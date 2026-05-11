@@ -4,6 +4,7 @@ import { logger } from "./lib/logger.js";
 import { initWebSocketServer } from "./websocket/server.js";
 import { scannerService } from "./services/scanner.service.js";
 import { paperTradingService } from "./services/paper-trading.service.js";
+import { autoTraderService } from "./services/auto-trader.service.js";
 
 const rawPort = process.env["PORT"];
 
@@ -28,9 +29,11 @@ server.listen(port, () => {
 
   scannerService.start();
   paperTradingService.startStopChecker();
+  autoTraderService.start();
 
   logger.info("Scanner service started — polling DexScreener every 2.5s");
   logger.info("Stop/TP checker started — checking positions every 1.5s");
+  logger.info("Auto-trader started — scanning & trading every 30s");
 });
 
 server.on("error", (err) => {

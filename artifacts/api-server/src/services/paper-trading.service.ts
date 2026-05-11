@@ -5,6 +5,7 @@ import { alertsService } from "./alerts.service.js";
 import type {
   BuyOrderRequest,
   Portfolio,
+  ScannedToken,
   TradeEntry,
   CloseReason,
 } from "../types/index.js";
@@ -24,6 +25,62 @@ class PaperTradingService {
 
   private broadcastPositions() {
     this.positionBroadcaster?.();
+  }
+
+  async buyDirect(
+    token: ScannedToken,
+    solAmount: number,
+    stopLoss: number,
+    takeProfit: number,
+  ): Promise<TradeEntry> {
+    if (solAmount <= 0) throw new Error("solAmount must be positive");
+    if (solAmount > this.solBalance) {
+      throw new Error(
+        `Insufficient balance. Available: ${this.solBalance.toFixed(4)} SOL`,
+      );
+    }
+    if (token.priceUsd <= 0) throw new Error("Invalid token price");
+
+    const entryFee = solAmount * FEE_RATE;
+    const slippageCost = solAmount * SLIPPAGE_RATE;
+    const effectiveSol = solAmount - entryFee - slippageCost;
+    const solPriceUsd =
+      token.priceNative > 0 ? token.priceUsd / token.priceNative : 0;
+    const effectiveSolUsd = effectiveSol * solPriceUsd;
+    const tokenAmount =
+      effectiveSolUsd > 0 ? effectiveSolUsd / token.priceUsd : 0;
+
+    this.solBalance -= solAmount;
+
+    const trade: TradeEntry = {
+      id: randomUUID(),
+      pairAddress: token.pairAddress,
+      tokenName: token.name,
+      tokenSymbol: token.symbol,
+      tokenAddress: token.address,
+      direction: "buy",
+      status: "open",
+      entryPrice: token.priceUsd,
+      solAmount,
+      tokenAmount,
+      entryFee,
+      slippage: slippageCost,
+      stopLoss,
+      takeProfit,
+      openedAt: Date.now(),
+      aiScoreAtEntry: token.aiScore,
+    };
+
+    this.trades.set(trade.id, trade);
+
+    logger.info(
+      { tradeId: trade.id, token: token.symbol, solAmount, source: "auto" },
+      "Auto paper trade opened",
+    );
+
+    alertsService.tradeOpened(trade.id, trade.tokenSymbol, solAmount, token.pairAddress);
+    this.broadcastPositions();
+    return trade;
   }
 
   async buy(req: BuyOrderRequest): Promise<TradeEntry> {
