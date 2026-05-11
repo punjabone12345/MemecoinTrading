@@ -4,9 +4,22 @@ import { paperTradingService } from "../services/paper-trading.service.js";
 const router: IRouter = Router();
 
 router.get("/positions", (_req, res) => {
-  const positions = paperTradingService.getOpenTradesWithLivePnl();
+  const positions = paperTradingService.getOpenPositionsWithLivePnl();
   const portfolio = paperTradingService.getPortfolio();
-  res.json({ success: true, data: { positions, portfolio } });
+  res.json({
+    success: true,
+    data: {
+      positions,
+      portfolio: {
+        solBalance: portfolio.solBalance,
+        totalPnlSol: portfolio.totalPnlSol,
+        totalPnlPercent: portfolio.totalPnlPercent,
+        openPositionsCount: portfolio.openPositionsCount,
+        openPositionsValueSol: portfolio.openPositionsValueSol,
+        initialBalance: portfolio.initialBalance,
+      },
+    },
+  });
 });
 
 router.get("/positions/all", (_req, res) => {
@@ -25,13 +38,12 @@ router.get("/positions/portfolio", (_req, res) => {
 });
 
 router.get("/positions/:id", (req, res) => {
-  const trade = paperTradingService.getTradeById(req.params.id);
-  if (!trade) {
-    res.status(404).json({ success: false, error: "Trade not found" });
+  const position = paperTradingService.getPositionById(req.params.id);
+  if (!position) {
+    res.status(404).json({ success: false, error: "Position not found" });
     return;
   }
-  const live = paperTradingService.getLiveTrade(req.params.id);
-  res.json({ success: true, data: live ?? trade });
+  res.json({ success: true, data: position });
 });
 
 export default router;

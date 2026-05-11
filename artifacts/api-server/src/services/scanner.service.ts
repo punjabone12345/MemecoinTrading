@@ -1,6 +1,6 @@
 import axios from "axios";
 import { logger } from "../lib/logger.js";
-import { computeAiScore, computeSignals } from "./ai-scoring.service.js";
+import { computeSignals, computeAiScore, computeConfidence } from "./ai-scoring.service.js";
 import { alertsService } from "./alerts.service.js";
 import type { DexScreenerPair, ScannedToken } from "../types/index.js";
 
@@ -17,9 +17,10 @@ function pairAgeLabel(createdAt: number): string {
   return `${Math.floor(hours / 24)}d`;
 }
 
-function mapPairToToken(pair: DexScreenerPair): ScannedToken {
+export function mapPairToToken(pair: DexScreenerPair): ScannedToken {
   const signals = computeSignals(pair);
   const aiScore = computeAiScore(signals);
+  const confidence = computeConfidence(pair);
   const priceUsd = parseFloat(pair.priceUsd) || 0;
   const priceNative = parseFloat(pair.priceNative) || 0;
 
@@ -36,14 +37,14 @@ function mapPairToToken(pair: DexScreenerPair): ScannedToken {
     volume24h: pair.volume?.h24 || 0,
     volume1h: pair.volume?.h1 || 0,
     volume5m: pair.volume?.m5 || 0,
-    buys24h: pair.txns?.h24?.buys || 0,
-    sells24h: pair.txns?.h24?.sells || 0,
     buys1h: pair.txns?.h1?.buys || 0,
     sells1h: pair.txns?.h1?.sells || 0,
+    buys24h: pair.txns?.h24?.buys || 0,
+    sells24h: pair.txns?.h24?.sells || 0,
     buys5m: pair.txns?.m5?.buys || 0,
     sells5m: pair.txns?.m5?.sells || 0,
-    priceChange5m: pair.priceChange?.m5 || 0,
     priceChange1h: pair.priceChange?.h1 || 0,
+    priceChange5m: pair.priceChange?.m5 || 0,
     priceChange6h: pair.priceChange?.h6 || 0,
     priceChange24h: pair.priceChange?.h24 || 0,
     pairAge: pair.pairCreatedAt || 0,
@@ -51,8 +52,9 @@ function mapPairToToken(pair: DexScreenerPair): ScannedToken {
     dexId: pair.dexId,
     chainId: pair.chainId,
     url: pair.url,
-    imageUrl: pair.info?.imageUrl,
+    imageUrl: pair.info?.imageUrl ?? "",
     aiScore,
+    confidence,
     signals,
     lastUpdated: Date.now(),
   };
@@ -72,7 +74,7 @@ class ScannerService {
   async fetchSolanaPairs(): Promise<DexScreenerPair[]> {
     try {
       const [boostedRes, searchRes] = await Promise.allSettled([
-        axios.get<{ pairs: DexScreenerPair[] }>(
+        axios.get<{ tokenAddress: string; chainId: string }[]>(
           `${DEXSCREENER_BASE}/token-boosts/top/v1`,
           { timeout: 8000 },
         ),
@@ -85,13 +87,13 @@ class ScannerService {
       const pairs: DexScreenerPair[] = [];
 
       if (boostedRes.status === "fulfilled" && Array.isArray(boostedRes.value.data)) {
-        const boostedAddresses = (boostedRes.value.data as { tokenAddress: string; chainId: string }[])
+        const boostedAddresses = boostedRes.value.data
           .filter((b) => b.chainId === "solana")
           .slice(0, 30)
           .map((b) => b.tokenAddress);
 
         if (boostedAddresses.length > 0) {
-          const chunks = [];
+          const chunks: string[][] = [];
           for (let i = 0; i < boostedAddresses.length; i += 10) {
             chunks.push(boostedAddresses.slice(i, i + 10));
           }
@@ -112,9 +114,7 @@ class ScannerService {
       }
 
       if (searchRes.status === "fulfilled" && Array.isArray(searchRes.value.data.pairs)) {
-        pairs.push(
-          ...searchRes.value.data.pairs.filter((p) => p.chainId === "solana"),
-        );
+        pairs.push(...searchRes.value.data.pairs.filter((p) => p.chainId === "solana"));
       }
 
       const seen = new Set<string>();
@@ -148,9 +148,7 @@ class ScannerService {
         }
       }
 
-      if (this.broadcaster) {
-        this.broadcaster(this.getAll());
-      }
+      this.broadcaster?.(this.getAll());
     } finally {
       this.isScanning = false;
     }
@@ -160,7 +158,7 @@ class ScannerService {
     if (this.intervalId) return;
     void this.scan();
     this.intervalId = setInterval(() => void this.scan(), SCAN_INTERVAL_MS);
-    logger.info("Scanner service started");
+    logger.info("Scanner service started — polling DexScreener every 2.5s");
   }
 
   stop() {
@@ -171,9 +169,7 @@ class ScannerService {
   }
 
   getAll(): ScannedToken[] {
-    return Array.from(this.tokens.values()).sort(
-      (a, b) => b.aiScore - a.aiScore,
-    );
+    return Array.from(this.tokens.values()).sort((a, b) => b.aiScore - a.aiScore);
   }
 
   getByPairAddress(pairAddress: string): ScannedToken | undefined {

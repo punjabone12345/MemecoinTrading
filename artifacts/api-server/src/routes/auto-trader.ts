@@ -39,8 +39,7 @@ router.get("/auto-trader/config", (_req, res) => {
 router.patch("/auto-trader/config", (req, res) => {
   const patch = req.body as Partial<AutoTraderConfig>;
   const numericKeys: (keyof AutoTraderConfig)[] = [
-    "solPerTrade", "minAiScore", "minLiquidity", "minConfidence",
-    "slPct", "tpPct", "cooldownMs", "maxConcurrentTrades",
+    "solPerTrade", "minAiScore", "maxConcurrentTrades",
   ];
   const validated: Partial<AutoTraderConfig> = {};
   for (const key of numericKeys) {

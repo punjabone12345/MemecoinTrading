@@ -8,17 +8,12 @@ import type { Alert, ScannedToken, WsMessage } from "../types/index.js";
 
 function send(ws: WebSocket, msg: WsMessage) {
   if (ws.readyState === ws.OPEN) {
-    try {
-      ws.send(JSON.stringify(msg));
-    } catch {
-    }
+    try { ws.send(JSON.stringify(msg)); } catch { /* ignore */ }
   }
 }
 
 function broadcast(wss: WebSocketServer, msg: WsMessage) {
-  wss.clients.forEach((client) => {
-    send(client as WebSocket, msg);
-  });
+  wss.clients.forEach((client) => send(client as WebSocket, msg));
 }
 
 export function initWebSocketServer(server: Server) {
@@ -33,69 +28,36 @@ export function initWebSocketServer(server: Server) {
 
     const initialTokens = scannerService.getAll();
     if (initialTokens.length > 0) {
-      send(ws, {
-        type: "scanner_update",
-        data: initialTokens,
-        timestamp: Date.now(),
-      });
+      send(ws, { type: "scanner_update", data: initialTokens, timestamp: Date.now() });
     }
 
     const portfolio = paperTradingService.getPortfolio();
-    send(ws, {
-      type: "portfolio_update",
-      data: portfolio,
-      timestamp: Date.now(),
-    });
+    send(ws, { type: "portfolio_update", data: portfolio, timestamp: Date.now() });
 
     ws.on("message", (raw) => {
       try {
         const msg = JSON.parse(raw.toString()) as { type: string };
-        if (msg.type === "ping") {
-          send(ws, { type: "ping", data: null, timestamp: Date.now() });
-        }
-      } catch {
-      }
+        if (msg.type === "ping") send(ws, { type: "ping", data: null, timestamp: Date.now() });
+      } catch { /* ignore */ }
     });
 
-    ws.on("close", () => {
-      clearInterval(pingInterval);
-      logger.info("WS client disconnected");
-    });
-
-    ws.on("error", (err) => {
-      logger.warn({ err }, "WS client error");
-    });
+    ws.on("close", () => { clearInterval(pingInterval); logger.info("WS client disconnected"); });
+    ws.on("error", (err) => { logger.warn({ err }, "WS client error"); });
   });
 
   scannerService.setBroadcaster((tokens: ScannedToken[]) => {
-    broadcast(wss, {
-      type: "scanner_update",
-      data: tokens,
-      timestamp: Date.now(),
-    });
+    broadcast(wss, { type: "scanner_update", data: tokens, timestamp: Date.now() });
   });
 
   paperTradingService.setPositionBroadcaster(() => {
-    const positions = paperTradingService.getOpenTradesWithLivePnl();
+    const positions = paperTradingService.getOpenPositionsWithLivePnl();
     const portfolio = paperTradingService.getPortfolio();
-    broadcast(wss, {
-      type: "position_update",
-      data: { positions, portfolio },
-      timestamp: Date.now(),
-    });
-    broadcast(wss, {
-      type: "portfolio_update",
-      data: portfolio,
-      timestamp: Date.now(),
-    });
+    broadcast(wss, { type: "position_update", data: { positions, portfolio }, timestamp: Date.now() });
+    broadcast(wss, { type: "portfolio_update", data: portfolio, timestamp: Date.now() });
   });
 
   alertsService.setBroadcaster((alert: Alert) => {
-    broadcast(wss, {
-      type: "alert",
-      data: alert,
-      timestamp: Date.now(),
-    });
+    broadcast(wss, { type: "alert", data: alert, timestamp: Date.now() });
   });
 
   logger.info("WebSocket server initialized at /ws");

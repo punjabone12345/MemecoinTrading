@@ -1,179 +1,123 @@
 import type { DexScreenerPair, TokenSignals } from "../types/index.js";
 
-const LIQUIDITY_THRESHOLDS = {
-  min: 10_000,
-  ideal: 100_000,
-  max: 2_000_000,
-};
-
 function clamp(val: number, min = 0, max = 100): number {
   return Math.max(min, Math.min(max, val));
 }
 
-function scoreLiquidity(liquidityUsd: number): number {
-  if (liquidityUsd < LIQUIDITY_THRESHOLDS.min) return 5;
-  if (liquidityUsd >= LIQUIDITY_THRESHOLDS.min && liquidityUsd < 50_000) {
-    return clamp(5 + ((liquidityUsd - 10_000) / 40_000) * 45);
-  }
-  if (liquidityUsd >= 50_000 && liquidityUsd < LIQUIDITY_THRESHOLDS.ideal) {
-    return clamp(50 + ((liquidityUsd - 50_000) / 50_000) * 30);
-  }
-  if (
-    liquidityUsd >= LIQUIDITY_THRESHOLDS.ideal &&
-    liquidityUsd < LIQUIDITY_THRESHOLDS.max
-  ) {
-    return clamp(80 + ((liquidityUsd - 100_000) / 1_900_000) * 15);
-  }
-  return 95;
-}
-
-function scoreVolumeGrowth(pair: DexScreenerPair): number {
-  const vol5m = pair.volume.m5 || 0;
-  const vol1h = pair.volume.h1 || 1;
-  const vol6h = pair.volume.h6 || 1;
-  const vol24h = pair.volume.h24 || 1;
-
-  const annualizedRate5m = vol5m * 12;
-  const growthVs1h = vol1h > 0 ? annualizedRate5m / vol1h : 0;
-  const growthVs6h = vol6h > 0 ? vol1h / (vol6h / 6) : 0;
-  const growthVs24h = vol24h > 0 ? vol6h / (vol24h / 4) : 0;
-
-  const avgGrowth = (growthVs1h + growthVs6h + growthVs24h) / 3;
-  return clamp(Math.log10(Math.max(1, avgGrowth) + 1) * 40);
-}
-
-function scoreBuyPressure(pair: DexScreenerPair): number {
-  const buys5m = pair.txns.m5.buys || 0;
-  const sells5m = pair.txns.m5.sells || 0;
-  const buys1h = pair.txns.h1.buys || 0;
-  const sells1h = pair.txns.h1.sells || 0;
-
-  const total5m = buys5m + sells5m;
-  const total1h = buys1h + sells1h;
-
-  const ratio5m = total5m > 0 ? buys5m / total5m : 0.5;
-  const ratio1h = total1h > 0 ? buys1h / total1h : 0.5;
-
-  const combined = ratio5m * 0.6 + ratio1h * 0.4;
-  return clamp(combined * 100);
-}
-
-function scoreVolatility(pair: DexScreenerPair): number {
-  const changes = [
-    Math.abs(pair.priceChange.m5 || 0),
-    Math.abs(pair.priceChange.h1 || 0),
-    Math.abs(pair.priceChange.h6 || 0),
-    Math.abs(pair.priceChange.h24 || 0),
-  ];
-
-  const avgAbsChange = changes.reduce((a, b) => a + b, 0) / 4;
-
-  if (avgAbsChange < 1) return 10;
-  if (avgAbsChange < 5) return 30;
-  if (avgAbsChange < 15) return 60;
-  if (avgAbsChange < 30) return 80;
-  if (avgAbsChange < 60) return 65;
-  return 40;
-}
-
-function scoreMomentum(pair: DexScreenerPair): number {
-  const pc5m = pair.priceChange.m5 || 0;
-  const pc1h = pair.priceChange.h1 || 0;
-  const pc6h = pair.priceChange.h6 || 0;
-
-  const weightedChange = pc5m * 0.5 + pc1h * 0.3 + pc6h * 0.2;
-
-  if (weightedChange > 50) return 95;
-  if (weightedChange > 20) return 80;
-  if (weightedChange > 10) return 70;
-  if (weightedChange > 5) return 60;
-  if (weightedChange > 0) return 50;
-  if (weightedChange > -5) return 40;
-  if (weightedChange > -15) return 25;
-  return 10;
-}
-
-function scoreLiquidityMcapRatio(
-  liquidityUsd: number,
-  marketCap: number,
-): number {
-  if (marketCap <= 0) return 30;
-  const ratio = liquidityUsd / marketCap;
-  if (ratio > 0.3) return 95;
-  if (ratio > 0.15) return 80;
-  if (ratio > 0.08) return 65;
-  if (ratio > 0.03) return 50;
-  if (ratio > 0.01) return 30;
-  return 10;
-}
-
+/**
+ * Score 0-100 using 5 components as specified:
+ * - 1h price momentum         → up to 30 pts
+ * - Buy/sell ratio 1h         → up to 20 pts
+ * - Liquidity depth >$50k     → up to 15 pts
+ * - Volume spike vs mcap      → up to 20 pts
+ * - Mcap sweet spot $50k-$5M  → up to 15 pts
+ */
 export function computeSignals(pair: DexScreenerPair): TokenSignals {
-  const liquidityUsd = pair.liquidity?.usd || 0;
+  const pc1h = pair.priceChange?.h1 || 0;
+  const buys1h = pair.txns?.h1?.buys || 0;
+  const sells1h = pair.txns?.h1?.sells || 0;
+  const total1h = buys1h + sells1h;
+  const liq = pair.liquidity?.usd || 0;
+  const vol1h = pair.volume?.h1 || 0;
   const marketCap = pair.marketCap || pair.fdv || 0;
 
-  const liquidityScore = scoreLiquidity(liquidityUsd);
-  const volumeScore = scoreVolumeGrowth(pair);
-  const buyPressureScore = scoreBuyPressure(pair);
-  const volatilityScore = scoreVolatility(pair);
-  const momentumScore = scoreMomentum(pair);
-  const liquidityMcapRatioScore = scoreLiquidityMcapRatio(
-    liquidityUsd,
-    marketCap,
-  );
+  // 1. 1h price momentum (max 30 pts)
+  let momentumScore = 0;
+  if (pc1h >= 50) momentumScore = 30;
+  else if (pc1h >= 30) momentumScore = 26;
+  else if (pc1h >= 15) momentumScore = 22;
+  else if (pc1h >= 8) momentumScore = 18;
+  else if (pc1h >= 4) momentumScore = 14;
+  else if (pc1h >= 1) momentumScore = 9;
+  else if (pc1h >= 0) momentumScore = 5;
+  else if (pc1h >= -5) momentumScore = 2;
+  else momentumScore = 0;
 
-  const buys5m = pair.txns.m5.buys || 0;
-  const sells5m = pair.txns.m5.sells || 0;
-  const total5m = buys5m + sells5m;
-  const buyRatio5m = total5m > 0 ? buys5m / total5m : 0.5;
+  // 2. Buy/sell ratio 1h (max 20 pts)
+  let buyRatioScore = 0;
+  if (total1h > 0) {
+    const ratio = buys1h / total1h;
+    if (ratio >= 0.80) buyRatioScore = 20;
+    else if (ratio >= 0.70) buyRatioScore = 17;
+    else if (ratio >= 0.60) buyRatioScore = 13;
+    else if (ratio >= 0.55) buyRatioScore = 10;
+    else if (ratio >= 0.50) buyRatioScore = 7;
+    else if (ratio >= 0.40) buyRatioScore = 4;
+    else buyRatioScore = 1;
+  }
 
-  const vol5m = pair.volume.m5 || 0;
-  const vol1h = pair.volume.h1 || 0;
-  const annualizedVol5m = vol5m * 12;
+  // 3. Liquidity depth (max 15 pts)
+  let liquidityScore = 0;
+  if (liq >= 500_000) liquidityScore = 15;
+  else if (liq >= 200_000) liquidityScore = 13;
+  else if (liq >= 100_000) liquidityScore = 11;
+  else if (liq >= 50_000) liquidityScore = 9;
+  else if (liq >= 20_000) liquidityScore = 6;
+  else if (liq >= 5_000) liquidityScore = 3;
+  else liquidityScore = 0;
 
-  const volumeSpike = vol1h > 0 ? annualizedVol5m > vol1h * 1.5 : false;
-  const buyPressure = buyRatio5m > 0.65;
-  const highMomentum = (pair.priceChange.m5 || 0) > 5;
-  const lowLiquidity = liquidityUsd < 30_000;
+  // 4. Volume spike vs market cap ratio (max 20 pts)
+  let volumeMcapScore = 0;
+  if (marketCap > 0 && vol1h > 0) {
+    const ratio = vol1h / marketCap;
+    if (ratio >= 1.0) volumeMcapScore = 20;
+    else if (ratio >= 0.5) volumeMcapScore = 17;
+    else if (ratio >= 0.2) volumeMcapScore = 14;
+    else if (ratio >= 0.1) volumeMcapScore = 11;
+    else if (ratio >= 0.05) volumeMcapScore = 7;
+    else if (ratio >= 0.01) volumeMcapScore = 4;
+    else volumeMcapScore = 1;
+  }
 
-  let momentumLabel: TokenSignals["momentumLabel"];
-  const pc1h = pair.priceChange.h1 || 0;
-  if (pc1h > 10) momentumLabel = "🔥 HOT";
-  else if (pc1h > 2) momentumLabel = "📈 RISING";
-  else if (pc1h > -2) momentumLabel = "😴 NEUTRAL";
-  else momentumLabel = "📉 FALLING";
+  // 5. Market cap sweet spot $50k–$5M (max 15 pts)
+  let mcapScore = 0;
+  if (marketCap >= 50_000 && marketCap <= 1_000_000) mcapScore = 15;
+  else if (marketCap > 1_000_000 && marketCap <= 5_000_000) mcapScore = 12;
+  else if (marketCap > 5_000_000 && marketCap <= 20_000_000) mcapScore = 8;
+  else if (marketCap > 20_000_000 && marketCap <= 100_000_000) mcapScore = 4;
+  else if (marketCap < 50_000 && marketCap > 0) mcapScore = 5;
+  else mcapScore = 0;
 
   return {
-    volumeSpike,
-    buyPressure,
-    highMomentum,
-    lowLiquidity,
-    liquidityScore,
-    volumeScore,
-    buyPressureScore,
-    momentumScore,
-    volatilityScore,
-    liquidityMcapRatioScore,
-    momentumLabel,
+    momentumScore: clamp(momentumScore, 0, 30),
+    buyRatioScore: clamp(buyRatioScore, 0, 20),
+    liquidityScore: clamp(liquidityScore, 0, 15),
+    volumeMcapScore: clamp(volumeMcapScore, 0, 20),
+    mcapScore: clamp(mcapScore, 0, 15),
   };
 }
 
 export function computeAiScore(signals: TokenSignals): number {
-  const {
-    liquidityScore,
-    volumeScore,
-    buyPressureScore,
-    momentumScore,
-    volatilityScore,
-    liquidityMcapRatioScore,
-  } = signals;
+  const raw =
+    signals.momentumScore +
+    signals.buyRatioScore +
+    signals.liquidityScore +
+    signals.volumeMcapScore +
+    signals.mcapScore;
+  return Math.round(clamp(raw, 0, 100));
+}
 
-  const weighted =
-    liquidityScore * 0.2 +
-    volumeScore * 0.2 +
-    buyPressureScore * 0.2 +
-    momentumScore * 0.2 +
-    volatilityScore * 0.1 +
-    liquidityMcapRatioScore * 0.1;
+export function computeConfidence(pair: DexScreenerPair): number {
+  let confidence = 100;
+  const priceUsd = parseFloat(pair.priceUsd) || 0;
+  const liq = pair.liquidity?.usd || 0;
+  const total1h = (pair.txns?.h1?.buys || 0) + (pair.txns?.h1?.sells || 0);
+  const vol24h = pair.volume?.h24 || 0;
 
-  return Math.round(clamp(weighted));
+  if (!priceUsd || priceUsd <= 0) confidence -= 30;
+  if (liq < 5_000) confidence -= 25;
+  if (total1h < 5) confidence -= 20;
+  if (vol24h < 1_000) confidence -= 15;
+  if (!pair.pairCreatedAt) confidence -= 10;
+
+  return Math.max(0, confidence);
+}
+
+/** Dynamic SL/TP percentages based on AI score */
+export function getDynamicRisk(score: number): { slPercent: number; tpPercent: number } {
+  if (score >= 95) return { slPercent: 5, tpPercent: 500 };
+  if (score >= 90) return { slPercent: 7, tpPercent: 200 };
+  if (score >= 80) return { slPercent: 8, tpPercent: 100 };
+  if (score >= 70) return { slPercent: 10, tpPercent: 60 };
+  return { slPercent: 12, tpPercent: 35 };
 }

@@ -47,6 +47,14 @@ export interface DexScreenerPair {
   boosts?: { active: number };
 }
 
+export interface TokenSignals {
+  momentumScore: number;
+  buyRatioScore: number;
+  liquidityScore: number;
+  volumeMcapScore: number;
+  mcapScore: number;
+}
+
 export interface ScannedToken {
   pairAddress: string;
   name: string;
@@ -60,14 +68,14 @@ export interface ScannedToken {
   volume24h: number;
   volume1h: number;
   volume5m: number;
-  buys24h: number;
-  sells24h: number;
   buys1h: number;
   sells1h: number;
+  buys24h: number;
+  sells24h: number;
   buys5m: number;
   sells5m: number;
-  priceChange5m: number;
   priceChange1h: number;
+  priceChange5m: number;
   priceChange6h: number;
   priceChange24h: number;
   pairAge: number;
@@ -75,60 +83,38 @@ export interface ScannedToken {
   dexId: string;
   chainId: string;
   url: string;
-  imageUrl?: string;
+  imageUrl: string;
   aiScore: number;
+  confidence: number;
   signals: TokenSignals;
   lastUpdated: number;
 }
 
-export interface TokenSignals {
-  volumeSpike: boolean;
-  buyPressure: boolean;
-  highMomentum: boolean;
-  lowLiquidity: boolean;
-  liquidityScore: number;
-  volumeScore: number;
-  buyPressureScore: number;
-  momentumScore: number;
-  volatilityScore: number;
-  liquidityMcapRatioScore: number;
-  momentumLabel: "🔥 HOT" | "📈 RISING" | "😴 NEUTRAL" | "📉 FALLING";
-}
+export type PositionStatus = "open" | "closed";
+export type CloseReason = "manual" | "stop_loss" | "take_profit";
 
-export type TradeStatus = "open" | "closed";
-export type TradeDirection = "buy";
-export type CloseReason =
-  | "manual"
-  | "stop_loss"
-  | "take_profit"
-  | "trailing_stop";
-
-export interface TradeEntry {
-  id: string;
-  pairAddress: string;
+export interface Position {
+  positionId: string;
+  symbol: string;
   tokenName: string;
-  tokenSymbol: string;
-  tokenAddress: string;
-  direction: TradeDirection;
-  status: TradeStatus;
+  pairAddress: string;
+  imageUrl: string;
   entryPrice: number;
   exitPrice?: number;
-  solAmount: number;
-  tokenAmount: number;
-  entryFee: number;
-  exitFee?: number;
-  slippage: number;
-  stopLoss?: number;
-  takeProfit?: number;
-  trailingStop?: number;
-  trailingStopHighPrice?: number;
-  trailingStopTriggerPrice?: number;
-  openedAt: number;
-  closedAt?: number;
+  sizeSol: number;
+  slPercent: number;
+  tpPercent: number;
+  slPrice: number;
+  tpPrice: number;
+  aiScore: number;
+  confidence: number;
+  openedAt: string;
+  closedAt?: string;
+  status: PositionStatus;
   closeReason?: CloseReason;
   pnlSol?: number;
   pnlPercent?: number;
-  aiScoreAtEntry?: number;
+  holdTimeMs?: number;
 }
 
 export interface Portfolio {
@@ -142,14 +128,7 @@ export interface Portfolio {
 
 export interface BuyOrderRequest {
   pairAddress: string;
-  solAmount: number;
-  stopLoss?: number;
-  takeProfit?: number;
-  trailingStop?: number;
-}
-
-export interface SellOrderRequest {
-  tradeId: string;
+  solAmount?: number;
 }
 
 export interface AnalyticsSnapshot {
@@ -178,13 +157,12 @@ export interface Alert {
     | "trade_closed"
     | "stop_loss_hit"
     | "take_profit_hit"
-    | "trailing_stop_hit"
     | "high_ai_score";
   title: string;
   message: string;
   pairAddress?: string;
   tokenSymbol?: string;
-  tradeId?: string;
+  positionId?: string;
   aiScore?: number;
   createdAt: number;
   read: boolean;

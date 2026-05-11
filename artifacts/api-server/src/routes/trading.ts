@@ -1,33 +1,19 @@
 import { Router, type IRouter } from "express";
 import { paperTradingService } from "../services/paper-trading.service.js";
-import type { BuyOrderRequest } from "../types/index.js";
 
 const router: IRouter = Router();
 
 router.post("/paper-buy", async (req, res) => {
-  const { pairAddress, solAmount, stopLoss, takeProfit, trailingStop } =
-    req.body as BuyOrderRequest;
+  const { pairAddress, solAmount } = req.body as { pairAddress: string; solAmount?: number };
 
   if (!pairAddress || typeof pairAddress !== "string") {
     res.status(400).json({ success: false, error: "pairAddress is required" });
     return;
   }
-  if (!solAmount || typeof solAmount !== "number" || solAmount <= 0) {
-    res
-      .status(400)
-      .json({ success: false, error: "solAmount must be a positive number" });
-    return;
-  }
 
   try {
-    const trade = await paperTradingService.buy({
-      pairAddress,
-      solAmount,
-      stopLoss,
-      takeProfit,
-      trailingStop,
-    });
-    res.json({ success: true, data: trade });
+    const position = await paperTradingService.buy(pairAddress, solAmount ?? 0.5);
+    res.json({ success: true, data: position });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
     res.status(400).json({ success: false, error: message });
@@ -35,16 +21,17 @@ router.post("/paper-buy", async (req, res) => {
 });
 
 router.post("/paper-sell", async (req, res) => {
-  const { tradeId } = req.body as { tradeId: string };
+  const { positionId, tradeId } = req.body as { positionId?: string; tradeId?: string };
+  const id = positionId ?? tradeId;
 
-  if (!tradeId || typeof tradeId !== "string") {
-    res.status(400).json({ success: false, error: "tradeId is required" });
+  if (!id || typeof id !== "string") {
+    res.status(400).json({ success: false, error: "positionId is required" });
     return;
   }
 
   try {
-    const trade = await paperTradingService.sell(tradeId);
-    res.json({ success: true, data: trade });
+    const position = await paperTradingService.close(id, "manual");
+    res.json({ success: true, data: position });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
     res.status(400).json({ success: false, error: message });
