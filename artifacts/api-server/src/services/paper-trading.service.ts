@@ -324,6 +324,20 @@ class PaperTradingService {
     };
   }
 
+  getTradeById(id: string): TradeEntry | undefined {
+    return this.trades.get(id);
+  }
+
+  getLiveTrade(id: string): (TradeEntry & { livePnlSol: number; livePnlPercent: number; currentPrice: number }) | undefined {
+    const trade = this.trades.get(id);
+    if (!trade) return undefined;
+    if (trade.status === "closed") return { ...trade, livePnlSol: trade.pnlSol ?? 0, livePnlPercent: trade.pnlPercent ?? 0, currentPrice: trade.exitPrice ?? trade.entryPrice };
+    const token = scannerService.getByPairAddress(trade.pairAddress);
+    const currentPrice = token?.priceUsd ?? trade.entryPrice;
+    const { pnlSol, pnlPercent } = this.computePnl(trade, currentPrice);
+    return { ...trade, livePnlSol: pnlSol, livePnlPercent: pnlPercent, currentPrice };
+  }
+
   reset(): void {
     this.trades.clear();
     this.solBalance = INITIAL_BALANCE_SOL;

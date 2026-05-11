@@ -24,4 +24,14 @@ router.get("/positions/portfolio", (_req, res) => {
   res.json({ success: true, data: portfolio });
 });
 
+router.get("/positions/:id", (req, res) => {
+  const trade = paperTradingService.getTradeById(req.params.id);
+  if (!trade) {
+    res.status(404).json({ success: false, error: "Trade not found" });
+    return;
+  }
+  const live = paperTradingService.getLiveTrade(req.params.id);
+  res.json({ success: true, data: live ?? trade });
+});
+
 export default router;
