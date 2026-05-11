@@ -5,48 +5,73 @@ function clamp(val: number, min = 0, max = 100): number {
 }
 
 /**
- * Score 0-100 using 5 components as specified:
- * - 1h price momentum         → up to 30 pts
- * - Buy/sell ratio 1h         → up to 20 pts
- * - Liquidity depth >$50k     → up to 15 pts
- * - Volume spike vs mcap      → up to 20 pts
- * - Mcap sweet spot $50k-$5M  → up to 15 pts
+ * Score 0–100 using 5 components (max 100 pts):
+ *
+ *  Component                Max   Notes
+ *  ─────────────────────────────────────────────────────────────
+ *  1h price momentum         30   Primary trend signal
+ *  5m momentum bonus          5   Early-pump detection (additive)
+ *  Buy/sell ratio 1h         20   Demand vs supply pressure
+ *  Liquidity depth           15   Safety / trade-ability
+ *  Effective vol / mcap      20   Activity intensity
+ *  Mcap sweet spot           15   Upside potential
+ *  ─────────────────────────────────────────────────────────────
+ *  (1h + 5m are capped together at 35)
+ *
+ * "Effective 1h volume" = vol1h if available, else vol24h / 24.
+ * DexScreener frequently returns 0 for vol1h even when vol24h is large.
  */
 export function computeSignals(pair: DexScreenerPair): TokenSignals {
-  const pc1h = pair.priceChange?.h1 || 0;
+  const pc1h = pair.priceChange?.h1 ?? 0;
+  const pc5m = pair.priceChange?.m5 ?? 0;
   const buys1h = pair.txns?.h1?.buys || 0;
   const sells1h = pair.txns?.h1?.sells || 0;
   const total1h = buys1h + sells1h;
   const liq = pair.liquidity?.usd || 0;
-  const vol1h = pair.volume?.h1 || 0;
+  const vol1hRaw = pair.volume?.h1 || 0;
+  const vol24h = pair.volume?.h24 || 0;
+  // Fallback: if vol1h is missing/zero, estimate from 24h data
+  const effectiveVol1h = vol1hRaw > 0 ? vol1hRaw : vol24h / 24;
   const marketCap = pair.marketCap || pair.fdv || 0;
 
-  // 1. 1h price momentum (max 30 pts)
+  // ── 1. 1h price momentum (max 30 pts) ────────────────────────────────────
   let momentumScore = 0;
-  if (pc1h >= 50) momentumScore = 30;
-  else if (pc1h >= 30) momentumScore = 26;
-  else if (pc1h >= 15) momentumScore = 22;
-  else if (pc1h >= 8) momentumScore = 18;
-  else if (pc1h >= 4) momentumScore = 14;
-  else if (pc1h >= 1) momentumScore = 9;
-  else if (pc1h >= 0) momentumScore = 5;
-  else if (pc1h >= -5) momentumScore = 2;
+  if (pc1h >= 100) momentumScore = 30;
+  else if (pc1h >= 50) momentumScore = 28;
+  else if (pc1h >= 30) momentumScore = 25;
+  else if (pc1h >= 15) momentumScore = 21;
+  else if (pc1h >= 8) momentumScore = 17;
+  else if (pc1h >= 4) momentumScore = 13;
+  else if (pc1h >= 1) momentumScore = 8;
+  else if (pc1h >= 0) momentumScore = 4;
+  else if (pc1h >= -5) momentumScore = 1;
   else momentumScore = 0;
 
-  // 2. Buy/sell ratio 1h (max 20 pts)
+  // ── 2. 5m momentum bonus (max 5 pts, additive with 1h capped at 35) ─────
+  let pumpBonus = 0;
+  if (pc5m >= 30) pumpBonus = 5;
+  else if (pc5m >= 15) pumpBonus = 4;
+  else if (pc5m >= 8) pumpBonus = 3;
+  else if (pc5m >= 4) pumpBonus = 2;
+  else if (pc5m >= 1) pumpBonus = 1;
+
+  // Combined momentum capped at 35
+  const combinedMomentum = clamp(momentumScore + pumpBonus, 0, 35);
+
+  // ── 3. Buy/sell ratio 1h (max 20 pts) ────────────────────────────────────
   let buyRatioScore = 0;
   if (total1h > 0) {
     const ratio = buys1h / total1h;
-    if (ratio >= 0.80) buyRatioScore = 20;
-    else if (ratio >= 0.70) buyRatioScore = 17;
-    else if (ratio >= 0.60) buyRatioScore = 13;
-    else if (ratio >= 0.55) buyRatioScore = 10;
-    else if (ratio >= 0.50) buyRatioScore = 7;
-    else if (ratio >= 0.40) buyRatioScore = 4;
-    else buyRatioScore = 1;
+    if (ratio >= 0.85) buyRatioScore = 20;
+    else if (ratio >= 0.75) buyRatioScore = 18;
+    else if (ratio >= 0.65) buyRatioScore = 15;
+    else if (ratio >= 0.58) buyRatioScore = 12;
+    else if (ratio >= 0.52) buyRatioScore = 9;
+    else if (ratio >= 0.45) buyRatioScore = 5;
+    else buyRatioScore = 2;
   }
 
-  // 3. Liquidity depth (max 15 pts)
+  // ── 4. Liquidity depth (max 15 pts) ──────────────────────────────────────
   let liquidityScore = 0;
   if (liq >= 500_000) liquidityScore = 15;
   else if (liq >= 200_000) liquidityScore = 13;
@@ -56,30 +81,34 @@ export function computeSignals(pair: DexScreenerPair): TokenSignals {
   else if (liq >= 5_000) liquidityScore = 3;
   else liquidityScore = 0;
 
-  // 4. Volume spike vs market cap ratio (max 20 pts)
+  // ── 5. Effective hourly volume / market cap (max 20 pts) ─────────────────
+  // Uses real vol1h when available, falls back to vol24h/24 estimate.
   let volumeMcapScore = 0;
-  if (marketCap > 0 && vol1h > 0) {
-    const ratio = vol1h / marketCap;
+  if (marketCap > 0 && effectiveVol1h > 0) {
+    const ratio = effectiveVol1h / marketCap;
     if (ratio >= 1.0) volumeMcapScore = 20;
-    else if (ratio >= 0.5) volumeMcapScore = 17;
-    else if (ratio >= 0.2) volumeMcapScore = 14;
-    else if (ratio >= 0.1) volumeMcapScore = 11;
-    else if (ratio >= 0.05) volumeMcapScore = 7;
-    else if (ratio >= 0.01) volumeMcapScore = 4;
+    else if (ratio >= 0.5) volumeMcapScore = 18;
+    else if (ratio >= 0.2) volumeMcapScore = 15;
+    else if (ratio >= 0.1) volumeMcapScore = 12;
+    else if (ratio >= 0.05) volumeMcapScore = 9;
+    else if (ratio >= 0.02) volumeMcapScore = 6;
+    else if (ratio >= 0.005) volumeMcapScore = 3;
     else volumeMcapScore = 1;
   }
 
-  // 5. Market cap sweet spot $50k–$5M (max 15 pts)
+  // ── 6. Mcap sweet spot (max 15 pts) ──────────────────────────────────────
+  // Best upside is in $100k–$5M range; penalty for very large or tiny mcaps
   let mcapScore = 0;
-  if (marketCap >= 50_000 && marketCap <= 1_000_000) mcapScore = 15;
+  if (marketCap >= 100_000 && marketCap <= 1_000_000) mcapScore = 15;
   else if (marketCap > 1_000_000 && marketCap <= 5_000_000) mcapScore = 12;
   else if (marketCap > 5_000_000 && marketCap <= 20_000_000) mcapScore = 8;
   else if (marketCap > 20_000_000 && marketCap <= 100_000_000) mcapScore = 4;
-  else if (marketCap < 50_000 && marketCap > 0) mcapScore = 5;
+  else if (marketCap >= 50_000 && marketCap < 100_000) mcapScore = 10;
+  else if (marketCap > 0 && marketCap < 50_000) mcapScore = 3;
   else mcapScore = 0;
 
   return {
-    momentumScore: clamp(momentumScore, 0, 30),
+    momentumScore: combinedMomentum,
     buyRatioScore: clamp(buyRatioScore, 0, 20),
     liquidityScore: clamp(liquidityScore, 0, 15),
     volumeMcapScore: clamp(volumeMcapScore, 0, 20),
@@ -113,7 +142,7 @@ export function computeConfidence(pair: DexScreenerPair): number {
   return Math.max(0, confidence);
 }
 
-/** Dynamic SL/TP percentages based on AI score */
+/** Dynamic SL/TP percentages based on AI score tier */
 export function getDynamicRisk(score: number): { slPercent: number; tpPercent: number } {
   if (score >= 95) return { slPercent: 5, tpPercent: 500 };
   if (score >= 90) return { slPercent: 7, tpPercent: 200 };

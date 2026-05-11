@@ -5,8 +5,16 @@ import { alertsService } from "./alerts.service.js";
 import type { DexScreenerPair, ScannedToken } from "../types/index.js";
 
 const DEXSCREENER_BASE = "https://api.dexscreener.com";
-const SCAN_INTERVAL_MS = 2500;
+const SCAN_INTERVAL_MS = 4000;
 const HIGH_AI_SCORE_THRESHOLD = 80;
+
+// Rotating search queries targeting active Solana meme coins
+const MEME_QUERIES = [
+  "pump", "pepe", "cat", "dog", "ai", "moon", "based",
+  "trump", "elon", "meme", "inu", "shib", "bonk", "wif",
+  "sol", "baby", "degen", "giga", "chad", "frog",
+];
+let queryRotation = 0;
 
 function pairAgeLabel(createdAt: number): string {
   const ageMs = Date.now() - createdAt;
@@ -66,63 +74,125 @@ class ScannerService {
   private broadcaster: ((tokens: ScannedToken[]) => void) | null = null;
   private alreadyAlertedHighScore: Set<string> = new Set();
   private isScanning = false;
+  private scanCount = 0;
 
   setBroadcaster(fn: (tokens: ScannedToken[]) => void) {
     this.broadcaster = fn;
   }
 
+  /** Fetch boosted + profiled token addresses from DexScreener */
+  private async fetchBoostedAddresses(): Promise<string[]> {
+    const [boostsRes, profilesRes] = await Promise.allSettled([
+      axios.get<{ tokenAddress: string; chainId: string }[]>(
+        `${DEXSCREENER_BASE}/token-boosts/top/v1`,
+        { timeout: 8000 },
+      ),
+      axios.get<{ tokenAddress: string; chainId: string }[]>(
+        `${DEXSCREENER_BASE}/token-profiles/latest/v1`,
+        { timeout: 8000 },
+      ),
+    ]);
+
+    const addresses = new Set<string>();
+    if (boostsRes.status === "fulfilled" && Array.isArray(boostsRes.value.data)) {
+      boostsRes.value.data
+        .filter((b) => b.chainId === "solana")
+        .slice(0, 50)
+        .forEach((b) => addresses.add(b.tokenAddress));
+    }
+    if (profilesRes.status === "fulfilled" && Array.isArray(profilesRes.value.data)) {
+      profilesRes.value.data
+        .filter((p) => p.chainId === "solana")
+        .slice(0, 50)
+        .forEach((p) => addresses.add(p.tokenAddress));
+    }
+    return Array.from(addresses);
+  }
+
+  /** Fetch pairs for a batch of token addresses (max 30 per request) */
+  private async fetchPairsForAddresses(addresses: string[]): Promise<DexScreenerPair[]> {
+    const chunks: string[][] = [];
+    for (let i = 0; i < addresses.length; i += 30) {
+      chunks.push(addresses.slice(i, i + 30));
+    }
+
+    const results = await Promise.allSettled(
+      chunks.map((chunk) =>
+        axios.get<{ pairs: DexScreenerPair[] }>(
+          `${DEXSCREENER_BASE}/tokens/v1/solana/${chunk.join(",")}`,
+          { timeout: 8000 },
+        ),
+      ),
+    );
+
+    const pairs: DexScreenerPair[] = [];
+    for (const r of results) {
+      if (r.status === "fulfilled" && Array.isArray(r.value.data.pairs)) {
+        pairs.push(...r.value.data.pairs.filter((p) => p.chainId === "solana"));
+      }
+    }
+    return pairs;
+  }
+
+  /** Search for trending meme coin pairs using rotating keyword queries */
+  private async fetchSearchPairs(): Promise<DexScreenerPair[]> {
+    // Pick 3 queries per scan cycle (rotate through the list)
+    const queries: string[] = [];
+    for (let i = 0; i < 3; i++) {
+      queries.push(MEME_QUERIES[queryRotation % MEME_QUERIES.length]!);
+      queryRotation++;
+    }
+
+    const results = await Promise.allSettled(
+      queries.map((q) =>
+        axios.get<{ pairs: DexScreenerPair[] }>(
+          `${DEXSCREENER_BASE}/latest/dex/search?q=${encodeURIComponent(q)}`,
+          { timeout: 8000 },
+        ),
+      ),
+    );
+
+    const pairs: DexScreenerPair[] = [];
+    for (const r of results) {
+      if (r.status === "fulfilled" && Array.isArray(r.value.data.pairs)) {
+        // Only Solana meme coin pairs (not SOL/USDC etc.) — filter out quote tokens named SOL/USDC
+        const filtered = r.value.data.pairs.filter(
+          (p) =>
+            p.chainId === "solana" &&
+            !["SOL", "USDC", "USDT", "WSOL"].includes(p.baseToken.symbol),
+        );
+        pairs.push(...filtered.slice(0, 20));
+      }
+    }
+    return pairs;
+  }
+
   async fetchSolanaPairs(): Promise<DexScreenerPair[]> {
     try {
-      const [boostedRes, searchRes] = await Promise.allSettled([
-        axios.get<{ tokenAddress: string; chainId: string }[]>(
-          `${DEXSCREENER_BASE}/token-boosts/top/v1`,
-          { timeout: 8000 },
-        ),
-        axios.get<{ pairs: DexScreenerPair[] }>(
-          `${DEXSCREENER_BASE}/latest/dex/search?q=solana`,
-          { timeout: 8000 },
-        ),
+      // Every 5th scan refresh the boosted/profiled address list
+      const useBoosted = this.scanCount % 5 === 0;
+      const allPairs: DexScreenerPair[] = [];
+
+      const [searchPairs, boostedPairs] = await Promise.allSettled([
+        this.fetchSearchPairs(),
+        useBoosted
+          ? this.fetchBoostedAddresses().then((addrs) => this.fetchPairsForAddresses(addrs))
+          : Promise.resolve([] as DexScreenerPair[]),
       ]);
 
-      const pairs: DexScreenerPair[] = [];
+      if (searchPairs.status === "fulfilled") allPairs.push(...searchPairs.value);
+      if (boostedPairs.status === "fulfilled") allPairs.push(...boostedPairs.value);
 
-      if (boostedRes.status === "fulfilled" && Array.isArray(boostedRes.value.data)) {
-        const boostedAddresses = boostedRes.value.data
-          .filter((b) => b.chainId === "solana")
-          .slice(0, 30)
-          .map((b) => b.tokenAddress);
-
-        if (boostedAddresses.length > 0) {
-          const chunks: string[][] = [];
-          for (let i = 0; i < boostedAddresses.length; i += 10) {
-            chunks.push(boostedAddresses.slice(i, i + 10));
-          }
-          const chunkResults = await Promise.allSettled(
-            chunks.map((chunk) =>
-              axios.get<{ pairs: DexScreenerPair[] }>(
-                `${DEXSCREENER_BASE}/tokens/v1/solana/${chunk.join(",")}`,
-                { timeout: 8000 },
-              ),
-            ),
-          );
-          for (const r of chunkResults) {
-            if (r.status === "fulfilled" && Array.isArray(r.value.data.pairs)) {
-              pairs.push(...r.value.data.pairs.filter((p) => p.chainId === "solana"));
-            }
-          }
+      // Deduplicate by pair address, keep highest-volume version
+      const seen = new Map<string, DexScreenerPair>();
+      for (const pair of allPairs) {
+        const existing = seen.get(pair.pairAddress);
+        if (!existing || (pair.volume?.h24 ?? 0) > (existing.volume?.h24 ?? 0)) {
+          seen.set(pair.pairAddress, pair);
         }
       }
 
-      if (searchRes.status === "fulfilled" && Array.isArray(searchRes.value.data.pairs)) {
-        pairs.push(...searchRes.value.data.pairs.filter((p) => p.chainId === "solana"));
-      }
-
-      const seen = new Set<string>();
-      return pairs.filter((p) => {
-        if (seen.has(p.pairAddress)) return false;
-        seen.add(p.pairAddress);
-        return true;
-      });
+      return Array.from(seen.values());
     } catch (err) {
       logger.error({ err }, "Scanner fetch error");
       return [];
@@ -132,11 +202,15 @@ class ScannerService {
   private async scan() {
     if (this.isScanning) return;
     this.isScanning = true;
+    this.scanCount++;
     try {
       const pairs = await this.fetchSolanaPairs();
+      let newCount = 0;
       for (const pair of pairs) {
         const token = mapPairToToken(pair);
+        const isNew = !this.tokens.has(token.pairAddress);
         this.tokens.set(token.pairAddress, token);
+        if (isNew) newCount++;
 
         if (
           token.aiScore >= HIGH_AI_SCORE_THRESHOLD &&
@@ -146,6 +220,10 @@ class ScannerService {
           alertsService.highAiScore(token.symbol, token.aiScore, token.pairAddress);
           setTimeout(() => this.alreadyAlertedHighScore.delete(token.pairAddress), 300_000);
         }
+      }
+
+      if (newCount > 0) {
+        logger.debug({ scanCount: this.scanCount, newTokens: newCount, total: this.tokens.size }, "Scanner: new tokens found");
       }
 
       this.broadcaster?.(this.getAll());
@@ -158,7 +236,7 @@ class ScannerService {
     if (this.intervalId) return;
     void this.scan();
     this.intervalId = setInterval(() => void this.scan(), SCAN_INTERVAL_MS);
-    logger.info("Scanner service started — polling DexScreener every 2.5s");
+    logger.info({ intervalMs: SCAN_INTERVAL_MS, queries: MEME_QUERIES.length }, "Scanner started — rotating meme coin queries + boosted tokens");
   }
 
   stop() {
@@ -196,6 +274,10 @@ class ScannerService {
     const token = mapPairToToken(pair);
     this.tokens.set(pairAddress, token);
     return token;
+  }
+
+  getTokenCount(): number {
+    return this.tokens.size;
   }
 }
 
