@@ -30,6 +30,7 @@ server.listen(port, () => {
   scannerService.start();
   paperTradingService.startStopChecker();
   autoTraderService.start();
+  autoTraderService.startHeartbeat();
 
   logger.info("Scanner service started — polling DexScreener every 2.5s");
   logger.info("Stop/TP checker started — checking positions every 1.5s");

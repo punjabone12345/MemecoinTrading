@@ -1,6 +1,6 @@
 import axios from "axios";
 import { logger } from "../lib/logger.js";
-import { isTelegramConfigured } from "../lib/telegram.js";
+import { sendTelegram, isTelegramConfigured } from "../lib/telegram.js";
 import { paperTradingService } from "./paper-trading.service.js";
 import { scannerService } from "./scanner.service.js";
 import { computeSignals, computeAiScore, computeConfidence, getDynamicRisk } from "./ai-scoring.service.js";
@@ -511,6 +511,57 @@ class AutoTraderService {
 
   stop(): void {
     if (this.intervalId) { clearInterval(this.intervalId); this.intervalId = null; }
+  }
+
+  startHeartbeat(): void {
+    if (!isTelegramConfigured()) {
+      logger.info("Heartbeat skipped — Telegram not configured");
+      return;
+    }
+
+    const send = () => {
+      const portfolio = paperTradingService.getPortfolio();
+      const openPositions = paperTradingService.getOpenPositions();
+      const closedTrades = paperTradingService.getClosedTrades();
+      const scannerPool = scannerService.getTokenCount();
+      const now = new Date().toUTCString();
+
+      const todayStart = new Date();
+      todayStart.setUTCHours(0, 0, 0, 0);
+      const tradesToday = closedTrades.filter(
+        (t) => t.closedAt && new Date(t.closedAt).getTime() >= todayStart.getTime(),
+      ).length;
+      const openToday = openPositions.filter(
+        (p) => new Date(p.openedAt).getTime() >= todayStart.getTime(),
+      ).length;
+
+      const pnlSign = portfolio.totalPnlSol >= 0 ? "+" : "";
+
+      void sendTelegram(
+        `🤖 <b>Apex Scanner — Hourly Heartbeat</b>\n` +
+        `──────────────────\n` +
+        `✅ Scanner: <b>RUNNING</b>\n` +
+        `🔍 Memecoins in pool: <b>${scannerPool}</b>\n` +
+        `🔄 Cycles run: <b>${this.cycleCounter}</b>\n` +
+        `──────────────────\n` +
+        `📊 Trades today: <b>${tradesToday + openToday}</b> (${openToday} open, ${tradesToday} closed)\n` +
+        `📈 All-time traded: <b>${this.totalTradesOpened}</b>\n` +
+        `💰 Open positions: <b>${portfolio.openPositionsCount}</b>\n` +
+        `💵 Balance: <b>${portfolio.solBalance.toFixed(4)} SOL</b>\n` +
+        `📉 Total PNL: <b>${pnlSign}${portfolio.totalPnlSol.toFixed(4)} SOL</b>\n` +
+        `──────────────────\n` +
+        `⏰ Waiting for A+ trade signals...\n` +
+        `<i>${now}</i>`,
+      );
+    };
+
+    // Send first heartbeat after 5 minutes (not immediately)
+    setTimeout(() => {
+      send();
+      setInterval(send, 60 * 60 * 1000); // then every hour
+    }, 5 * 60 * 1000);
+
+    logger.info("Heartbeat started — Telegram status every 1h (first in 5m)");
   }
 
   getStatus(): AutoTraderStatus {
