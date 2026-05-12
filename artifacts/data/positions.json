@@ -1,19 +1,23 @@
 [
   {
-    "positionId": "652b8918-3855-4142-bf91-3168f22426be",
+    "positionId": "3ff7c51b-38a1-463b-8dd2-4247f244f0e7",
     "symbol": "BULL",
-    "tokenName": "Bullshot",
-    "pairAddress": "GD3vku4KsRSwmSQZVoHzP48KqFWTBnd4W1TkMzr6n6zb",
+    "tokenName": "BULL",
+    "pairAddress": "HDUGQ9GLTfmMLJKof4pwYXkjectuXtKZmce21pZyWK3e",
+    "contractAddress": "4P7XDGHxVsXb4HJxBs1gXCNwDsWkrMs7KbBxmHNRE8Yw",
     "imageUrl": "",
-    "entryPrice": 0.0001004,
+    "entryPrice": 0.0001092,
     "sizeSol": 0.5,
-    "slPercent": 7,
-    "tpPercent": 200,
-    "slPrice": 0.000093372,
-    "tpPrice": 0.0003012,
-    "aiScore": 92,
+    "slPercent": 12,
+    "tpPercent": 50,
+    "slPrice": 0.000096096,
+    "tpPrice": 0.0001638,
+    "entryMarketCap": 109242,
+    "tpMarketCap": 163863,
+    "slMarketCap": 96132.96,
+    "aiScore": 75,
     "confidence": 100,
-    "openedAt": "2026-05-12T01:07:38.378Z",
+    "openedAt": "2026-05-12T15:58:13.135Z",
     "status": "open"
   }
 ]
