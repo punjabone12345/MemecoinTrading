@@ -1,1 +1,19 @@
-[]
+[
+  {
+    "positionId": "652b8918-3855-4142-bf91-3168f22426be",
+    "symbol": "BULL",
+    "tokenName": "Bullshot",
+    "pairAddress": "GD3vku4KsRSwmSQZVoHzP48KqFWTBnd4W1TkMzr6n6zb",
+    "imageUrl": "",
+    "entryPrice": 0.0001004,
+    "sizeSol": 0.5,
+    "slPercent": 7,
+    "tpPercent": 200,
+    "slPrice": 0.000093372,
+    "tpPrice": 0.0003012,
+    "aiScore": 92,
+    "confidence": 100,
+    "openedAt": "2026-05-12T01:07:38.378Z",
+    "status": "open"
+  }
+]
