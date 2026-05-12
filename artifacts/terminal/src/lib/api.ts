@@ -177,11 +177,11 @@ export function useWatchlist() {
 export function useClosePosition() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: async (pairAddress: string) => {
+    mutationFn: async (positionId: string) => {
       await fetch("/api/paper-sell", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ pairAddress }),
+        body: JSON.stringify({ positionId }),
       });
     },
     onSuccess: () => {

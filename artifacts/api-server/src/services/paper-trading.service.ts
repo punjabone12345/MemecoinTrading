@@ -6,7 +6,7 @@ import { logger } from "../lib/logger.js";
 import { scannerService } from "./scanner.service.js";
 import { alertsService } from "./alerts.service.js";
 import { getDynamicRisk } from "./ai-scoring.service.js";
-import { sendTelegram } from "../lib/telegram.js";
+import { sendTelegram, toIST } from "../lib/telegram.js";
 import type { Position, Portfolio, CloseReason, ScannedToken } from "../types/index.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -53,6 +53,13 @@ function formatPrice(price: number): string {
   if (price < 0.01) return price.toFixed(8);
   if (price < 1) return price.toFixed(6);
   return price.toFixed(4);
+}
+
+function formatMcap(mcap: number): string {
+  if (mcap >= 1_000_000_000) return `$${(mcap / 1_000_000_000).toFixed(2)}B`;
+  if (mcap >= 1_000_000) return `$${(mcap / 1_000_000).toFixed(2)}M`;
+  if (mcap >= 1_000) return `$${(mcap / 1_000).toFixed(1)}K`;
+  return `$${mcap.toFixed(0)}`;
 }
 
 class PaperTradingService {
@@ -128,6 +135,11 @@ class PaperTradingService {
     const slPrice = token.priceUsd * (1 - slPercent / 100);
     const tpPrice = token.priceUsd * (1 + tpPercent / 100);
 
+    // Market cap projections
+    const entryMarketCap = token.marketCap;
+    const tpMarketCap = entryMarketCap > 0 ? entryMarketCap * (1 + tpPercent / 100) : 0;
+    const slMarketCap = entryMarketCap > 0 ? entryMarketCap * (1 - slPercent / 100) : 0;
+
     this.solBalance -= sizeSol;
 
     const position: Position = {
@@ -135,6 +147,7 @@ class PaperTradingService {
       symbol: token.symbol,
       tokenName: token.name,
       pairAddress: token.pairAddress,
+      contractAddress: token.address,
       imageUrl: token.imageUrl,
       entryPrice: token.priceUsd,
       sizeSol,
@@ -142,6 +155,9 @@ class PaperTradingService {
       tpPercent,
       slPrice,
       tpPrice,
+      entryMarketCap,
+      tpMarketCap,
+      slMarketCap,
       aiScore: token.aiScore,
       confidence: token.confidence,
       openedAt: new Date().toISOString(),
@@ -157,13 +173,23 @@ class PaperTradingService {
     alertsService.tradeOpened(position.positionId, token.symbol, sizeSol, token.pairAddress);
 
     void sendTelegram(
-      `🟢 <b>TRADE OPENED</b>\n` +
-      `Token: <b>$${token.symbol}</b> (${token.name})\n` +
-      `Entry: $${formatPrice(token.priceUsd)}\n` +
-      `Size: ${sizeSol} SOL\n` +
-      `AI Score: ${token.aiScore} | Confidence: ${token.confidence}%\n` +
-      `SL: -${slPercent}% | TP: +${tpPercent}%\n` +
-      `──────────────────`,
+      `🟢 <b>TRADE OPENED — $${token.symbol}</b>\n` +
+      `──────────────────────\n` +
+      `🏷️ Token: <b>${token.name}</b>\n` +
+      `📍 CA: <code>${token.address}</code>\n` +
+      `\n` +
+      `💰 <b>Entry Price:</b> $${formatPrice(token.priceUsd)}\n` +
+      `🎯 <b>Take Profit:</b> $${formatPrice(tpPrice)} (+${tpPercent}%)\n` +
+      `🛑 <b>Stop Loss:</b> $${formatPrice(slPrice)} (-${slPercent}%)\n` +
+      `\n` +
+      `📊 <b>Market Cap at Entry:</b> ${formatMcap(entryMarketCap)}\n` +
+      `🎯 <b>Target MCap (TP):</b> ${tpMarketCap > 0 ? formatMcap(tpMarketCap) : "N/A"}\n` +
+      `🛑 <b>MCap at SL:</b> ${slMarketCap > 0 ? formatMcap(slMarketCap) : "N/A"}\n` +
+      `\n` +
+      `📦 Size: ${sizeSol} SOL\n` +
+      `🤖 AI Score: ${token.aiScore} | Confidence: ${token.confidence}%\n` +
+      `🕐 Time: ${toIST(new Date())}\n` +
+      `🔗 <a href="https://dexscreener.com/solana/${token.address}">View on DexScreener</a>`,
     );
 
     this.broadcastPositions();
@@ -222,36 +248,46 @@ class PaperTradingService {
 
     const holdLabel = formatHoldTime(holdTimeMs);
     const sign = pnlSol >= 0 ? "+" : "";
+    const portfolio = this.getPortfolio();
 
     if (reason === "take_profit") {
       alertsService.takeProfitHit(positionId, pos.symbol, pnlSol, pos.pairAddress);
       void sendTelegram(
-        `✅ <b>TAKE PROFIT HIT</b>\n` +
-        `Token: <b>$${pos.symbol}</b>\n` +
-        `Entry: $${formatPrice(pos.entryPrice)} → Exit: $${formatPrice(exitPrice)}\n` +
-        `P&L: ${sign}${pnlPercent.toFixed(0)}% | ${sign}${pnlSol.toFixed(4)} SOL\n` +
-        `Hold time: ${holdLabel}\n` +
-        `──────────────────`,
+        `✅ <b>TAKE PROFIT HIT — $${pos.symbol}</b>\n` +
+        `──────────────────────\n` +
+        `📍 CA: <code>${pos.contractAddress}</code>\n` +
+        `💰 Entry: $${formatPrice(pos.entryPrice)} → Exit: $${formatPrice(exitPrice)}\n` +
+        `📈 P&L: <b>${sign}${pnlPercent.toFixed(1)}% | ${sign}${pnlSol.toFixed(4)} SOL</b>\n` +
+        `⏱️ Hold Time: ${holdLabel}\n` +
+        `💼 Balance Now: ${portfolio.solBalance.toFixed(4)} SOL\n` +
+        `🕐 Time: ${toIST(new Date())}\n` +
+        `🔗 <a href="https://dexscreener.com/solana/${pos.contractAddress}">View on DexScreener</a>`,
       );
     } else if (reason === "stop_loss") {
       alertsService.stopLossHit(positionId, pos.symbol, pnlSol, pos.pairAddress);
       void sendTelegram(
-        `🔴 <b>STOP LOSS HIT</b>\n` +
-        `Token: <b>$${pos.symbol}</b>\n` +
-        `Entry: $${formatPrice(pos.entryPrice)} → Exit: $${formatPrice(exitPrice)}\n` +
-        `P&L: ${sign}${pnlPercent.toFixed(0)}% | ${sign}${pnlSol.toFixed(4)} SOL\n` +
-        `Hold time: ${holdLabel}\n` +
-        `──────────────────`,
+        `🔴 <b>STOP LOSS HIT — $${pos.symbol}</b>\n` +
+        `──────────────────────\n` +
+        `📍 CA: <code>${pos.contractAddress}</code>\n` +
+        `💰 Entry: $${formatPrice(pos.entryPrice)} → Exit: $${formatPrice(exitPrice)}\n` +
+        `📉 P&L: <b>${sign}${pnlPercent.toFixed(1)}% | ${sign}${pnlSol.toFixed(4)} SOL</b>\n` +
+        `⏱️ Hold Time: ${holdLabel}\n` +
+        `💼 Balance Now: ${portfolio.solBalance.toFixed(4)} SOL\n` +
+        `🕐 Time: ${toIST(new Date())}\n` +
+        `🔗 <a href="https://dexscreener.com/solana/${pos.contractAddress}">View on DexScreener</a>`,
       );
     } else {
       alertsService.tradeClosed(positionId, pos.symbol, pnlSol, pnlPercent, pos.pairAddress, "Manual Close");
       void sendTelegram(
-        `⚪ <b>TRADE CLOSED (Manual)</b>\n` +
-        `Token: <b>$${pos.symbol}</b>\n` +
-        `Entry: $${formatPrice(pos.entryPrice)} → Exit: $${formatPrice(exitPrice)}\n` +
-        `P&L: ${sign}${pnlPercent.toFixed(0)}% | ${sign}${pnlSol.toFixed(4)} SOL\n` +
-        `Hold time: ${holdLabel}\n` +
-        `──────────────────`,
+        `⚪ <b>TRADE CLOSED (Manual) — $${pos.symbol}</b>\n` +
+        `──────────────────────\n` +
+        `📍 CA: <code>${pos.contractAddress}</code>\n` +
+        `💰 Entry: $${formatPrice(pos.entryPrice)} → Exit: $${formatPrice(exitPrice)}\n` +
+        `📊 P&L: <b>${sign}${pnlPercent.toFixed(1)}% | ${sign}${pnlSol.toFixed(4)} SOL</b>\n` +
+        `⏱️ Hold Time: ${holdLabel}\n` +
+        `💼 Balance Now: ${portfolio.solBalance.toFixed(4)} SOL\n` +
+        `🕐 Time: ${toIST(new Date())}\n` +
+        `🔗 <a href="https://dexscreener.com/solana/${pos.contractAddress}">View on DexScreener</a>`,
       );
     }
 

@@ -98,6 +98,7 @@ export interface Position {
   symbol: string;
   tokenName: string;
   pairAddress: string;
+  contractAddress: string;
   imageUrl: string;
   entryPrice: number;
   exitPrice?: number;
@@ -106,6 +107,9 @@ export interface Position {
   tpPercent: number;
   slPrice: number;
   tpPrice: number;
+  entryMarketCap: number;
+  tpMarketCap: number;
+  slMarketCap: number;
   aiScore: number;
   confidence: number;
   openedAt: string;

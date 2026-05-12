@@ -11,13 +11,17 @@ export interface ScannedToken {
 }
 
 export interface Position {
-  positionId: string; symbol: string; tokenName: string; pairAddress: string; imageUrl: string;
+  positionId: string; symbol: string; tokenName: string; pairAddress: string;
+  contractAddress: string; imageUrl: string;
   entryPrice: number; exitPrice?: number; sizeSol: number;
   slPercent: number; tpPercent: number; slPrice: number; tpPrice: number;
+  entryMarketCap: number; tpMarketCap: number; slMarketCap: number;
   aiScore: number; confidence: number;
   openedAt: string; closedAt?: string; status: "open" | "closed";
   closeReason?: "manual" | "stop_loss" | "take_profit";
   pnlSol?: number; pnlPercent?: number; holdTimeMs?: number;
+  // live fields (from getOpenPositionsWithLivePnl)
+  livePnlSol?: number; livePnlPercent?: number; currentPrice?: number;
 }
 
 export interface Portfolio {

@@ -17,9 +17,6 @@ function clamp(val: number, min = 0, max = 100): number {
  *  Mcap sweet spot           15   Upside potential
  *  ─────────────────────────────────────────────────────────────
  *  (1h + 5m are capped together at 35)
- *
- * "Effective 1h volume" = vol1h if available, else vol24h / 24.
- * DexScreener frequently returns 0 for vol1h even when vol24h is large.
  */
 export function computeSignals(pair: DexScreenerPair): TokenSignals {
   const pc1h = pair.priceChange?.h1 ?? 0;
@@ -30,7 +27,6 @@ export function computeSignals(pair: DexScreenerPair): TokenSignals {
   const liq = pair.liquidity?.usd || 0;
   const vol1hRaw = pair.volume?.h1 || 0;
   const vol24h = pair.volume?.h24 || 0;
-  // Fallback: if vol1h is missing/zero, estimate from 24h data
   const effectiveVol1h = vol1hRaw > 0 ? vol1hRaw : vol24h / 24;
   const marketCap = pair.marketCap || pair.fdv || 0;
 
@@ -55,7 +51,6 @@ export function computeSignals(pair: DexScreenerPair): TokenSignals {
   else if (pc5m >= 4) pumpBonus = 2;
   else if (pc5m >= 1) pumpBonus = 1;
 
-  // Combined momentum capped at 35
   const combinedMomentum = clamp(momentumScore + pumpBonus, 0, 35);
 
   // ── 3. Buy/sell ratio 1h (max 20 pts) ────────────────────────────────────
@@ -82,7 +77,6 @@ export function computeSignals(pair: DexScreenerPair): TokenSignals {
   else liquidityScore = 0;
 
   // ── 5. Effective hourly volume / market cap (max 20 pts) ─────────────────
-  // Uses real vol1h when available, falls back to vol24h/24 estimate.
   let volumeMcapScore = 0;
   if (marketCap > 0 && effectiveVol1h > 0) {
     const ratio = effectiveVol1h / marketCap;
@@ -97,7 +91,6 @@ export function computeSignals(pair: DexScreenerPair): TokenSignals {
   }
 
   // ── 6. Mcap sweet spot (max 15 pts) ──────────────────────────────────────
-  // Best upside is in $100k–$5M range; penalty for very large or tiny mcaps
   let mcapScore = 0;
   if (marketCap >= 100_000 && marketCap <= 1_000_000) mcapScore = 15;
   else if (marketCap > 1_000_000 && marketCap <= 5_000_000) mcapScore = 12;
@@ -142,11 +135,22 @@ export function computeConfidence(pair: DexScreenerPair): number {
   return Math.max(0, confidence);
 }
 
-/** Dynamic SL/TP percentages based on AI score tier */
+/**
+ * Dynamic SL/TP percentages based on AI score tier.
+ * Wider SL to survive volatility, aggressive TP for moonshots.
+ *
+ * Score  | SL   | TP     | Rationale
+ * ────────────────────────────────────────────
+ * 95+    | -20% | 500%   | Ultra high conviction, max moonshot
+ * 90-94  | -18% | 200%   | High conviction, big upside
+ * 80-89  | -15% | 80%    | Strong signal, moderate moonshot
+ * 70-79  | -12% | 50%    | Good signal, reasonable target
+ * <70    | -12% | 35%    | Lower conviction, tighter target
+ */
 export function getDynamicRisk(score: number): { slPercent: number; tpPercent: number } {
-  if (score >= 95) return { slPercent: 5, tpPercent: 500 };
-  if (score >= 90) return { slPercent: 7, tpPercent: 200 };
-  if (score >= 80) return { slPercent: 8, tpPercent: 100 };
-  if (score >= 70) return { slPercent: 10, tpPercent: 60 };
+  if (score >= 95) return { slPercent: 20, tpPercent: 500 };
+  if (score >= 90) return { slPercent: 18, tpPercent: 200 };
+  if (score >= 80) return { slPercent: 15, tpPercent: 80 };
+  if (score >= 70) return { slPercent: 12, tpPercent: 50 };
   return { slPercent: 12, tpPercent: 35 };
 }

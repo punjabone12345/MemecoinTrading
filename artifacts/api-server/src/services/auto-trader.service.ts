@@ -1,6 +1,6 @@
 import axios from "axios";
 import { logger } from "../lib/logger.js";
-import { sendTelegram, isTelegramConfigured } from "../lib/telegram.js";
+import { sendTelegram, isTelegramConfigured, toIST } from "../lib/telegram.js";
 import { paperTradingService } from "./paper-trading.service.js";
 import { scannerService } from "./scanner.service.js";
 import { computeSignals, computeAiScore, computeConfidence, getDynamicRisk } from "./ai-scoring.service.js";
@@ -22,7 +22,7 @@ export interface AutoTraderConfig {
   minVolume24hUsd: number;
   minVolume1hUsd: number;
   // Activity / momentum
-  minBuyRatio1h: number;       // 0–1, e.g. 0.60 = 60% buys
+  minBuyRatio1h: number;       // 0–1, e.g. 0.55 = 55% buys
   minPriceChange1h: number;    // %, must be positive momentum
   minTransactions24h: number;
   // Market cap sweet spot
@@ -32,8 +32,8 @@ export interface AutoTraderConfig {
   minPairAgeMinutes: number;
   maxPairAgeHours: number;
   // Rug-pull guards
-  minLiquidityMcapRatio: number;  // e.g. 0.05 = liq must be ≥5% of mcap
-  maxFdvMcapRatio: number;        // e.g. 5.0 = FDV must not exceed 5× mcap
+  minLiquidityMcapRatio: number;  // e.g. 0.03 = liq must be ≥3% of mcap
+  maxFdvMcapRatio: number;        // e.g. 8.0 = FDV must not exceed 8× mcap
   maxPriceDropH6Pct: number;      // reject if 6h drop exceeds this (negative number)
   maxPriceDropH24Pct: number;     // reject if 24h drop exceeds this (negative number)
 }
@@ -86,32 +86,32 @@ export interface AutoTraderStatus {
   config: AutoTraderConfig;
 }
 
-// ─── Default config: strict quality filters ───────────────────────────────────
+// ─── Default config: balanced filters for finding moonshots ──────────────────
 const DEFAULT_CONFIG: AutoTraderConfig = {
   solPerTrade: 0.5,
   maxConcurrentTrades: 5,
   // AI
-  minAiScore: 65,
-  minConfidence: 70,
-  // Liquidity & volume
-  minLiquidityUsd: 75_000,
-  minVolume24hUsd: 100_000,
-  minVolume1hUsd: 10_000,
+  minAiScore: 60,
+  minConfidence: 60,
+  // Liquidity & volume — loosened so more tokens pass
+  minLiquidityUsd: 30_000,
+  minVolume24hUsd: 50_000,
+  minVolume1hUsd: 3_000,
   // Momentum
-  minBuyRatio1h: 0.60,
-  minPriceChange1h: 3,
-  minTransactions24h: 200,
-  // Market cap sweet spot ($100k – $20M)
-  minMcapUsd: 100_000,
-  maxMcapUsd: 20_000_000,
-  // Pair age (30 min – 72 hours)
-  minPairAgeMinutes: 30,
-  maxPairAgeHours: 72,
-  // Rug guards
-  minLiquidityMcapRatio: 0.05,
-  maxFdvMcapRatio: 5.0,
-  maxPriceDropH6Pct: -35,
-  maxPriceDropH24Pct: -60,
+  minBuyRatio1h: 0.55,
+  minPriceChange1h: 1,
+  minTransactions24h: 100,
+  // Market cap sweet spot ($50k – $30M for moonshots)
+  minMcapUsd: 50_000,
+  maxMcapUsd: 30_000_000,
+  // Pair age (15 min – 96 hours)
+  minPairAgeMinutes: 15,
+  maxPairAgeHours: 96,
+  // Rug guards — slightly relaxed
+  minLiquidityMcapRatio: 0.03,
+  maxFdvMcapRatio: 8.0,
+  maxPriceDropH6Pct: -40,
+  maxPriceDropH24Pct: -65,
 };
 
 // ─── Multi-layer quality + rug-pull filter ────────────────────────────────────
@@ -146,7 +146,8 @@ export function qualityFilter(pair: DexScreenerPair, cfg: AutoTraderConfig): Fil
   // ── Volume floors ─────────────────────────────────────────────────────────
   if (vol24h < cfg.minVolume24hUsd)
     return fail(`Vol24h $${Math.round(vol24h).toLocaleString()} < $${cfg.minVolume24hUsd.toLocaleString()} min`);
-  if (vol1h < cfg.minVolume1hUsd)
+  // vol1h check: only if 1h volume data is available
+  if (vol1h > 0 && vol1h < cfg.minVolume1hUsd)
     return fail(`Vol1h $${Math.round(vol1h).toLocaleString()} < $${cfg.minVolume1hUsd.toLocaleString()} min`);
 
   // ── Activity ──────────────────────────────────────────────────────────────
@@ -154,9 +155,7 @@ export function qualityFilter(pair: DexScreenerPair, cfg: AutoTraderConfig): Fil
     return fail(`Txns24h ${txns24h} < ${cfg.minTransactions24h} min`);
 
   // ── Buy pressure ─────────────────────────────────────────────────────────
-  if (total1h < 10)
-    return fail(`Only ${total1h} txns in last 1h — can't verify buy pressure`);
-  if (buyRatio1h < cfg.minBuyRatio1h)
+  if (total1h >= 5 && buyRatio1h < cfg.minBuyRatio1h)
     return fail(`Buy ratio ${(buyRatio1h * 100).toFixed(0)}% < ${(cfg.minBuyRatio1h * 100).toFixed(0)}% min`);
 
   // ── Momentum ──────────────────────────────────────────────────────────────
@@ -191,7 +190,7 @@ export function qualityFilter(pair: DexScreenerPair, cfg: AutoTraderConfig): Fil
     return fail(`24h dump ${pc24h.toFixed(1)}% — token in severe decline`);
 
   // ── Wash-trading suspicion ────────────────────────────────────────────────
-  if (sells1h === 0 && buys1h > 20)
+  if (sells1h === 0 && buys1h > 50)
     return fail("Zero sells with high buys in 1h — likely wash trading");
 
   return { pass: true, reason: "All filters passed" };
@@ -224,6 +223,21 @@ class AutoTraderService {
   resume(): void { this.paused = false; logger.info("Auto-trader resumed"); void this.run(); }
   isPaused(): boolean { return this.paused; }
   getHistory(): CycleRecord[] { return [...this.history].reverse(); }
+
+  getStatus(): AutoTraderStatus {
+    return {
+      paused: this.paused,
+      running: this.running,
+      lastRunAt: this.lastRunAt,
+      lastRunTokensEvaluated: this.lastRunTokensEvaluated,
+      lastRunTradesOpened: this.lastRunTradesOpened,
+      totalTradesOpened: this.totalTradesOpened,
+      telegramEnabled: isTelegramConfigured(),
+      nextRunIn: Math.max(0, this.nextRunAt - Date.now()),
+      scannerPoolSize: scannerService.getTokenCount(),
+      config: this.getConfig(),
+    };
+  }
 
   /**
    * Supplementary fetch: get any fresh boosted/profiled addresses not yet in scanner
@@ -317,20 +331,16 @@ class AutoTraderService {
       }
 
       // ── PRIMARY: use scanner's accumulated token pool ──────────────────────
-      // Scanner runs every 4s with rotating meme coin queries + boosts/profiles.
-      // After the server has been running for a few minutes this pool is rich.
       const scannerTokens = scannerService.getAll();
 
       // ── SUPPLEMENTARY: fresh fetch for any tokens not in scanner yet ────────
       const freshPairs = await this.fetchSupplementaryPairs();
       const seenInScanner = new Set(scannerTokens.map((t) => t.pairAddress));
 
-      // Convert fresh pairs → scanned tokens, skip ones already in scanner cache
       const freshTokens = freshPairs
         .filter((p) => !seenInScanner.has(p.pairAddress))
         .map((p) => mapPairToToken(p));
 
-      // Deduplicate fresh tokens
       const freshSeen = new Set<string>();
       const uniqueFresh = freshTokens.filter((t) => {
         if (freshSeen.has(t.pairAddress)) return false;
@@ -525,7 +535,7 @@ class AutoTraderService {
     this.nextRunAt = Date.now() + AUTO_TRADE_INTERVAL_MS;
     logger.info(
       { intervalSec: AUTO_TRADE_INTERVAL_MS / 1000, telegramEnabled: isTelegramConfigured(), config: this.config },
-      "Auto-trader started — strict quality filters active",
+      "Auto-trader started — balanced quality filters active",
     );
   }
 
@@ -546,7 +556,7 @@ class AutoTraderService {
       const scannerPool = scannerService.getTokenCount();
       const scanCycles = scannerService.getScanCount();
       const expired = scannerService.getTotalExpired();
-      const now = new Date().toUTCString();
+      const nowIST = toIST(new Date());
 
       const todayStart = new Date();
       todayStart.setUTCHours(0, 0, 0, 0);
@@ -554,52 +564,32 @@ class AutoTraderService {
         (t) => t.closedAt && new Date(t.closedAt).getTime() >= todayStart.getTime(),
       ).length;
       const openToday = openPositions.filter(
-        (p) => new Date(p.openedAt).getTime() >= todayStart.getTime(),
+        (t) => new Date(t.openedAt).getTime() >= todayStart.getTime(),
       ).length;
 
-      const pnlSign = portfolio.totalPnlSol >= 0 ? "+" : "";
+      const sign = portfolio.totalPnlSol >= 0 ? "+" : "";
+      const statusLine = this.paused ? "⏸️ PAUSED" : "✅ RUNNING";
 
       void sendTelegram(
         `🤖 <b>Apex Scanner — Hourly Heartbeat</b>\n` +
-        `──────────────────\n` +
-        `✅ Scanner: <b>RUNNING</b>\n` +
-        `🔍 Active tokens in pool: <b>${scannerPool}</b>\n` +
+        `──────────────────────\n` +
+        `${statusLine} Scanner: ${scannerPool > 0 ? "RUNNING" : "IDLE"}\n` +
+        `🔵 Active tokens in pool: <b>${scannerPool}</b>\n` +
         `♻️ Rotated out (stale): <b>${expired}</b>\n` +
-        `🔄 Scanner cycles: <b>${scanCycles}</b> | Trader cycles: <b>${this.cycleCounter}</b>\n` +
-        `──────────────────\n` +
-        `📊 Trades today: <b>${openToday + closedToday}</b> (${openToday} open, ${closedToday} closed)\n` +
-        `📈 All-time traded: <b>${this.totalTradesOpened}</b>\n` +
-        `💰 Open positions: <b>${portfolio.openPositionsCount}/${this.config.maxConcurrentTrades}</b>\n` +
-        `💵 Balance: <b>${portfolio.solBalance.toFixed(4)} SOL</b>\n` +
-        `📉 Total PNL: <b>${pnlSign}${portfolio.totalPnlSol.toFixed(4)} SOL</b>\n` +
-        `──────────────────\n` +
-        `⏰ Hunting for A+ signals...\n` +
-        `<i>${now}</i>`,
+        `🔄 Scanner cycles: ${scanCycles} | Trader cycles: ${this.cycleCounter}\n` +
+        `──────────────────────\n` +
+        `📊 Trades today: ${openToday + closedToday} (${openToday} open, ${closedToday} closed)\n` +
+        `🏆 All-time traded: ${this.totalTradesOpened}\n` +
+        `💼 Open positions: ${openPositions.length}/${this.config.maxConcurrentTrades}\n` +
+        `💰 Balance: ${portfolio.solBalance.toFixed(4)} SOL\n` +
+        `📈 Total PNL: <b>${sign}${portfolio.totalPnlSol.toFixed(4)} SOL</b>\n` +
+        `──────────────────────\n` +
+        `🕐 <i>${nowIST}</i>`,
       );
     };
 
-    // Send first heartbeat after 5 minutes (not immediately)
-    setTimeout(() => {
-      send();
-      setInterval(send, 60 * 60 * 1000); // then every hour
-    }, 5 * 60 * 1000);
-
-    logger.info("Heartbeat started — Telegram status every 1h (first in 5m)");
-  }
-
-  getStatus(): AutoTraderStatus {
-    return {
-      paused: this.paused,
-      running: this.running,
-      lastRunAt: this.lastRunAt,
-      lastRunTokensEvaluated: this.lastRunTokensEvaluated,
-      lastRunTradesOpened: this.lastRunTradesOpened,
-      totalTradesOpened: this.totalTradesOpened,
-      telegramEnabled: isTelegramConfigured(),
-      nextRunIn: Math.max(0, Math.round((this.nextRunAt - Date.now()) / 1000)),
-      scannerPoolSize: scannerService.getTokenCount(),
-      config: this.getConfig(),
-    };
+    send();
+    setInterval(send, 60 * 60 * 1_000);
   }
 }
 
