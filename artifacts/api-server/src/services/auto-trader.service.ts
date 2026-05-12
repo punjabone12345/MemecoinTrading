@@ -210,6 +210,7 @@ class AutoTraderService {
   private cycleCounter = 0;
   private history: CycleRecord[] = [];
   private config: AutoTraderConfig = { ...DEFAULT_CONFIG };
+  private wasAtMaxTrades = false;
 
   getConfig(): AutoTraderConfig { return { ...this.config }; }
 
@@ -293,7 +294,26 @@ class AutoTraderService {
 
       if (openPositions.length >= maxConcurrentTrades) {
         logger.info({ open: openPositions.length, max: maxConcurrentTrades }, "Auto-trader: at max concurrent trades — skipping cycle");
+        if (!this.wasAtMaxTrades) {
+          this.wasAtMaxTrades = true;
+          void sendTelegram(
+            `⏸️ <b>Auto-Trader — All Slots Full</b>\n` +
+            `──────────────────\n` +
+            `📦 Open positions: <b>${openPositions.length}/${maxConcurrentTrades}</b>\n` +
+            `🔍 Scanner still running in background.\n` +
+            `🔔 You'll be notified when a position closes and a new slot opens.`,
+          );
+        }
         return;
+      }
+      if (this.wasAtMaxTrades) {
+        this.wasAtMaxTrades = false;
+        void sendTelegram(
+          `▶️ <b>Auto-Trader — Slot Freed Up</b>\n` +
+          `──────────────────\n` +
+          `📦 Open positions: <b>${openPositions.length}/${maxConcurrentTrades}</b>\n` +
+          `🔍 Resuming scan for next A+ trade signal...`,
+        );
       }
 
       // ── PRIMARY: use scanner's accumulated token pool ──────────────────────
@@ -524,11 +544,13 @@ class AutoTraderService {
       const openPositions = paperTradingService.getOpenPositions();
       const closedTrades = paperTradingService.getClosedTrades();
       const scannerPool = scannerService.getTokenCount();
+      const scanCycles = scannerService.getScanCount();
+      const expired = scannerService.getTotalExpired();
       const now = new Date().toUTCString();
 
       const todayStart = new Date();
       todayStart.setUTCHours(0, 0, 0, 0);
-      const tradesToday = closedTrades.filter(
+      const closedToday = closedTrades.filter(
         (t) => t.closedAt && new Date(t.closedAt).getTime() >= todayStart.getTime(),
       ).length;
       const openToday = openPositions.filter(
@@ -541,16 +563,17 @@ class AutoTraderService {
         `🤖 <b>Apex Scanner — Hourly Heartbeat</b>\n` +
         `──────────────────\n` +
         `✅ Scanner: <b>RUNNING</b>\n` +
-        `🔍 Memecoins in pool: <b>${scannerPool}</b>\n` +
-        `🔄 Cycles run: <b>${this.cycleCounter}</b>\n` +
+        `🔍 Active tokens in pool: <b>${scannerPool}</b>\n` +
+        `♻️ Rotated out (stale): <b>${expired}</b>\n` +
+        `🔄 Scanner cycles: <b>${scanCycles}</b> | Trader cycles: <b>${this.cycleCounter}</b>\n` +
         `──────────────────\n` +
-        `📊 Trades today: <b>${tradesToday + openToday}</b> (${openToday} open, ${tradesToday} closed)\n` +
+        `📊 Trades today: <b>${openToday + closedToday}</b> (${openToday} open, ${closedToday} closed)\n` +
         `📈 All-time traded: <b>${this.totalTradesOpened}</b>\n` +
-        `💰 Open positions: <b>${portfolio.openPositionsCount}</b>\n` +
+        `💰 Open positions: <b>${portfolio.openPositionsCount}/${this.config.maxConcurrentTrades}</b>\n` +
         `💵 Balance: <b>${portfolio.solBalance.toFixed(4)} SOL</b>\n` +
         `📉 Total PNL: <b>${pnlSign}${portfolio.totalPnlSol.toFixed(4)} SOL</b>\n` +
         `──────────────────\n` +
-        `⏰ Waiting for A+ trade signals...\n` +
+        `⏰ Hunting for A+ signals...\n` +
         `<i>${now}</i>`,
       );
     };

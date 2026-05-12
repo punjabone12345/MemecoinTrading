@@ -5,14 +5,20 @@ import { alertsService } from "./alerts.service.js";
 import type { DexScreenerPair, ScannedToken } from "../types/index.js";
 
 const DEXSCREENER_BASE = "https://api.dexscreener.com";
-const SCAN_INTERVAL_MS = 4000;
+const SCAN_INTERVAL_MS = 4_000;
+const CLEANUP_INTERVAL_MS = 2 * 60 * 1_000;   // clean stale tokens every 2 min
+const TOKEN_TTL_MS = 15 * 60 * 1_000;          // token expires after 15 min without refresh
 const HIGH_AI_SCORE_THRESHOLD = 80;
+const QUERIES_PER_SCAN = 5;                     // was 3, now 5
+const BOOSTED_EVERY_N_SCANS = 3;               // was 5, now 3
 
-// Rotating search queries targeting active Solana meme coins
+// 30 rotating keywords — meme culture + chain culture + new-launch patterns
 const MEME_QUERIES = [
   "pump", "pepe", "cat", "dog", "ai", "moon", "based",
   "trump", "elon", "meme", "inu", "shib", "bonk", "wif",
   "sol", "baby", "degen", "giga", "chad", "frog",
+  "wojak", "cope", "sigma", "ape", "bear", "bull",
+  "retard", "send", "rip", "wen",
 ];
 let queryRotation = 0;
 
@@ -71,20 +77,42 @@ export function mapPairToToken(pair: DexScreenerPair): ScannedToken {
 class ScannerService {
   private tokens: Map<string, ScannedToken> = new Map();
   private intervalId: ReturnType<typeof setInterval> | null = null;
+  private cleanupIntervalId: ReturnType<typeof setInterval> | null = null;
   private broadcaster: ((tokens: ScannedToken[]) => void) | null = null;
   private alreadyAlertedHighScore: Set<string> = new Set();
   private isScanning = false;
   private scanCount = 0;
+  private totalExpired = 0;
 
   setBroadcaster(fn: (tokens: ScannedToken[]) => void) {
     this.broadcaster = fn;
   }
 
-  /** Fetch boosted + profiled token addresses from DexScreener */
+  /** Remove tokens that haven't been refreshed within TOKEN_TTL_MS */
+  private cleanup() {
+    const cutoff = Date.now() - TOKEN_TTL_MS;
+    let removed = 0;
+    for (const [addr, token] of this.tokens) {
+      if (token.lastUpdated < cutoff) {
+        this.tokens.delete(addr);
+        removed++;
+      }
+    }
+    if (removed > 0) {
+      this.totalExpired += removed;
+      logger.debug({ removed, remaining: this.tokens.size, totalExpired: this.totalExpired }, "Scanner: expired stale tokens");
+    }
+  }
+
+  /** Fetch latest + top boosted and recently profiled token addresses */
   private async fetchBoostedAddresses(): Promise<string[]> {
-    const [boostsRes, profilesRes] = await Promise.allSettled([
+    const [topBoostsRes, latestBoostsRes, profilesRes] = await Promise.allSettled([
       axios.get<{ tokenAddress: string; chainId: string }[]>(
         `${DEXSCREENER_BASE}/token-boosts/top/v1`,
+        { timeout: 8000 },
+      ),
+      axios.get<{ tokenAddress: string; chainId: string }[]>(
+        `${DEXSCREENER_BASE}/token-boosts/latest/v1`,
         { timeout: 8000 },
       ),
       axios.get<{ tokenAddress: string; chainId: string }[]>(
@@ -94,16 +122,22 @@ class ScannerService {
     ]);
 
     const addresses = new Set<string>();
-    if (boostsRes.status === "fulfilled" && Array.isArray(boostsRes.value.data)) {
-      boostsRes.value.data
+    if (topBoostsRes.status === "fulfilled" && Array.isArray(topBoostsRes.value.data)) {
+      topBoostsRes.value.data
         .filter((b) => b.chainId === "solana")
-        .slice(0, 50)
+        .slice(0, 30)
+        .forEach((b) => addresses.add(b.tokenAddress));
+    }
+    if (latestBoostsRes.status === "fulfilled" && Array.isArray(latestBoostsRes.value.data)) {
+      latestBoostsRes.value.data
+        .filter((b) => b.chainId === "solana")
+        .slice(0, 30)
         .forEach((b) => addresses.add(b.tokenAddress));
     }
     if (profilesRes.status === "fulfilled" && Array.isArray(profilesRes.value.data)) {
       profilesRes.value.data
         .filter((p) => p.chainId === "solana")
-        .slice(0, 50)
+        .slice(0, 30)
         .forEach((p) => addresses.add(p.tokenAddress));
     }
     return Array.from(addresses);
@@ -134,11 +168,10 @@ class ScannerService {
     return pairs;
   }
 
-  /** Search for trending meme coin pairs using rotating keyword queries */
+  /** Search 5 rotating keyword queries per scan (was 3) */
   private async fetchSearchPairs(): Promise<DexScreenerPair[]> {
-    // Pick 3 queries per scan cycle (rotate through the list)
     const queries: string[] = [];
-    for (let i = 0; i < 3; i++) {
+    for (let i = 0; i < QUERIES_PER_SCAN; i++) {
       queries.push(MEME_QUERIES[queryRotation % MEME_QUERIES.length]!);
       queryRotation++;
     }
@@ -155,7 +188,6 @@ class ScannerService {
     const pairs: DexScreenerPair[] = [];
     for (const r of results) {
       if (r.status === "fulfilled" && Array.isArray(r.value.data.pairs)) {
-        // Only Solana meme coin pairs (not SOL/USDC etc.) — filter out quote tokens named SOL/USDC
         const filtered = r.value.data.pairs.filter(
           (p) =>
             p.chainId === "solana" &&
@@ -169,8 +201,7 @@ class ScannerService {
 
   async fetchSolanaPairs(): Promise<DexScreenerPair[]> {
     try {
-      // Every 5th scan refresh the boosted/profiled address list
-      const useBoosted = this.scanCount % 5 === 0;
+      const useBoosted = this.scanCount % BOOSTED_EVERY_N_SCANS === 0;
       const allPairs: DexScreenerPair[] = [];
 
       const [searchPairs, boostedPairs] = await Promise.allSettled([
@@ -223,7 +254,10 @@ class ScannerService {
       }
 
       if (newCount > 0) {
-        logger.debug({ scanCount: this.scanCount, newTokens: newCount, total: this.tokens.size }, "Scanner: new tokens found");
+        logger.debug(
+          { scanCount: this.scanCount, newTokens: newCount, total: this.tokens.size },
+          "Scanner: new tokens found",
+        );
       }
 
       this.broadcaster?.(this.getAll());
@@ -236,13 +270,26 @@ class ScannerService {
     if (this.intervalId) return;
     void this.scan();
     this.intervalId = setInterval(() => void this.scan(), SCAN_INTERVAL_MS);
-    logger.info({ intervalMs: SCAN_INTERVAL_MS, queries: MEME_QUERIES.length }, "Scanner started — rotating meme coin queries + boosted tokens");
+    this.cleanupIntervalId = setInterval(() => this.cleanup(), CLEANUP_INTERVAL_MS);
+    logger.info(
+      {
+        intervalMs: SCAN_INTERVAL_MS,
+        queriesPerScan: QUERIES_PER_SCAN,
+        totalKeywords: MEME_QUERIES.length,
+        tokenTtlMin: TOKEN_TTL_MS / 60_000,
+      },
+      "Scanner started — rotating keywords + boosted/profiled + TTL expiry",
+    );
   }
 
   stop() {
     if (this.intervalId) {
       clearInterval(this.intervalId);
       this.intervalId = null;
+    }
+    if (this.cleanupIntervalId) {
+      clearInterval(this.cleanupIntervalId);
+      this.cleanupIntervalId = null;
     }
   }
 
@@ -278,6 +325,14 @@ class ScannerService {
 
   getTokenCount(): number {
     return this.tokens.size;
+  }
+
+  getTotalExpired(): number {
+    return this.totalExpired;
+  }
+
+  getScanCount(): number {
+    return this.scanCount;
   }
 }
 
