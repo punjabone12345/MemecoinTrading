@@ -9,6 +9,10 @@ const app: Express = express();
 app.use(
   pinoHttp({
     logger,
+    // Silence /api/healthz ping requests so UptimeRobot pings don't flood logs
+    autoLogging: {
+      ignore: (req) => req.url === "/api/healthz",
+    },
     serializers: {
       req(req) {
         return {
