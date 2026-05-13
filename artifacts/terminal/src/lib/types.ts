@@ -62,3 +62,24 @@ export interface AutoTraderConfig {
   minLiquidityMcapRatio: number; maxFdvMcapRatio: number;
   maxPriceDropH6Pct: number; maxPriceDropH24Pct: number;
 }
+
+export interface CycleDecision {
+  symbol: string; tokenName: string; pairAddress: string;
+  aiScore: number; confidence: number;
+  liquidityUsd: number; volume24hUsd: number; volume1hUsd: number;
+  marketCapUsd: number; buyRatio1h: number; priceChange1h: number;
+  pairAgeMinutes: number; priceUsd: number;
+  slPercent: number; tpPercent: number;
+  action: "traded" | "filtered" | "skipped_duplicate" | "skipped_slots" | "skipped_balance";
+  reason: string;
+  positionId?: string;
+}
+
+export interface CycleRecord {
+  cycleId: number;
+  startedAt: number;
+  finishedAt: number;
+  tokensEvaluated: number;
+  tradesOpened: number;
+  decisions: CycleDecision[];
+}

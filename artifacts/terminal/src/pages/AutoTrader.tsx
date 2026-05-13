@@ -1,14 +1,11 @@
 import { useState, useEffect } from "react";
-import { useAutoTraderStatus, useAutoTraderConfig, useUpdateAutoTraderConfig, usePauseAutoTrader, useResumeAutoTrader } from "@/lib/api";
-import { Play, Pause, Settings, Zap, Shield, TrendingUp, Clock } from "lucide-react";
+import { useAutoTraderStatus, useAutoTraderConfig, useUpdateAutoTraderConfig, usePauseAutoTrader, useResumeAutoTrader, useAutoTraderHistory } from "@/lib/api";
+import { Play, Pause, Settings, Zap, Shield, TrendingUp, Clock, ChevronDown, ChevronUp, CheckCircle2, XCircle, SkipForward } from "lucide-react";
+import type { CycleDecision } from "@/lib/types";
 
 function ConfigRow({ label, field, value, step, onChange, unit }: {
-  label: string;
-  field: string;
-  value: number;
-  step?: number;
-  onChange: (field: string, val: string) => void;
-  unit?: string;
+  label: string; field: string; value: number; step?: number;
+  onChange: (field: string, val: string) => void; unit?: string;
 }) {
   return (
     <div className="flex items-center justify-between py-3 border-b border-white/5 last:border-0">
@@ -29,15 +26,61 @@ function ConfigRow({ label, field, value, step, onChange, unit }: {
 
 type AnyConfig = Record<string, number>;
 
+function formatK(n: number) {
+  if (!n) return "—";
+  if (n >= 1_000_000) return `$${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `$${(n / 1_000).toFixed(0)}K`;
+  return `$${n.toFixed(0)}`;
+}
+
+function holdLabel(mins: number) {
+  if (mins < 60) return `${Math.round(mins)}m`;
+  const h = Math.floor(mins / 60);
+  const m = Math.round(mins % 60);
+  return m > 0 ? `${h}h ${m}m` : `${h}h`;
+}
+
+function DecisionRow({ d }: { d: CycleDecision }) {
+  const isTraded = d.action === "traded";
+  const isFiltered = d.action === "filtered";
+
+  const Icon = isTraded ? CheckCircle2 : isFiltered ? XCircle : SkipForward;
+  const iconColor = isTraded ? "text-emerald-400" : isFiltered ? "text-red-400" : "text-white/30";
+
+  return (
+    <div className={`flex items-start gap-2.5 py-2.5 border-b border-white/5 last:border-0`}>
+      <Icon className={`w-3.5 h-3.5 mt-0.5 shrink-0 ${iconColor}`} />
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="font-bold text-white text-xs">${d.symbol}</span>
+          <span className="text-white/30 text-[10px]">Score {d.aiScore}</span>
+          <span className="text-white/30 text-[10px]">Liq {formatK(d.liquidityUsd)}</span>
+          <span className="text-white/30 text-[10px]">MCap {formatK(d.marketCapUsd)}</span>
+          <span className="text-white/30 text-[10px]">Vol24h {formatK(d.volume24hUsd)}</span>
+          {d.pairAgeMinutes > 0 && (
+            <span className="text-white/30 text-[10px]">{holdLabel(d.pairAgeMinutes)} old</span>
+          )}
+        </div>
+        <p className={`text-[10px] mt-0.5 ${isTraded ? "text-emerald-400/80" : isFiltered ? "text-red-400/70" : "text-white/30"}`}>
+          {d.reason}
+        </p>
+      </div>
+    </div>
+  );
+}
+
 export default function AutoTrader() {
   const { data: status } = useAutoTraderStatus();
   const { data: config } = useAutoTraderConfig();
+  const { data: history = [] } = useAutoTraderHistory();
   const updateConfig = useUpdateAutoTraderConfig();
   const pause = usePauseAutoTrader();
   const resume = useResumeAutoTrader();
 
   const [localConfig, setLocalConfig] = useState<AnyConfig | null>(null);
   const [saved, setSaved] = useState(false);
+  const [cycleOpen, setCycleOpen] = useState(true);
+  const [showAll, setShowAll] = useState(false);
 
   useEffect(() => {
     if (config && !localConfig) setLocalConfig(config as unknown as AnyConfig);
@@ -66,6 +109,28 @@ export default function AutoTrader() {
 
   const isRunning = !status.paused;
 
+  // Latest cycle
+  const latestCycle = history[0];
+  const decisions = latestCycle?.decisions ?? [];
+  const traded = decisions.filter((d) => d.action === "traded");
+  const filtered = decisions.filter((d) => d.action === "filtered");
+  const skipped = decisions.filter((d) => d.action !== "traded" && d.action !== "filtered");
+
+  // Group filter reasons
+  const reasonCounts: Record<string, number> = {};
+  for (const d of filtered) {
+    const key = d.reason.split(" ")[0] + " " + (d.reason.split(" ")[1] ?? "");
+    reasonCounts[key] = (reasonCounts[key] ?? 0) + 1;
+  }
+  const topReasons = Object.entries(reasonCounts)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 5);
+
+  // Decisions to show: traded first, then top filtered, then skipped
+  const displayDecisions = showAll
+    ? [...traded, ...filtered, ...skipped]
+    : [...traded, ...filtered.slice(0, 8), ...skipped.slice(0, 3)];
+
   return (
     <div className="px-4 py-4 space-y-4">
       {/* Status Card */}
@@ -80,9 +145,9 @@ export default function AutoTrader() {
               </p>
             </div>
             <div className="mt-2 space-y-0.5 text-xs text-white/40">
-              <p>Scanner: <span className="text-white/60">{status.scannerPoolSize} tokens</span></p>
-              <p>Total trades opened: <span className="text-white/60">{status.totalTradesOpened}</span></p>
-              <p>Tokens evaluated: <span className="text-white/60">{status.lastRunTokensEvaluated}</span></p>
+              <p>Scanner pool: <span className="text-white/60">{status.scannerPoolSize} tokens</span></p>
+              <p>All-time trades: <span className="text-white/60">{status.totalTradesOpened}</span></p>
+              <p>Last cycle evaluated: <span className="text-white/60">{status.lastRunTokensEvaluated} tokens</span></p>
             </div>
           </div>
           <button
@@ -100,6 +165,74 @@ export default function AutoTrader() {
         </div>
       </div>
 
+      {/* Last Cycle Panel */}
+      {latestCycle && (
+        <div className="bg-[#0d0d18] border border-white/8 rounded-xl overflow-hidden">
+          <button
+            className="w-full flex items-center justify-between px-4 py-3 border-b border-white/5"
+            onClick={() => setCycleOpen((v) => !v)}
+          >
+            <div className="flex items-center gap-2">
+              <Zap className="w-4 h-4 text-amber-400" />
+              <p className="text-sm font-bold text-white/70">Last Cycle #{latestCycle.cycleId}</p>
+              <span className="text-[10px] text-white/30">
+                {new Date(latestCycle.startedAt).toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata", hour: "2-digit", minute: "2-digit" })} IST
+              </span>
+            </div>
+            <div className="flex items-center gap-3">
+              <span className="text-[10px] font-bold text-emerald-400">{traded.length} traded</span>
+              <span className="text-[10px] text-red-400">{filtered.length} filtered</span>
+              <span className="text-[10px] text-white/30">{skipped.length} skipped</span>
+              {cycleOpen ? <ChevronUp className="w-4 h-4 text-white/30" /> : <ChevronDown className="w-4 h-4 text-white/30" />}
+            </div>
+          </button>
+
+          {cycleOpen && (
+            <div className="px-4">
+              {/* Top rejection reasons */}
+              {topReasons.length > 0 && filtered.length > 0 && (
+                <div className="py-3 border-b border-white/5">
+                  <p className="text-[10px] font-bold text-white/30 uppercase tracking-wider mb-2">Top Filter Reasons</p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {topReasons.map(([reason, count]) => (
+                      <span key={reason} className="text-[10px] bg-red-500/10 border border-red-500/20 text-red-400/80 rounded-full px-2 py-0.5">
+                        {reason} ×{count}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Decision list */}
+              <div>
+                {displayDecisions.length === 0 && (
+                  <p className="text-white/30 text-xs py-4 text-center">No decisions recorded yet</p>
+                )}
+                {displayDecisions.map((d, i) => (
+                  <DecisionRow key={`${d.pairAddress}-${i}`} d={d} />
+                ))}
+                {!showAll && decisions.length > displayDecisions.length && (
+                  <button
+                    className="w-full py-2.5 text-[11px] text-violet-400 text-center"
+                    onClick={() => setShowAll(true)}
+                  >
+                    Show all {decisions.length} decisions ↓
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {!latestCycle && (
+        <div className="bg-[#0d0d18] border border-white/8 rounded-xl p-6 text-center">
+          <Zap className="w-7 h-7 text-white/20 mx-auto mb-2" />
+          <p className="text-white/30 text-sm">Waiting for first cycle...</p>
+          <p className="text-white/20 text-[11px] mt-1">The bot runs every 60 seconds</p>
+        </div>
+      )}
+
       {/* SL/TP Info Banner */}
       <div className="bg-violet-500/8 border border-violet-500/20 rounded-xl p-3">
         <p className="text-violet-400 text-xs font-bold mb-1">Dynamic SL/TP (AI Score Based)</p>
@@ -113,7 +246,6 @@ export default function AutoTrader() {
 
       {/* Settings Sections */}
       <div className="space-y-3">
-        {/* Trade Settings */}
         <Section title="Trade Settings" icon={<Zap className="w-4 h-4 text-amber-400" />}>
           <ConfigRow label="Trade Size" field="solPerTrade" value={localConfig.solPerTrade} step={0.01} onChange={handleChange} unit="SOL per trade" />
           <ConfigRow label="Max Concurrent Trades" field="maxConcurrentTrades" value={localConfig.maxConcurrentTrades} onChange={handleChange} unit="open at once" />
@@ -121,7 +253,6 @@ export default function AutoTrader() {
           <ConfigRow label="Min Confidence" field="minConfidence" value={localConfig.minConfidence} onChange={handleChange} unit="0–100%" />
         </Section>
 
-        {/* Market Filters */}
         <Section title="Market Filters" icon={<TrendingUp className="w-4 h-4 text-blue-400" />}>
           <ConfigRow label="Min Liquidity" field="minLiquidityUsd" value={localConfig.minLiquidityUsd} step={1000} onChange={handleChange} unit="USD" />
           <ConfigRow label="Min Vol 24h" field="minVolume24hUsd" value={localConfig.minVolume24hUsd} step={1000} onChange={handleChange} unit="USD" />
@@ -131,15 +262,13 @@ export default function AutoTrader() {
           <ConfigRow label="Min Transactions 24h" field="minTransactions24h" value={localConfig.minTransactions24h} onChange={handleChange} unit="txns" />
         </Section>
 
-        {/* Market Cap */}
         <Section title="Market Cap Range" icon={<Settings className="w-4 h-4 text-violet-400" />}>
-          <ConfigRow label="Min Market Cap" field="minMcapUsd" value={localConfig.minMcapUsd} step={10000} onChange={handleChange} unit="USD" />
+          <ConfigRow label="Min Market Cap" field="minMcapUsd" value={localConfig.minMcapUsd} step={1000} onChange={handleChange} unit="USD" />
           <ConfigRow label="Max Market Cap" field="maxMcapUsd" value={localConfig.maxMcapUsd} step={100000} onChange={handleChange} unit="USD" />
           <ConfigRow label="Min Liq/MCap Ratio" field="minLiquidityMcapRatio" value={localConfig.minLiquidityMcapRatio} step={0.01} onChange={handleChange} unit="e.g. 0.03 = 3%" />
           <ConfigRow label="Max FDV/MCap Ratio" field="maxFdvMcapRatio" value={localConfig.maxFdvMcapRatio} step={0.5} onChange={handleChange} unit="dilution guard" />
         </Section>
 
-        {/* Age & Dump */}
         <Section title="Age & Safety" icon={<Clock className="w-4 h-4 text-white/40" />}>
           <ConfigRow label="Min Pair Age" field="minPairAgeMinutes" value={localConfig.minPairAgeMinutes} onChange={handleChange} unit="minutes" />
           <ConfigRow label="Max Pair Age" field="maxPairAgeHours" value={localConfig.maxPairAgeHours} onChange={handleChange} unit="hours" />

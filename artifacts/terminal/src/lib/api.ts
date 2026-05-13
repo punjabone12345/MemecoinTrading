@@ -162,6 +162,18 @@ export function useAutoTraderConfig() {
   });
 }
 
+export function useAutoTraderHistory() {
+  return useQuery({
+    queryKey: ["auto-trader-history"],
+    queryFn: async () => {
+      const res = await fetch("/api/auto-trader/history");
+      const json = await res.json();
+      return (json.data ?? json) as CycleRecord[];
+    },
+    refetchInterval: 10_000,
+  });
+}
+
 export function useWatchlist() {
   return useQuery({
     queryKey: ["watchlist"],

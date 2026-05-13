@@ -86,28 +86,36 @@ export interface AutoTraderStatus {
   config: AutoTraderConfig;
 }
 
-// ─── Default config: balanced filters for finding moonshots ──────────────────
+// ─── Default config: memecoin-realistic filters for Solana ───────────────────
+//
+// Tuned for actual Solana memecoin market conditions:
+//   - Fresh memecoins typically have $5K–$20K liquidity, not $30K+
+//   - Early tokens have low 24h volume — they haven't been live long enough
+//   - Micro-cap sweet spot is $8K–$5M for maximum upside
+//   - Confidence is lower for new tokens (sparse data) — soften that gate
+//   - All rug guards (liq/mcap ratio, age window, dump %, wash trade) remain strict
+//
 const DEFAULT_CONFIG: AutoTraderConfig = {
   solPerTrade: 0.5,
   maxConcurrentTrades: 5,
   // AI
   minAiScore: 60,
-  minConfidence: 60,
-  // Liquidity & volume — loosened so more tokens pass
-  minLiquidityUsd: 30_000,
-  minVolume24hUsd: 50_000,
-  minVolume1hUsd: 3_000,
+  minConfidence: 40,            // was 60 — new tokens have sparse data → lower confidence naturally
+  // Liquidity & volume — memecoin-realistic
+  minLiquidityUsd: 8_000,       // was 30,000 — fresh memecoins often have $5K–$20K liq
+  minVolume24hUsd: 15_000,      // was 50,000 — early tokens don't yet have high 24h volume
+  minVolume1hUsd: 500,          // was 3,000 — soft gate only
   // Momentum
-  minBuyRatio1h: 0.55,
-  minPriceChange1h: 1,
-  minTransactions24h: 100,
-  // Market cap sweet spot ($50k – $30M for moonshots)
-  minMcapUsd: 50_000,
+  minBuyRatio1h: 0.52,          // was 0.55 — slight ease for thin-market tokens
+  minPriceChange1h: 1,          // unchanged — must show positive momentum
+  minTransactions24h: 30,       // was 100 — micro-caps have fewer txns
+  // Market cap sweet spot — wider to catch early pumps
+  minMcapUsd: 8_000,            // was 50,000 — micro-cap moonshots live here
   maxMcapUsd: 30_000_000,
-  // Pair age (15 min – 96 hours)
+  // Pair age (15 min – 96 hours) — unchanged, keeps rugs and veterans out
   minPairAgeMinutes: 15,
   maxPairAgeHours: 96,
-  // Rug guards — slightly relaxed
+  // Rug guards — unchanged
   minLiquidityMcapRatio: 0.03,
   maxFdvMcapRatio: 8.0,
   maxPriceDropH6Pct: -40,
