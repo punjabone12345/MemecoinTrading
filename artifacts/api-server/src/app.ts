@@ -1,18 +1,14 @@
 import express, { type Express } from "express";
 import cors from "cors";
 import pinoHttp from "pino-http";
-import router from "./routes/index.js";
-import { logger } from "./lib/logger.js";
+import router from "./routes";
+import { logger } from "./lib/logger";
 
 const app: Express = express();
 
 app.use(
   pinoHttp({
     logger,
-    // Silence /api/healthz ping requests so UptimeRobot pings don't flood logs
-    autoLogging: {
-      ignore: (req) => req.url === "/api/healthz",
-    },
     serializers: {
       req(req) {
         return {
@@ -29,30 +25,10 @@ app.use(
     },
   }),
 );
-
-app.use(
-  cors({
-    origin: "*",
-    methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
-  }),
-);
-
+app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 app.use("/api", router);
-
-app.use(
-  (
-    err: Error,
-    _req: express.Request,
-    res: express.Response,
-    _next: express.NextFunction,
-  ) => {
-    logger.error({ err }, "Unhandled error");
-    res.status(500).json({ success: false, error: "Internal server error" });
-  },
-);
 
 export default app;
