@@ -195,10 +195,7 @@ server.listen(port, () => {
   autoTraderService.startHeartbeat();
   startCommandPolling();
 
-  logger.info("Scanner service started");
-  logger.info("Stop/TP checker started");
-  logger.info("Auto-trader started");
-  logger.info("Telegram command polling started");
+  logger.info("All services started");
 });
 
 server.on("error", (err) => {

@@ -47,6 +47,10 @@ type CommandHandler = (command: string) => Promise<string>;
 let lastUpdateId = 0;
 let commandHandler: CommandHandler | null = null;
 
+// Singleton guards — prevent double-start if called twice in the same process
+let pollingStarted = false;
+let heartbeatStarted = false;
+
 export function registerCommandHandler(fn: CommandHandler): void {
   commandHandler = fn;
 }
@@ -100,6 +104,13 @@ export function startCommandPolling(): void {
     return;
   }
 
+  // Singleton guard: only one polling loop per process
+  if (pollingStarted) {
+    logger.warn("Telegram command polling already running — skipping duplicate start");
+    return;
+  }
+  pollingStarted = true;
+
   logger.info("Telegram command polling started");
 
   const poll = async () => {
@@ -108,4 +119,22 @@ export function startCommandPolling(): void {
   };
 
   setTimeout(poll, 3_000);
+}
+
+export function startHeartbeat(sendFn: () => void, intervalMs = 60 * 60 * 1_000): void {
+  if (!isTelegramConfigured()) {
+    logger.info("Heartbeat skipped — Telegram not configured");
+    return;
+  }
+
+  // Singleton guard: only one heartbeat per process
+  if (heartbeatStarted) {
+    logger.warn("Telegram heartbeat already running — skipping duplicate start");
+    return;
+  }
+  heartbeatStarted = true;
+
+  logger.info({ intervalMs }, "Telegram heartbeat started");
+  sendFn();
+  setInterval(sendFn, intervalMs);
 }

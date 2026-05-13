@@ -296,14 +296,47 @@ class PaperTradingService {
   }
 
   async checkStopsForAll(): Promise<void> {
+    const MAX_HOLD_MS = 48 * 60 * 60 * 1_000; // auto-close after 48h (stuck/illiquid)
+
     for (const pos of Array.from(this.openPositions.values())) {
-      const token = scannerService.getByPairAddress(pos.pairAddress);
-      if (!token) continue;
-      const price = token.priceUsd;
-      if (price <= pos.slPrice) {
-        await this.close(pos.positionId, "stop_loss");
-      } else if (price >= pos.tpPrice) {
-        await this.close(pos.positionId, "take_profit");
+      try {
+        // Try scanner cache first; if expired, fetch directly from DexScreener
+        // Critical: SL/TP must fire even if token aged out of the 15-min scanner TTL
+        let price: number | null = null;
+        const cached = scannerService.getByPairAddress(pos.pairAddress);
+        if (cached && cached.priceUsd > 0) {
+          price = cached.priceUsd;
+        } else {
+          logger.debug({ symbol: pos.symbol }, "Stop checker: token not in cache, fetching from DexScreener");
+          const fetched = await scannerService.getOrFetchToken(pos.pairAddress);
+          price = fetched?.priceUsd ?? null;
+        }
+
+        if (!price || price <= 0) {
+          logger.warn({ symbol: pos.symbol, pairAddress: pos.pairAddress }, "Stop checker: could not get price — skipping");
+          continue;
+        }
+
+        if (price <= pos.slPrice) {
+          logger.info({ symbol: pos.symbol, price, slPrice: pos.slPrice }, "Stop loss triggered");
+          await this.close(pos.positionId, "stop_loss");
+          continue;
+        }
+
+        if (price >= pos.tpPrice) {
+          logger.info({ symbol: pos.symbol, price, tpPrice: pos.tpPrice }, "Take profit triggered");
+          await this.close(pos.positionId, "take_profit");
+          continue;
+        }
+
+        // Auto-close stuck / illiquid positions after 48 hours
+        const holdMs = Date.now() - new Date(pos.openedAt).getTime();
+        if (holdMs > MAX_HOLD_MS) {
+          logger.warn({ symbol: pos.symbol, holdHours: (holdMs / 3_600_000).toFixed(1) }, "Auto-closing stale position (>48h)");
+          await this.close(pos.positionId, "manual");
+        }
+      } catch (err) {
+        logger.error({ err, symbol: pos.symbol }, "Stop checker error for position");
       }
     }
   }

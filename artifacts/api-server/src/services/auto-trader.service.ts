@@ -1,6 +1,6 @@
 import axios from "axios";
 import { logger } from "../lib/logger.js";
-import { sendTelegram, isTelegramConfigured, toIST } from "../lib/telegram.js";
+import { sendTelegram, isTelegramConfigured, toIST, startHeartbeat } from "../lib/telegram.js";
 import { paperTradingService } from "./paper-trading.service.js";
 import { scannerService } from "./scanner.service.js";
 import { computeSignals, computeAiScore, computeConfidence, getDynamicRisk } from "./ai-scoring.service.js";
@@ -544,11 +544,6 @@ class AutoTraderService {
   }
 
   startHeartbeat(): void {
-    if (!isTelegramConfigured()) {
-      logger.info("Heartbeat skipped — Telegram not configured");
-      return;
-    }
-
     const send = () => {
       const portfolio = paperTradingService.getPortfolio();
       const openPositions = paperTradingService.getOpenPositions();
@@ -588,8 +583,8 @@ class AutoTraderService {
       );
     };
 
-    send();
-    setInterval(send, 60 * 60 * 1_000);
+    // Uses singleton guard inside startHeartbeat — safe to call multiple times
+    startHeartbeat(send, 60 * 60 * 1_000);
   }
 }
 

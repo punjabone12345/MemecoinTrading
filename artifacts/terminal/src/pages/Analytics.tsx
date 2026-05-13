@@ -1,5 +1,5 @@
-import { useAnalytics } from "@/lib/api";
-import { TrendingUp, TrendingDown, Award, Target, Clock, BarChart2 } from "lucide-react";
+import { useAnalytics, useClosedPositions } from "@/lib/api";
+import { TrendingUp, TrendingDown, Award, Target, Clock, BarChart2, CheckCircle2, XCircle, MinusCircle } from "lucide-react";
 import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, Cell } from "recharts";
 
 function fmt(v: number | undefined, d = 4) {
@@ -7,8 +7,44 @@ function fmt(v: number | undefined, d = 4) {
   return (v >= 0 ? "+" : "") + Math.abs(v).toFixed(d);
 }
 
+function formatPrice(price: number): string {
+  if (!price) return "—";
+  if (price < 0.0001) return price.toFixed(10);
+  if (price < 0.01) return price.toFixed(8);
+  if (price < 1) return price.toFixed(6);
+  return price.toFixed(4);
+}
+
+function formatMcap(mcap: number): string {
+  if (!mcap) return "—";
+  if (mcap >= 1_000_000_000) return `$${(mcap / 1_000_000_000).toFixed(2)}B`;
+  if (mcap >= 1_000_000) return `$${(mcap / 1_000_000).toFixed(2)}M`;
+  if (mcap >= 1_000) return `$${(mcap / 1_000).toFixed(1)}K`;
+  return `$${mcap.toFixed(0)}`;
+}
+
+function toIST(iso: string): string {
+  return new Date(iso).toLocaleString("en-IN", {
+    timeZone: "Asia/Kolkata",
+    day: "2-digit",
+    month: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: true,
+  });
+}
+
+function holdLabel(ms: number): string {
+  const mins = Math.round(ms / 60_000);
+  if (mins < 60) return `${mins}m`;
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return m > 0 ? `${h}h ${m}m` : `${h}h`;
+}
+
 export default function Analytics() {
   const { data: analytics } = useAnalytics();
+  const { data: closedTrades = [] } = useClosedPositions();
 
   if (!analytics) {
     return (
@@ -128,6 +164,119 @@ export default function Analytics() {
           </div>
         </div>
       )}
+
+      {/* Trade History */}
+      <div>
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-sm font-bold text-white/80 uppercase tracking-wider">Trade History</h3>
+          <span className="text-xs text-white/30">{closedTrades.length} closed</span>
+        </div>
+
+        {closedTrades.length === 0 ? (
+          <div className="bg-[#0d0d18] border border-white/8 rounded-xl p-8 text-center">
+            <BarChart2 className="w-8 h-8 text-white/20 mx-auto mb-2" />
+            <p className="text-white/30 text-sm">No closed trades yet</p>
+            <p className="text-white/20 text-xs mt-1">Trades will appear here once the bot closes positions</p>
+          </div>
+        ) : (
+          <div className="space-y-2">
+            {closedTrades.map((trade) => {
+              const pnl = trade.pnlSol ?? 0;
+              const pnlPct = trade.pnlPercent ?? 0;
+              const isWin = pnl > 0;
+              const reason = trade.closeReason;
+
+              const ReasonIcon = reason === "take_profit"
+                ? CheckCircle2
+                : reason === "stop_loss"
+                  ? XCircle
+                  : MinusCircle;
+
+              const reasonColor = reason === "take_profit"
+                ? "text-emerald-400"
+                : reason === "stop_loss"
+                  ? "text-red-400"
+                  : "text-white/40";
+
+              const reasonLabel = reason === "take_profit"
+                ? "TP Hit"
+                : reason === "stop_loss"
+                  ? "SL Hit"
+                  : "Manual";
+
+              return (
+                <div
+                  key={trade.positionId}
+                  className={`bg-[#0d0d18] border rounded-xl p-3.5 ${isWin ? "border-emerald-500/15" : "border-red-500/15"}`}
+                >
+                  {/* Row 1: Symbol + PnL */}
+                  <div className="flex items-start justify-between mb-2">
+                    <div className="flex items-center gap-2">
+                      <span className="font-black text-white text-sm">${trade.symbol}</span>
+                      <div className={`flex items-center gap-1 text-[10px] font-semibold ${reasonColor}`}>
+                        <ReasonIcon className="w-3 h-3" />
+                        {reasonLabel}
+                      </div>
+                    </div>
+                    <div className="text-right">
+                      <p className={`font-black text-sm ${isWin ? "text-emerald-400" : "text-red-400"}`}>
+                        {pnl >= 0 ? "+" : ""}{pnl.toFixed(4)} SOL
+                      </p>
+                      <p className={`text-xs font-bold ${isWin ? "text-emerald-400/70" : "text-red-400/70"}`}>
+                        {pnlPct >= 0 ? "+" : ""}{pnlPct.toFixed(1)}%
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* Row 2: Prices */}
+                  <div className="grid grid-cols-3 gap-2 text-[10px] mb-2">
+                    <div>
+                      <p className="text-white/30">Entry</p>
+                      <p className="text-white font-mono">${formatPrice(trade.entryPrice)}</p>
+                    </div>
+                    <div>
+                      <p className="text-white/30">Exit</p>
+                      <p className={`font-mono ${isWin ? "text-emerald-400" : "text-red-400"}`}>
+                        ${formatPrice(trade.exitPrice ?? 0)}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-white/30">Entry MCap</p>
+                      <p className="text-white/60">{formatMcap(trade.entryMarketCap)}</p>
+                    </div>
+                  </div>
+
+                  {/* Row 3: Meta */}
+                  <div className="flex items-center justify-between text-[10px] text-white/30">
+                    <div className="flex items-center gap-3">
+                      <span>SL -{trade.slPercent}% / TP +{trade.tpPercent}%</span>
+                      {trade.holdTimeMs !== undefined && (
+                        <span>⏱ {holdLabel(trade.holdTimeMs)}</span>
+                      )}
+                    </div>
+                    <span>{trade.closedAt ? toIST(trade.closedAt) : "—"}</span>
+                  </div>
+
+                  {/* Contract address */}
+                  {trade.contractAddress && (
+                    <div className="mt-2 pt-2 border-t border-white/5 flex items-center justify-between">
+                      <p className="text-[9px] font-mono text-white/20 truncate max-w-[180px]">{trade.contractAddress}</p>
+                      <a
+                        href={`https://dexscreener.com/solana/${trade.contractAddress}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-[10px] text-violet-400/60 hover:text-violet-400 shrink-0 ml-2"
+                      >
+                        DEX ↗
+                      </a>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
