@@ -208,10 +208,36 @@ export function useResetAccount() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: async () => {
-      await fetch("/api/reset", { method: "POST" });
+      const res = await fetch("/api/reset", { method: "POST" });
+      if (!res.ok) throw new Error("Reset failed");
     },
     onSuccess: () => {
+      // Immediately wipe cached data so stale trades don't show
+      queryClient.setQueryData(["closed-positions"], []);
+      queryClient.setQueryData(["positions"], { positions: [], portfolio: null });
+      queryClient.setQueryData(["portfolio"], null);
+      queryClient.setQueryData(["analytics"], null);
+      // Then force a fresh fetch for everything
       queryClient.invalidateQueries();
+    },
+  });
+}
+
+export function useDeleteClosedTrade() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (positionId: string) => {
+      const res = await fetch(`/api/positions/history/${positionId}`, { method: "DELETE" });
+      if (!res.ok) {
+        const json = await res.json();
+        throw new Error(json.error ?? "Delete failed");
+      }
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["closed-positions"] });
+      queryClient.invalidateQueries({ queryKey: ["portfolio"] });
+      queryClient.invalidateQueries({ queryKey: ["positions"] });
+      queryClient.invalidateQueries({ queryKey: ["analytics"] });
     },
   });
 }

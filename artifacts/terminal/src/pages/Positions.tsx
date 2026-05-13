@@ -1,6 +1,6 @@
 import { useState } from "react";
-import { usePositions, useClosedPositions, useClosePosition } from "@/lib/api";
-import { TrendingUp, TrendingDown, Clock, ExternalLink, X } from "lucide-react";
+import { usePositions, useClosedPositions, useClosePosition, useDeleteClosedTrade } from "@/lib/api";
+import { TrendingUp, TrendingDown, Clock, ExternalLink, X, Trash2 } from "lucide-react";
 
 function formatPrice(price: number): string {
   if (!price) return "—";
@@ -42,9 +42,11 @@ const TABS = ["Open", "Closed"] as const;
 
 export default function Positions() {
   const [tab, setTab] = useState<"Open" | "Closed">("Open");
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const { data: positionsData } = usePositions();
   const { data: closedPositions = [] } = useClosedPositions();
   const closePosition = useClosePosition();
+  const deleteClosedTrade = useDeleteClosedTrade();
 
   const openPositions = positionsData?.positions ?? [];
 
@@ -187,6 +189,7 @@ export default function Positions() {
             const isWin = pnl >= 0;
             const reasonColor = p.closeReason === "take_profit" ? "text-emerald-400 bg-emerald-500/15" : p.closeReason === "stop_loss" ? "text-red-400 bg-red-500/15" : "text-white/50 bg-white/8";
             const reasonLabel = p.closeReason === "take_profit" ? "✅ TP Hit" : p.closeReason === "stop_loss" ? "🛑 SL Hit" : "⚪ Manual";
+            const isConfirming = confirmDeleteId === p.positionId;
 
             return (
               <div key={p.positionId} className="bg-[#0d0d18] border border-white/8 rounded-xl overflow-hidden">
@@ -223,7 +226,7 @@ export default function Positions() {
                     </div>
                   )}
                 </div>
-                <div className="px-4 pb-3">
+                <div className="px-4 pb-3 flex items-center justify-between gap-2">
                   <a
                     href={`https://dexscreener.com/solana/${p.contractAddress || p.pairAddress}`}
                     target="_blank"
@@ -232,6 +235,38 @@ export default function Positions() {
                   >
                     View on DexScreener ↗
                   </a>
+
+                  {/* Delete trade with confirm */}
+                  {isConfirming ? (
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-[10px] text-white/50">Remove & restore balance?</span>
+                      <button
+                        onClick={() => {
+                          deleteClosedTrade.mutate(p.positionId);
+                          setConfirmDeleteId(null);
+                        }}
+                        disabled={deleteClosedTrade.isPending}
+                        className="text-[10px] font-bold px-2 py-1 rounded-md bg-red-500/20 text-red-400 border border-red-500/30 active:scale-95"
+                      >
+                        Yes, delete
+                      </button>
+                      <button
+                        onClick={() => setConfirmDeleteId(null)}
+                        className="text-[10px] font-bold px-2 py-1 rounded-md bg-white/8 text-white/50 active:scale-95"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      onClick={() => setConfirmDeleteId(p.positionId)}
+                      className="flex items-center gap-1 text-[10px] text-white/30 hover:text-red-400 transition-colors py-1 px-1.5 rounded"
+                      title="Remove this trade and restore its balance impact"
+                    >
+                      <Trash2 className="w-3 h-3" />
+                      Remove
+                    </button>
+                  )}
                 </div>
               </div>
             );

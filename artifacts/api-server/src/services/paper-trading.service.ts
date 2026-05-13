@@ -384,6 +384,26 @@ class PaperTradingService {
     };
   }
 
+  deleteClosedTrade(positionId: string): void {
+    const idx = this.closedTrades.findIndex((t) => t.positionId === positionId);
+    if (idx === -1) throw new Error(`Closed trade not found: ${positionId}`);
+
+    const trade = this.closedTrades[idx];
+    this.closedTrades.splice(idx, 1);
+
+    // Recompute balance from remaining history (same logic as loadFromDisk)
+    const closedPnl = this.closedTrades.reduce((s, t) => s + (t.pnlSol ?? 0), 0);
+    this.solBalance = INITIAL_BALANCE_SOL - this.totalOpenSol() + closedPnl;
+
+    this.persistHistory();
+    this.broadcastPositions();
+
+    logger.info(
+      { positionId, symbol: trade.symbol, pnlSol: trade.pnlSol, newBalance: this.solBalance.toFixed(4) },
+      "Closed trade deleted — balance recomputed",
+    );
+  }
+
   reset(): void {
     const hadPositions = this.openPositions.size;
     const oldBalance = this.solBalance;

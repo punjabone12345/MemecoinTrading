@@ -37,6 +37,16 @@ router.get("/positions/portfolio", (_req, res) => {
   res.json({ success: true, data: portfolio });
 });
 
+router.delete("/positions/history/:id", (req, res) => {
+  try {
+    paperTradingService.deleteClosedTrade(req.params.id);
+    res.json({ success: true, message: "Trade deleted and balance restored" });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Unknown error";
+    res.status(404).json({ success: false, error: message });
+  }
+});
+
 router.get("/positions/:id", (req, res) => {
   const position = paperTradingService.getPositionById(req.params.id);
   if (!position) {
