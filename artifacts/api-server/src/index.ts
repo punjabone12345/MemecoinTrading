@@ -5,7 +5,7 @@ import { initWebSocketServer } from "./websocket/server.js";
 import { scannerService } from "./services/scanner.service.js";
 import { paperTradingService } from "./services/paper-trading.service.js";
 import { autoTraderService } from "./services/auto-trader.service.js";
-import { startCommandPolling, registerCommandHandler, toIST } from "./lib/telegram.js";
+import { startCommandPolling, registerCommandHandler, toIST, sendTelegram, isTelegramConfigured } from "./lib/telegram.js";
 
 const rawPort = process.env["PORT"] ?? "8080";
 const port = Number(rawPort);
@@ -196,6 +196,24 @@ server.listen(port, () => {
   startCommandPolling();
 
   logger.info("All services started");
+
+  // Send a startup confirmation to Telegram so you can verify the new bot token is working
+  if (isTelegramConfigured()) {
+    const env = process.env["RENDER"] ? "🌐 Render (Production)" : "💻 Replit (Dev)";
+    const polling = process.env["TELEGRAM_POLLING_DISABLED"] === "true"
+      ? "⏸️ Polling disabled on this instance"
+      : "✅ Polling active on this instance";
+    sendTelegram(
+      `🚀 <b>Apex Meme Trader — Bot Online</b>\n` +
+      `──────────────────────\n` +
+      `🌍 Environment: <b>${env}</b>\n` +
+      `📡 ${polling}\n` +
+      `🕐 ${toIST(new Date())}\n` +
+      `\n` +
+      `If you see this message, the new bot token is working correctly.\n` +
+      `Commands: /command1 /command2 /command3`,
+    ).catch(() => {/* already logged inside sendTelegram */});
+  }
 });
 
 server.on("error", (err) => {

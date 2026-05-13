@@ -4,6 +4,11 @@ import { logger } from "./logger.js";
 const BOT_TOKEN = process.env["TELEGRAM_BOT_TOKEN"];
 const CHAT_ID = process.env["TELEGRAM_CHAT_ID"];
 
+// Set TELEGRAM_POLLING_DISABLED=true on whichever instance should NOT poll
+// (e.g. set it on the Replit dev server when Render is your production instance,
+//  or set it on Render if you want Replit to be the active bot)
+const POLLING_DISABLED = process.env["TELEGRAM_POLLING_DISABLED"] === "true";
+
 export function isTelegramConfigured(): boolean {
   return Boolean(BOT_TOKEN && CHAT_ID);
 }
@@ -101,6 +106,11 @@ async function pollUpdates(): Promise<void> {
 export function startCommandPolling(): void {
   if (!isTelegramConfigured()) {
     logger.info("Telegram command polling skipped — not configured");
+    return;
+  }
+
+  if (POLLING_DISABLED) {
+    logger.info("Telegram command polling skipped — TELEGRAM_POLLING_DISABLED=true");
     return;
   }
 
