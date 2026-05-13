@@ -385,6 +385,8 @@ class PaperTradingService {
   }
 
   reset(): void {
+    const hadPositions = this.openPositions.size;
+    const oldBalance = this.solBalance;
     this.openPositions.clear();
     this.openSymbols.clear();
     this.closedTrades = [];
@@ -393,6 +395,14 @@ class PaperTradingService {
     this.persistHistory();
     logger.info("Paper trading account reset to 100 SOL");
     this.broadcastPositions();
+    void sendTelegram(
+      `🔄 <b>ACCOUNT RESET</b>\n` +
+      `──────────────────────\n` +
+      `🗑️ Cleared: <b>${hadPositions} open position${hadPositions !== 1 ? "s" : ""}</b> & all trade history\n` +
+      `💰 Old Balance: <b>${oldBalance.toFixed(4)} SOL</b>\n` +
+      `✅ New Balance: <b>${INITIAL_BALANCE_SOL.toFixed(4)} SOL</b>\n` +
+      `🕐 ${toIST(new Date())}`,
+    );
   }
 
   startStopChecker() {

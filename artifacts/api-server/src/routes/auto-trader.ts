@@ -9,22 +9,43 @@ router.get("/auto-trader/status", (_req, res) => {
   res.json({ success: true, data: autoTraderService.getStatus() });
 });
 
-router.post("/auto-trader/pause", (_req, res) => {
+router.post("/auto-trader/pause", async (_req, res) => {
   if (autoTraderService.isPaused()) {
     res.json({ success: false, error: "Auto-trader is already paused" });
     return;
   }
   autoTraderService.pause();
   res.json({ success: true, message: "Auto-trader paused" });
+  if (isTelegramConfigured()) {
+    const { toIST } = await import("../lib/telegram.js");
+    void sendTelegram(
+      `⏸️ <b>BOT PAUSED</b>\n` +
+      `──────────────────────\n` +
+      `The auto-trader has been paused from the app.\n` +
+      `No new trades will be opened until resumed.\n` +
+      `🕐 ${toIST(new Date())}`,
+    );
+  }
 });
 
-router.post("/auto-trader/resume", (_req, res) => {
+router.post("/auto-trader/resume", async (_req, res) => {
   if (!autoTraderService.isPaused()) {
     res.json({ success: false, error: "Auto-trader is already running" });
     return;
   }
   autoTraderService.resume();
   res.json({ success: true, message: "Auto-trader resumed" });
+  if (isTelegramConfigured()) {
+    const { toIST } = await import("../lib/telegram.js");
+    const cfg = autoTraderService.getConfig();
+    void sendTelegram(
+      `▶️ <b>BOT RESUMED</b>\n` +
+      `──────────────────────\n` +
+      `The auto-trader is running again and scanning for trades.\n` +
+      `🤖 Min AI Score: <b>${cfg.minAiScore}</b> | Max Slots: <b>${cfg.maxConcurrentTrades}</b>\n` +
+      `🕐 ${toIST(new Date())}`,
+    );
+  }
 });
 
 router.get("/auto-trader/history", (_req, res) => {
