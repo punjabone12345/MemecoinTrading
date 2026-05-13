@@ -1,1 +1,23 @@
-[]
+[
+  {
+    "positionId": "cb6d0808-837a-4ead-9b4d-ac24eba4249d",
+    "symbol": "WIF",
+    "tokenName": "dog wif bag",
+    "pairAddress": "22tdZsSJKU6FcCUcS5qbBN2ELCPudPcRdaXQRdxp42Jh",
+    "contractAddress": "7WoMYCkHRyEgQa9RE36NkhXcouNMp6LGXXeqY2izdPvw",
+    "imageUrl": "",
+    "entryPrice": 0.0002479,
+    "sizeSol": 0.5,
+    "slPercent": 15,
+    "tpPercent": 80,
+    "slPrice": 0.000210715,
+    "tpPrice": 0.00044622000000000005,
+    "entryMarketCap": 247937,
+    "tpMarketCap": 446286.60000000003,
+    "slMarketCap": 210746.44999999998,
+    "aiScore": 86,
+    "confidence": 100,
+    "openedAt": "2026-05-13T02:39:32.121Z",
+    "status": "open"
+  }
+]

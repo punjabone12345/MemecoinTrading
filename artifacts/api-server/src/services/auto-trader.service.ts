@@ -95,31 +95,59 @@ export interface AutoTraderStatus {
 //   - Confidence is lower for new tokens (sparse data) — soften that gate
 //   - All rug guards (liq/mcap ratio, age window, dump %, wash trade) remain strict
 //
+// ─── Default config: quality-first, memecoin-realistic ───────────────────────
+//
+// Philosophy: fewer, higher-conviction trades are better than frequent ones.
+//
+// The AI score IS the quality gate — it already encodes momentum, buy pressure,
+// liquidity depth, and volume intensity. Raising the score floor to 70 ensures
+// only strong setups are traded. The absolute thresholds below are calibrated
+// to reflect what real early Solana memecoins look like (not to lower quality).
+//
+// Quality levers (keep these strict):
+//   minAiScore: 70         → only top-quartile signals
+//   minBuyRatio1h: 0.58    → buyers dominating sellers in the last hour
+//   minPriceChange1h: 3    → must be actively pumping (not flat)
+//   maxPairAgeHours: 48    → tightened to 48h — fresh pumps only
+//   minLiquidityMcapRatio  → rug protection unchanged at 3%
+//
+// Realistic floors (corrected for real memecoin sizes — not quality reduction):
+//   minLiquidityUsd: 10K   → tradeable without massive slippage
+//   minVolume24hUsd: 20K   → some accumulated activity required
+//   minMcapUsd: 10K        → very micro-cap is OK if score is high
+//   minTransactions24h: 50 → real interest, not ghost chains
+//
 const DEFAULT_CONFIG: AutoTraderConfig = {
   solPerTrade: 0.5,
-  maxConcurrentTrades: 5,
-  // AI
-  minAiScore: 60,
-  minConfidence: 40,            // was 60 — new tokens have sparse data → lower confidence naturally
-  // Liquidity & volume — memecoin-realistic
-  minLiquidityUsd: 8_000,       // was 30,000 — fresh memecoins often have $5K–$20K liq
-  minVolume24hUsd: 15_000,      // was 50,000 — early tokens don't yet have high 24h volume
-  minVolume1hUsd: 500,          // was 3,000 — soft gate only
-  // Momentum
-  minBuyRatio1h: 0.52,          // was 0.55 — slight ease for thin-market tokens
-  minPriceChange1h: 1,          // unchanged — must show positive momentum
-  minTransactions24h: 30,       // was 100 — micro-caps have fewer txns
-  // Market cap sweet spot — wider to catch early pumps
-  minMcapUsd: 8_000,            // was 50,000 — micro-cap moonshots live here
-  maxMcapUsd: 30_000_000,
-  // Pair age (15 min – 96 hours) — unchanged, keeps rugs and veterans out
-  minPairAgeMinutes: 15,
-  maxPairAgeHours: 96,
-  // Rug guards — unchanged
-  minLiquidityMcapRatio: 0.03,
-  maxFdvMcapRatio: 8.0,
-  maxPriceDropH6Pct: -40,
-  maxPriceDropH24Pct: -65,
+  maxConcurrentTrades: 3,       // tightened: fewer slots = more selective
+
+  // AI quality — the primary gates
+  minAiScore: 70,               // was 60 → only strong conviction signals
+  minConfidence: 45,            // softened for new tokens with sparse data
+
+  // Liquidity & volume — memecoin-realistic floors (not quality reduction)
+  minLiquidityUsd: 10_000,      // $10K min — tradeable, exits possible
+  minVolume24hUsd: 20_000,      // $20K min — some accumulated activity
+  minVolume1hUsd: 1_000,        // $1K/h min — showing current interest
+
+  // Momentum — kept strict, these matter most for memecoins
+  minBuyRatio1h: 0.58,          // 58% buys in 1h — clear buyer dominance
+  minPriceChange1h: 3,          // must be actively pumping (+3% minimum)
+  minTransactions24h: 50,       // real activity, not ghost-chain tokens
+
+  // Market cap — wide range, score handles quality
+  minMcapUsd: 10_000,           // micro-cap OK if score is 70+
+  maxMcapUsd: 10_000_000,       // tightened max: smaller caps have more upside
+
+  // Pair age — tightened for freshness
+  minPairAgeMinutes: 20,        // 20 min min — enough time to establish
+  maxPairAgeHours: 48,          // was 96h → tightened to 48h for fresh pumps only
+
+  // Rug guards — unchanged, protect capital
+  minLiquidityMcapRatio: 0.04,  // tightened slightly: 4% liq/mcap minimum
+  maxFdvMcapRatio: 6.0,         // tightened: FDV must not exceed 6x mcap
+  maxPriceDropH6Pct: -30,       // tightened: reject if dumped 30%+ in 6h
+  maxPriceDropH24Pct: -50,      // tightened: reject if down 50%+ in 24h
 };
 
 // ─── Multi-layer quality + rug-pull filter ────────────────────────────────────
