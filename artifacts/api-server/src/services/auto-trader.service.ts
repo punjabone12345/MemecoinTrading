@@ -119,40 +119,35 @@ export interface AutoTraderStatus {
 //
 const DEFAULT_CONFIG: AutoTraderConfig = {
   solPerTrade: 0.5,
-  maxConcurrentTrades: 3,
+  maxConcurrentTrades: 2,       // max 2 open at a time — quality over quantity
 
-  // AI quality — the primary gates
-  minAiScore: 70,               // only strong conviction signals
-  minConfidence: 45,            // softened for new tokens with sparse data
+  // AI quality — primary gates (strict)
+  minAiScore: 75,               // raised from 70 → only top-tier signals
+  minConfidence: 50,            // raised from 45
 
   // Liquidity & volume
-  // NOTE: GeckoTerminal feeds us tokens that are 0–5 min old.
-  // A 2-minute-old token physically cannot have $20K of 24h volume.
-  // minVolume24hUsd is lowered to $5K; the AI score (which bakes in
-  // vol/mcap intensity) is the real quality gate for volume activity.
-  minLiquidityUsd: 8_000,       // $8K min — tradeable without huge slippage
-  minVolume24hUsd: 5_000,       // $5K min — fresh tokens can't show 24h yet
-  minVolume1hUsd: 500,          // $500/h min — must have some 1h activity
+  minLiquidityUsd: 15_000,      // raised from $8K — thicker markets, less manipulation
+  minVolume24hUsd: 5_000,       // keep low — fresh GeckoTerminal tokens won't have 24h yet
+  minVolume1hUsd: 2_000,        // raised from $500 — real buying activity in the last hour
 
-  // Momentum — kept strict
-  minBuyRatio1h: 0.58,          // 58% buys in 1h — clear buyer dominance
-  minPriceChange1h: 3,          // must be actively pumping (+3% minimum)
-  minTransactions24h: 20,       // lowered: fresh tokens won't have 50 txns yet
+  // Momentum — strict to avoid stale-pump entries
+  minBuyRatio1h: 0.62,          // raised from 0.58 — clear buyer dominance required
+  minPriceChange1h: 8,          // raised from 3 → actively pumping at least 8% in 1h
+  minTransactions24h: 20,       // fresh tokens won't have 50 txns yet
 
-  // Market cap — wide range, score handles quality
+  // Market cap sweet spot
   minMcapUsd: 10_000,
   maxMcapUsd: 10_000_000,
 
-  // Pair age — lowered to catch early pumps from GeckoTerminal new pools
-  // 5 min is enough to confirm the pair is real; rug guards below handle safety
-  minPairAgeMinutes: 5,         // was 20 → lowered to 5 — catch early pumps
-  maxPairAgeHours: 48,          // 48h max — fresh pumps only
+  // Pair age — 5 min is enough to confirm the pair is real
+  minPairAgeMinutes: 5,
+  maxPairAgeHours: 48,
 
-  // Rug guards — unchanged, protect capital
+  // Rug guards
   minLiquidityMcapRatio: 0.04,  // 4% liq/mcap minimum
   maxFdvMcapRatio: 6.0,         // FDV must not exceed 6x mcap
-  maxPriceDropH6Pct: -30,       // reject if dumped 30%+ in 6h
-  maxPriceDropH24Pct: -50,      // reject if down 50%+ in 24h
+  maxPriceDropH6Pct: -25,       // tightened: reject if dumped 25%+ in 6h
+  maxPriceDropH24Pct: -40,      // tightened: reject if down 40%+ in 24h
 };
 
 // ─── Multi-layer quality + rug-pull filter ────────────────────────────────────
@@ -229,6 +224,13 @@ export function qualityFilter(pair: DexScreenerPair, cfg: AutoTraderConfig): Fil
     return fail(`6h dump ${pc6h.toFixed(1)}% — possible rug or dead momentum`);
   if (pc24h < cfg.maxPriceDropH24Pct)
     return fail(`24h dump ${pc24h.toFixed(1)}% — token in severe decline`);
+
+  // ── Stale pump guard (5m momentum) ───────────────────────────────────────
+  // If the 5m price is negative it means buyers have already left — the 1h
+  // change is history, not current. Only reject when we have actual 5m data.
+  const pc5m = pair.priceChange?.m5 ?? null;
+  if (pc5m !== null && pc5m < -3)
+    return fail(`5m change ${pc5m.toFixed(1)}% — pump peaked, momentum gone`);
 
   // ── Wash-trading suspicion ────────────────────────────────────────────────
   if (sells1h === 0 && buys1h > 50)
@@ -514,8 +516,9 @@ class AutoTraderService {
       }
 
       // Sort by AI score descending, slot into available positions
+      // Cap at 1 new trade per cycle — prevents burst-opening on first scan
       qualifiedCandidates.sort((a, b) => b.aiScore - a.aiScore);
-      const slots = maxConcurrentTrades - openPositions.length;
+      const slots = Math.min(1, maxConcurrentTrades - openPositions.length);
       const toTrade = qualifiedCandidates.slice(0, slots);
       const overflow = qualifiedCandidates.slice(slots);
 
