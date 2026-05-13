@@ -119,122 +119,176 @@ export interface AutoTraderStatus {
 //
 const DEFAULT_CONFIG: AutoTraderConfig = {
   solPerTrade: 0.5,
-  maxConcurrentTrades: 2,       // max 2 open at a time — quality over quantity
+  maxConcurrentTrades: 2,
 
-  // AI quality — primary gates (strict)
-  minAiScore: 75,               // raised from 70 → only top-tier signals
-  minConfidence: 50,            // raised from 45
+  // ── AI quality ────────────────────────────────────────────────────────────
+  minAiScore: 78,               // top-tier only — 78+ is roughly top 5% of pool
+  minConfidence: 55,
 
-  // Liquidity & volume
-  minLiquidityUsd: 15_000,      // raised from $8K — thicker markets, less manipulation
-  minVolume24hUsd: 5_000,       // keep low — fresh GeckoTerminal tokens won't have 24h yet
-  minVolume1hUsd: 2_000,        // raised from $500 — real buying activity in the last hour
+  // ── Liquidity & volume ────────────────────────────────────────────────────
+  // A 15-min-old token should already have meaningful volume.
+  // Lower floors were exploited — tokens with $5K liq rugged within 60s.
+  minLiquidityUsd: 20_000,      // $20K min — real, hard-to-drain LP
+  minVolume24hUsd: 8_000,       // token survived 15+ min → some 24h vol expected
+  minVolume1hUsd: 3_000,        // $3K in the last hour — active buying NOW
 
-  // Momentum — strict to avoid stale-pump entries
-  minBuyRatio1h: 0.62,          // raised from 0.58 — clear buyer dominance required
-  minPriceChange1h: 8,          // raised from 3 → actively pumping at least 8% in 1h
-  minTransactions24h: 20,       // fresh tokens won't have 50 txns yet
+  // ── Momentum ─────────────────────────────────────────────────────────────
+  minBuyRatio1h: 0.60,          // 60% organic buy dominance
+  minPriceChange1h: 10,         // +10% minimum — must be a genuine pump
+  minTransactions24h: 30,       // 15-min-old token should have 30+ txns by now
 
-  // Market cap sweet spot
-  minMcapUsd: 10_000,
+  // ── Market cap ────────────────────────────────────────────────────────────
+  minMcapUsd: 15_000,
   maxMcapUsd: 10_000_000,
 
-  // Pair age — 5 min is enough to confirm the pair is real
-  minPairAgeMinutes: 5,
+  // ── Pair age ──────────────────────────────────────────────────────────────
+  // 15 min is the critical threshold — tokens that rug do so in the first
+  // 1–10 minutes. Surviving 15 min with LP intact is a meaningful signal.
+  minPairAgeMinutes: 15,
   maxPairAgeHours: 48,
 
-  // Rug guards
-  minLiquidityMcapRatio: 0.04,  // 4% liq/mcap minimum
-  maxFdvMcapRatio: 6.0,         // FDV must not exceed 6x mcap
-  maxPriceDropH6Pct: -25,       // tightened: reject if dumped 25%+ in 6h
-  maxPriceDropH24Pct: -40,      // tightened: reject if down 40%+ in 24h
+  // ── Rug guards ────────────────────────────────────────────────────────────
+  minLiquidityMcapRatio: 0.05,  // 5% liq/mcap — tighter than before
+  maxFdvMcapRatio: 5.0,         // FDV ≤ 5× mcap
+  maxPriceDropH6Pct: -25,
+  maxPriceDropH24Pct: -40,
 };
 
-// ─── Multi-layer quality + rug-pull filter ────────────────────────────────────
+// ─── Anti-rug + quality filter ────────────────────────────────────────────────
+//
+// Layer 1 — Hard sanity checks (data integrity)
+// Layer 2 — RUG DETECTION (never configurable — always enforced)
+//    2a. Pool drain:     vol5m > 75% of liquidity → LP being drained right now
+//    2b. Bot buy 5m:     ≥95% buys in last 5 min with ≥10 txns → pre-rug accumulation
+//    2c. Bot buy 1h:     ≥92% buys in last 1h with ≥40 txns → insider-dominated
+//    2d. Wash trade:     zero sells but many buys → fake volume
+//    2e. Liquidity thin: liq/mcap < threshold → easy to drain
+//    2f. FDV inflation:  FDV >> mcap → massive unlocked supply overhang
+// Layer 3 — Config-driven quality gates (adjustable)
+// Layer 4 — Momentum guards (stale pump detection)
+//
 export function qualityFilter(pair: DexScreenerPair, cfg: AutoTraderConfig): FilterResult {
   const fail = (reason: string): FilterResult => ({ pass: false, reason });
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // LAYER 1 — SANITY
+  // ═══════════════════════════════════════════════════════════════════════════
   const priceUsd = parseFloat(pair.priceUsd) || 0;
-  const liq = pair.liquidity?.usd || 0;
-  const vol24h = pair.volume?.h24 || 0;
-  const vol1h = pair.volume?.h1 || 0;
-  const mcap = pair.marketCap || pair.fdv || 0;
-  const fdv = pair.fdv || mcap;
-  const buys1h = pair.txns?.h1?.buys || 0;
+  if (priceUsd <= 0) return fail("No valid price");
+
+  const liq     = pair.liquidity?.usd || 0;
+  const mcap    = pair.marketCap || pair.fdv || 0;
+  const fdv     = pair.fdv || mcap;
+  if (mcap <= 0) return fail("No market cap data");
+  if (liq <= 0)  return fail("No liquidity data");
+
+  const vol24h  = pair.volume?.h24 || 0;
+  const vol1h   = pair.volume?.h1  || 0;
+  const vol5m   = pair.volume?.m5  || 0;
+  const buys1h  = pair.txns?.h1?.buys  || 0;
   const sells1h = pair.txns?.h1?.sells || 0;
   const total1h = buys1h + sells1h;
+  const buys5m  = pair.txns?.m5?.buys  || 0;
+  const sells5m = pair.txns?.m5?.sells || 0;
+  const total5m = buys5m + sells5m;
   const txns24h = (pair.txns?.h24?.buys || 0) + (pair.txns?.h24?.sells || 0);
-  const pc1h = pair.priceChange?.h1 || 0;
-  const pc6h = pair.priceChange?.h6 || 0;
-  const pc24h = pair.priceChange?.h24 || 0;
-  const ageMs = pair.pairCreatedAt ? Date.now() - pair.pairCreatedAt : 0;
-  const ageMinutes = ageMs / 60_000;
+  const pc1h    = pair.priceChange?.h1  || 0;
+  const pc5m    = pair.priceChange?.m5  ?? null;
+  const pc6h    = pair.priceChange?.h6  || 0;
+  const pc24h   = pair.priceChange?.h24 || 0;
+  const ageMs   = pair.pairCreatedAt ? Date.now() - pair.pairCreatedAt : 0;
+  const ageMin  = ageMs / 60_000;
+
   const buyRatio1h = total1h > 0 ? buys1h / total1h : 0;
+  const buyRatio5m = total5m > 0 ? buys5m / total5m : 0;
 
-  // ── Sanity ────────────────────────────────────────────────────────────────
-  if (priceUsd <= 0) return fail("No valid price");
-  if (mcap <= 0) return fail("No market cap data");
+  // ═══════════════════════════════════════════════════════════════════════════
+  // LAYER 2 — RUG DETECTION (hardcoded — cannot be overridden by config)
+  // ═══════════════════════════════════════════════════════════════════════════
 
-  // ── Liquidity floor ───────────────────────────────────────────────────────
+  // 2a. Pool drain — if 5m volume is ≥75% of current liquidity, someone is
+  //     burning through the LP pool at an unsustainable rate. This is the
+  //     #1 signal of an imminent rug (dev swaps everything then pulls LP).
+  if (vol5m > 0 && liq > 0 && vol5m >= liq * 0.75)
+    return fail(`Pool drain: 5m vol $${Math.round(vol5m).toLocaleString()} is ${((vol5m / liq) * 100).toFixed(0)}% of liquidity — LP being drained`);
+
+  // 2b. Bot accumulation (5m) — ≥95% buys in the last 5 min with real activity.
+  //     Organic trading always has some sellers. Near-100% buys = insider/bot
+  //     buying everything before pulling LP.
+  if (total5m >= 10 && buyRatio5m >= 0.95)
+    return fail(`Bot buying: ${(buyRatio5m * 100).toFixed(0)}% buys in last 5m (${total5m} txns) — pre-rug accumulation`);
+
+  // 2c. Insider-dominated 1h — same logic over a longer window. ≥92% buys
+  //     with ≥40 transactions means no organic market — just insiders.
+  if (total1h >= 40 && buyRatio1h >= 0.92)
+    return fail(`Insider buying: ${(buyRatio1h * 100).toFixed(0)}% buys in 1h (${total1h} txns) — no organic sellers`);
+
+  // 2d. Wash trading — zero sells but massive buy count = fake volume signal.
+  if (sells1h === 0 && buys1h >= 30)
+    return fail(`Wash trade: ${buys1h} buys / 0 sells in 1h — artificial volume`);
+
+  // 2e. Thin liquidity vs market cap — easy to drain the entire pool.
+  const liqMcapRatio = liq / mcap;
+  if (liqMcapRatio < cfg.minLiquidityMcapRatio)
+    return fail(`Liq/MCap ${(liqMcapRatio * 100).toFixed(1)}% < ${(cfg.minLiquidityMcapRatio * 100).toFixed(0)}% — easy rug`);
+
+  // 2f. FDV inflation — massive unissued/locked supply that will dump.
+  if (fdv > 0 && mcap > 0 && fdv / mcap > cfg.maxFdvMcapRatio)
+    return fail(`FDV ${(fdv / mcap).toFixed(1)}× mcap > ${cfg.maxFdvMcapRatio}× max — supply dump risk`);
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // LAYER 3 — CONFIG-DRIVEN QUALITY GATES
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  // Pair age — tokens that rug do so in the first 1–10 min.
+  // 15 min of survival with LP intact is a meaningful signal.
+  if (!pair.pairCreatedAt || ageMin < cfg.minPairAgeMinutes)
+    return fail(`Too new: ${Math.round(ageMin)}m old < ${cfg.minPairAgeMinutes}m min — survival unproven`);
+  if (ageMin > cfg.maxPairAgeHours * 60)
+    return fail(`Too old: ${Math.round(ageMin / 60)}h > ${cfg.maxPairAgeHours}h max`);
+
+  // Liquidity floor
   if (liq < cfg.minLiquidityUsd)
     return fail(`Liquidity $${Math.round(liq).toLocaleString()} < $${cfg.minLiquidityUsd.toLocaleString()} min`);
 
-  // ── Volume floors ─────────────────────────────────────────────────────────
+  // Volume floors
   if (vol24h < cfg.minVolume24hUsd)
     return fail(`Vol24h $${Math.round(vol24h).toLocaleString()} < $${cfg.minVolume24hUsd.toLocaleString()} min`);
-  // vol1h check: only if 1h volume data is available
   if (vol1h > 0 && vol1h < cfg.minVolume1hUsd)
     return fail(`Vol1h $${Math.round(vol1h).toLocaleString()} < $${cfg.minVolume1hUsd.toLocaleString()} min`);
 
-  // ── Activity ──────────────────────────────────────────────────────────────
+  // Activity — real traders leave a txn footprint
   if (txns24h < cfg.minTransactions24h)
     return fail(`Txns24h ${txns24h} < ${cfg.minTransactions24h} min`);
 
-  // ── Buy pressure ─────────────────────────────────────────────────────────
+  // Buy pressure — organic but not suspicious
   if (total1h >= 5 && buyRatio1h < cfg.minBuyRatio1h)
     return fail(`Buy ratio ${(buyRatio1h * 100).toFixed(0)}% < ${(cfg.minBuyRatio1h * 100).toFixed(0)}% min`);
 
-  // ── Momentum ──────────────────────────────────────────────────────────────
+  // Momentum — must be actively pumping, not a ghost from hours ago
   if (pc1h < cfg.minPriceChange1h)
     return fail(`1h change ${pc1h.toFixed(1)}% < +${cfg.minPriceChange1h}% min`);
 
-  // ── Market cap sweet spot ─────────────────────────────────────────────────
+  // Market cap sweet spot
   if (mcap < cfg.minMcapUsd)
     return fail(`MCap $${Math.round(mcap).toLocaleString()} < $${cfg.minMcapUsd.toLocaleString()} min`);
   if (mcap > cfg.maxMcapUsd)
     return fail(`MCap $${(mcap / 1_000_000).toFixed(1)}M > $${(cfg.maxMcapUsd / 1_000_000).toFixed(0)}M max`);
 
-  // ── Pair age window ───────────────────────────────────────────────────────
-  if (!pair.pairCreatedAt || ageMinutes < cfg.minPairAgeMinutes)
-    return fail(`Pair age ${Math.round(ageMinutes)}m < ${cfg.minPairAgeMinutes}m min`);
-  if (ageMinutes > cfg.maxPairAgeHours * 60)
-    return fail(`Pair age ${Math.round(ageMinutes / 60)}h > ${cfg.maxPairAgeHours}h max`);
-
-  // ── Rug-pull: liquidity/mcap ratio ───────────────────────────────────────
-  const liqMcapRatio = liq / mcap;
-  if (liqMcapRatio < cfg.minLiquidityMcapRatio)
-    return fail(`Liq/MCap ${(liqMcapRatio * 100).toFixed(1)}% < ${(cfg.minLiquidityMcapRatio * 100).toFixed(0)}% — rug risk`);
-
-  // ── Rug-pull: FDV inflation (massive locked supply) ───────────────────────
-  if (fdv > 0 && mcap > 0 && fdv / mcap > cfg.maxFdvMcapRatio)
-    return fail(`FDV/MCap ${(fdv / mcap).toFixed(1)}x > ${cfg.maxFdvMcapRatio}x max — dilution risk`);
-
-  // ── Dump detection ────────────────────────────────────────────────────────
+  // Price dump guards
   if (pc6h < cfg.maxPriceDropH6Pct)
-    return fail(`6h dump ${pc6h.toFixed(1)}% — possible rug or dead momentum`);
+    return fail(`6h dump ${pc6h.toFixed(1)}% — rug or dead momentum`);
   if (pc24h < cfg.maxPriceDropH24Pct)
-    return fail(`24h dump ${pc24h.toFixed(1)}% — token in severe decline`);
+    return fail(`24h dump ${pc24h.toFixed(1)}% — severe decline`);
 
-  // ── Stale pump guard (5m momentum) ───────────────────────────────────────
-  // If the 5m price is negative it means buyers have already left — the 1h
-  // change is history, not current. Only reject when we have actual 5m data.
-  const pc5m = pair.priceChange?.m5 ?? null;
-  if (pc5m !== null && pc5m < -3)
-    return fail(`5m change ${pc5m.toFixed(1)}% — pump peaked, momentum gone`);
+  // ═══════════════════════════════════════════════════════════════════════════
+  // LAYER 4 — MOMENTUM FRESHNESS
+  // ═══════════════════════════════════════════════════════════════════════════
 
-  // ── Wash-trading suspicion ────────────────────────────────────────────────
-  if (sells1h === 0 && buys1h > 50)
-    return fail("Zero sells with high buys in 1h — likely wash trading");
+  // Stale pump guard — if 5m is deeply negative, the pump peaked already.
+  // The 1h% includes history; we need the move to be happening NOW.
+  if (pc5m !== null && pc5m < -5)
+    return fail(`5m change ${pc5m.toFixed(1)}% — momentum gone, pump peaked`);
 
   return { pass: true, reason: "All filters passed" };
 }

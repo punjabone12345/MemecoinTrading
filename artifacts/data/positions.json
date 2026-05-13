@@ -1,1 +1,44 @@
-[]
+[
+  {
+    "positionId": "4dc623e9-b535-4989-b404-81d80537b95b",
+    "symbol": "DC",
+    "tokenName": "DC",
+    "pairAddress": "EPdNcsQm9NH6BU35aFcLAh4DFwS8NkuG9ufaQRvcyT1W",
+    "contractAddress": "HoxLM4vAKFP14rsibbTK8QuSFrx3vc5rH7Kvtd5Mbp5y",
+    "imageUrl": "",
+    "entryPrice": 0.00022898632838951326,
+    "sizeSol": 0.5,
+    "slPercent": 15,
+    "tpPercent": 80,
+    "slPrice": 0.00019463837913108627,
+    "tpPrice": 0.0004121753911011239,
+    "entryMarketCap": 214545.8794,
+    "tpMarketCap": 386182.58292,
+    "slMarketCap": 182363.99749,
+    "aiScore": 82,
+    "confidence": 100,
+    "openedAt": "2026-05-13T16:34:01.363Z",
+    "status": "open"
+  },
+  {
+    "positionId": "e2087963-21dd-4dc0-97d8-8672161b53ac",
+    "symbol": "Ieitigr",
+    "tokenName": "Ieitigr",
+    "pairAddress": "3NvE3tMUrpQD1ZUsjgQng8kVwmLEe8iZq9qDnfDMxoyg",
+    "contractAddress": "2NEA6UVgNN9Mp2215EHM5VuiBuiF3ApTKHwvAun6pump",
+    "imageUrl": "",
+    "entryPrice": 0.00002454395291289001,
+    "sizeSol": 0.5,
+    "slPercent": 12,
+    "tpPercent": 50,
+    "slPrice": 0.00002159867856334321,
+    "tpPrice": 0.000036815929369335015,
+    "entryMarketCap": 24624.60174,
+    "tpMarketCap": 36936.90261,
+    "slMarketCap": 21669.649531199997,
+    "aiScore": 79,
+    "confidence": 100,
+    "openedAt": "2026-05-13T16:37:01.750Z",
+    "status": "open"
+  }
+]
