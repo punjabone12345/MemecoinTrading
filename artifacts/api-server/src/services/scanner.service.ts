@@ -1,0 +1,465 @@
+import axios from "axios";
+import { logger } from "../lib/logger.js";
+import { computeSignals, computeAiScore, computeConfidence } from "./ai-scoring.service.js";
+import { alertsService } from "./alerts.service.js";
+import type { DexScreenerPair, ScannedToken } from "../types/index.js";
+
+const DEXSCREENER_BASE = "https://api.dexscreener.com";
+const GECKOTERMINAL_BASE = "https://api.geckoterminal.com/api/v2";
+const SCAN_INTERVAL_MS = 4_000;
+const CLEANUP_INTERVAL_MS = 2 * 60 * 1_000;
+const TOKEN_TTL_MS = 15 * 60 * 1_000;
+const HIGH_AI_SCORE_THRESHOLD = 80;
+const QUERIES_PER_SCAN = 5;
+const BOOSTED_EVERY_N_SCANS = 3;
+const GECKO_EVERY_N_SCANS = 2;
+
+// Max age to store in pool — tokens older than this are skipped before storing
+const MAX_POOL_AGE_HOURS = 48;
+const MAX_POOL_AGE_MS = MAX_POOL_AGE_HOURS * 60 * 60 * 1_000;
+
+// Min liquidity to accept — $0 liquidity tokens are useless
+const MIN_POOL_LIQUIDITY_USD = 100;
+
+// 30 rotating keywords — meme culture + chain culture + new-launch patterns
+const MEME_QUERIES = [
+  "pump", "pepe", "cat", "dog", "ai", "moon", "based",
+  "trump", "elon", "meme", "inu", "shib", "bonk", "wif",
+  "sol", "baby", "degen", "giga", "chad", "frog",
+  "wojak", "cope", "sigma", "ape", "bear", "bull",
+  "retard", "send", "rip", "wen",
+];
+let queryRotation = 0;
+
+function pairAgeLabel(createdAt: number): string {
+  const ageMs = Date.now() - createdAt;
+  const mins = Math.floor(ageMs / 60_000);
+  if (mins < 60) return `${mins}m`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h`;
+  return `${Math.floor(hours / 24)}d`;
+}
+
+export function mapPairToToken(pair: DexScreenerPair): ScannedToken {
+  const signals = computeSignals(pair);
+  const aiScore = computeAiScore(signals);
+  const confidence = computeConfidence(pair);
+  const priceUsd = parseFloat(pair.priceUsd) || 0;
+  const priceNative = parseFloat(pair.priceNative) || 0;
+
+  return {
+    pairAddress: pair.pairAddress,
+    name: pair.baseToken.name,
+    symbol: pair.baseToken.symbol,
+    address: pair.baseToken.address,
+    priceUsd,
+    priceNative,
+    liquidity: pair.liquidity?.usd || 0,
+    marketCap: pair.marketCap || pair.fdv || 0,
+    fdv: pair.fdv || 0,
+    volume24h: pair.volume?.h24 || 0,
+    volume1h: pair.volume?.h1 || 0,
+    volume5m: pair.volume?.m5 || 0,
+    buys1h: pair.txns?.h1?.buys || 0,
+    sells1h: pair.txns?.h1?.sells || 0,
+    buys24h: pair.txns?.h24?.buys || 0,
+    sells24h: pair.txns?.h24?.sells || 0,
+    buys5m: pair.txns?.m5?.buys || 0,
+    sells5m: pair.txns?.m5?.sells || 0,
+    priceChange1h: pair.priceChange?.h1 || 0,
+    priceChange5m: pair.priceChange?.m5 || 0,
+    priceChange6h: pair.priceChange?.h6 || 0,
+    priceChange24h: pair.priceChange?.h24 || 0,
+    pairAge: pair.pairCreatedAt || 0,
+    pairAgeLabel: pair.pairCreatedAt ? pairAgeLabel(pair.pairCreatedAt) : "?",
+    dexId: pair.dexId,
+    chainId: pair.chainId,
+    url: pair.url,
+    imageUrl: pair.info?.imageUrl ?? "",
+    aiScore,
+    confidence,
+    signals,
+    lastUpdated: Date.now(),
+  };
+}
+
+class ScannerService {
+  private tokens: Map<string, ScannedToken> = new Map();
+  private intervalId: ReturnType<typeof setInterval> | null = null;
+  private cleanupIntervalId: ReturnType<typeof setInterval> | null = null;
+  private broadcaster: ((tokens: ScannedToken[]) => void) | null = null;
+  private alreadyAlertedHighScore: Set<string> = new Set();
+  private isScanning = false;
+  private scanCount = 0;
+  private totalExpired = 0;
+  private totalSkippedStale = 0;
+  private totalSkippedNoLiq = 0;
+
+  setBroadcaster(fn: (tokens: ScannedToken[]) => void) {
+    this.broadcaster = fn;
+  }
+
+  private cleanup() {
+    const cutoff = Date.now() - TOKEN_TTL_MS;
+    let removed = 0;
+    for (const [addr, token] of this.tokens) {
+      if (token.lastUpdated < cutoff) {
+        this.tokens.delete(addr);
+        removed++;
+      }
+    }
+    if (removed > 0) {
+      this.totalExpired += removed;
+      logger.debug({ removed, remaining: this.tokens.size, totalExpired: this.totalExpired }, "Scanner: expired stale tokens");
+    }
+  }
+
+  private async fetchBoostedAddresses(): Promise<string[]> {
+    const [topBoostsRes, latestBoostsRes, profilesRes] = await Promise.allSettled([
+      axios.get<{ tokenAddress: string; chainId: string }[]>(
+        `${DEXSCREENER_BASE}/token-boosts/top/v1`,
+        { timeout: 8000 },
+      ),
+      axios.get<{ tokenAddress: string; chainId: string }[]>(
+        `${DEXSCREENER_BASE}/token-boosts/latest/v1`,
+        { timeout: 8000 },
+      ),
+      axios.get<{ tokenAddress: string; chainId: string }[]>(
+        `${DEXSCREENER_BASE}/token-profiles/latest/v1`,
+        { timeout: 8000 },
+      ),
+    ]);
+
+    const addresses = new Set<string>();
+    if (topBoostsRes.status === "fulfilled" && Array.isArray(topBoostsRes.value.data)) {
+      topBoostsRes.value.data
+        .filter((b) => b.chainId === "solana")
+        .slice(0, 30)
+        .forEach((b) => addresses.add(b.tokenAddress));
+    }
+    if (latestBoostsRes.status === "fulfilled" && Array.isArray(latestBoostsRes.value.data)) {
+      latestBoostsRes.value.data
+        .filter((b) => b.chainId === "solana")
+        .slice(0, 30)
+        .forEach((b) => addresses.add(b.tokenAddress));
+    }
+    if (profilesRes.status === "fulfilled" && Array.isArray(profilesRes.value.data)) {
+      profilesRes.value.data
+        .filter((p) => p.chainId === "solana")
+        .slice(0, 30)
+        .forEach((p) => addresses.add(p.tokenAddress));
+    }
+    return Array.from(addresses);
+  }
+
+  private async fetchPairsForAddresses(addresses: string[]): Promise<DexScreenerPair[]> {
+    const chunks: string[][] = [];
+    for (let i = 0; i < addresses.length; i += 30) {
+      chunks.push(addresses.slice(i, i + 30));
+    }
+
+    const results = await Promise.allSettled(
+      chunks.map((chunk) =>
+        axios.get<{ pairs: DexScreenerPair[] }>(
+          `${DEXSCREENER_BASE}/tokens/v1/solana/${chunk.join(",")}`,
+          { timeout: 8000 },
+        ),
+      ),
+    );
+
+    const pairs: DexScreenerPair[] = [];
+    for (const r of results) {
+      if (r.status === "fulfilled" && Array.isArray(r.value.data.pairs)) {
+        pairs.push(...r.value.data.pairs.filter((p) => p.chainId === "solana"));
+      }
+    }
+    return pairs;
+  }
+
+  /**
+   * Fetch genuinely fresh Solana pairs from GeckoTerminal.
+   * /new_pools returns pools sorted by creation time DESC — page 1 = newest on Solana.
+   * This directly addresses old tokens flooding in from keyword search.
+   */
+  private async fetchGeckoTerminalNewPools(): Promise<DexScreenerPair[]> {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    type GeckoPool = any;
+
+    const results = await Promise.allSettled([
+      axios.get<{ data: GeckoPool[] }>(
+        `${GECKOTERMINAL_BASE}/networks/solana/new_pools?page=1`,
+        { timeout: 8000, headers: { Accept: "application/json;version=20230302" } },
+      ),
+      axios.get<{ data: GeckoPool[] }>(
+        `${GECKOTERMINAL_BASE}/networks/solana/new_pools?page=2`,
+        { timeout: 8000, headers: { Accept: "application/json;version=20230302" } },
+      ),
+    ]);
+
+    const pairs: DexScreenerPair[] = [];
+    for (const r of results) {
+      if (r.status !== "fulfilled" || !Array.isArray(r.value.data.data)) continue;
+
+      for (const pool of r.value.data.data) {
+        const attrs = pool.attributes ?? {};
+        const pairCreatedAt = attrs.pool_created_at
+          ? new Date(attrs.pool_created_at).getTime()
+          : undefined;
+
+        const baseTokenId: string = pool.relationships?.base_token?.data?.id ?? "";
+        const baseAddress = baseTokenId.replace(/^solana_/, "");
+
+        const nameParts = ((attrs.name as string) || "").split(" / ");
+        const baseSymbol = nameParts[0]?.trim() || "UNKNOWN";
+        const quoteSymbol = nameParts[1]?.trim() || "SOL";
+
+        if (["SOL", "USDC", "USDT", "WSOL"].includes(baseSymbol)) continue;
+
+        const dexPair: DexScreenerPair = {
+          chainId: "solana",
+          dexId: pool.relationships?.dex?.data?.id || "unknown",
+          url: `https://dexscreener.com/solana/${attrs.address}`,
+          pairAddress: attrs.address || baseAddress,
+          baseToken: { address: baseAddress, name: baseSymbol, symbol: baseSymbol },
+          quoteToken: { address: "", name: quoteSymbol, symbol: quoteSymbol },
+          priceNative: attrs.base_token_price_usd || "0",
+          priceUsd: attrs.base_token_price_usd || "0",
+          txns: {
+            m5: { buys: attrs.transactions?.m5?.buys || 0, sells: attrs.transactions?.m5?.sells || 0 },
+            h1: { buys: attrs.transactions?.h1?.buys || 0, sells: attrs.transactions?.h1?.sells || 0 },
+            h6: { buys: attrs.transactions?.h6?.buys || 0, sells: attrs.transactions?.h6?.sells || 0 },
+            h24: { buys: attrs.transactions?.h24?.buys || 0, sells: attrs.transactions?.h24?.sells || 0 },
+          },
+          volume: {
+            m5: parseFloat(attrs.volume_usd?.m5 || "0"),
+            h1: parseFloat(attrs.volume_usd?.h1 || "0"),
+            h6: parseFloat(attrs.volume_usd?.h6 || "0"),
+            h24: parseFloat(attrs.volume_usd?.h24 || "0"),
+          },
+          priceChange: {
+            m5: parseFloat(attrs.price_change_percentage?.m5 || "0"),
+            h1: parseFloat(attrs.price_change_percentage?.h1 || "0"),
+            h6: parseFloat(attrs.price_change_percentage?.h6 || "0"),
+            h24: parseFloat(attrs.price_change_percentage?.h24 || "0"),
+          },
+          liquidity: {
+            usd: parseFloat(attrs.reserve_in_usd || "0"),
+            base: 0,
+            quote: 0,
+          },
+          fdv: parseFloat(attrs.fdv_usd || "0"),
+          marketCap: parseFloat(attrs.market_cap_usd || "0"),
+          pairCreatedAt,
+          info: { imageUrl: "" },
+        };
+
+        pairs.push(dexPair);
+      }
+    }
+
+    logger.debug({ count: pairs.length }, "Scanner: GeckoTerminal new pools fetched");
+    return pairs;
+  }
+
+  /** Search 5 rotating keyword queries per scan */
+  private async fetchSearchPairs(): Promise<DexScreenerPair[]> {
+    const queries: string[] = [];
+    for (let i = 0; i < QUERIES_PER_SCAN; i++) {
+      queries.push(MEME_QUERIES[queryRotation % MEME_QUERIES.length]!);
+      queryRotation++;
+    }
+
+    const results = await Promise.allSettled(
+      queries.map((q) =>
+        axios.get<{ pairs: DexScreenerPair[] }>(
+          `${DEXSCREENER_BASE}/latest/dex/search?q=${encodeURIComponent(q)}`,
+          { timeout: 8000 },
+        ),
+      ),
+    );
+
+    const pairs: DexScreenerPair[] = [];
+    for (const r of results) {
+      if (r.status === "fulfilled" && Array.isArray(r.value.data.pairs)) {
+        const filtered = r.value.data.pairs.filter(
+          (p) =>
+            p.chainId === "solana" &&
+            !["SOL", "USDC", "USDT", "WSOL"].includes(p.baseToken.symbol),
+        );
+        // Top 10 per keyword — keyword search returns by relevance not age,
+        // GeckoTerminal covers genuinely fresh tokens
+        pairs.push(...filtered.slice(0, 10));
+      }
+    }
+    return pairs;
+  }
+
+  async fetchSolanaPairs(): Promise<DexScreenerPair[]> {
+    try {
+      const useBoosted = this.scanCount % BOOSTED_EVERY_N_SCANS === 0;
+      const useGecko = this.scanCount % GECKO_EVERY_N_SCANS === 0;
+      const allPairs: DexScreenerPair[] = [];
+
+      const [searchPairs, boostedPairs, geckoPairs] = await Promise.allSettled([
+        this.fetchSearchPairs(),
+        useBoosted
+          ? this.fetchBoostedAddresses().then((addrs) => this.fetchPairsForAddresses(addrs))
+          : Promise.resolve([] as DexScreenerPair[]),
+        useGecko
+          ? this.fetchGeckoTerminalNewPools()
+          : Promise.resolve([] as DexScreenerPair[]),
+      ]);
+
+      if (searchPairs.status === "fulfilled") allPairs.push(...searchPairs.value);
+      if (boostedPairs.status === "fulfilled") allPairs.push(...boostedPairs.value);
+      if (geckoPairs.status === "fulfilled") allPairs.push(...geckoPairs.value);
+
+      // Deduplicate by pair address, keep highest-volume version
+      const seen = new Map<string, DexScreenerPair>();
+      for (const pair of allPairs) {
+        const existing = seen.get(pair.pairAddress);
+        if (!existing || (pair.volume?.h24 ?? 0) > (existing.volume?.h24 ?? 0)) {
+          seen.set(pair.pairAddress, pair);
+        }
+      }
+
+      return Array.from(seen.values());
+    } catch (err) {
+      logger.error({ err }, "Scanner fetch error");
+      return [];
+    }
+  }
+
+  private async scan() {
+    if (this.isScanning) return;
+    this.isScanning = true;
+    this.scanCount++;
+    try {
+      const pairs = await this.fetchSolanaPairs();
+      let newCount = 0;
+      let skippedNoLiq = 0;
+      let skippedStale = 0;
+
+      for (const pair of pairs) {
+        // ── Pre-flight: reject junk pairs before mapping or storing ──────────
+        const liq = pair.liquidity?.usd ?? 0;
+        if (liq < MIN_POOL_LIQUIDITY_USD) {
+          skippedNoLiq++;
+          continue;
+        }
+        if (pair.pairCreatedAt && (Date.now() - pair.pairCreatedAt) > MAX_POOL_AGE_MS) {
+          skippedStale++;
+          continue;
+        }
+        const priceUsd = parseFloat(pair.priceUsd) || 0;
+        if (priceUsd <= 0) continue;
+
+        const token = mapPairToToken(pair);
+        const isNew = !this.tokens.has(token.pairAddress);
+        this.tokens.set(token.pairAddress, token);
+        if (isNew) newCount++;
+
+        if (
+          token.aiScore >= HIGH_AI_SCORE_THRESHOLD &&
+          !this.alreadyAlertedHighScore.has(token.pairAddress)
+        ) {
+          this.alreadyAlertedHighScore.add(token.pairAddress);
+          alertsService.highAiScore(token.symbol, token.aiScore, token.pairAddress);
+          setTimeout(() => this.alreadyAlertedHighScore.delete(token.pairAddress), 300_000);
+        }
+      }
+
+      this.totalSkippedNoLiq += skippedNoLiq;
+      this.totalSkippedStale += skippedStale;
+
+      logger.debug(
+        {
+          scanCount: this.scanCount,
+          newTokens: newCount,
+          total: this.tokens.size,
+          skippedNoLiq,
+          skippedStale,
+        },
+        "Scanner: scan complete",
+      );
+
+      this.broadcaster?.(this.getAll());
+    } finally {
+      this.isScanning = false;
+    }
+  }
+
+  start() {
+    if (this.intervalId) return;
+    void this.scan();
+    this.intervalId = setInterval(() => void this.scan(), SCAN_INTERVAL_MS);
+    this.cleanupIntervalId = setInterval(() => this.cleanup(), CLEANUP_INTERVAL_MS);
+    logger.info(
+      {
+        intervalMs: SCAN_INTERVAL_MS,
+        queriesPerScan: QUERIES_PER_SCAN,
+        totalKeywords: MEME_QUERIES.length,
+        tokenTtlMin: TOKEN_TTL_MS / 60_000,
+        maxPoolAgeHours: MAX_POOL_AGE_HOURS,
+        minPoolLiquidityUsd: MIN_POOL_LIQUIDITY_USD,
+        geckoEveryNScans: GECKO_EVERY_N_SCANS,
+      },
+      "Scanner started — keywords + boosted/profiled + GeckoTerminal new pools + age/liq pre-filter",
+    );
+  }
+
+  stop() {
+    if (this.intervalId) {
+      clearInterval(this.intervalId);
+      this.intervalId = null;
+    }
+    if (this.cleanupIntervalId) {
+      clearInterval(this.cleanupIntervalId);
+      this.cleanupIntervalId = null;
+    }
+  }
+
+  getAll(): ScannedToken[] {
+    return Array.from(this.tokens.values()).sort((a, b) => b.aiScore - a.aiScore);
+  }
+
+  getByPairAddress(pairAddress: string): ScannedToken | undefined {
+    return this.tokens.get(pairAddress);
+  }
+
+  async getPairFromDex(pairAddress: string): Promise<DexScreenerPair | null> {
+    try {
+      const res = await axios.get<{ pairs: DexScreenerPair[] }>(
+        `${DEXSCREENER_BASE}/latest/dex/pairs/solana/${pairAddress}`,
+        { timeout: 8000 },
+      );
+      return res.data.pairs?.[0] ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  async getOrFetchToken(pairAddress: string): Promise<ScannedToken | null> {
+    const cached = this.tokens.get(pairAddress);
+    if (cached) return cached;
+    const pair = await this.getPairFromDex(pairAddress);
+    if (!pair) return null;
+    const token = mapPairToToken(pair);
+    this.tokens.set(pairAddress, token);
+    return token;
+  }
+
+  getTokenCount(): number {
+    return this.tokens.size;
+  }
+
+  getTotalExpired(): number {
+    return this.totalExpired;
+  }
+
+  getScanCount(): number {
+    return this.scanCount;
+  }
+}
+
+export const scannerService = new ScannerService();
