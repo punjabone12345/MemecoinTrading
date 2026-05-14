@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { ScannedToken, Position, Portfolio, AnalyticsSnapshot, Alert, AutoTraderStatus, AutoTraderConfig, CycleRecord } from "./types";
+import { ScannedToken, Position, Portfolio, AnalyticsSnapshot, Alert, AutoTraderStatus, AutoTraderConfig, CycleRecord, LossInsights } from "./types";
 import { useToast } from "@/hooks/use-toast";
 
 export function useWebSocket() {
@@ -378,6 +378,19 @@ export function useResumeAutoTrader() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["auto-trader-status"] });
     },
+  });
+}
+
+export function useLossJournal() {
+  return useQuery<LossInsights>({
+    queryKey: ["loss-journal"],
+    queryFn: async () => {
+      const res = await fetch("/api/loss-journal");
+      const json = await res.json();
+      return json.data as LossInsights;
+    },
+    refetchInterval: 30_000,
+    staleTime: 15_000,
   });
 }
 

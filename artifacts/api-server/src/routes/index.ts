@@ -7,6 +7,7 @@ import analyticsRouter from "./analytics.js";
 import watchlistRouter from "./watchlist.js";
 import alertsRouter from "./alerts.js";
 import autoTraderRouter from "./auto-trader.js";
+import lossJournalRouter from "./loss-journal.js";
 
 const router: IRouter = Router();
 
@@ -18,5 +19,6 @@ router.use(analyticsRouter);
 router.use(watchlistRouter);
 router.use(alertsRouter);
 router.use(autoTraderRouter);
+router.use(lossJournalRouter);
 
 export default router;

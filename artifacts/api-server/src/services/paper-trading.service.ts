@@ -5,6 +5,7 @@ import { fileURLToPath } from "url";
 import { logger } from "../lib/logger.js";
 import { scannerService } from "./scanner.service.js";
 import { alertsService } from "./alerts.service.js";
+import { lossJournalService } from "./loss-journal.service.js";
 import { getDynamicRisk } from "./ai-scoring.service.js";
 import { sendTelegram, toIST } from "../lib/telegram.js";
 import type { Position, Portfolio, CloseReason, ScannedToken } from "../types/index.js";
@@ -294,6 +295,11 @@ class PaperTradingService {
     this.closedTrades.unshift(closed);
     this.persistOpen();
     this.persistHistory();
+
+    // Record losses in the self-learning journal
+    if (pnlSol < 0) {
+      lossJournalService.record(closed);
+    }
 
     logger.info({ positionId, symbol: pos.symbol, reason, pnlSol: pnlSol.toFixed(4) }, "Position closed");
 
@@ -607,6 +613,11 @@ class PaperTradingService {
 
     this.persistHistory();
     this.broadcastPositions();
+
+    // Re-record in loss journal if the updated trade is a loss
+    if ((updated.pnlSol ?? 0) < 0) {
+      lossJournalService.reRecord(updated);
+    }
 
     logger.info(
       { positionId, symbol: old.symbol, oldPnl: old.pnlSol, newPnl: updated.pnlSol, newBalance: this.solBalance.toFixed(4) },

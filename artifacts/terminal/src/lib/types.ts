@@ -83,6 +83,61 @@ export interface CycleDecision {
   llmDurationMs?: number;
 }
 
+export type LossTag =
+  | "rug_speed" | "fast_rug" | "slow_dump" | "no_ai_recovery"
+  | "borderline_score" | "borderline_conf"
+  | "thin_liquidity" | "micro_cap" | "large_cap"
+  | "high_fdv_risk" | "fake_price";
+
+export interface LossJournalEntry {
+  positionId: string;
+  symbol: string;
+  contractAddress: string;
+  openedAt: string;
+  closedAt: string;
+  holdTimeMs: number;
+  pnlSol: number;
+  pnlPercent: number;
+  aiScore: number;
+  confidence: number;
+  entryMcapUsd: number;
+  entryLiquidityUsd: number;
+  slPercent: number;
+  tpPercent: number;
+  tags: LossTag[];
+  warnings: string[];
+  recordedAt: number;
+  note?: string;
+}
+
+export interface FilterSuggestion {
+  filter: string;
+  currentValue: string | number;
+  suggestedValue: string | number;
+  reason: string;
+  priority: "high" | "medium" | "low";
+  confidence: number;
+}
+
+export interface LossInsights {
+  totalLosses: number;
+  totalLossSol: number;
+  avgLossSol: number;
+  avgHoldMinutes: number;
+  tagFrequency: Record<string, number>;
+  tagPercentage: Record<string, number>;
+  avgAiScore: number;
+  avgConfidence: number;
+  borderlineScoreCount: number;
+  borderlineConfCount: number;
+  instantRugs: number;
+  fastRugs: number;
+  slowDumps: number;
+  longLosses: number;
+  suggestions: FilterSuggestion[];
+  recentLosses: LossJournalEntry[];
+}
+
 export interface CycleRecord {
   cycleId: number;
   startedAt: number;
