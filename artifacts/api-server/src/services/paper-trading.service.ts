@@ -69,7 +69,7 @@ class PaperTradingService {
   private openPositions: Map<string, Position> = new Map();
   private closedTrades: Position[] = [];
   private solBalance = INITIAL_BALANCE_SOL;
-  private openSymbols: Set<string> = new Set();
+  private openContracts: Set<string> = new Set(); // keyed by token contract address, not symbol
   private positionBroadcaster: (() => void) | null = null;
   // Latest verified price from DexScreener per pairAddress — updated by stop checker every 30s
   private latestPrices: Map<string, { price: number; ts: number }> = new Map();
@@ -88,7 +88,7 @@ class PaperTradingService {
     for (const pos of open) {
       if (pos.status === "open") {
         this.openPositions.set(pos.positionId, pos);
-        this.openSymbols.add(pos.symbol.toUpperCase());
+        this.openContracts.add(pos.contractAddress);
         this.solBalance -= pos.sizeSol;
       }
     }
@@ -122,8 +122,8 @@ class PaperTradingService {
     this.positionBroadcaster?.();
   }
 
-  hasOpenPositionForSymbol(symbol: string): boolean {
-    return this.openSymbols.has(symbol.toUpperCase());
+  hasOpenPositionForContract(contractAddress: string): boolean {
+    return this.openContracts.has(contractAddress);
   }
 
   async buyDirect(token: ScannedToken, sizeSol: number, slOverridePct?: number): Promise<Position> {
@@ -132,8 +132,8 @@ class PaperTradingService {
       throw new Error(`Insufficient balance. Available: ${this.solBalance.toFixed(4)} SOL`);
     }
     if (token.priceUsd <= 0) throw new Error("Invalid token price");
-    if (this.hasOpenPositionForSymbol(token.symbol)) {
-      throw new Error(`Already have an open position for ${token.symbol}`);
+    if (this.hasOpenPositionForContract(token.address)) {
+      throw new Error(`Already have an open position for contract ${token.address} (${token.symbol})`);
     }
 
     // Always verify entry price directly from DexScreener — scanner cache (esp. GeckoTerminal)
@@ -196,7 +196,7 @@ class PaperTradingService {
     };
 
     this.openPositions.set(position.positionId, position);
-    this.openSymbols.add(token.symbol.toUpperCase());
+    this.openContracts.add(token.address);
     this.persistOpen();
 
     logger.info({ positionId: position.positionId, symbol: token.symbol, aiScore: token.aiScore, slPercent, tpPercent }, "Position opened");
@@ -290,7 +290,7 @@ class PaperTradingService {
     };
 
     this.openPositions.delete(positionId);
-    this.openSymbols.delete(pos.symbol.toUpperCase());
+    this.openContracts.delete(pos.contractAddress);
     this.closedTrades.unshift(closed);
     this.persistOpen();
     this.persistHistory();
@@ -540,7 +540,7 @@ class PaperTradingService {
     const hadPositions = this.openPositions.size;
     const oldBalance = this.solBalance;
     this.openPositions.clear();
-    this.openSymbols.clear();
+    this.openContracts.clear();
     this.closedTrades = [];
     this.solBalance = INITIAL_BALANCE_SOL;
     this.persistOpen();

@@ -528,9 +528,9 @@ class AutoTraderService {
           tpPercent,
         };
 
-        // Duplicate symbol check
-        if (paperTradingService.hasOpenPositionForSymbol(token.symbol)) {
-          decisions.push({ ...base, action: "skipped_duplicate", reason: `Already have open position for ${token.symbol}` });
+        // Duplicate contract check — same symbol ≠ same token; use contract address
+        if (paperTradingService.hasOpenPositionForContract(token.address)) {
+          decisions.push({ ...base, action: "skipped_duplicate", reason: `Already trading this contract (${token.address.slice(0, 8)}…) as ${token.symbol}` });
           continue;
         }
 
