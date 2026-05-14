@@ -165,6 +165,7 @@ class PaperTradingService {
 
     // Market cap projections
     const entryMarketCap = token.marketCap;
+    const entryLiquidityUsd = token.liquidity;
     const tpMarketCap = entryMarketCap > 0 ? entryMarketCap * (1 + tpPercent / 100) : 0;
     const slMarketCap = entryMarketCap > 0 ? entryMarketCap * (1 - slPercent / 100) : 0;
 
@@ -184,6 +185,7 @@ class PaperTradingService {
       slPrice,
       tpPrice,
       entryMarketCap,
+      entryLiquidityUsd,
       tpMarketCap,
       slMarketCap,
       aiScore: token.aiScore,
@@ -367,17 +369,38 @@ class PaperTradingService {
           }
         }
 
+        // ── MID-HOLD LIQUIDITY DRAIN DETECTION ────────────────────────────
+        // If current liquidity has dropped to <10% of entry liquidity and it's
+        // been at least 2 minutes (giving time for initial data to settle),
+        // the pool is being drained — close immediately at stop loss.
+        // This catches rugs where price hasn't fallen yet but LP is being pulled.
+        const currentLiqMidHold = dexPair?.liquidity?.usd ?? 0;
+        const holdMsCheck = Date.now() - new Date(pos.openedAt).getTime();
+        if (
+          pos.entryLiquidityUsd > 0 &&
+          currentLiqMidHold > 0 &&
+          holdMsCheck > 2 * 60_000 &&
+          currentLiqMidHold < pos.entryLiquidityUsd * 0.1
+        ) {
+          logger.warn(
+            { symbol: pos.symbol, entryLiq: pos.entryLiquidityUsd, currentLiq: currentLiqMidHold, dropPct: ((1 - currentLiqMidHold / pos.entryLiquidityUsd) * 100).toFixed(0) },
+            "Stop checker: liquidity drained >90% since entry — rug detected, closing at SL"
+          );
+          await this.close(pos.positionId, "stop_loss");
+          continue;
+        }
+
         if (!price || price <= 0) {
           // No price from DexScreener or cache — check if this looks like a rug
           const holdMs = Date.now() - new Date(pos.openedAt).getTime();
           const lastKnown = this.latestPrices.get(pos.pairAddress);
           const msWithoutPrice = lastKnown ? Date.now() - lastKnown.ts : holdMs;
 
-          if (holdMs > RUG_TIMEOUT_MS && msWithoutPrice > RUG_TIMEOUT_MS) {
-            // Can't price for 8+ minutes → treat as rug, close at stop-loss
+          // Reduced from 8 minutes to 3 minutes — don't hold a dead token long
+          if (holdMs > 3 * 60_000 && msWithoutPrice > 3 * 60_000) {
             logger.warn(
               { symbol: pos.symbol, holdMs, msWithoutPrice },
-              "Stop checker: no price for extended period — treating as rug, closing at SL"
+              "Stop checker: no price for 3+ minutes — treating as rug, closing at SL"
             );
             await this.close(pos.positionId, "stop_loss");
           } else {
@@ -393,7 +416,24 @@ class PaperTradingService {
         }
 
         if (price >= pos.tpPrice) {
-          logger.info({ symbol: pos.symbol, price, tpPrice: pos.tpPrice }, "Take profit triggered");
+          // ── LIQUIDITY VALIDATION BEFORE TAKE PROFIT ──────────────────────
+          // Critical fix: low-liquidity tokens have highly manipulable spot
+          // prices. A single $10 buy on a $100 pool can 100x the price,
+          // falsely triggering TP even though the token has effectively rugged.
+          // Before accepting a TP, verify that meaningful liquidity still exists.
+          const currentLiq = dexPair?.liquidity?.usd ?? 0;
+          const MIN_TP_LIQUIDITY_USD = 2_000; // $2K minimum to consider a TP real
+
+          if (currentLiq > 0 && currentLiq < MIN_TP_LIQUIDITY_USD) {
+            logger.warn(
+              { symbol: pos.symbol, price, tpPrice: pos.tpPrice, currentLiq },
+              "Take profit price reached but liquidity drained — treating as rug, closing at SL"
+            );
+            await this.close(pos.positionId, "stop_loss");
+            continue;
+          }
+
+          logger.info({ symbol: pos.symbol, price, tpPrice: pos.tpPrice, currentLiq }, "Take profit triggered");
           await this.close(pos.positionId, "take_profit");
           continue;
         }

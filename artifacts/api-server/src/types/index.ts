@@ -108,6 +108,7 @@ export interface Position {
   slPrice: number;
   tpPrice: number;
   entryMarketCap: number;
+  entryLiquidityUsd: number;
   tpMarketCap: number;
   slMarketCap: number;
   aiScore: number;

@@ -86,64 +86,54 @@ export interface AutoTraderStatus {
   config: AutoTraderConfig;
 }
 
-// ─── Default config: balanced quality + realistic Solana memecoin thresholds ─
+// ─── Default config: high-conviction, selective entries only ──────────────────
 //
-// Philosophy: quality filters PLUS realistic floors for how Solana memecoins
-// actually look. Most fresh launches have $5K–$30K liquidity, sub-$1M mcap,
-// and strong 1h momentum. We must catch these early without trading rugs.
+// Philosophy: FEWER trades, BETTER trades. Every filter exists to avoid:
+//   (a) Late entries on already-pumped tokens (distribution phase)
+//   (b) Rug pulls with fake or thin liquidity / volume
+//   (c) Ghost tokens with no real recent activity
 //
-// Quality levers (these enforce conviction):
-//   minAiScore:       62   → top ~25% of scanned tokens — real signals only
-//   minBuyRatio1h:  0.55   → majority are buying, not selling
-//   minPriceChange1h:  3   → actively moving up, not stale
-//   minPairAgeMinutes: 10  → survived the first 10 min (most rugs die in <5m)
-//   Layer-2 rug guards     → always enforced regardless of config
-//
-// Realistic absolute floors (calibrated to real Solana memecoin data):
-//   minLiquidityUsd: 8K    → just enough depth to enter/exit without huge slippage
-//   minVolume24hUsd: 2K    → some real trading activity recorded
-//   minVolume1hUsd:  500   → something happening in the last hour
-//   minTransactions24h: 20 → not a ghost chain
-//   minMcapUsd: 10K        → micro-cap is fine; AI score guards quality
-//   maxMcapUsd: 20M        → avoid already-pumped large caps
+// Why these numbers:
+//   minAiScore: 72       → top ~15% of scanned tokens — real signals only
+//   minConfidence: 65    → data quality gate — don't trade on unreliable data
+//   minLiquidityUsd: 20K → proper exit depth; 0.5 SOL in $8K pool = huge slippage
+//   minBuyRatio1h: 0.60  → clear buyer majority, not a coin flip
+//   minPriceChange1h: 8  → real momentum, not noise
+//   minVolume1hUsd: 2K   → actively traded RIGHT NOW
+//   minPairAgeMinutes: 15 → survived critical first window (most rugs die <10m)
+//   maxPriceDropH6Pct: -20 → don't trade tokens falling on longer timeframe
 //
 const DEFAULT_CONFIG: AutoTraderConfig = {
   solPerTrade: 0.5,
   maxConcurrentTrades: 3,
 
   // ── AI quality ────────────────────────────────────────────────────────────
-  // 62+ covers top ~25% of the pool. Score already encodes momentum, buy
-  // pressure, liquidity depth, and volume intensity — it IS the quality gate.
-  minAiScore: 62,
-  minConfidence: 50,
+  minAiScore: 72,
+  minConfidence: 65,
 
   // ── Liquidity & volume ────────────────────────────────────────────────────
-  // Real fresh Solana memecoins: $5K–$50K liquidity is the norm.
-  // $50K is what large established tokens have — not realistic for new launches.
-  minLiquidityUsd: 8_000,       // $8K — tradeable with low slippage
-  minVolume24hUsd: 2_000,       // $2K 24h — some real activity
-  minVolume1hUsd:  500,         // $500 in the last hour — actively traded NOW
+  minLiquidityUsd: 20_000,      // $20K — proper exit depth for 0.5 SOL trade
+  minVolume24hUsd: 5_000,       // $5K 24h — proven trading activity
+  minVolume1hUsd:  2_000,       // $2K last hour — actively traded RIGHT NOW
 
   // ── Momentum ─────────────────────────────────────────────────────────────
-  minBuyRatio1h: 0.52,          // 52% buys vs sells — slight buyer majority
-  minPriceChange1h: 3,          // +3% minimum — not flat or declining
-  minTransactions24h: 20,       // 20+ txns — real wallets, not ghost chain
+  minBuyRatio1h: 0.60,          // 60% buys — clear buyer conviction
+  minPriceChange1h: 8,          // +8% minimum — real momentum, not noise
+  minTransactions24h: 50,       // 50+ txns — real wallets, not ghost chain
 
-  // ── Market cap ────────────────────────────────────────────────────────────
-  minMcapUsd: 10_000,           // $10K — any real token has this
-  maxMcapUsd: 20_000_000,       // $20M — avoid large caps with no room to run
+  // ── Market cap sweet spot ────────────────────────────────────────────────
+  minMcapUsd: 50_000,           // $50K floor — tiny caps are almost always rugs
+  maxMcapUsd: 10_000_000,       // $10M ceiling — already-pumped, no room to run
 
   // ── Pair age ──────────────────────────────────────────────────────────────
-  // 10 min of survival with LP intact is meaningful — rugs die in <5 min.
-  // 72h max so we're still trading active/relevant tokens.
-  minPairAgeMinutes: 10,
-  maxPairAgeHours: 72,
+  minPairAgeMinutes: 15,        // 15 min — rugs almost always die in <10 min
+  maxPairAgeHours: 48,          // 48h max — trade fresh/active tokens only
 
-  // ── Rug guards (calibrated for memecoin liq/mcap ratios) ─────────────────
-  minLiquidityMcapRatio: 0.03,  // 3% liq/mcap — standard memecoin safety floor
-  maxFdvMcapRatio: 8.0,         // FDV ≤ 8× mcap — pump.fun often has high FDV
-  maxPriceDropH6Pct: -30,       // not crashed more than 30% in 6h
-  maxPriceDropH24Pct: -50,      // not crashed more than 50% in 24h
+  // ── Rug guards ────────────────────────────────────────────────────────────
+  minLiquidityMcapRatio: 0.05,  // 5% liq/mcap — tighter pool drain guard
+  maxFdvMcapRatio: 6.0,         // FDV ≤ 6× mcap — less supply overhang risk
+  maxPriceDropH6Pct: -20,       // not crashed >20% in last 6h
+  maxPriceDropH24Pct: -40,      // not crashed >40% in last 24h
 };
 
 // ─── Anti-rug + quality filter ────────────────────────────────────────────────
@@ -290,6 +280,40 @@ export function qualityFilter(pair: DexScreenerPair, cfg: AutoTraderConfig): Fil
   // The 1h% includes history; we need the move to be happening NOW.
   if (pc5m !== null && pc5m < -5)
     return fail(`5m change ${pc5m.toFixed(1)}% — momentum gone, pump peaked`);
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // LAYER 5 — PUMP STAGE DETECTION (never configurable — always enforced)
+  // ═══════════════════════════════════════════════════════════════════════════
+  //
+  // The #1 cause of losses: buying a token that has ALREADY pumped and is now
+  // being distributed by early holders. The 1h candle still looks great but
+  // the move is essentially over. Latecomers buy the top while insiders sell.
+  //
+  // Signals that the pump is LATE / in distribution:
+  //   5a. Massive 1h rally + flat/negative 5m → early holders distributing
+  //   5b. 1h very high + barely any 5m activity → momentum exhaustion
+  //   5c. 6h dump > 15% but 1h suddenly positive → dead cat bounce (trap)
+  //
+  // Note: we only apply the strictest checks here. The AI score already
+  // penalises late-stage pumps via the entry timing component.
+
+  // 5a. 1h pump already >200% and 5m not confirming — definitely late
+  if (pc1h > 200 && (pc5m !== null && pc5m < 3))
+    return fail(`Late pump: +${pc1h.toFixed(0)}% in 1h but 5m only ${pc5m?.toFixed(1)}% — distribution phase, momentum exhausted`);
+
+  // 5b. 1h pump >100% with negative 5m — clear reversal signal
+  if (pc1h > 100 && (pc5m !== null && pc5m < 0))
+    return fail(`Pump reversal: +${pc1h.toFixed(0)}% in 1h but 5m now ${pc5m?.toFixed(1)}% — price rolling over`);
+
+  // 5c. Dead cat bounce — 6h significantly negative but 1h bounced
+  // This is typically a relief rally before further decline
+  if (pc6h < -15 && pc1h < 20)
+    return fail(`Dead cat bounce: -${Math.abs(pc6h).toFixed(0)}% in 6h with only +${pc1h.toFixed(0)}% recovery — likely short-lived relief rally`);
+
+  // 5d. Very recent activity check: if there are near-zero transactions in 5m
+  // despite passing other filters, the token is stale/inactive RIGHT NOW
+  if (total5m < 3 && ageMin > 30)
+    return fail(`No recent activity: only ${total5m} txns in last 5m — not actively trading right now`);
 
   return { pass: true, reason: "All filters passed" };
 }
