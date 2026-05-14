@@ -3,6 +3,16 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { ScannedToken, Position, Portfolio, AnalyticsSnapshot, Alert, AutoTraderStatus, AutoTraderConfig, CycleRecord, LossInsights } from "./types";
 import { useToast } from "@/hooks/use-toast";
 
+// When the frontend is deployed separately from the backend (e.g. Vercel + Render),
+// set VITE_API_BASE_URL to the backend's origin (e.g. https://your-app.onrender.com).
+// Leave it empty (default) when both run on the same host (dev / single-host deploy).
+const API_BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, "") ?? "";
+
+/** Prefix a path with the backend origin when deployed separately */
+function apiUrl(path: string): string {
+  return `${API_BASE}${path}`;
+}
+
 export function useWebSocket() {
   const queryClient = useQueryClient();
   const wsRef = useRef<WebSocket | null>(null);
@@ -13,8 +23,16 @@ export function useWebSocket() {
     let isMounted = true;
 
     function connect() {
-      const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-      const wsUrl = `${protocol}//${window.location.host}/ws`;
+      let wsUrl: string;
+      if (API_BASE) {
+        // Cross-host deployment: derive WS URL from the backend origin
+        const wsProto = API_BASE.startsWith("https://") ? "wss://" : "ws://";
+        wsUrl = `${wsProto}${API_BASE.replace(/^https?:\/\//, "")}/ws`;
+      } else {
+        // Same-host (dev Vite proxy or single-host prod): use window.location
+        const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+        wsUrl = `${protocol}//${window.location.host}/ws`;
+      }
       const ws = new WebSocket(wsUrl);
 
       ws.onmessage = (event) => {
@@ -62,7 +80,7 @@ export function useScanner() {
   return useQuery({
     queryKey: ["scanner"],
     queryFn: async () => {
-      const res = await fetch("/api/scanner");
+      const res = await fetch(apiUrl("/api/scanner"));
       const json = await res.json();
       return (json.data ?? json) as ScannedToken[];
     },
@@ -74,7 +92,7 @@ export function usePositions() {
   return useQuery({
     queryKey: ["positions"],
     queryFn: async () => {
-      const res = await fetch("/api/positions");
+      const res = await fetch(apiUrl("/api/positions"));
       const json = await res.json();
       return (json.data ?? json) as { positions: Position[]; portfolio: Portfolio };
     },
@@ -86,7 +104,7 @@ export function useClosedPositions() {
   return useQuery({
     queryKey: ["closed-positions"],
     queryFn: async () => {
-      const res = await fetch("/api/positions/closed");
+      const res = await fetch(apiUrl("/api/positions/closed"));
       const json = await res.json();
       return (json.data ?? json) as Position[];
     },
@@ -97,7 +115,7 @@ export function usePortfolio() {
   return useQuery({
     queryKey: ["portfolio"],
     queryFn: async () => {
-      const res = await fetch("/api/positions/portfolio");
+      const res = await fetch(apiUrl("/api/positions/portfolio"));
       const json = await res.json();
       return (json.data ?? json) as Portfolio;
     },
@@ -109,7 +127,7 @@ export function useAnalytics() {
   return useQuery({
     queryKey: ["analytics"],
     queryFn: async () => {
-      const res = await fetch("/api/analytics");
+      const res = await fetch(apiUrl("/api/analytics"));
       const json = await res.json();
       return (json.data ?? json) as AnalyticsSnapshot;
     },
@@ -120,7 +138,7 @@ export function useAlerts() {
   return useQuery({
     queryKey: ["alerts"],
     queryFn: async () => {
-      const res = await fetch("/api/alerts");
+      const res = await fetch(apiUrl("/api/alerts"));
       const json = await res.json();
       return (json.data ?? json) as Alert[];
     },
@@ -131,7 +149,7 @@ export function useUnreadAlerts() {
   return useQuery({
     queryKey: ["alerts-unread"],
     queryFn: async () => {
-      const res = await fetch("/api/alerts/unread");
+      const res = await fetch(apiUrl("/api/alerts/unread"));
       const json = await res.json();
       return (json.data ?? json) as Alert[];
     },
@@ -143,7 +161,7 @@ export function useAutoTraderStatus() {
   return useQuery({
     queryKey: ["auto-trader-status"],
     queryFn: async () => {
-      const res = await fetch("/api/auto-trader/status");
+      const res = await fetch(apiUrl("/api/auto-trader/status"));
       const json = await res.json();
       return (json.data ?? json) as AutoTraderStatus;
     },
@@ -155,7 +173,7 @@ export function useAutoTraderConfig() {
   return useQuery({
     queryKey: ["auto-trader-config"],
     queryFn: async () => {
-      const res = await fetch("/api/auto-trader/config");
+      const res = await fetch(apiUrl("/api/auto-trader/config"));
       const json = await res.json();
       return (json.data ?? json) as AutoTraderConfig;
     },
@@ -166,7 +184,7 @@ export function useAutoTraderHistory() {
   return useQuery({
     queryKey: ["auto-trader-history"],
     queryFn: async () => {
-      const res = await fetch("/api/auto-trader/history");
+      const res = await fetch(apiUrl("/api/auto-trader/history"));
       const json = await res.json();
       return (json.data ?? json) as CycleRecord[];
     },
@@ -178,7 +196,7 @@ export function useWatchlist() {
   return useQuery({
     queryKey: ["watchlist"],
     queryFn: async () => {
-      const res = await fetch("/api/watchlist");
+      const res = await fetch(apiUrl("/api/watchlist"));
       const json = await res.json();
       return (json.data ?? json) as any[];
     },
@@ -190,7 +208,7 @@ export function useClosePosition() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: async (positionId: string) => {
-      await fetch("/api/paper-sell", {
+      await fetch(apiUrl("/api/paper-sell"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ positionId }),
@@ -208,7 +226,7 @@ export function useResetAccount() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: async () => {
-      const res = await fetch("/api/reset", { method: "POST" });
+      const res = await fetch(apiUrl("/api/reset"), { method: "POST" });
       if (!res.ok) throw new Error("Reset failed");
     },
     onSuccess: () => {
@@ -227,7 +245,7 @@ export function useDeleteClosedTrade() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: async (positionId: string) => {
-      const res = await fetch(`/api/positions/history/${positionId}`, { method: "DELETE" });
+      const res = await fetch(apiUrl(`/api/positions/history/${positionId}`), { method: "DELETE" });
       if (!res.ok) {
         const json = await res.json();
         throw new Error(json.error ?? "Delete failed");
@@ -254,7 +272,7 @@ export function useEditClosedTrade() {
       note?: string;
     }) => {
       const { positionId, ...body } = payload;
-      const res = await fetch(`/api/positions/history/${positionId}`, {
+      const res = await fetch(apiUrl(`/api/positions/history/${positionId}`), {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
@@ -278,7 +296,7 @@ export function useAddWatchlist() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: async (data: { pairAddress: string; note?: string }) => {
-      await fetch("/api/watchlist", {
+      await fetch(apiUrl("/api/watchlist"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(data),
@@ -294,7 +312,7 @@ export function useRemoveWatchlist() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: async (pairAddress: string) => {
-      await fetch(`/api/watchlist/${pairAddress}`, { method: "DELETE" });
+      await fetch(apiUrl(`/api/watchlist/${pairAddress}`), { method: "DELETE" });
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["watchlist"] });
@@ -306,7 +324,7 @@ export function useUpdateWatchlistNote() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: async (data: { pairAddress: string; note: string }) => {
-      await fetch(`/api/watchlist/${data.pairAddress}`, {
+      await fetch(apiUrl(`/api/watchlist/${data.pairAddress}`), {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ note: data.note }),
@@ -322,7 +340,7 @@ export function useMarkAlertRead() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: async (id: string) => {
-      await fetch(`/api/alerts/${id}/read`, { method: "PATCH" });
+      await fetch(apiUrl(`/api/alerts/${id}/read`), { method: "PATCH" });
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["alerts"] });
@@ -335,7 +353,7 @@ export function useMarkAllAlertsRead() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: async () => {
-      await fetch("/api/alerts/read-all", { method: "POST" });
+      await fetch(apiUrl("/api/alerts/read-all"), { method: "POST" });
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["alerts"] });
@@ -348,7 +366,7 @@ export function useClearAlerts() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: async () => {
-      await fetch("/api/alerts", { method: "DELETE" });
+      await fetch(apiUrl("/api/alerts"), { method: "DELETE" });
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["alerts"] });
@@ -361,7 +379,7 @@ export function usePauseAutoTrader() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: async () => {
-      await fetch("/api/auto-trader/pause", { method: "POST" });
+      await fetch(apiUrl("/api/auto-trader/pause"), { method: "POST" });
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["auto-trader-status"] });
@@ -373,7 +391,7 @@ export function useResumeAutoTrader() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: async () => {
-      await fetch("/api/auto-trader/resume", { method: "POST" });
+      await fetch(apiUrl("/api/auto-trader/resume"), { method: "POST" });
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["auto-trader-status"] });
@@ -398,7 +416,7 @@ export function useUpdateAutoTraderConfig() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: async (config: Partial<AutoTraderConfig>) => {
-      await fetch("/api/auto-trader/config", {
+      await fetch(apiUrl("/api/auto-trader/config"), {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(config),

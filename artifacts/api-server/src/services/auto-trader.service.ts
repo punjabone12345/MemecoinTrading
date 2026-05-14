@@ -410,8 +410,11 @@ class AutoTraderService {
 
       const pairs: DexScreenerPair[] = [];
       for (const r of results) {
-        if (r.status === "fulfilled" && Array.isArray(r.value.data.pairs)) {
-          pairs.push(...r.value.data.pairs.filter((p) => p.chainId === "solana"));
+        if (r.status === "fulfilled") {
+          const data = r.value.data;
+          // /tokens/v1/solana/{addresses} returns a bare array [], NOT { pairs: [] }
+          const arr: DexScreenerPair[] = Array.isArray(data) ? data : (data as { pairs: DexScreenerPair[] }).pairs ?? [];
+          pairs.push(...arr.filter((p) => p.chainId === "solana"));
         }
       }
       return pairs;

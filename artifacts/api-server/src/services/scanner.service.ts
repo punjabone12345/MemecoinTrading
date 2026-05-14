@@ -10,12 +10,12 @@ const DEXSCREENER_BASE = "https://api.dexscreener.com";
 // 5 s interval × 30 parallel queries = 6 req/s = 360 req/min
 // DexScreener public limit is ~300 req/min so we cap parallel at 25 per tick
 const SCAN_INTERVAL_MS      = 5_000;
-const QUERIES_PER_SCAN      = 25;   // keyword queries per scan tick
+const QUERIES_PER_SCAN      = 30;   // keyword queries per scan tick (was 25)
 const MAX_RESULTS_PER_QUERY = 30;   // DexScreener returns up to 30 per search
 
 // ─── Pool lifecycle ───────────────────────────────────────────────────────────
 const CLEANUP_INTERVAL_MS  = 2 * 60 * 1_000;
-const TOKEN_TTL_MS         = 45 * 60 * 1_000;   // keep tokens for 45 min
+const TOKEN_TTL_MS         = 20 * 60 * 1_000;   // keep tokens for 20 min (was 45) — faster churn = fresher pool
 const MAX_POOL_AGE_HOURS   = 72;
 const MAX_POOL_AGE_MS      = MAX_POOL_AGE_HOURS * 60 * 60 * 1_000;
 const MIN_POOL_LIQUIDITY_USD = 500;              // wide net — auto-trader filters more tightly
@@ -236,13 +236,14 @@ class ScannerService {
   }
 
   // ── Source 3: Batch-fetch by token addresses ───────────────────────────────
+  // NOTE: /tokens/v1/solana/{addresses} returns a bare array [], NOT { pairs: [] }
   private async fetchPairsForTokenAddresses(addresses: string[]): Promise<DexScreenerPair[]> {
     const chunks: string[][] = [];
     for (let i = 0; i < addresses.length; i += 30) chunks.push(addresses.slice(i, i + 30));
 
     const results = await Promise.allSettled(
       chunks.map((chunk) =>
-        axios.get<{ pairs: DexScreenerPair[] }>(
+        axios.get<DexScreenerPair[] | { pairs: DexScreenerPair[] }>(
           `${DEXSCREENER_BASE}/tokens/v1/solana/${chunk.join(",")}`,
           { timeout: 8000 },
         ),
@@ -251,8 +252,11 @@ class ScannerService {
 
     const pairs: DexScreenerPair[] = [];
     for (const r of results) {
-      if (r.status === "fulfilled" && Array.isArray(r.value.data.pairs)) {
-        pairs.push(...r.value.data.pairs.filter((p) => p.chainId === "solana"));
+      if (r.status === "fulfilled") {
+        const data = r.value.data;
+        // API returns a bare array — handle both formats defensively
+        const arr: DexScreenerPair[] = Array.isArray(data) ? data : (data as { pairs: DexScreenerPair[] }).pairs ?? [];
+        pairs.push(...arr.filter((p) => p.chainId === "solana"));
       }
     }
     return pairs;
@@ -423,11 +427,14 @@ class ScannerService {
    */
   async getPairByContractAddress(contractAddress: string, preferPairAddress?: string): Promise<DexScreenerPair | null> {
     try {
-      const res = await axios.get<{ pairs: DexScreenerPair[] }>(
+      const res = await axios.get<DexScreenerPair[] | { pairs: DexScreenerPair[] }>(
         `${DEXSCREENER_BASE}/tokens/v1/solana/${contractAddress}`,
         { timeout: 8000 },
       );
-      const pairs = (res.data.pairs ?? []).filter((p) => p.chainId === "solana");
+      // /tokens/v1/solana/{address} returns a bare array [], NOT { pairs: [] }
+      const data = res.data;
+      const rawPairs: DexScreenerPair[] = Array.isArray(data) ? data : (data as { pairs: DexScreenerPair[] }).pairs ?? [];
+      const pairs = rawPairs.filter((p) => p.chainId === "solana");
       if (pairs.length === 0) return null;
       if (preferPairAddress) {
         const exact = pairs.find((p) => p.pairAddress === preferPairAddress);

@@ -1,6 +1,17 @@
 import axios from "axios";
+import { GoogleGenAI } from "@google/genai";
 import { logger } from "../lib/logger.js";
 import type { DexScreenerPair } from "../types/index.js";
+
+// ─── Gemini client (Replit AI Integrations or direct key) ─────────────────────
+function getGeminiClient(): GoogleGenAI {
+  const baseUrl = process.env["AI_INTEGRATIONS_GEMINI_BASE_URL"];
+  const apiKey  = process.env["AI_INTEGRATIONS_GEMINI_API_KEY"] ?? process.env["GEMINI_API_KEY"] ?? "no-key";
+  if (baseUrl) {
+    return new GoogleGenAI({ apiKey, httpOptions: { apiVersion: "", baseUrl } });
+  }
+  return new GoogleGenAI({ apiKey });
+}
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -140,38 +151,35 @@ function parseJsonVerdict(raw: string): Omit<LlmAnalysis, "provider" | "duration
   }
 }
 
-// ─── Gemini (primary) — via Replit AI Integrations ───────────────────────────
+// ─── Gemini (primary) — via Replit AI Integrations or direct key ─────────────
 
 async function callGemini(prompt: string, timeoutMs: number): Promise<string> {
-  const baseUrl = process.env["AI_INTEGRATIONS_GEMINI_BASE_URL"];
-  const apiKey  = process.env["AI_INTEGRATIONS_GEMINI_API_KEY"] ?? process.env["GEMINI_API_KEY"];
+  const hasIntegration = Boolean(process.env["AI_INTEGRATIONS_GEMINI_BASE_URL"]);
+  const hasDirectKey   = Boolean(process.env["GEMINI_API_KEY"]);
+  if (!hasIntegration && !hasDirectKey) throw new Error("No Gemini credentials configured");
 
-  // Use Replit AI Integrations endpoint when available, fall back to direct Gemini
-  const url = baseUrl
-    ? `${baseUrl}/v1beta/models/gemini-2.5-flash:generateContent`
-    : `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+  const ai = getGeminiClient();
 
-  if (!baseUrl && !apiKey) throw new Error("No Gemini credentials configured");
+  const abortCtrl = new AbortController();
+  const timer = setTimeout(() => abortCtrl.abort(), timeoutMs);
 
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (baseUrl && apiKey) headers["x-goog-api-key"] = apiKey;
-
-  const res = await axios.post(
-    url,
-    {
-      contents: [{ parts: [{ text: prompt }] }],
-      generationConfig: {
+  try {
+    const response = await ai.models.generateContent({
+      model: "gemini-2.5-flash",
+      contents: [{ role: "user", parts: [{ text: prompt }] }],
+      config: {
         temperature: 0.1,
         maxOutputTokens: 8192,
         responseMimeType: "application/json",
       },
-    },
-    { timeout: timeoutMs, headers },
-  );
+    });
 
-  const text: string = res.data?.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
-  if (!text) throw new Error("Gemini returned empty response");
-  return text;
+    const text = response.text ?? "";
+    if (!text) throw new Error("Gemini returned empty response");
+    return text;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // ─── Groq (fallback) ──────────────────────────────────────────────────────────
