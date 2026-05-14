@@ -28,13 +28,13 @@ args = "Apex Meme Trader"
 name = "API Server"
 author = "agent"
 
-[[workflows.workflow.tasks]]
-task = "shell.exec"
-args = "pnpm --filter @workspace/api-server run dev"
-waitForPort = 8080
-
 [workflows.workflow.metadata]
 outputType = "console"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "cd artifacts/api-server && pnpm run dev"
+waitForPort = 8080
 
 [[workflows.workflow]]
 name = "Apex Meme Trader"
@@ -45,8 +45,8 @@ outputType = "webview"
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "PORT=5173 pnpm --filter @workspace/terminal run dev"
-waitForPort = 5173
+args = "cd artifacts/terminal && pnpm run dev"
+waitForPort = 5000
 
 [agent]
 stack = "BEST_EFFORT_FALLBACK"
@@ -62,15 +62,11 @@ externalPort = 5173
 
 [[ports]]
 localPort = 8080
+externalPort = 8080
+
+[[ports]]
+localPort = 5000
 externalPort = 80
-
-[[ports]]
-localPort = 8081
-externalPort = 8081
-
-[[ports]]
-localPort = 25245
-externalPort = 3000
 
 [nix]
 channel = "stable-25_05"
