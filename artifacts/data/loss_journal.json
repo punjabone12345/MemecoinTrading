@@ -1,5 +1,30 @@
 [
   {
+    "positionId": "b5c6e7fe-e35d-43bf-bc2d-e36cad3adfac",
+    "symbol": "团结",
+    "contractAddress": "H9nrHLjxrWPzA4N6YDiCAoSD5aXMJ3APnfJuEfSbpump",
+    "openedAt": "2026-05-14T14:59:52.651Z",
+    "closedAt": "2026-05-14T15:00:47.747Z",
+    "holdTimeMs": 55096,
+    "pnlSol": -0.06176754118364858,
+    "pnlPercent": -12.353508236729716,
+    "aiScore": 90,
+    "confidence": 100,
+    "entryMcapUsd": 767759,
+    "entryLiquidityUsd": 73370.88,
+    "slPercent": 10,
+    "tpPercent": 80,
+    "tags": [
+      "rug_speed",
+      "high_fdv_risk"
+    ],
+    "warnings": [
+      "Closed in only 0.9m — instant rug despite all filters passing",
+      "TP was +80% but trade still lost — wide TP on a risky token is a bad combo"
+    ],
+    "recordedAt": 1778770847748
+  },
+  {
     "positionId": "e76afad6-196b-4fec-a53a-1b3e38f8d5cb",
     "symbol": "Rcc",
     "contractAddress": "B8H8iRXMLP7VmbBJx8GoBA9un7sAJbCwn8bWqGktpump",

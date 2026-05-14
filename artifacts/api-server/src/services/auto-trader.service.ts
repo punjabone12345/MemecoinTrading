@@ -531,9 +531,11 @@ class AutoTraderService {
           tpPercent,
         };
 
-        // Duplicate contract check — same symbol ≠ same token; use contract address
-        if (paperTradingService.hasOpenPositionForContract(token.address)) {
-          decisions.push({ ...base, action: "skipped_duplicate", reason: `Already trading this contract (${token.address.slice(0, 8)}…) as ${token.symbol}` });
+        // One-trade-per-coin rule: block re-entry for any contract that has
+        // ever been traded (open OR closed). Prevents the AI from re-buying
+        // the same coin after a stop-loss or take-profit.
+        if (paperTradingService.hasEverTradedContract(token.address)) {
+          decisions.push({ ...base, action: "skipped_duplicate", reason: `Already traded this contract (${token.address.slice(0, 8)}…) as ${token.symbol} — no re-entry allowed` });
           continue;
         }
 

@@ -127,6 +127,16 @@ class PaperTradingService {
     return this.openContracts.has(contractAddress);
   }
 
+  /**
+   * Returns true if this contract address has EVER been traded —
+   * either currently open OR already closed. Used to enforce the
+   * "one trade per coin, ever" rule and prevent re-entry after SL/TP.
+   */
+  hasEverTradedContract(contractAddress: string): boolean {
+    if (this.openContracts.has(contractAddress)) return true;
+    return this.closedTrades.some((t) => t.contractAddress === contractAddress);
+  }
+
   async buyDirect(token: ScannedToken, sizeSol: number, slOverridePct?: number): Promise<Position> {
     if (sizeSol <= 0) throw new Error("sizeSol must be positive");
     if (sizeSol > this.solBalance) {
