@@ -73,6 +73,13 @@ export interface CycleDecision {
   action: "traded" | "filtered" | "skipped_duplicate" | "skipped_slots" | "skipped_balance";
   reason: string;
   positionId?: string;
+  llmVerdict?: "TRADE" | "SKIP" | "RISKY" | "none";
+  llmConfidence?: number;
+  llmReasoning?: string;
+  llmRisks?: string[];
+  llmStrengths?: string[];
+  llmProvider?: string;
+  llmDurationMs?: number;
 }
 
 export interface CycleRecord {

@@ -40,31 +40,87 @@ function holdLabel(mins: number) {
   return m > 0 ? `${h}h ${m}m` : `${h}h`;
 }
 
+function LlmBadge({ verdict, provider, confidence }: { verdict?: string; provider?: string; confidence?: number }) {
+  if (!verdict || verdict === "none" || !provider || provider === "none") return null;
+  const colors: Record<string, string> = {
+    TRADE: "bg-emerald-500/20 text-emerald-300 border-emerald-500/30",
+    RISKY: "bg-amber-500/20 text-amber-300 border-amber-500/30",
+    SKIP:  "bg-red-500/20 text-red-300 border-red-500/30",
+  };
+  const cls = colors[verdict] ?? "bg-white/10 text-white/50 border-white/10";
+  const providerLabel = provider === "gemini" ? "Gemini" : provider === "groq" ? "Groq" : provider;
+  return (
+    <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded border text-[9px] font-semibold ${cls}`}>
+      <span>{verdict}</span>
+      <span className="opacity-60">·</span>
+      <span className="opacity-70">{providerLabel}</span>
+      {confidence !== undefined && confidence > 0 && (
+        <><span className="opacity-60">·</span><span className="opacity-70">{confidence}%</span></>
+      )}
+    </span>
+  );
+}
+
 function DecisionRow({ d }: { d: CycleDecision }) {
   const isTraded = d.action === "traded";
   const isFiltered = d.action === "filtered";
+  const [expanded, setExpanded] = useState(false);
 
   const Icon = isTraded ? CheckCircle2 : isFiltered ? XCircle : SkipForward;
   const iconColor = isTraded ? "text-emerald-400" : isFiltered ? "text-red-400" : "text-white/30";
+  const hasLlm = d.llmProvider && d.llmProvider !== "none";
+  const hasDetail = hasLlm && ((d.llmRisks && d.llmRisks.length > 0) || (d.llmStrengths && d.llmStrengths.length > 0));
 
   return (
-    <div className={`flex items-start gap-2.5 py-2.5 border-b border-white/5 last:border-0`}>
-      <Icon className={`w-3.5 h-3.5 mt-0.5 shrink-0 ${iconColor}`} />
-      <div className="flex-1 min-w-0">
-        <div className="flex items-center gap-2 flex-wrap">
-          <span className="font-bold text-white text-xs">${d.symbol}</span>
-          <span className="text-white/30 text-[10px]">Score {d.aiScore}</span>
-          <span className="text-white/30 text-[10px]">Liq {formatK(d.liquidityUsd)}</span>
-          <span className="text-white/30 text-[10px]">MCap {formatK(d.marketCapUsd)}</span>
-          <span className="text-white/30 text-[10px]">Vol24h {formatK(d.volume24hUsd)}</span>
-          {d.pairAgeMinutes > 0 && (
-            <span className="text-white/30 text-[10px]">{holdLabel(d.pairAgeMinutes)} old</span>
+    <div className="border-b border-white/5 last:border-0">
+      <div
+        className={`flex items-start gap-2.5 py-2.5 ${hasDetail ? "cursor-pointer" : ""}`}
+        onClick={() => hasDetail && setExpanded(e => !e)}
+      >
+        <Icon className={`w-3.5 h-3.5 mt-0.5 shrink-0 ${iconColor}`} />
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="font-bold text-white text-xs">${d.symbol}</span>
+            <span className="text-white/30 text-[10px]">Score {d.aiScore}</span>
+            <span className="text-white/30 text-[10px]">Liq {formatK(d.liquidityUsd)}</span>
+            <span className="text-white/30 text-[10px]">MCap {formatK(d.marketCapUsd)}</span>
+            <span className="text-white/30 text-[10px]">Vol24h {formatK(d.volume24hUsd)}</span>
+            {d.pairAgeMinutes > 0 && (
+              <span className="text-white/30 text-[10px]">{holdLabel(d.pairAgeMinutes)} old</span>
+            )}
+            <LlmBadge verdict={d.llmVerdict} provider={d.llmProvider} confidence={d.llmConfidence} />
+          </div>
+          <p className={`text-[10px] mt-0.5 ${isTraded ? "text-emerald-400/80" : isFiltered ? "text-red-400/70" : "text-white/30"}`}>
+            {d.reason}
+          </p>
+          {hasLlm && d.llmReasoning && (
+            <p className="text-[10px] mt-0.5 text-white/40 italic">{d.llmReasoning}</p>
           )}
         </div>
-        <p className={`text-[10px] mt-0.5 ${isTraded ? "text-emerald-400/80" : isFiltered ? "text-red-400/70" : "text-white/30"}`}>
-          {d.reason}
-        </p>
+        {hasDetail && (
+          <span className="text-white/20 text-[10px] mt-0.5 shrink-0">{expanded ? "▲" : "▼"}</span>
+        )}
       </div>
+      {expanded && hasDetail && (
+        <div className="ml-6 mb-2.5 grid grid-cols-2 gap-2">
+          {d.llmStrengths && d.llmStrengths.length > 0 && (
+            <div>
+              <p className="text-[9px] font-semibold text-emerald-400/70 uppercase tracking-wide mb-1">Strengths</p>
+              {d.llmStrengths.map((s, i) => (
+                <p key={i} className="text-[10px] text-emerald-300/60 leading-snug">+ {s}</p>
+              ))}
+            </div>
+          )}
+          {d.llmRisks && d.llmRisks.length > 0 && (
+            <div>
+              <p className="text-[9px] font-semibold text-red-400/70 uppercase tracking-wide mb-1">Risks</p>
+              {d.llmRisks.map((r, i) => (
+                <p key={i} className="text-[10px] text-red-300/60 leading-snug">- {r}</p>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

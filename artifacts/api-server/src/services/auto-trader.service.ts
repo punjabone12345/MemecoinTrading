@@ -5,6 +5,7 @@ import { paperTradingService } from "./paper-trading.service.js";
 import { scannerService } from "./scanner.service.js";
 import { computeSignals, computeAiScore, computeConfidence, getDynamicRisk } from "./ai-scoring.service.js";
 import { mapPairToToken } from "./scanner.service.js";
+import { analyseTokenWithAi, buildAnalysisInput } from "./ai-analysis.service.js";
 import type { DexScreenerPair } from "../types/index.js";
 
 const DEXSCREENER_BASE = "https://api.dexscreener.com";
@@ -62,6 +63,13 @@ export interface CycleDecision {
   action: "traded" | "filtered" | "skipped_duplicate" | "skipped_slots" | "skipped_balance";
   reason: string;
   positionId?: string;
+  llmVerdict?: "TRADE" | "SKIP" | "RISKY" | "none";
+  llmConfidence?: number;
+  llmReasoning?: string;
+  llmRisks?: string[];
+  llmStrengths?: string[];
+  llmProvider?: string;
+  llmDurationMs?: number;
 }
 
 export interface CycleRecord {
@@ -686,23 +694,65 @@ class AutoTraderService {
         token.aiScore = c.aiScore;
         token.confidence = c.confidence;
 
-        try {
-          const position = await paperTradingService.buyDirect(token, solPerTrade);
+        // ── Layer 6: LLM pre-trade analysis (Gemini → Groq fallback) ──────────
+        const analysisInput = buildAnalysisInput(c.pair, c.symbol, c.tokenName, c.aiScore, c.confidence);
+        const llm = await analyseTokenWithAi(analysisInput);
+
+        const llmFields = {
+          llmVerdict: llm.verdict as "TRADE" | "SKIP" | "RISKY" | "none",
+          llmConfidence: llm.confidence,
+          llmReasoning: llm.reasoning,
+          llmRisks: llm.risks,
+          llmStrengths: llm.strengths,
+          llmProvider: llm.provider,
+          llmDurationMs: llm.durationMs,
+        };
+
+        if (llm.verdict === "SKIP" && llm.provider !== "none") {
           decisions.push({
             ...c,
+            ...llmFields,
+            action: "filtered",
+            reason: `LLM SKIP (${llm.provider}, ${llm.confidence}% confidence): ${llm.reasoning}`,
+          });
+          logger.info(
+            { symbol: c.symbol, provider: llm.provider, confidence: llm.confidence, reasoning: llm.reasoning },
+            "Auto-trader: LLM vetoed trade — SKIP",
+          );
+          continue;
+        }
+
+        // If RISKY, tighten stop-loss by 2 percentage points
+        let effectiveSlPercent = c.slPercent;
+        if (llm.verdict === "RISKY" && llm.provider !== "none") {
+          effectiveSlPercent = Math.max(c.slPercent - 2, 4);
+          logger.info(
+            { symbol: c.symbol, provider: llm.provider, originalSl: c.slPercent, effectiveSl: effectiveSlPercent, reasoning: llm.reasoning },
+            "Auto-trader: LLM flagged RISKY — tightening SL",
+          );
+        }
+
+        try {
+          const position = await paperTradingService.buyDirect(token, solPerTrade, effectiveSlPercent);
+          const llmTag = llm.provider !== "none"
+            ? ` | LLM:${llm.verdict}(${llm.provider},${llm.confidence}%)`
+            : " | LLM:unavailable";
+          decisions.push({
+            ...c,
+            ...llmFields,
             action: "traded",
-            reason: `Opened ${solPerTrade} SOL | Score ${c.aiScore} | SL -${c.slPercent}% | TP +${c.tpPercent}% | DexLiq $${Math.round(c.liquidityUsd).toLocaleString()} ✓`,
+            reason: `Opened ${solPerTrade} SOL | Score ${c.aiScore} | SL -${effectiveSlPercent}% | TP +${c.tpPercent}%${llmTag} | DexLiq $${Math.round(c.liquidityUsd).toLocaleString()} ✓`,
             positionId: position.positionId,
           });
           tradesOpened++;
           this.totalTradesOpened++;
           logger.info(
-            { positionId: position.positionId, symbol: c.symbol, aiScore: c.aiScore, dexLiq: c.liquidityUsd, vol24h: c.volume24hUsd, mcap: c.marketCapUsd },
-            "Auto-trader: DexScreener-verified trade opened",
+            { positionId: position.positionId, symbol: c.symbol, aiScore: c.aiScore, llmVerdict: llm.verdict, llmProvider: llm.provider, dexLiq: c.liquidityUsd },
+            "Auto-trader: LLM-verified trade opened",
           );
         } catch (err) {
           const msg = err instanceof Error ? err.message : "Unknown";
-          decisions.push({ ...c, action: "skipped_balance", reason: msg });
+          decisions.push({ ...c, ...llmFields, action: "skipped_balance", reason: msg });
           logger.warn({ err, symbol: c.symbol }, "Auto-trader: trade open failed");
         }
       }

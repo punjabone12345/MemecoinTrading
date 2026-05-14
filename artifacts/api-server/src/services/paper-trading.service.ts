@@ -126,7 +126,7 @@ class PaperTradingService {
     return this.openSymbols.has(symbol.toUpperCase());
   }
 
-  async buyDirect(token: ScannedToken, sizeSol: number): Promise<Position> {
+  async buyDirect(token: ScannedToken, sizeSol: number, slOverridePct?: number): Promise<Position> {
     if (sizeSol <= 0) throw new Error("sizeSol must be positive");
     if (sizeSol > this.solBalance) {
       throw new Error(`Insufficient balance. Available: ${this.solBalance.toFixed(4)} SOL`);
@@ -159,7 +159,8 @@ class PaperTradingService {
       logger.warn({ err, symbol: token.symbol }, "DexScreener price verification failed at entry — using scanner price");
     }
 
-    const { slPercent, tpPercent } = getDynamicRisk(token.aiScore);
+    const { slPercent: defaultSlPct, tpPercent } = getDynamicRisk(token.aiScore);
+    const slPercent = slOverridePct !== undefined ? slOverridePct : defaultSlPct;
     const slPrice = verifiedPriceUsd * (1 - slPercent / 100);
     const tpPrice = verifiedPriceUsd * (1 + tpPercent / 100);
 
