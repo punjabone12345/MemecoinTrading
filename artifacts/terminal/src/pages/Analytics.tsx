@@ -58,7 +58,7 @@ export default function Analytics() {
     .slice(-14)
     .map(([date, pnl]) => ({ date: date.slice(5), pnl }));
 
-  const winRate = (analytics.winRate * 100).toFixed(1);
+  const winRate = analytics.winRate.toFixed(1);
 
   return (
     <div className="px-4 py-4 space-y-4">

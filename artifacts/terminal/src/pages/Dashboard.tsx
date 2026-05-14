@@ -108,7 +108,7 @@ export default function Dashboard() {
             <span className="text-white/50 text-xs font-medium">Win Rate</span>
           </div>
           <p className="text-2xl font-black text-white">
-            {analytics ? `${(analytics.winRate * 100).toFixed(1)}%` : "—"}
+            {analytics ? `${analytics.winRate.toFixed(1)}%` : "—"}
           </p>
         </div>
       </div>
