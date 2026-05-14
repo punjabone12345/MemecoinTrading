@@ -10,34 +10,43 @@ import type { DexScreenerPair, ScannedToken } from "../types/index.js";
 const DEXSCREENER_BASE = "https://api.dexscreener.com";
 const SCAN_INTERVAL_MS = 4_000;
 const CLEANUP_INTERVAL_MS = 2 * 60 * 1_000;
-const TOKEN_TTL_MS = 15 * 60 * 1_000;
-const HIGH_AI_SCORE_THRESHOLD = 80;
-// Run 8 keyword queries per scan (up from 5) to compensate for removed GeckoTerminal
-const QUERIES_PER_SCAN = 8;
-// Run boosted/profiled every scan (up from every 3) — these are DexScreener's
-// own curated token lists and always have accurate data
+// Keep tokens in pool for 45 min — long enough to build a rich pool
+const TOKEN_TTL_MS = 45 * 60 * 1_000;
+const HIGH_AI_SCORE_THRESHOLD = 65;
+// 14 keyword queries per scan — wide net to find fresh memecoins
+const QUERIES_PER_SCAN = 14;
+// Run boosted/profiled every scan — DexScreener's own curated lists
 const BOOSTED_EVERY_N_SCANS = 1;
 
-// Max age to store in pool — tokens older than this are skipped before storing
-const MAX_POOL_AGE_HOURS = 48;
+// Max age to store in pool
+const MAX_POOL_AGE_HOURS = 72;
 const MAX_POOL_AGE_MS = MAX_POOL_AGE_HOURS * 60 * 60 * 1_000;
 
-// Min liquidity to accept — $0 liquidity tokens are useless
-// This is DexScreener's real liquidity value — no more fabricated numbers
+// Min liquidity — anything above $500 goes into the pool; the auto-trader
+// applies its own stricter floor. Wide scanner = more candidates to pick from.
 const MIN_POOL_LIQUIDITY_USD = 500;
 
-// 50 rotating keywords — broad coverage to discover new Solana memecoins
-// via DexScreener's own search engine (returns accurate, real-time data)
+// 80 rotating keywords — diverse enough to surface fresh launches across all
+// the current trending meme categories on Solana. DexScreener search returns
+// pairs sorted by relevance so short, punchy terms surface the most active ones.
 const MEME_QUERIES = [
-  "pump", "pepe", "cat", "dog", "ai", "moon", "based",
-  "trump", "elon", "meme", "inu", "shib", "bonk", "wif",
-  "sol", "baby", "degen", "giga", "chad", "frog",
-  "wojak", "cope", "sigma", "ape", "bear", "bull",
-  "send", "wen", "new", "launch",
-  "solana", "raydium", "meteora", "pumpfun", "letsbonk",
-  "420", "1000x", "gem", "alpha", "fire", "hot",
-  "king", "queen", "max", "ultra", "super", "mega",
-  "dragon", "tiger", "wolf", "eagle",
+  // Animals
+  "cat", "dog", "inu", "frog", "wolf", "bear", "bull", "fish", "rat", "crab",
+  "penguin", "hamster", "goat", "pig", "shib", "bonk", "wif", "bird", "snake",
+  // People/culture
+  "trump", "elon", "pepe", "chad", "sigma", "degen", "baby", "giga", "wojak",
+  "cope", "ape", "based", "send", "wen", "bro", "king", "god",
+  // Meme terms
+  "moon", "pump", "gem", "alpha", "fire", "hot", "new", "launch", "1000x",
+  "420", "mega", "super", "ultra", "max", "meme", "ai", "hype",
+  // Solana-specific
+  "sol", "solana", "raydium", "meteora", "pumpfun", "letsbonk", "jup",
+  // Crypto slang
+  "gm", "wagmi", "ngmi", "rekt", "shill", "gg", "fud", "hodl", "bags",
+  // Current trending patterns
+  "dragon", "tiger", "eagle", "phoenix", "nuke", "rocket", "laser", "blaze",
+  // More variety
+  "pnut", "moodeng", "popcat", "goat", "act", "chillguy", "fwog", "popo",
 ];
 let queryRotation = 0;
 
@@ -244,8 +253,8 @@ class ScannerService {
             p.chainId === "solana" &&
             !["SOL", "USDC", "USDT", "WSOL"].includes(p.baseToken.symbol),
         );
-        // Top 15 per keyword — DexScreener search sorts by relevance+activity
-        pairs.push(...filtered.slice(0, 15));
+        // Top 20 per keyword — DexScreener search sorts by relevance+activity
+        pairs.push(...filtered.slice(0, 20));
       }
     }
     return pairs;

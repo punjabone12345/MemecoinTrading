@@ -86,74 +86,64 @@ export interface AutoTraderStatus {
   config: AutoTraderConfig;
 }
 
-// ─── Default config: memecoin-realistic filters for Solana ───────────────────
+// ─── Default config: balanced quality + realistic Solana memecoin thresholds ─
 //
-// Tuned for actual Solana memecoin market conditions:
-//   - Fresh memecoins typically have $5K–$20K liquidity, not $30K+
-//   - Early tokens have low 24h volume — they haven't been live long enough
-//   - Micro-cap sweet spot is $8K–$5M for maximum upside
-//   - Confidence is lower for new tokens (sparse data) — soften that gate
-//   - All rug guards (liq/mcap ratio, age window, dump %, wash trade) remain strict
+// Philosophy: quality filters PLUS realistic floors for how Solana memecoins
+// actually look. Most fresh launches have $5K–$30K liquidity, sub-$1M mcap,
+// and strong 1h momentum. We must catch these early without trading rugs.
 //
-// ─── Default config: quality-first, memecoin-realistic ───────────────────────
+// Quality levers (these enforce conviction):
+//   minAiScore:       62   → top ~25% of scanned tokens — real signals only
+//   minBuyRatio1h:  0.55   → majority are buying, not selling
+//   minPriceChange1h:  3   → actively moving up, not stale
+//   minPairAgeMinutes: 10  → survived the first 10 min (most rugs die in <5m)
+//   Layer-2 rug guards     → always enforced regardless of config
 //
-// Philosophy: fewer, higher-conviction trades are better than frequent ones.
-//
-// The AI score IS the quality gate — it already encodes momentum, buy pressure,
-// liquidity depth, and volume intensity. Raising the score floor to 70 ensures
-// only strong setups are traded. The absolute thresholds below are calibrated
-// to reflect what real early Solana memecoins look like (not to lower quality).
-//
-// Quality levers (keep these strict):
-//   minAiScore: 70         → only top-quartile signals
-//   minBuyRatio1h: 0.58    → buyers dominating sellers in the last hour
-//   minPriceChange1h: 3    → must be actively pumping (not flat)
-//   maxPairAgeHours: 48    → tightened to 48h — fresh pumps only
-//   minLiquidityMcapRatio  → rug protection unchanged at 3%
-//
-// Realistic floors (corrected for real memecoin sizes — not quality reduction):
-//   minLiquidityUsd: 10K   → tradeable without massive slippage
-//   minVolume24hUsd: 20K   → some accumulated activity required
-//   minMcapUsd: 10K        → very micro-cap is OK if score is high
-//   minTransactions24h: 50 → real interest, not ghost chains
+// Realistic absolute floors (calibrated to real Solana memecoin data):
+//   minLiquidityUsd: 8K    → just enough depth to enter/exit without huge slippage
+//   minVolume24hUsd: 2K    → some real trading activity recorded
+//   minVolume1hUsd:  500   → something happening in the last hour
+//   minTransactions24h: 20 → not a ghost chain
+//   minMcapUsd: 10K        → micro-cap is fine; AI score guards quality
+//   maxMcapUsd: 20M        → avoid already-pumped large caps
 //
 const DEFAULT_CONFIG: AutoTraderConfig = {
   solPerTrade: 0.5,
-  maxConcurrentTrades: 2,
+  maxConcurrentTrades: 3,
 
   // ── AI quality ────────────────────────────────────────────────────────────
-  // 80+ is roughly the top 3% of scanned pool — only high-conviction signals.
-  minAiScore: 80,
-  minConfidence: 60,
+  // 62+ covers top ~25% of the pool. Score already encodes momentum, buy
+  // pressure, liquidity depth, and volume intensity — it IS the quality gate.
+  minAiScore: 62,
+  minConfidence: 50,
 
   // ── Liquidity & volume ────────────────────────────────────────────────────
-  // These thresholds now apply to DexScreener-VERIFIED data (not GeckoTerminal).
-  // GeckoTerminal inflates liquidity figures — the real check is what DexScreener
-  // actually shows. $50K is the true floor for a non-drainable pool.
-  minLiquidityUsd: 50_000,      // $50K verified on DexScreener — hard to drain
-  minVolume24hUsd: 10_000,      // real sustained activity over 24h
-  minVolume1hUsd: 5_000,        // $5K last hour — actively being traded RIGHT NOW
+  // Real fresh Solana memecoins: $5K–$50K liquidity is the norm.
+  // $50K is what large established tokens have — not realistic for new launches.
+  minLiquidityUsd: 8_000,       // $8K — tradeable with low slippage
+  minVolume24hUsd: 2_000,       // $2K 24h — some real activity
+  minVolume1hUsd:  500,         // $500 in the last hour — actively traded NOW
 
   // ── Momentum ─────────────────────────────────────────────────────────────
-  minBuyRatio1h: 0.60,          // 60% organic buy dominance
-  minPriceChange1h: 10,         // +10% minimum — must be a genuine active pump
-  minTransactions24h: 50,       // 50+ unique txns prove real activity
+  minBuyRatio1h: 0.52,          // 52% buys vs sells — slight buyer majority
+  minPriceChange1h: 3,          // +3% minimum — not flat or declining
+  minTransactions24h: 20,       // 20+ txns — real wallets, not ghost chain
 
   // ── Market cap ────────────────────────────────────────────────────────────
-  minMcapUsd: 50_000,           // sub-$50K mcap is too easy to fully exit
-  maxMcapUsd: 10_000_000,
+  minMcapUsd: 10_000,           // $10K — any real token has this
+  maxMcapUsd: 20_000_000,       // $20M — avoid large caps with no room to run
 
   // ── Pair age ──────────────────────────────────────────────────────────────
-  // Rugs happen in the first 1–15 min. Surviving 25+ min with LP intact is
-  // a much stronger signal that this is a real token not a 30-second exit scam.
-  minPairAgeMinutes: 25,
-  maxPairAgeHours: 48,
+  // 10 min of survival with LP intact is meaningful — rugs die in <5 min.
+  // 72h max so we're still trading active/relevant tokens.
+  minPairAgeMinutes: 10,
+  maxPairAgeHours: 72,
 
-  // ── Rug guards ────────────────────────────────────────────────────────────
-  minLiquidityMcapRatio: 0.05,  // 5% liq/mcap — tighter than before
-  maxFdvMcapRatio: 5.0,         // FDV ≤ 5× mcap
-  maxPriceDropH6Pct: -25,
-  maxPriceDropH24Pct: -40,
+  // ── Rug guards (calibrated for memecoin liq/mcap ratios) ─────────────────
+  minLiquidityMcapRatio: 0.03,  // 3% liq/mcap — standard memecoin safety floor
+  maxFdvMcapRatio: 8.0,         // FDV ≤ 8× mcap — pump.fun often has high FDV
+  maxPriceDropH6Pct: -30,       // not crashed more than 30% in 6h
+  maxPriceDropH24Pct: -50,      // not crashed more than 50% in 24h
 };
 
 // ─── Anti-rug + quality filter ────────────────────────────────────────────────
@@ -208,11 +198,20 @@ export function qualityFilter(pair: DexScreenerPair, cfg: AutoTraderConfig): Fil
   // LAYER 2 — RUG DETECTION (hardcoded — cannot be overridden by config)
   // ═══════════════════════════════════════════════════════════════════════════
 
-  // 2a. Pool drain — if 5m volume is ≥75% of current liquidity, someone is
-  //     burning through the LP pool at an unsustainable rate. This is the
-  //     #1 signal of an imminent rug (dev swaps everything then pulls LP).
-  if (vol5m > 0 && liq > 0 && vol5m >= liq * 0.75)
-    return fail(`Pool drain: 5m vol $${Math.round(vol5m).toLocaleString()} is ${((vol5m / liq) * 100).toFixed(0)}% of liquidity — LP being drained`);
+  // 2a. Pool drain — extreme volume spike in 5m relative to liquidity is a
+  //     classic rug signal. BUT: during a legitimate pump, 5m volume is HIGH
+  //     while price goes UP. We only flag drain when volume is extreme (>150%
+  //     of LP) OR when high volume coincides with a falling price (selling into
+  //     LP = actual drain). A rising price with high volume = healthy pump.
+  const drainRatio = liq > 0 ? vol5m / liq : 0;
+  if (vol5m > 0 && liq > 0) {
+    // Absolute drain: 5m vol > 2× LP regardless of price direction
+    if (drainRatio >= 2.0)
+      return fail(`Pool drain: 5m vol $${Math.round(vol5m).toLocaleString()} is ${(drainRatio * 100).toFixed(0)}% of liquidity — LP being drained`);
+    // Moderate drain WITH falling price: selling into LP, price collapsing
+    if (drainRatio >= 0.75 && (pc5m !== null && pc5m < -5))
+      return fail(`Pool drain + dump: 5m vol ${(drainRatio * 100).toFixed(0)}% of LP and price down ${pc5m?.toFixed(1)}% — LP being drained`);
+  }
 
   // 2b. Bot accumulation (5m) — ≥95% buys in the last 5 min with real activity.
   //     Organic trading always has some sellers. Near-100% buys = insider/bot
