@@ -140,23 +140,33 @@ function parseJsonVerdict(raw: string): Omit<LlmAnalysis, "provider" | "duration
   }
 }
 
-// ─── Gemini (primary) ─────────────────────────────────────────────────────────
+// ─── Gemini (primary) — via Replit AI Integrations ───────────────────────────
 
 async function callGemini(prompt: string, timeoutMs: number): Promise<string> {
-  const apiKey = process.env["GEMINI_API_KEY"];
-  if (!apiKey) throw new Error("GEMINI_API_KEY not set");
+  const baseUrl = process.env["AI_INTEGRATIONS_GEMINI_BASE_URL"];
+  const apiKey  = process.env["AI_INTEGRATIONS_GEMINI_API_KEY"] ?? process.env["GEMINI_API_KEY"];
+
+  // Use Replit AI Integrations endpoint when available, fall back to direct Gemini
+  const url = baseUrl
+    ? `${baseUrl}/v1beta/models/gemini-2.5-flash:generateContent`
+    : `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+
+  if (!baseUrl && !apiKey) throw new Error("No Gemini credentials configured");
+
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (baseUrl && apiKey) headers["x-goog-api-key"] = apiKey;
 
   const res = await axios.post(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key=${apiKey}`,
+    url,
     {
       contents: [{ parts: [{ text: prompt }] }],
       generationConfig: {
         temperature: 0.1,
-        maxOutputTokens: 300,
+        maxOutputTokens: 8192,
         responseMimeType: "application/json",
       },
     },
-    { timeout: timeoutMs },
+    { timeout: timeoutMs, headers },
   );
 
   const text: string = res.data?.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
