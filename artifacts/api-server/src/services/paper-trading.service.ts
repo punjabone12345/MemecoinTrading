@@ -18,6 +18,9 @@ const INITIAL_BALANCE_SOL = 100;
 const FEE_RATE = 0.003;
 const SLIPPAGE_RATE = 0.005;
 
+// After this many ms with no priceable data from DexScreener, treat as rug
+const RUG_TIMEOUT_MS = 8 * 60 * 1_000;
+
 function ensureDataDir() {
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 }
@@ -68,6 +71,8 @@ class PaperTradingService {
   private solBalance = INITIAL_BALANCE_SOL;
   private openSymbols: Set<string> = new Set();
   private positionBroadcaster: (() => void) | null = null;
+  // Latest verified price from DexScreener per pairAddress — updated by stop checker every 30s
+  private latestPrices: Map<string, { price: number; ts: number }> = new Map();
 
   constructor() {
     this.loadFromDisk();
@@ -131,9 +136,32 @@ class PaperTradingService {
       throw new Error(`Already have an open position for ${token.symbol}`);
     }
 
+    // Always verify entry price directly from DexScreener — scanner cache (esp. GeckoTerminal)
+    // can have stale or inaccurate prices that don't match what DexScreener actually shows.
+    let verifiedPriceUsd = token.priceUsd;
+    try {
+      const dexPair = await scannerService.getPairFromDex(token.pairAddress);
+      const dexPrice = parseFloat(dexPair?.priceUsd ?? "0");
+      if (dexPrice > 0) {
+        if (Math.abs(dexPrice - token.priceUsd) / token.priceUsd > 0.15) {
+          logger.warn(
+            { symbol: token.symbol, scannerPrice: token.priceUsd, dexPrice },
+            "Entry price mismatch >15% between scanner and DexScreener — using DexScreener price"
+          );
+        }
+        verifiedPriceUsd = dexPrice;
+        // Also update the latestPrices cache so PnL is immediately correct
+        this.latestPrices.set(token.pairAddress, { price: dexPrice, ts: Date.now() });
+      } else {
+        logger.warn({ symbol: token.symbol }, "DexScreener returned no price at entry — using scanner price");
+      }
+    } catch (err) {
+      logger.warn({ err, symbol: token.symbol }, "DexScreener price verification failed at entry — using scanner price");
+    }
+
     const { slPercent, tpPercent } = getDynamicRisk(token.aiScore);
-    const slPrice = token.priceUsd * (1 - slPercent / 100);
-    const tpPrice = token.priceUsd * (1 + tpPercent / 100);
+    const slPrice = verifiedPriceUsd * (1 - slPercent / 100);
+    const tpPrice = verifiedPriceUsd * (1 + tpPercent / 100);
 
     // Market cap projections
     const entryMarketCap = token.marketCap;
@@ -149,7 +177,7 @@ class PaperTradingService {
       pairAddress: token.pairAddress,
       contractAddress: token.address,
       imageUrl: token.imageUrl,
-      entryPrice: token.priceUsd,
+      entryPrice: verifiedPriceUsd,
       sizeSol,
       slPercent,
       tpPercent,
@@ -217,8 +245,28 @@ class PaperTradingService {
     const pos = this.openPositions.get(positionId);
     if (!pos) throw new Error(`Position not found: ${positionId}`);
 
-    const token = await scannerService.getOrFetchToken(pos.pairAddress);
-    const exitPrice = token?.priceUsd ?? pos.entryPrice;
+    // Resolve exit price — always prefer a DexScreener-verified price:
+    // 1. latestPrices cache (fresh from stop checker or entry verification)
+    // 2. fresh DexScreener fetch
+    // 3. slPrice when closing as stop_loss (rug with no available price)
+    // 4. entryPrice as absolute last resort (0% PnL — prefer slPrice for stop_loss)
+    let exitPrice: number;
+    const latestEntry = this.latestPrices.get(pos.pairAddress);
+    if (latestEntry && latestEntry.price > 0 && Date.now() - latestEntry.ts < 60_000) {
+      exitPrice = latestEntry.price;
+    } else {
+      const dexPair = await scannerService.getPairFromDex(pos.pairAddress);
+      const dexPrice = parseFloat(dexPair?.priceUsd ?? "0");
+      if (dexPrice > 0) {
+        exitPrice = dexPrice;
+        this.latestPrices.set(pos.pairAddress, { price: dexPrice, ts: Date.now() });
+      } else if (reason === "stop_loss") {
+        // No live price and closing as stop-loss → use slPrice (reflects the actual loss)
+        exitPrice = pos.slPrice;
+      } else {
+        exitPrice = pos.entryPrice;
+      }
+    }
 
     const { pnlSol, pnlPercent, netReturn } = this.computePnl(pos, exitPrice);
 
@@ -300,20 +348,41 @@ class PaperTradingService {
 
     for (const pos of Array.from(this.openPositions.values())) {
       try {
-        // Try scanner cache first; if expired, fetch directly from DexScreener
-        // Critical: SL/TP must fire even if token aged out of the 15-min scanner TTL
+        // Always fetch fresh from DexScreener — this is the authoritative price source.
+        // Scanner cache (especially GeckoTerminal) can lag or be stale.
         let price: number | null = null;
-        const cached = scannerService.getByPairAddress(pos.pairAddress);
-        if (cached && cached.priceUsd > 0) {
-          price = cached.priceUsd;
+        const dexPair = await scannerService.getPairFromDex(pos.pairAddress);
+        const dexPrice = parseFloat(dexPair?.priceUsd ?? "0");
+        if (dexPrice > 0) {
+          price = dexPrice;
+          // Keep latestPrices cache fresh for live PnL display
+          this.latestPrices.set(pos.pairAddress, { price: dexPrice, ts: Date.now() });
         } else {
-          logger.debug({ symbol: pos.symbol }, "Stop checker: token not in cache, fetching from DexScreener");
-          const fetched = await scannerService.getOrFetchToken(pos.pairAddress);
-          price = fetched?.priceUsd ?? null;
+          // DexScreener returned 0/null — token may have rugged (liquidity drained)
+          // Fall back to scanner cache as last resort
+          const cached = scannerService.getByPairAddress(pos.pairAddress);
+          if (cached && cached.priceUsd > 0) {
+            price = cached.priceUsd;
+            this.latestPrices.set(pos.pairAddress, { price: cached.priceUsd, ts: Date.now() });
+          }
         }
 
         if (!price || price <= 0) {
-          logger.warn({ symbol: pos.symbol, pairAddress: pos.pairAddress }, "Stop checker: could not get price — skipping");
+          // No price from DexScreener or cache — check if this looks like a rug
+          const holdMs = Date.now() - new Date(pos.openedAt).getTime();
+          const lastKnown = this.latestPrices.get(pos.pairAddress);
+          const msWithoutPrice = lastKnown ? Date.now() - lastKnown.ts : holdMs;
+
+          if (holdMs > RUG_TIMEOUT_MS && msWithoutPrice > RUG_TIMEOUT_MS) {
+            // Can't price for 8+ minutes → treat as rug, close at stop-loss
+            logger.warn(
+              { symbol: pos.symbol, holdMs, msWithoutPrice },
+              "Stop checker: no price for extended period — treating as rug, closing at SL"
+            );
+            await this.close(pos.positionId, "stop_loss");
+          } else {
+            logger.warn({ symbol: pos.symbol }, "Stop checker: no DexScreener price yet — will retry");
+          }
           continue;
         }
 
@@ -349,8 +418,30 @@ class PaperTradingService {
 
   getOpenPositionsWithLivePnl(): (Position & { livePnlSol: number; livePnlPercent: number; currentPrice: number })[] {
     return this.getOpenPositions().map((pos) => {
-      const token = scannerService.getByPairAddress(pos.pairAddress);
-      const currentPrice = token?.priceUsd ?? pos.entryPrice;
+      // Priority: (1) DexScreener-verified latestPrices cache updated by stop checker every 30s
+      //           (2) scanner cache as fallback
+      //           (3) slPrice if token has been unresolvable long enough (likely rugged)
+      //           (4) entryPrice only for brand-new positions not yet priced by the stop checker
+      const latestEntry = this.latestPrices.get(pos.pairAddress);
+      const scannerToken = scannerService.getByPairAddress(pos.pairAddress);
+
+      let currentPrice: number;
+      if (latestEntry && latestEntry.price > 0) {
+        currentPrice = latestEntry.price;
+      } else if (scannerToken && scannerToken.priceUsd > 0) {
+        currentPrice = scannerToken.priceUsd;
+      } else {
+        // Token not priceable — check if it's been open long enough to be suspicious
+        const holdMs = Date.now() - new Date(pos.openedAt).getTime();
+        if (holdMs > RUG_TIMEOUT_MS) {
+          // Show stop-loss price so the card reflects the true worst-case loss
+          currentPrice = pos.slPrice;
+        } else {
+          // Brand-new position, stop checker hasn't run yet — use entry price (0% PnL)
+          currentPrice = pos.entryPrice;
+        }
+      }
+
       const { pnlSol, pnlPercent } = this.computePnl(pos, currentPrice);
       return { ...pos, livePnlSol: pnlSol, livePnlPercent: pnlPercent, currentPrice };
     });
