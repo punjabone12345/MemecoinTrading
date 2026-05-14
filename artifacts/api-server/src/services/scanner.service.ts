@@ -7,11 +7,15 @@ import type { DexScreenerPair, ScannedToken } from "../types/index.js";
 const DEXSCREENER_BASE = "https://api.dexscreener.com";
 
 // ─── Timing & limits ─────────────────────────────────────────────────────────
-// 5 s interval × 30 parallel queries = 6 req/s = 360 req/min
-// DexScreener public limit is ~300 req/min so we cap parallel at 25 per tick
-const SCAN_INTERVAL_MS      = 5_000;
-const QUERIES_PER_SCAN      = 30;   // keyword queries per scan tick (was 25)
-const MAX_RESULTS_PER_QUERY = 30;   // DexScreener returns up to 30 per search
+// Budget: DexScreener public limit ≈ 300 req/min (5 req/s).
+// Scanner uses at most CONCURRENCY requests at a time with 200 ms between
+// batches → ~4 req/s peak for scanning, leaving ~1 req/s headroom for
+// the auto-trader's per-trade verification calls.
+const SCAN_INTERVAL_MS      = 8_000;  // 8 s between ticks (was 5 s)
+const QUERIES_PER_SCAN      = 20;     // queries per tick (was 30) — 20/8s = 2.5 req/s
+const SCAN_CONCURRENCY      = 5;      // max parallel DexScreener requests at once
+const SCAN_BATCH_DELAY_MS   = 200;    // ms pause between batches of SCAN_CONCURRENCY
+const MAX_RESULTS_PER_QUERY = 30;     // DexScreener returns up to 30 per search
 
 // ─── Pool lifecycle ───────────────────────────────────────────────────────────
 const CLEANUP_INTERVAL_MS  = 2 * 60 * 1_000;
@@ -169,8 +173,9 @@ class ScannerService {
 
   // ── Source 1: Broad keyword rotation ──────────────────────────────────────
   // Picks the next QUERIES_PER_SCAN slice from DISCOVERY_QUERIES (wraps around).
-  // Single-letter queries are the core improvement — each letter returns a
-  // completely different set of active tokens from DexScreener.
+  // Requests are issued in batches of SCAN_CONCURRENCY with SCAN_BATCH_DELAY_MS
+  // pauses between batches to avoid saturating DexScreener's rate limit and
+  // leaving headroom for the auto-trader's per-trade verification calls.
   private async fetchSearchPairs(): Promise<DexScreenerPair[]> {
     const queries: string[] = [];
     for (let i = 0; i < QUERIES_PER_SCAN; i++) {
@@ -178,26 +183,37 @@ class ScannerService {
       queryRotation++;
     }
 
-    const results = await Promise.allSettled(
-      queries.map((q) =>
-        axios.get<{ pairs: DexScreenerPair[] }>(
-          `${DEXSCREENER_BASE}/latest/dex/search?q=${encodeURIComponent(q)}`,
-          { timeout: 8000 },
-        ),
-      ),
-    );
-
     const pairs: DexScreenerPair[] = [];
-    for (const r of results) {
-      if (r.status === "fulfilled" && Array.isArray(r.value.data.pairs)) {
-        const filtered = r.value.data.pairs.filter(
-          (p) =>
-            p.chainId === "solana" &&
-            !["SOL", "USDC", "USDT", "WSOL"].includes(p.baseToken.symbol),
-        );
-        pairs.push(...filtered.slice(0, MAX_RESULTS_PER_QUERY));
+
+    // Process in batches of SCAN_CONCURRENCY
+    for (let offset = 0; offset < queries.length; offset += SCAN_CONCURRENCY) {
+      const batch = queries.slice(offset, offset + SCAN_CONCURRENCY);
+      const results = await Promise.allSettled(
+        batch.map((q) =>
+          axios.get<{ pairs: DexScreenerPair[] }>(
+            `${DEXSCREENER_BASE}/latest/dex/search?q=${encodeURIComponent(q)}`,
+            { timeout: 10_000 },
+          ),
+        ),
+      );
+
+      for (const r of results) {
+        if (r.status === "fulfilled" && Array.isArray(r.value.data.pairs)) {
+          const filtered = r.value.data.pairs.filter(
+            (p) =>
+              p.chainId === "solana" &&
+              !["SOL", "USDC", "USDT", "WSOL"].includes(p.baseToken.symbol),
+          );
+          pairs.push(...filtered.slice(0, MAX_RESULTS_PER_QUERY));
+        }
+      }
+
+      // Brief pause between batches — keeps scanner well under the rate limit
+      if (offset + SCAN_CONCURRENCY < queries.length) {
+        await new Promise((r) => setTimeout(r, SCAN_BATCH_DELAY_MS));
       }
     }
+
     return pairs;
   }
 
@@ -408,7 +424,8 @@ class ScannerService {
     return this.tokens.get(pairAddress);
   }
 
-  /** GET with up to `retries` retries on 429 / timeout, with exponential backoff */
+  // ── HTTP helper: retries on 429/5xx with exponential backoff ─────────────────
+
   private async dexGet<T>(url: string, retries = 3): Promise<T | null> {
     for (let attempt = 0; attempt <= retries; attempt++) {
       try {
@@ -430,51 +447,255 @@ class ScannerService {
     return null;
   }
 
-  /** Lookup by pair address (/latest/dex/pairs/solana/{pairAddress}) */
-  async getPairFromDex(pairAddress: string): Promise<DexScreenerPair | null> {
+  // ── Pair validator — rejects fake/stale/underpowered pairs ──────────────────
+
+  private isValidPair(p: DexScreenerPair): boolean {
+    if (!p.pairAddress) return false;
+    const liq    = p.liquidity?.usd ?? 0;
+    const vol24h = p.volume?.h24    ?? 0;
+    const mcap   = p.marketCap || p.fdv || 0;
+    if (liq    < 5_000)  return false;  // too illiquid
+    if (vol24h < 10_000) return false;  // not trading
+    if (mcap > 0 && liq > 0 && mcap / liq > 500) return false; // inflated mcap — likely fake
+    return true;
+  }
+
+  // ── Pair ranker — Raydium first, then liquidity, then volume ─────────────────
+
+  private rankPairs(pairs: DexScreenerPair[]): DexScreenerPair[] {
+    return [...pairs].sort((a, b) => {
+      const aRaydium = a.dexId === "raydium" ? 1 : 0;
+      const bRaydium = b.dexId === "raydium" ? 1 : 0;
+      if (bRaydium !== aRaydium) return bRaydium - aRaydium; // Raydium pairs first
+      const liqDiff = (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0);
+      if (liqDiff !== 0) return liqDiff;                      // then highest liquidity
+      return (b.volume?.h24 ?? 0) - (a.volume?.h24 ?? 0);    // then highest volume
+    });
+  }
+
+  // ── Stage A: Search by contract address (most reliable for fresh pools) ───────
+  // GET /latest/dex/search?q={contractAddress}
+  // Returns all pairs across all DEXes for that exact token CA.
+  // This is the PRIMARY method — more reliable than pair-address lookup because
+  // the CA never changes even when pools are migrated or re-indexed.
+
+  private async searchByContractAddress(contractAddress: string): Promise<DexScreenerPair[]> {
+    const data = await this.dexGet<{ pairs: DexScreenerPair[] }>(
+      `${DEXSCREENER_BASE}/latest/dex/search?q=${encodeURIComponent(contractAddress)}`,
+    );
+    if (!data?.pairs) return [];
+    return data.pairs.filter(
+      (p) => p.chainId === "solana" && p.baseToken.address.toLowerCase() === contractAddress.toLowerCase(),
+    );
+  }
+
+  // ── Stage B: Direct pair-address lookup ───────────────────────────────────────
+  // GET /latest/dex/pairs/solana/{pairAddress}
+  // Precise but fails if the pair address is stale or the pool was migrated.
+
+  private async lookupByPairAddress(pairAddress: string): Promise<DexScreenerPair[]> {
     const data = await this.dexGet<{ pairs: DexScreenerPair[] }>(
       `${DEXSCREENER_BASE}/latest/dex/pairs/solana/${pairAddress}`,
     );
-    return data?.pairs?.[0] ?? null;
+    return data?.pairs?.filter((p) => p.chainId === "solana") ?? [];
   }
 
-  /**
-   * Fallback 1 — lookup by token contract address (/tokens/v1/solana/{address}).
-   * Returns the highest-liquidity Solana pair (prefers known pairAddress).
-   * NOTE: endpoint returns a bare array [], NOT { pairs: [] }
-   */
-  async getPairByContractAddress(contractAddress: string, preferPairAddress?: string): Promise<DexScreenerPair | null> {
+  // ── Stage C: Token-address endpoint ───────────────────────────────────────────
+  // GET /tokens/v1/solana/{address}
+  // NOTE: returns a bare array [], NOT { pairs: [] }
+
+  private async lookupByTokenAddress(contractAddress: string): Promise<DexScreenerPair[]> {
     const data = await this.dexGet<DexScreenerPair[] | { pairs: DexScreenerPair[] }>(
       `${DEXSCREENER_BASE}/tokens/v1/solana/${contractAddress}`,
     );
-    if (!data) return null;
-    const rawPairs: DexScreenerPair[] = Array.isArray(data) ? data : (data as { pairs: DexScreenerPair[] }).pairs ?? [];
-    const pairs = rawPairs.filter((p) => p.chainId === "solana");
-    if (pairs.length === 0) return null;
-    if (preferPairAddress) {
-      const exact = pairs.find((p) => p.pairAddress === preferPairAddress);
-      if (exact) return exact;
-    }
-    return pairs.sort((a, b) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0))[0] ?? null;
+    if (!data) return [];
+    const arr: DexScreenerPair[] = Array.isArray(data)
+      ? data
+      : (data as { pairs: DexScreenerPair[] }).pairs ?? [];
+    return arr.filter((p) => p.chainId === "solana");
   }
 
-  /**
-   * Fallback 2 — search by symbol (/latest/dex/search?q={symbol}).
-   * Last resort when both pair address and contract address lookups fail.
-   * Matches on symbol name and picks highest-liquidity Solana result.
-   */
-  async getPairBySymbol(symbol: string, preferPairAddress?: string): Promise<DexScreenerPair | null> {
+  // ── Stage D: Symbol search ────────────────────────────────────────────────────
+  // GET /latest/dex/search?q={symbol}
+  // Fuzzy fallback — filters to exact symbol match on Solana.
+
+  private async searchBySymbol(symbol: string): Promise<DexScreenerPair[]> {
     const data = await this.dexGet<{ pairs: DexScreenerPair[] }>(
       `${DEXSCREENER_BASE}/latest/dex/search?q=${encodeURIComponent(symbol)}`,
     );
-    if (!data?.pairs) return null;
-    const pairs = data.pairs.filter((p) => p.chainId === "solana" && p.baseToken.symbol.toLowerCase() === symbol.toLowerCase());
-    if (pairs.length === 0) return null;
+    if (!data?.pairs) return [];
+    return data.pairs.filter(
+      (p) => p.chainId === "solana" && p.baseToken.symbol.toLowerCase() === symbol.toLowerCase(),
+    );
+  }
+
+  // ── Stage E: GeckoTerminal fallback (free, no API key) ───────────────────────
+  // GET https://api.geckoterminal.com/api/v2/networks/solana/tokens/{ca}/pools
+  // Converts GeckoTerminal pool format into a minimal DexScreenerPair shape.
+
+  private async lookupViaGeckoTerminal(contractAddress: string): Promise<DexScreenerPair[]> {
+    try {
+      type GtPool = {
+        attributes: {
+          address: string;
+          name: string;
+          dex_id: string;
+          reserve_in_usd: string;
+          volume_usd: { h24: string };
+          fdv_usd: string | null;
+          market_cap_usd: string | null;
+          base_token_price_usd: string;
+          transactions: { h1?: { buys?: number; sells?: number }; h24?: { buys?: number; sells?: number } };
+          price_change_percentage: { h1?: string; h24?: string };
+          pool_created_at: string | null;
+        };
+        relationships: { base_token: { data: { id: string } } };
+      };
+      type GtResponse = { data: GtPool[] };
+
+      const res = await axios.get<GtResponse>(
+        `https://api.geckoterminal.com/api/v2/networks/solana/tokens/${contractAddress}/pools?sort=h24_volume_usd_liquidity_desc&page=1`,
+        { timeout: 12_000, headers: { Accept: "application/json;version=20230302" } },
+      );
+      const pools = res.data?.data ?? [];
+
+      return pools.slice(0, 5).map((pool): DexScreenerPair => {
+        const attr = pool.attributes;
+        const liq   = parseFloat(attr.reserve_in_usd) || 0;
+        const vol24 = parseFloat(attr.volume_usd?.h24) || 0;
+        const price = parseFloat(attr.base_token_price_usd) || 0;
+        const mcap  = parseFloat(attr.market_cap_usd ?? attr.fdv_usd ?? "0") || 0;
+        // Derive a symbol from pool name (e.g. "TOKEN / SOL" → "TOKEN")
+        const sym   = attr.name.split(/[\s/]+/)[0] ?? "UNKNOWN";
+        return {
+          chainId: "solana",
+          dexId: attr.dex_id ?? "unknown",
+          url: `https://www.geckoterminal.com/solana/pools/${attr.address}`,
+          pairAddress: attr.address,
+          baseToken: { address: contractAddress, name: sym, symbol: sym },
+          quoteToken: { address: "", name: "SOL", symbol: "SOL" },
+          priceNative: String(price),
+          priceUsd: String(price),
+          txns: {
+            m5:  { buys: 0, sells: 0 },
+            h1:  { buys: attr.transactions?.h1?.buys ?? 0, sells: attr.transactions?.h1?.sells ?? 0 },
+            h6:  { buys: 0, sells: 0 },
+            h24: { buys: attr.transactions?.h24?.buys ?? 0, sells: attr.transactions?.h24?.sells ?? 0 },
+          },
+          volume: { m5: 0, h1: 0, h6: 0, h24: vol24 },
+          priceChange: {
+            m5: 0,
+            h1: parseFloat(attr.price_change_percentage?.h1 ?? "0") || 0,
+            h6: 0,
+            h24: parseFloat(attr.price_change_percentage?.h24 ?? "0") || 0,
+          },
+          liquidity: { usd: liq, base: 0, quote: 0 },
+          fdv: mcap,
+          marketCap: mcap,
+          pairCreatedAt: attr.pool_created_at ? new Date(attr.pool_created_at).getTime() : undefined,
+          info: {},
+        };
+      });
+    } catch (err) {
+      logger.warn({ contractAddress, err: (err as Error).message }, "GeckoTerminal: lookup failed");
+      return [];
+    }
+  }
+
+  // ── Master verification lookup — used by auto-trader before opening trades ────
+  // Tries 5 sources in order, validates each result set, returns best pair.
+  // A token is ONLY rejected as "not found" if all 5 sources return nothing valid.
+
+  async verifyPairForTrading(
+    pairAddress: string,
+    contractAddress: string,
+    symbol: string,
+  ): Promise<DexScreenerPair | null> {
+    const strategies: Array<{ label: string; fn: () => Promise<DexScreenerPair[]> }> = [
+      // A — search by CA (most reliable, catches migrated pools)
+      {
+        label: "search-by-ca",
+        fn: () => this.searchByContractAddress(contractAddress),
+      },
+      // B — direct pair address (precise, fails if stale)
+      {
+        label: "pair-address",
+        fn: () => this.lookupByPairAddress(pairAddress),
+      },
+      // C — token address endpoint
+      {
+        label: "token-address",
+        fn: () => this.lookupByTokenAddress(contractAddress),
+      },
+      // D — symbol search (fuzzy last resort for DexScreener)
+      {
+        label: "symbol-search",
+        fn: () => this.searchBySymbol(symbol),
+      },
+      // E — GeckoTerminal (independent data source, different infrastructure)
+      {
+        label: "geckoterminal",
+        fn: () => this.lookupViaGeckoTerminal(contractAddress),
+      },
+    ];
+
+    for (const { label, fn } of strategies) {
+      try {
+        const pairs = await fn();
+        // Validate and rank — pick best valid pair
+        const valid = this.rankPairs(pairs.filter((p) => this.isValidPair(p)));
+        if (valid.length > 0) {
+          logger.debug({ symbol, pairAddress, source: label }, "DexScreener verify: found via source");
+          return valid[0]!;
+        }
+        // Source returned pairs but none passed validation — log and continue
+        if (pairs.length > 0) {
+          logger.warn(
+            { symbol, source: label, count: pairs.length },
+            "DexScreener verify: pairs found but all failed validation — trying next source",
+          );
+        }
+      } catch (err) {
+        logger.warn({ symbol, source: label, err: (err as Error).message }, "DexScreener verify: source error — trying next");
+      }
+    }
+
+    logger.warn({ symbol, pairAddress, contractAddress }, "DexScreener verify: all 5 sources exhausted — pair not found");
+    return null;
+  }
+
+  // ── Legacy public methods kept for backward compatibility ─────────────────────
+
+  /** @deprecated Use verifyPairForTrading() instead */
+  async getPairFromDex(pairAddress: string): Promise<DexScreenerPair | null> {
+    const pairs = await this.lookupByPairAddress(pairAddress);
+    const valid = pairs.filter((p) => this.isValidPair(p));
+    return this.rankPairs(valid)[0] ?? null;
+  }
+
+  /** @deprecated Use verifyPairForTrading() instead */
+  async getPairByContractAddress(contractAddress: string, preferPairAddress?: string): Promise<DexScreenerPair | null> {
+    const [bySearch, byToken] = await Promise.all([
+      this.searchByContractAddress(contractAddress),
+      this.lookupByTokenAddress(contractAddress),
+    ]);
+    const all = [...bySearch, ...byToken].filter((p) => this.isValidPair(p));
     if (preferPairAddress) {
-      const exact = pairs.find((p) => p.pairAddress === preferPairAddress);
+      const exact = all.find((p) => p.pairAddress === preferPairAddress);
       if (exact) return exact;
     }
-    return pairs.sort((a, b) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0))[0] ?? null;
+    return this.rankPairs(all)[0] ?? null;
+  }
+
+  /** @deprecated Use verifyPairForTrading() instead */
+  async getPairBySymbol(symbol: string, preferPairAddress?: string): Promise<DexScreenerPair | null> {
+    const pairs = await this.searchBySymbol(symbol);
+    const valid = pairs.filter((p) => this.isValidPair(p));
+    if (preferPairAddress) {
+      const exact = valid.find((p) => p.pairAddress === preferPairAddress);
+      if (exact) return exact;
+    }
+    return this.rankPairs(valid)[0] ?? null;
   }
 
   async getOrFetchToken(pairAddress: string): Promise<ScannedToken | null> {

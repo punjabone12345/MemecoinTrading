@@ -3,7 +3,7 @@ import { GoogleGenAI } from "@google/genai";
 import { logger } from "../lib/logger.js";
 import type { DexScreenerPair } from "../types/index.js";
 
-// ─── Gemini client (Replit AI Integrations or direct key) ─────────────────────
+// ─── Gemini client ─────────────────────────────────────────────────────────────
 function getGeminiClient(): GoogleGenAI {
   const baseUrl = process.env["AI_INTEGRATIONS_GEMINI_BASE_URL"];
   const apiKey  = process.env["AI_INTEGRATIONS_GEMINI_API_KEY"] ?? process.env["GEMINI_API_KEY"] ?? "no-key";
@@ -19,11 +19,11 @@ export type LlmVerdict = "TRADE" | "SKIP" | "RISKY";
 
 export interface LlmAnalysis {
   verdict: LlmVerdict;
-  confidence: number;       // 0–100
-  reasoning: string;        // 1–2 sentence summary
+  confidence: number;
+  reasoning: string;
   risks: string[];
   strengths: string[];
-  provider: "gemini" | "groq" | "none";
+  provider: "gemini" | "groq" | "heuristic" | "none";
   durationMs: number;
 }
 
@@ -47,7 +47,7 @@ export interface TokenAnalysisInput {
   buys5m: number;
   sells5m: number;
   txns24h: number;
-  aiScore: number;          // our quantitative score (context for the LLM)
+  aiScore: number;
   confidence: number;
   dexId: string;
 }
@@ -119,15 +119,21 @@ Verdict guide:
   SKIP   — likely late entry, distribution, rug signal, or poor risk/reward`;
 }
 
-// ─── JSON parser (robust — strips markdown code fences if present) ─────────────
+// ─── Safe JSON parser — never throws, strips markdown fences ──────────────────
 
 function parseJsonVerdict(raw: string): Omit<LlmAnalysis, "provider" | "durationMs"> | null {
   try {
+    // Strip markdown code fences if the model wraps the response
     const cleaned = raw
       .replace(/^```(?:json)?\s*/i, "")
       .replace(/\s*```\s*$/, "")
       .trim();
-    const obj = JSON.parse(cleaned) as {
+
+    // Some models emit extra text before/after the JSON object — extract the first {...}
+    const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) return null;
+
+    const obj = JSON.parse(jsonMatch[0]) as {
       verdict: string;
       confidence: unknown;
       reasoning: string;
@@ -151,84 +157,197 @@ function parseJsonVerdict(raw: string): Omit<LlmAnalysis, "provider" | "duration
   }
 }
 
-// ─── Gemini (primary) — via Replit AI Integrations or direct key ─────────────
+// ─── Retry helper with exponential backoff + AbortController timeout ───────────
 
-async function callGemini(prompt: string, timeoutMs: number): Promise<string> {
-  const hasIntegration = Boolean(process.env["AI_INTEGRATIONS_GEMINI_BASE_URL"]);
-  const hasDirectKey   = Boolean(process.env["GEMINI_API_KEY"]);
-  if (!hasIntegration && !hasDirectKey) throw new Error("No Gemini credentials configured");
+const AI_TIMEOUT_MS = 10_000; // hard 10 s cap per attempt
 
-  const ai = getGeminiClient();
-
-  const abortCtrl = new AbortController();
-  const timer = setTimeout(() => abortCtrl.abort(), timeoutMs);
-
+async function withTimeout<T>(fn: (signal: AbortSignal) => Promise<T>, timeoutMs = AI_TIMEOUT_MS): Promise<T> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    const response = await ai.models.generateContent({
-      model: "gemini-2.5-flash",
-      contents: [{ role: "user", parts: [{ text: prompt }] }],
-      config: {
-        temperature: 0.1,
-        maxOutputTokens: 8192,
-        responseMimeType: "application/json",
-      },
-    });
-
-    const text = response.text ?? "";
-    if (!text) throw new Error("Gemini returned empty response");
-    return text;
+    return await fn(ctrl.signal);
   } finally {
     clearTimeout(timer);
   }
 }
 
+async function withRetry<T>(
+  fn: () => Promise<T>,
+  retries: number,
+  label: string,
+): Promise<T> {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      if (attempt < retries) {
+        const delay = 500 * 2 ** attempt; // 500 ms, 1 s, 2 s …
+        logger.warn({ label, attempt, delay, err: (err as Error).message }, "AI: attempt failed — retrying");
+        await new Promise((r) => setTimeout(r, delay));
+      }
+    }
+  }
+  throw lastErr;
+}
+
+// ─── Gemini (primary) ─────────────────────────────────────────────────────────
+
+async function callGemini(prompt: string): Promise<string> {
+  const hasIntegration = Boolean(process.env["AI_INTEGRATIONS_GEMINI_BASE_URL"]);
+  const hasDirectKey   = Boolean(process.env["GEMINI_API_KEY"]);
+  if (!hasIntegration && !hasDirectKey) throw new Error("No Gemini credentials configured");
+
+  return withRetry(async () => {
+    return withTimeout(async (_signal) => {
+      const ai = getGeminiClient();
+      const response = await ai.models.generateContent({
+        model: "gemini-2.5-flash",
+        contents: [{ role: "user", parts: [{ text: prompt }] }],
+        config: {
+          temperature: 0.1,
+          maxOutputTokens: 512,
+          // Force JSON-only output — eliminates markdown wrapping
+          responseMimeType: "application/json",
+        },
+      });
+      const text = response.text ?? "";
+      if (!text) throw new Error("Gemini returned empty response");
+      return text;
+    });
+  }, 2, "gemini");
+}
+
 // ─── Groq (fallback) ──────────────────────────────────────────────────────────
 
-async function callGroq(prompt: string, timeoutMs: number): Promise<string> {
+async function callGroq(prompt: string): Promise<string> {
   const apiKey = process.env["GROQ_API_KEY"];
   if (!apiKey) throw new Error("GROQ_API_KEY not set");
 
-  const res = await axios.post(
-    "https://api.groq.com/openai/v1/chat/completions",
-    {
-      model: "llama-3.3-70b-versatile",
-      messages: [
+  return withRetry(async () => {
+    return withTimeout(async (signal) => {
+      const res = await axios.post(
+        "https://api.groq.com/openai/v1/chat/completions",
         {
-          role: "system",
-          content: "You are an expert Solana memecoin trader. Always respond with valid JSON only — no markdown, no extra text.",
+          model: "llama-3.3-70b-versatile",
+          messages: [
+            {
+              role: "system",
+              content: "You are an expert Solana memecoin trader. Always respond with ONLY valid JSON — no markdown, no extra text, no code fences.",
+            },
+            { role: "user", content: prompt },
+          ],
+          temperature: 0.1,
+          max_tokens: 300,
+          response_format: { type: "json_object" }, // Forces strict JSON from Groq
         },
-        { role: "user", content: prompt },
-      ],
-      temperature: 0.1,
-      max_tokens: 300,
-      response_format: { type: "json_object" },
-    },
-    {
-      timeout: timeoutMs,
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-      },
-    },
-  );
-
-  const text: string = res.data?.choices?.[0]?.message?.content ?? "";
-  if (!text) throw new Error("Groq returned empty response");
-  return text;
+        {
+          timeout: AI_TIMEOUT_MS,
+          signal,
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            "Content-Type": "application/json",
+          },
+        },
+      );
+      const text: string = res.data?.choices?.[0]?.message?.content ?? "";
+      if (!text) throw new Error("Groq returned empty response");
+      return text;
+    });
+  }, 2, "groq");
 }
 
-// ─── Main export: analyse a token with LLM before trading ────────────────────
+// ─── Heuristic fallback scorer — runs when ALL LLM providers fail ──────────────
+// Never skips a token just because AI is down. Scores based on raw metrics.
+// Returns a verdict equivalent to the AI format so the rest of the pipeline
+// can proceed unchanged.
 
-const GEMINI_TIMEOUT_MS = 6_000;
-const GROQ_TIMEOUT_MS   = 5_000;
+function heuristicFallback(input: TokenAnalysisInput): Omit<LlmAnalysis, "provider" | "durationMs"> {
+  let score = 0;
+  const strengths: string[] = [];
+  const risks: string[] = [];
+
+  // Liquidity check (+25)
+  if (input.liquidityUsd > 30_000) {
+    score += 25;
+    strengths.push(`Strong liquidity $${Math.round(input.liquidityUsd / 1000)}K`);
+  } else {
+    risks.push(`Low liquidity $${Math.round(input.liquidityUsd / 1000)}K`);
+  }
+
+  // Volume 24h check (+25)
+  if (input.volume24hUsd > 500_000) {
+    score += 25;
+    strengths.push(`High 24h volume $${Math.round(input.volume24hUsd / 1000)}K`);
+  } else if (input.volume24hUsd > 100_000) {
+    score += 12;
+    strengths.push(`Moderate 24h volume $${Math.round(input.volume24hUsd / 1000)}K`);
+  } else {
+    risks.push(`Low 24h volume $${Math.round(input.volume24hUsd / 1000)}K`);
+  }
+
+  // Pair age check — early entries are better (+20)
+  if (input.pairAgeMinutes < 120) {
+    score += 20;
+    strengths.push(`Fresh pair — ${Math.round(input.pairAgeMinutes)}m old`);
+  } else if (input.pairAgeMinutes > 1440) {
+    risks.push("Pair is >24h old — may be past peak");
+  }
+
+  // Buy/sell ratio 1h (+15)
+  const total1h = input.buys1h + input.sells1h;
+  const buyRatio = total1h > 0 ? input.buys1h / total1h : 0;
+  if (buyRatio > 1.2 / (1 + 1.2)) { // buys > 1.2× sells
+    score += 15;
+    strengths.push(`Buy pressure ${(buyRatio * 100).toFixed(0)}% buys`);
+  } else if (buyRatio < 0.4) {
+    risks.push(`Selling pressure ${((1 - buyRatio) * 100).toFixed(0)}% sells`);
+  }
+
+  // Txn count as proxy for holders (+15)
+  if (input.txns24h > 200) {
+    score += 15;
+    strengths.push(`Active ${input.txns24h} txns 24h`);
+  } else if (input.txns24h < 50) {
+    risks.push(`Low activity ${input.txns24h} txns 24h`);
+  }
+
+  // Normalise to 0-100
+  score = Math.min(100, Math.max(0, score));
+
+  // Map score to verdict
+  let verdict: LlmVerdict;
+  let confidence: number;
+  if (score >= 65) {
+    verdict = "TRADE";
+    confidence = score;
+  } else if (score >= 40) {
+    verdict = "RISKY";
+    confidence = score;
+  } else {
+    verdict = "SKIP";
+    confidence = 100 - score;
+  }
+
+  return {
+    verdict,
+    confidence,
+    reasoning: `Heuristic scoring (AI unavailable): score ${score}/100. ${strengths.slice(0, 1).join(". ")}`,
+    risks: risks.slice(0, 3),
+    strengths: strengths.slice(0, 3),
+  };
+}
+
+// ─── Main export ──────────────────────────────────────────────────────────────
 
 export async function analyseTokenWithAi(input: TokenAnalysisInput): Promise<LlmAnalysis> {
   const start = Date.now();
   const prompt = buildPrompt(input);
 
-  // ── Try Gemini first ────────────────────────────────────────────────────────
+  // ── Try Gemini (up to 2 retries, 10 s timeout per attempt) ──────────────────
   try {
-    const raw = await callGemini(prompt, GEMINI_TIMEOUT_MS);
+    const raw = await callGemini(prompt);
     const parsed = parseJsonVerdict(raw);
     if (parsed) {
       const result: LlmAnalysis = { ...parsed, provider: "gemini", durationMs: Date.now() - start };
@@ -238,14 +357,14 @@ export async function analyseTokenWithAi(input: TokenAnalysisInput): Promise<Llm
       );
       return result;
     }
-    throw new Error("Gemini JSON parse failed");
+    throw new Error("Gemini JSON parse failed even after retries");
   } catch (geminiErr) {
-    logger.warn({ err: geminiErr, symbol: input.symbol }, "AI analysis: Gemini failed — trying Groq");
+    logger.warn({ err: (geminiErr as Error).message, symbol: input.symbol }, "AI analysis: Gemini failed — trying Groq");
   }
 
-  // ── Fallback: Groq ──────────────────────────────────────────────────────────
+  // ── Fallback: Groq (up to 2 retries, 10 s timeout per attempt) ──────────────
   try {
-    const raw = await callGroq(prompt, GROQ_TIMEOUT_MS);
+    const raw = await callGroq(prompt);
     const parsed = parseJsonVerdict(raw);
     if (parsed) {
       const result: LlmAnalysis = { ...parsed, provider: "groq", durationMs: Date.now() - start };
@@ -255,22 +374,19 @@ export async function analyseTokenWithAi(input: TokenAnalysisInput): Promise<Llm
       );
       return result;
     }
-    throw new Error("Groq JSON parse failed");
+    throw new Error("Groq JSON parse failed even after retries");
   } catch (groqErr) {
-    logger.warn({ err: groqErr, symbol: input.symbol }, "AI analysis: Groq also failed — proceeding without LLM");
+    logger.warn({ err: (groqErr as Error).message, symbol: input.symbol }, "AI analysis: Groq also failed — using heuristic fallback");
   }
 
-  // ── Both failed — fail CLOSED (never trade without LLM confirmation) ─────────
-  // Failing open caused real losses: bad AI = bad trades. Require LLM verdict.
-  return {
-    verdict: "SKIP",
-    confidence: 0,
-    reasoning: "AI analysis unavailable (Gemini + Groq both failed). Skipping to protect capital.",
-    risks: ["No LLM confirmation available"],
-    strengths: [],
-    provider: "none",
-    durationMs: Date.now() - start,
-  };
+  // ── Both LLMs failed — use heuristic scorer, NEVER skip just because AI is down ──
+  const heuristic = heuristicFallback(input);
+  const result: LlmAnalysis = { ...heuristic, provider: "heuristic", durationMs: Date.now() - start };
+  logger.warn(
+    { symbol: input.symbol, verdict: result.verdict, score: result.confidence, durationMs: result.durationMs },
+    "AI analysis: heuristic fallback used (Gemini + Groq both unavailable)",
+  );
+  return result;
 }
 
 // ─── Helper: build TokenAnalysisInput from DexScreenerPair ───────────────────

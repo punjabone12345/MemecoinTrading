@@ -1,0 +1,27 @@
+[
+  {
+    "positionId": "e76afad6-196b-4fec-a53a-1b3e38f8d5cb",
+    "symbol": "Rcc",
+    "contractAddress": "B8H8iRXMLP7VmbBJx8GoBA9un7sAJbCwn8bWqGktpump",
+    "openedAt": "2026-05-14T13:18:02.910Z",
+    "closedAt": "2026-05-14T14:48:33.549Z",
+    "holdTimeMs": 5430639,
+    "pnlSol": -0.4986084219858156,
+    "pnlPercent": -99.72168439716313,
+    "aiScore": 75,
+    "confidence": 100,
+    "entryMcapUsd": 390463,
+    "entryLiquidityUsd": 53970.11,
+    "slPercent": 6,
+    "tpPercent": 35,
+    "tags": [
+      "no_ai_recovery",
+      "borderline_score"
+    ],
+    "warnings": [
+      "Held 90.5m — token stalled and drained slowly",
+      "AI score was 75 — only 3pts above the 72 minimum. Low-conviction entry."
+    ],
+    "recordedAt": 1778770113551
+  }
+]

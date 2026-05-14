@@ -623,27 +623,18 @@ class AutoTraderService {
 
       for (const c of qualifiedCandidates.slice(0, MAX_VERIFY)) {
         try {
-          let dexPair = await scannerService.getPairFromDex(c.pairAddress);
-
-          // Fallback 1: pairAddress lookup can fail for re-indexed or rate-limited tokens.
-          // Try the token contract address endpoint (/tokens/v1/solana/{address}).
-          if (!dexPair) {
-            const contractAddress = c.pair.baseToken.address;
-            if (contractAddress) {
-              logger.warn({ symbol: c.symbol, pairAddress: c.pairAddress }, "DexScreener pairAddress lookup failed — retrying via contract address");
-              dexPair = await scannerService.getPairByContractAddress(contractAddress, c.pairAddress);
-            }
-          }
-
-          // Fallback 2: if both fail, try symbol search — catches stale pair addresses
-          // and tokens that were re-indexed under a new pool address.
-          if (!dexPair) {
-            logger.warn({ symbol: c.symbol, pairAddress: c.pairAddress }, "DexScreener contract address lookup failed — retrying via symbol search");
-            dexPair = await scannerService.getPairBySymbol(c.symbol, c.pairAddress);
-          }
+          // 5-stage verification: search-by-CA → pair-address → token-address →
+          // symbol-search → GeckoTerminal. Prioritises Raydium, validates liq/vol.
+          // Only truly rejects a token if ALL 5 sources return nothing valid.
+          const contractAddress = c.pair.baseToken.address;
+          const dexPair = await scannerService.verifyPairForTrading(
+            c.pairAddress,
+            contractAddress,
+            c.symbol,
+          );
 
           if (!dexPair) {
-            decisions.push({ ...c, action: "filtered", reason: "DexScreener: pair not found via pairAddress, contract address, or symbol search — skipping" });
+            decisions.push({ ...c, action: "filtered", reason: "DexScreener: pair not found via any source (CA search / pair-address / token-address / symbol / GeckoTerminal) — skipping" });
             continue;
           }
 
