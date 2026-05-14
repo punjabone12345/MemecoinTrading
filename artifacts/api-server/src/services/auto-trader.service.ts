@@ -122,29 +122,31 @@ const DEFAULT_CONFIG: AutoTraderConfig = {
   maxConcurrentTrades: 2,
 
   // ── AI quality ────────────────────────────────────────────────────────────
-  minAiScore: 78,               // top-tier only — 78+ is roughly top 5% of pool
-  minConfidence: 55,
+  // 80+ is roughly the top 3% of scanned pool — only high-conviction signals.
+  minAiScore: 80,
+  minConfidence: 60,
 
   // ── Liquidity & volume ────────────────────────────────────────────────────
-  // A 15-min-old token should already have meaningful volume.
-  // Lower floors were exploited — tokens with $5K liq rugged within 60s.
-  minLiquidityUsd: 20_000,      // $20K min — real, hard-to-drain LP
-  minVolume24hUsd: 8_000,       // token survived 15+ min → some 24h vol expected
-  minVolume1hUsd: 3_000,        // $3K in the last hour — active buying NOW
+  // These thresholds now apply to DexScreener-VERIFIED data (not GeckoTerminal).
+  // GeckoTerminal inflates liquidity figures — the real check is what DexScreener
+  // actually shows. $50K is the true floor for a non-drainable pool.
+  minLiquidityUsd: 50_000,      // $50K verified on DexScreener — hard to drain
+  minVolume24hUsd: 10_000,      // real sustained activity over 24h
+  minVolume1hUsd: 5_000,        // $5K last hour — actively being traded RIGHT NOW
 
   // ── Momentum ─────────────────────────────────────────────────────────────
   minBuyRatio1h: 0.60,          // 60% organic buy dominance
-  minPriceChange1h: 10,         // +10% minimum — must be a genuine pump
-  minTransactions24h: 30,       // 15-min-old token should have 30+ txns by now
+  minPriceChange1h: 10,         // +10% minimum — must be a genuine active pump
+  minTransactions24h: 50,       // 50+ unique txns prove real activity
 
   // ── Market cap ────────────────────────────────────────────────────────────
-  minMcapUsd: 15_000,
+  minMcapUsd: 50_000,           // sub-$50K mcap is too easy to fully exit
   maxMcapUsd: 10_000_000,
 
   // ── Pair age ──────────────────────────────────────────────────────────────
-  // 15 min is the critical threshold — tokens that rug do so in the first
-  // 1–10 minutes. Surviving 15 min with LP intact is a meaningful signal.
-  minPairAgeMinutes: 15,
+  // Rugs happen in the first 1–15 min. Surviving 25+ min with LP intact is
+  // a much stronger signal that this is a real token not a 30-second exit scam.
+  minPairAgeMinutes: 25,
   maxPairAgeHours: 48,
 
   // ── Rug guards ────────────────────────────────────────────────────────────
@@ -513,7 +515,10 @@ class AutoTraderService {
           continue;
         }
 
-        // Build a synthetic pair object from scanner data to run qualityFilter
+        // Stage 1: Fast pre-filter using scanner/GeckoTerminal data.
+        // This is cheap (no API call) and eliminates the vast majority of tokens.
+        // NOTE: liquidity/volume from GeckoTerminal can be inflated — this is
+        // ONLY a pre-screen. Stage 2 re-verifies everything with DexScreener.
         const syntheticPair: DexScreenerPair = {
           chainId: token.chainId,
           dexId: token.dexId,
@@ -543,12 +548,13 @@ class AutoTraderService {
           info: { imageUrl: token.imageUrl },
         };
 
-        const filterResult = qualityFilter(syntheticPair, this.config);
-        if (!filterResult.pass) {
-          decisions.push({ ...base, action: "filtered", reason: filterResult.reason });
+        const preFilterResult = qualityFilter(syntheticPair, this.config);
+        if (!preFilterResult.pass) {
+          decisions.push({ ...base, action: "filtered", reason: preFilterResult.reason });
           continue;
         }
 
+        // Passed pre-filter — add to candidates for DexScreener verification
         qualifiedCandidates.push({
           pairAddress: token.pairAddress,
           symbol: token.symbol,
@@ -569,16 +575,84 @@ class AutoTraderService {
         });
       }
 
-      // Sort by AI score descending, slot into available positions
-      // Cap at 1 new trade per cycle — prevents burst-opening on first scan
+      // Sort by AI score descending
       qualifiedCandidates.sort((a, b) => b.aiScore - a.aiScore);
-      const slots = Math.min(1, maxConcurrentTrades - openPositions.length);
-      const toTrade = qualifiedCandidates.slice(0, slots);
-      const overflow = qualifiedCandidates.slice(slots);
 
-      for (const c of overflow) {
+      // ── STAGE 2: DexScreener mandatory verification ───────────────────────
+      // Re-fetch every candidate directly from DexScreener and re-run the full
+      // quality filter on the REAL data. GeckoTerminal frequently shows
+      // inflated liquidity ($50K+) for pools that DexScreener shows at $1-$10.
+      // A token MUST pass this step before any trade is opened.
+      // We check up to 5 candidates in score order and stop at the first winner.
+      const MAX_VERIFY = 5;
+      const verifiedCandidates: typeof qualifiedCandidates = [];
+
+      for (const c of qualifiedCandidates.slice(0, MAX_VERIFY)) {
+        try {
+          const dexPair = await scannerService.getPairFromDex(c.pairAddress);
+          if (!dexPair) {
+            decisions.push({ ...c, action: "filtered", reason: "DexScreener: pair not found — likely dead or not yet indexed" });
+            continue;
+          }
+
+          const dexLiq    = dexPair.liquidity?.usd || 0;
+          const dexPrice  = parseFloat(dexPair.priceUsd) || 0;
+          const dexMcap   = dexPair.marketCap || dexPair.fdv || 0;
+          const dexVol24h = dexPair.volume?.h24 || 0;
+
+          // Hard sanity — if DexScreener shows no price or no liquidity,
+          // this token is dead, rugged, or not genuinely trading.
+          if (dexPrice <= 0) {
+            decisions.push({ ...c, action: "filtered", reason: "DexScreener: no live price — token not trading" });
+            continue;
+          }
+          if (dexLiq <= 0) {
+            decisions.push({ ...c, action: "filtered", reason: "DexScreener: zero liquidity — pool drained or not real" });
+            continue;
+          }
+
+          // Extra intelligence: warn if scanner data was wildly off (rug signal)
+          const liqRatio = c.liquidityUsd > 0 ? dexLiq / c.liquidityUsd : 0;
+          if (c.liquidityUsd > 0 && dexLiq < c.liquidityUsd * 0.1) {
+            // DexScreener shows <10% of what scanner claimed → data fabrication
+            decisions.push({
+              ...c,
+              action: "filtered",
+              reason: `DexScreener liquidity mismatch: scanner claimed $${Math.round(c.liquidityUsd).toLocaleString()} but DexScreener shows $${Math.round(dexLiq).toLocaleString()} — likely fake/inflated`,
+            });
+            continue;
+          }
+
+          // Run the full quality filter on the REAL DexScreener pair
+          const dexFilterResult = qualityFilter(dexPair, this.config);
+          if (!dexFilterResult.pass) {
+            decisions.push({
+              ...c,
+              action: "filtered",
+              reason: `DexScreener verify failed: ${dexFilterResult.reason} (dexLiq=$${Math.round(dexLiq).toLocaleString()}, dexVol24h=$${Math.round(dexVol24h).toLocaleString()})`,
+            });
+            continue;
+          }
+
+          logger.info(
+            { symbol: c.symbol, aiScore: c.aiScore, dexLiq, dexPrice, dexMcap, dexVol24h },
+            "Auto-trader: DexScreener verification PASSED — candidate confirmed"
+          );
+
+          verifiedCandidates.push({ ...c, liquidityUsd: dexLiq, priceUsd: dexPrice, marketCapUsd: dexMcap, pair: dexPair });
+          break; // We only need 1 verified candidate per cycle (1-trade-per-cycle cap)
+        } catch (err) {
+          decisions.push({ ...c, action: "filtered", reason: `DexScreener verify error: ${err instanceof Error ? err.message : "unknown"}` });
+        }
+      }
+
+      // Remaining pre-filter qualifiers that we didn't verify (no slots or beyond MAX_VERIFY)
+      for (const c of qualifiedCandidates.slice(verifiedCandidates.length + (qualifiedCandidates.length > MAX_VERIFY ? MAX_VERIFY : qualifiedCandidates.length))) {
         decisions.push({ ...c, action: "skipped_slots", reason: "No available trade slots (max concurrent reached)" });
       }
+
+      const slots = Math.min(1, maxConcurrentTrades - openPositions.length);
+      const toTrade = verifiedCandidates.slice(0, slots);
 
       for (const c of toTrade) {
         const token = scannerService.getByPairAddress(c.pairAddress) ?? await scannerService.getOrFetchToken(c.pairAddress);
@@ -594,14 +668,14 @@ class AutoTraderService {
           decisions.push({
             ...c,
             action: "traded",
-            reason: `Opened ${solPerTrade} SOL | Score ${c.aiScore} | SL -${c.slPercent}% | TP +${c.tpPercent}%`,
+            reason: `Opened ${solPerTrade} SOL | Score ${c.aiScore} | SL -${c.slPercent}% | TP +${c.tpPercent}% | DexLiq $${Math.round(c.liquidityUsd).toLocaleString()} ✓`,
             positionId: position.positionId,
           });
           tradesOpened++;
           this.totalTradesOpened++;
           logger.info(
-            { positionId: position.positionId, symbol: c.symbol, aiScore: c.aiScore, liq: c.liquidityUsd, vol24h: c.volume24hUsd, mcap: c.marketCapUsd },
-            "Auto-trader: HIGH-QUALITY trade opened",
+            { positionId: position.positionId, symbol: c.symbol, aiScore: c.aiScore, dexLiq: c.liquidityUsd, vol24h: c.volume24hUsd, mcap: c.marketCapUsd },
+            "Auto-trader: DexScreener-verified trade opened",
           );
         } catch (err) {
           const msg = err instanceof Error ? err.message : "Unknown";
