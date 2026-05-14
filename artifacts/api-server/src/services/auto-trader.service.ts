@@ -625,18 +625,25 @@ class AutoTraderService {
         try {
           let dexPair = await scannerService.getPairFromDex(c.pairAddress);
 
-          // Fallback: pairAddress lookup can fail for very new or recently re-indexed tokens.
-          // Try the token contract address endpoint (/tokens/v1/solana/{address}) instead.
+          // Fallback 1: pairAddress lookup can fail for re-indexed or rate-limited tokens.
+          // Try the token contract address endpoint (/tokens/v1/solana/{address}).
           if (!dexPair) {
             const contractAddress = c.pair.baseToken.address;
             if (contractAddress) {
-              logger.warn({ symbol: c.symbol, pairAddress: c.pairAddress }, "DexScreener pairAddress lookup returned null — retrying via contract address");
+              logger.warn({ symbol: c.symbol, pairAddress: c.pairAddress }, "DexScreener pairAddress lookup failed — retrying via contract address");
               dexPair = await scannerService.getPairByContractAddress(contractAddress, c.pairAddress);
             }
           }
 
+          // Fallback 2: if both fail, try symbol search — catches stale pair addresses
+          // and tokens that were re-indexed under a new pool address.
           if (!dexPair) {
-            decisions.push({ ...c, action: "filtered", reason: "DexScreener: pair not found via both pairAddress and contract address — skipping" });
+            logger.warn({ symbol: c.symbol, pairAddress: c.pairAddress }, "DexScreener contract address lookup failed — retrying via symbol search");
+            dexPair = await scannerService.getPairBySymbol(c.symbol, c.pairAddress);
+          }
+
+          if (!dexPair) {
+            decisions.push({ ...c, action: "filtered", reason: "DexScreener: pair not found via pairAddress, contract address, or symbol search — skipping" });
             continue;
           }
 

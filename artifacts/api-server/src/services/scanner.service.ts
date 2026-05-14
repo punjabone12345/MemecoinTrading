@@ -408,42 +408,73 @@ class ScannerService {
     return this.tokens.get(pairAddress);
   }
 
-  async getPairFromDex(pairAddress: string): Promise<DexScreenerPair | null> {
-    try {
-      const res = await axios.get<{ pairs: DexScreenerPair[] }>(
-        `${DEXSCREENER_BASE}/latest/dex/pairs/solana/${pairAddress}`,
-        { timeout: 8000 },
-      );
-      return res.data.pairs?.[0] ?? null;
-    } catch {
-      return null;
+  /** GET with up to `retries` retries on 429 / timeout, with exponential backoff */
+  private async dexGet<T>(url: string, retries = 3): Promise<T | null> {
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      try {
+        const res = await axios.get<T>(url, { timeout: 12_000 });
+        return res.data;
+      } catch (err: unknown) {
+        const status = (err as { response?: { status?: number } })?.response?.status;
+        const isRetryable = !status || status === 429 || status >= 500;
+        if (isRetryable && attempt < retries) {
+          const delay = Math.min(500 * 2 ** attempt, 4_000);
+          logger.warn({ url, attempt, status, delay }, "DexScreener: retryable error — waiting before retry");
+          await new Promise((r) => setTimeout(r, delay));
+          continue;
+        }
+        logger.warn({ url, attempt, status, err: (err as Error).message }, "DexScreener: lookup failed");
+        return null;
+      }
     }
+    return null;
+  }
+
+  /** Lookup by pair address (/latest/dex/pairs/solana/{pairAddress}) */
+  async getPairFromDex(pairAddress: string): Promise<DexScreenerPair | null> {
+    const data = await this.dexGet<{ pairs: DexScreenerPair[] }>(
+      `${DEXSCREENER_BASE}/latest/dex/pairs/solana/${pairAddress}`,
+    );
+    return data?.pairs?.[0] ?? null;
   }
 
   /**
-   * Fallback lookup by token contract address when pairAddress lookup returns null.
-   * Uses /tokens/v1/solana/{address} and picks the highest-liquidity Solana pair,
-   * preferring the known pairAddress if it shows up.
+   * Fallback 1 — lookup by token contract address (/tokens/v1/solana/{address}).
+   * Returns the highest-liquidity Solana pair (prefers known pairAddress).
+   * NOTE: endpoint returns a bare array [], NOT { pairs: [] }
    */
   async getPairByContractAddress(contractAddress: string, preferPairAddress?: string): Promise<DexScreenerPair | null> {
-    try {
-      const res = await axios.get<DexScreenerPair[] | { pairs: DexScreenerPair[] }>(
-        `${DEXSCREENER_BASE}/tokens/v1/solana/${contractAddress}`,
-        { timeout: 8000 },
-      );
-      // /tokens/v1/solana/{address} returns a bare array [], NOT { pairs: [] }
-      const data = res.data;
-      const rawPairs: DexScreenerPair[] = Array.isArray(data) ? data : (data as { pairs: DexScreenerPair[] }).pairs ?? [];
-      const pairs = rawPairs.filter((p) => p.chainId === "solana");
-      if (pairs.length === 0) return null;
-      if (preferPairAddress) {
-        const exact = pairs.find((p) => p.pairAddress === preferPairAddress);
-        if (exact) return exact;
-      }
-      return pairs.sort((a, b) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0))[0] ?? null;
-    } catch {
-      return null;
+    const data = await this.dexGet<DexScreenerPair[] | { pairs: DexScreenerPair[] }>(
+      `${DEXSCREENER_BASE}/tokens/v1/solana/${contractAddress}`,
+    );
+    if (!data) return null;
+    const rawPairs: DexScreenerPair[] = Array.isArray(data) ? data : (data as { pairs: DexScreenerPair[] }).pairs ?? [];
+    const pairs = rawPairs.filter((p) => p.chainId === "solana");
+    if (pairs.length === 0) return null;
+    if (preferPairAddress) {
+      const exact = pairs.find((p) => p.pairAddress === preferPairAddress);
+      if (exact) return exact;
     }
+    return pairs.sort((a, b) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0))[0] ?? null;
+  }
+
+  /**
+   * Fallback 2 — search by symbol (/latest/dex/search?q={symbol}).
+   * Last resort when both pair address and contract address lookups fail.
+   * Matches on symbol name and picks highest-liquidity Solana result.
+   */
+  async getPairBySymbol(symbol: string, preferPairAddress?: string): Promise<DexScreenerPair | null> {
+    const data = await this.dexGet<{ pairs: DexScreenerPair[] }>(
+      `${DEXSCREENER_BASE}/latest/dex/search?q=${encodeURIComponent(symbol)}`,
+    );
+    if (!data?.pairs) return null;
+    const pairs = data.pairs.filter((p) => p.chainId === "solana" && p.baseToken.symbol.toLowerCase() === symbol.toLowerCase());
+    if (pairs.length === 0) return null;
+    if (preferPairAddress) {
+      const exact = pairs.find((p) => p.pairAddress === preferPairAddress);
+      if (exact) return exact;
+    }
+    return pairs.sort((a, b) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0))[0] ?? null;
   }
 
   async getOrFetchToken(pairAddress: string): Promise<ScannedToken | null> {

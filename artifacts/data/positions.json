@@ -1,1 +1,24 @@
-[]
+[
+  {
+    "positionId": "e76afad6-196b-4fec-a53a-1b3e38f8d5cb",
+    "symbol": "Rcc",
+    "tokenName": "Red Claw Cartel",
+    "pairAddress": "2Rmf6TbwavWniQMmg4F7XWMWc5QX42ydehRy2H4yo7NP",
+    "contractAddress": "B8H8iRXMLP7VmbBJx8GoBA9un7sAJbCwn8bWqGktpump",
+    "imageUrl": "https://cdn.dexscreener.com/cms/images/8_EgAllm6Q-MShuf?width=800&height=800&quality=95&format=auto",
+    "entryPrice": 0.0003948,
+    "sizeSol": 0.5,
+    "slPercent": 6,
+    "tpPercent": 35,
+    "slPrice": 0.000371112,
+    "tpPrice": 0.0005329800000000001,
+    "entryMarketCap": 390463,
+    "entryLiquidityUsd": 53970.11,
+    "tpMarketCap": 527125.05,
+    "slMarketCap": 367035.22,
+    "aiScore": 75,
+    "confidence": 100,
+    "openedAt": "2026-05-14T13:18:02.910Z",
+    "status": "open"
+  }
+]
