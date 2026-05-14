@@ -242,12 +242,13 @@ export async function analyseTokenWithAi(input: TokenAnalysisInput): Promise<Llm
     logger.warn({ err: groqErr, symbol: input.symbol }, "AI analysis: Groq also failed — proceeding without LLM");
   }
 
-  // ── Both failed — fail open (quant filters still guard the trade) ───────────
+  // ── Both failed — fail CLOSED (never trade without LLM confirmation) ─────────
+  // Failing open caused real losses: bad AI = bad trades. Require LLM verdict.
   return {
-    verdict: "TRADE",
+    verdict: "SKIP",
     confidence: 0,
-    reasoning: "AI analysis unavailable — proceeding on quantitative filters only.",
-    risks: [],
+    reasoning: "AI analysis unavailable (Gemini + Groq both failed). Skipping to protect capital.",
+    risks: ["No LLM confirmation available"],
     strengths: [],
     provider: "none",
     durationMs: Date.now() - start,

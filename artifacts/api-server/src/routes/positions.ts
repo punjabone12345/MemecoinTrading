@@ -47,6 +47,29 @@ router.delete("/positions/history/:id", (req, res) => {
   }
 });
 
+router.patch("/positions/history/:id", (req, res) => {
+  try {
+    const { pnlSol, pnlPercent, exitPrice, closeReason, note } = req.body as {
+      pnlSol?: number;
+      pnlPercent?: number;
+      exitPrice?: number;
+      closeReason?: "manual" | "stop_loss" | "take_profit";
+      note?: string;
+    };
+    const updated = paperTradingService.editClosedTrade(req.params.id, {
+      pnlSol,
+      pnlPercent,
+      exitPrice,
+      closeReason,
+      note,
+    });
+    res.json({ success: true, data: updated });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Unknown error";
+    res.status(404).json({ success: false, error: message });
+  }
+});
+
 router.get("/positions/:id", (req, res) => {
   const position = paperTradingService.getPositionById(req.params.id);
   if (!position) {

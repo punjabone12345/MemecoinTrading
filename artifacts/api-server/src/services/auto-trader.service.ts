@@ -719,23 +719,26 @@ class AutoTraderService {
           llmDurationMs: llm.durationMs,
         };
 
-        if (llm.verdict === "SKIP" && llm.provider !== "none") {
+        // SKIP for any reason — including when both Gemini+Groq unavailable (fail-closed)
+        if (llm.verdict === "SKIP") {
           decisions.push({
             ...c,
             ...llmFields,
             action: "filtered",
-            reason: `LLM SKIP (${llm.provider}, ${llm.confidence}% confidence): ${llm.reasoning}`,
+            reason: llm.provider === "none"
+              ? `LLM unavailable (Gemini+Groq both failed) — skipping to protect capital`
+              : `LLM SKIP (${llm.provider}, ${llm.confidence}% confidence): ${llm.reasoning}`,
           });
           logger.info(
             { symbol: c.symbol, provider: llm.provider, confidence: llm.confidence, reasoning: llm.reasoning },
-            "Auto-trader: LLM vetoed trade — SKIP",
+            "Auto-trader: LLM SKIP — trade rejected",
           );
           continue;
         }
 
         // If RISKY, tighten stop-loss by 2 percentage points
         let effectiveSlPercent = c.slPercent;
-        if (llm.verdict === "RISKY" && llm.provider !== "none") {
+        if (llm.verdict === "RISKY") {
           effectiveSlPercent = Math.max(c.slPercent - 2, 4);
           logger.info(
             { symbol: c.symbol, provider: llm.provider, originalSl: c.slPercent, effectiveSl: effectiveSlPercent, reasoning: llm.reasoning },

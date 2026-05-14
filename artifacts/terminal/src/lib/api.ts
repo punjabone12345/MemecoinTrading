@@ -242,6 +242,38 @@ export function useDeleteClosedTrade() {
   });
 }
 
+export function useEditClosedTrade() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (payload: {
+      positionId: string;
+      pnlSol?: number;
+      pnlPercent?: number;
+      exitPrice?: number;
+      closeReason?: "manual" | "stop_loss" | "take_profit";
+      note?: string;
+    }) => {
+      const { positionId, ...body } = payload;
+      const res = await fetch(`/api/positions/history/${positionId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const json = await res.json();
+        throw new Error(json.error ?? "Edit failed");
+      }
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["closed-positions"] });
+      queryClient.invalidateQueries({ queryKey: ["portfolio"] });
+      queryClient.invalidateQueries({ queryKey: ["positions"] });
+      queryClient.invalidateQueries({ queryKey: ["analytics"] });
+    },
+  });
+}
+
 export function useAddWatchlist() {
   const queryClient = useQueryClient();
   return useMutation({

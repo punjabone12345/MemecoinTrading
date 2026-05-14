@@ -417,24 +417,55 @@ class PaperTradingService {
         }
 
         if (price >= pos.tpPrice) {
-          // ── LIQUIDITY VALIDATION BEFORE TAKE PROFIT ──────────────────────
-          // Critical fix: low-liquidity tokens have highly manipulable spot
-          // prices. A single $10 buy on a $100 pool can 100x the price,
-          // falsely triggering TP even though the token has effectively rugged.
-          // Before accepting a TP, verify that meaningful liquidity still exists.
-          const currentLiq = dexPair?.liquidity?.usd ?? 0;
-          const MIN_TP_LIQUIDITY_USD = 2_000; // $2K minimum to consider a TP real
+          // ── FAKE PRICE DETECTION (LESSON LEARNED FROM REAL LOSSES) ────────
+          // DexScreener sometimes shows astronomically fake prices on dead tokens:
+          // a single dust buy on a $0 pool creates a price of $999999 which
+          // falsely triggers TP and records a fake profit while the coin is -100%.
+          //
+          // Three guards before accepting any TP:
+          //   1. Liquidity floor: pool must have >$5K remaining
+          //   2. Price sanity cap: exit price can't be >50x entry (5000% gain impossible
+          //      on a token we only target up to 80% TP — any reading above that is fake data)
+          //   3. Volume sanity: if price moved >500% but 5m volume < $100, it's manipulated
+          const currentLiq  = dexPair?.liquidity?.usd ?? 0;
+          const currentVol5m = dexPair?.volume?.m5 ?? 0;
+          const priceMultiplier = pos.entryPrice > 0 ? price / pos.entryPrice : 1;
 
+          const MIN_TP_LIQUIDITY_USD = 5_000;   // raised from $2K — thin pools are fake
+          const MAX_PRICE_MULTIPLIER = 50;       // 5000% gain = fake price, not real
+          const MIN_VOL_FOR_LARGE_MOVE = 100;    // must have $100+ volume if price >500% up
+
+          // Guard 1: liquidity drained
           if (currentLiq > 0 && currentLiq < MIN_TP_LIQUIDITY_USD) {
             logger.warn(
               { symbol: pos.symbol, price, tpPrice: pos.tpPrice, currentLiq },
-              "Take profit price reached but liquidity drained — treating as rug, closing at SL"
+              "TP rejected: liquidity drained (<$5K) — likely rug, closing at SL"
             );
             await this.close(pos.positionId, "stop_loss");
             continue;
           }
 
-          logger.info({ symbol: pos.symbol, price, tpPrice: pos.tpPrice, currentLiq }, "Take profit triggered");
+          // Guard 2: astronomically fake price (the +9999999 SOL bug)
+          if (priceMultiplier > MAX_PRICE_MULTIPLIER) {
+            logger.warn(
+              { symbol: pos.symbol, price, entryPrice: pos.entryPrice, priceMultiplier: priceMultiplier.toFixed(0) },
+              `TP rejected: price is ${priceMultiplier.toFixed(0)}x entry — fake/manipulated data, closing at SL`
+            );
+            await this.close(pos.positionId, "stop_loss");
+            continue;
+          }
+
+          // Guard 3: big price move with no real volume = single dust buy manipulation
+          if (priceMultiplier > 5 && currentVol5m < MIN_VOL_FOR_LARGE_MOVE) {
+            logger.warn(
+              { symbol: pos.symbol, price, priceMultiplier: priceMultiplier.toFixed(1), currentVol5m },
+              "TP rejected: >5x price move but <$100 volume in 5m — dust manipulation, closing at SL"
+            );
+            await this.close(pos.positionId, "stop_loss");
+            continue;
+          }
+
+          logger.info({ symbol: pos.symbol, price, tpPrice: pos.tpPrice, currentLiq, priceMultiplier: priceMultiplier.toFixed(2) }, "Take profit triggered");
           await this.close(pos.positionId, "take_profit");
           continue;
         }
@@ -534,6 +565,55 @@ class PaperTradingService {
       { positionId, symbol: trade.symbol, pnlSol: trade.pnlSol, newBalance: this.solBalance.toFixed(4) },
       "Closed trade deleted — balance recomputed",
     );
+  }
+
+  /**
+   * Edit a closed trade's outcome.
+   * Use this to correct fake profits caused by manipulated DexScreener prices
+   * (e.g. +9999999 SOL from thin-pool price manipulation).
+   *
+   * Providing closeReason="stop_loss" with pnlOverrideSol=-(slPercent loss)
+   * will mark it as a full stop-loss and recompute the account balance.
+   */
+  editClosedTrade(
+    positionId: string,
+    patch: {
+      pnlSol?: number;
+      pnlPercent?: number;
+      exitPrice?: number;
+      closeReason?: "manual" | "stop_loss" | "take_profit";
+      note?: string;
+    },
+  ): Position {
+    const idx = this.closedTrades.findIndex((t) => t.positionId === positionId);
+    if (idx === -1) throw new Error(`Closed trade not found: ${positionId}`);
+
+    const old = this.closedTrades[idx];
+
+    const updated: Position = {
+      ...old,
+      ...(patch.exitPrice !== undefined  ? { exitPrice: patch.exitPrice }   : {}),
+      ...(patch.pnlSol !== undefined     ? { pnlSol: patch.pnlSol }         : {}),
+      ...(patch.pnlPercent !== undefined ? { pnlPercent: patch.pnlPercent } : {}),
+      ...(patch.closeReason !== undefined ? { closeReason: patch.closeReason } : {}),
+      ...(patch.note !== undefined ? { note: patch.note } : {}),
+    };
+
+    this.closedTrades[idx] = updated;
+
+    // Recompute balance from all closed trades
+    const closedPnl = this.closedTrades.reduce((s, t) => s + (t.pnlSol ?? 0), 0);
+    this.solBalance = INITIAL_BALANCE_SOL - this.totalOpenSol() + closedPnl;
+
+    this.persistHistory();
+    this.broadcastPositions();
+
+    logger.info(
+      { positionId, symbol: old.symbol, oldPnl: old.pnlSol, newPnl: updated.pnlSol, newBalance: this.solBalance.toFixed(4) },
+      "Closed trade edited — balance recomputed",
+    );
+
+    return updated;
   }
 
   reset(): void {

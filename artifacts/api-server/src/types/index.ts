@@ -120,6 +120,7 @@ export interface Position {
   pnlSol?: number;
   pnlPercent?: number;
   holdTimeMs?: number;
+  note?: string;
 }
 
 export interface Portfolio {

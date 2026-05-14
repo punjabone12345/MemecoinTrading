@@ -20,6 +20,7 @@ export interface Position {
   openedAt: string; closedAt?: string; status: "open" | "closed";
   closeReason?: "manual" | "stop_loss" | "take_profit";
   pnlSol?: number; pnlPercent?: number; holdTimeMs?: number;
+  note?: string;
   // live fields (from getOpenPositionsWithLivePnl)
   livePnlSol?: number; livePnlPercent?: number; currentPrice?: number;
 }
