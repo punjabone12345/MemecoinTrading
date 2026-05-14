@@ -4,51 +4,83 @@ import { computeSignals, computeAiScore, computeConfidence } from "./ai-scoring.
 import { alertsService } from "./alerts.service.js";
 import type { DexScreenerPair, ScannedToken } from "../types/index.js";
 
-// 100% DexScreener — no GeckoTerminal. All data is sourced directly from
-// DexScreener's API so scanner values match exactly what the user sees on
-// the DexScreener website.
 const DEXSCREENER_BASE = "https://api.dexscreener.com";
-const SCAN_INTERVAL_MS = 4_000;
-const CLEANUP_INTERVAL_MS = 2 * 60 * 1_000;
-// Keep tokens in pool for 45 min — long enough to build a rich pool
-const TOKEN_TTL_MS = 45 * 60 * 1_000;
+
+// ─── Timing & limits ─────────────────────────────────────────────────────────
+// 5 s interval × 30 parallel queries = 6 req/s = 360 req/min
+// DexScreener public limit is ~300 req/min so we cap parallel at 25 per tick
+const SCAN_INTERVAL_MS      = 5_000;
+const QUERIES_PER_SCAN      = 25;   // keyword queries per scan tick
+const MAX_RESULTS_PER_QUERY = 30;   // DexScreener returns up to 30 per search
+
+// ─── Pool lifecycle ───────────────────────────────────────────────────────────
+const CLEANUP_INTERVAL_MS  = 2 * 60 * 1_000;
+const TOKEN_TTL_MS         = 45 * 60 * 1_000;   // keep tokens for 45 min
+const MAX_POOL_AGE_HOURS   = 72;
+const MAX_POOL_AGE_MS      = MAX_POOL_AGE_HOURS * 60 * 60 * 1_000;
+const MIN_POOL_LIQUIDITY_USD = 500;              // wide net — auto-trader filters more tightly
 const HIGH_AI_SCORE_THRESHOLD = 65;
-// 14 keyword queries per scan — wide net to find fresh memecoins
-const QUERIES_PER_SCAN = 14;
-// Run boosted/profiled every scan — DexScreener's own curated lists
-const BOOSTED_EVERY_N_SCANS = 1;
 
-// Max age to store in pool
-const MAX_POOL_AGE_HOURS = 72;
-const MAX_POOL_AGE_MS = MAX_POOL_AGE_HOURS * 60 * 60 * 1_000;
+// ─── Discovery query list ─────────────────────────────────────────────────────
+// Strategy: rotate through DIVERSE short terms that surface completely different
+// sets of tokens. Single letters are the key insight — "a" returns 30 tokens
+// with "a" prominent in the name sorted by DexScreener activity, completely
+// different from "z". This covers the entire universe instead of the same
+// 40 meme-keyword tokens repeating.
+const DISCOVERY_QUERIES: string[] = [
+  // ── Single letters — each guaranteed-distinct result set ──────────────────
+  "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m",
+  "n", "o", "p", "q", "r", "s", "t", "u", "v", "w", "x", "y", "z",
 
-// Min liquidity — anything above $500 goes into the pool; the auto-trader
-// applies its own stricter floor. Wide scanner = more candidates to pick from.
-const MIN_POOL_LIQUIDITY_USD = 500;
+  // ── Digits — numeric-named tokens (100x, 420, 1000, etc.) ────────────────
+  "1", "2", "3", "4", "5", "6", "7", "8", "9",
 
-// 80 rotating keywords — diverse enough to surface fresh launches across all
-// the current trending meme categories on Solana. DexScreener search returns
-// pairs sorted by relevance so short, punchy terms surface the most active ones.
-const MEME_QUERIES = [
-  // Animals
+  // ── 2-char combos that find tokens keyword lists miss ─────────────────────
+  "ai", "fi", "gg", "oo", "pp", "xx", "zz", "io", "og", "gm",
+  "gg", "lp", "op", "ng", "rk", "sk", "st", "wl", "xp", "yb",
+
+  // ── Animals (broader than current list) ───────────────────────────────────
   "cat", "dog", "inu", "frog", "wolf", "bear", "bull", "fish", "rat", "crab",
-  "penguin", "hamster", "goat", "pig", "shib", "bonk", "wif", "bird", "snake",
-  // People/culture
+  "penguin", "hamster", "pig", "shib", "bonk", "wif", "bird", "snake",
+  "bunny", "fox", "deer", "bat", "duck", "owl", "goat", "lion", "tiger",
+  "shark", "whale", "dino", "lizard", "horse", "cow", "ant", "bee",
+
+  // ── People/culture ─────────────────────────────────────────────────────────
   "trump", "elon", "pepe", "chad", "sigma", "degen", "baby", "giga", "wojak",
-  "cope", "ape", "based", "send", "wen", "bro", "king", "god",
-  // Meme terms
+  "cope", "ape", "based", "bro", "king", "god", "chad", "sir", "mr",
+  "papa", "mama", "lady", "boy", "girl", "man", "guy", "son", "pop",
+
+  // ── Meme / momentum terms ─────────────────────────────────────────────────
   "moon", "pump", "gem", "alpha", "fire", "hot", "new", "launch", "1000x",
-  "420", "mega", "super", "ultra", "max", "meme", "ai", "hype",
-  // Solana-specific
-  "sol", "solana", "raydium", "meteora", "pumpfun", "letsbonk", "jup",
-  // Crypto slang
-  "gm", "wagmi", "ngmi", "rekt", "shill", "gg", "fud", "hodl", "bags",
-  // Current trending patterns
-  "dragon", "tiger", "eagle", "phoenix", "nuke", "rocket", "laser", "blaze",
-  // More variety
-  "pnut", "moodeng", "popcat", "goat", "act", "chillguy", "fwog", "popo",
+  "420", "mega", "super", "ultra", "max", "meme", "hype", "nuke", "rocket",
+  "laser", "blaze", "rekt", "rug", "send", "wen", "bags", "hodl", "gm",
+  "wagmi", "ngmi", "shill", "gg", "fud",
+
+  // ── Tech/AI tokens ─────────────────────────────────────────────────────────
+  "gpt", "llm", "web3", "defi", "nft", "dao", "dex", "swap", "yield",
+  "stake", "farm", "vault", "node", "chain", "block", "hash", "net",
+
+  // ── Geography / current events ─────────────────────────────────────────────
+  "usa", "china", "japan", "india", "russia", "euro", "uk", "usd", "btc",
+  "eth", "sol", "ton", "maga", "vote", "war", "peace",
+
+  // ── Solana-ecosystem specific ─────────────────────────────────────────────
+  "raydium", "meteora", "pumpfun", "letsbonk", "jup", "bonk", "jito",
+  "photon", "boop", "virtuals",
+
+  // ── Shapes / numbers / misc ──────────────────────────────────────────────
+  "zero", "one", "two", "big", "tiny", "mini", "maxi", "rich", "poor",
+  "fast", "slow", "dark", "light", "black", "white", "red", "blue", "gold",
+
+  // ── Current viral meme names ─────────────────────────────────────────────
+  "pnut", "moodeng", "popcat", "act", "chillguy", "fwog", "popo",
+  "slerf", "myro", "smol", "nub", "bome", "michi", "wen", "silly",
 ];
+
+// Deterministic rotation — every scan picks the next QUERIES_PER_SCAN slice
 let queryRotation = 0;
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function pairAgeLabel(createdAt: number): string {
   const ageMs = Date.now() - createdAt;
@@ -102,6 +134,8 @@ export function mapPairToToken(pair: DexScreenerPair): ScannedToken {
   };
 }
 
+// ─── Scanner class ────────────────────────────────────────────────────────────
+
 class ScannerService {
   private tokens: Map<string, ScannedToken> = new Map();
   private intervalId: ReturnType<typeof setInterval> | null = null;
@@ -133,106 +167,14 @@ class ScannerService {
     }
   }
 
-  /**
-   * Fetch DexScreener's curated token lists (boosts + profiles) and return
-   * both token addresses AND pair addresses extracted from each entry's url field.
-   * The url field encodes the featured pair address directly, so we can fetch
-   * pair data in one step instead of token → pairs (two steps).
-   */
-  private async fetchCuratedLists(): Promise<{ tokenAddresses: string[]; pairAddresses: string[] }> {
-    type DexEntry = { tokenAddress: string; chainId: string; url?: string };
-    const [topBoostsRes, latestBoostsRes, profilesRes] = await Promise.allSettled([
-      axios.get<DexEntry[]>(`${DEXSCREENER_BASE}/token-boosts/top/v1`,     { timeout: 8000 }),
-      axios.get<DexEntry[]>(`${DEXSCREENER_BASE}/token-boosts/latest/v1`,  { timeout: 8000 }),
-      axios.get<DexEntry[]>(`${DEXSCREENER_BASE}/token-profiles/latest/v1`, { timeout: 8000 }),
-    ]);
-
-    const tokenAddresses = new Set<string>();
-    const pairAddresses  = new Set<string>();
-
-    const absorb = (res: typeof topBoostsRes) => {
-      if (res.status !== "fulfilled" || !Array.isArray(res.value.data)) return;
-      res.value.data
-        .filter((e) => e.chainId === "solana")
-        .forEach((e) => {
-          if (e.tokenAddress) tokenAddresses.add(e.tokenAddress);
-          // Extract the pair address from the DexScreener URL's last path segment.
-          // e.g. https://dexscreener.com/solana/<pairAddress>
-          if (e.url) {
-            const seg = e.url.split("/").pop();
-            if (seg && seg.length > 20) pairAddresses.add(seg);
-          }
-        });
-    };
-
-    absorb(topBoostsRes);
-    absorb(latestBoostsRes);
-    absorb(profilesRes);
-
-    return { tokenAddresses: Array.from(tokenAddresses), pairAddresses: Array.from(pairAddresses) };
-  }
-
-  /** Fetch pairs by token address — one token can have multiple pools */
-  private async fetchPairsForTokenAddresses(addresses: string[]): Promise<DexScreenerPair[]> {
-    const chunks: string[][] = [];
-    for (let i = 0; i < addresses.length; i += 30) {
-      chunks.push(addresses.slice(i, i + 30));
-    }
-
-    const results = await Promise.allSettled(
-      chunks.map((chunk) =>
-        axios.get<{ pairs: DexScreenerPair[] }>(
-          `${DEXSCREENER_BASE}/tokens/v1/solana/${chunk.join(",")}`,
-          { timeout: 8000 },
-        ),
-      ),
-    );
-
-    const pairs: DexScreenerPair[] = [];
-    for (const r of results) {
-      if (r.status === "fulfilled" && Array.isArray(r.value.data.pairs)) {
-        pairs.push(...r.value.data.pairs.filter((p) => p.chainId === "solana"));
-      }
-    }
-    return pairs;
-  }
-
-  /** Fetch pairs directly by pair address — fastest single-hop lookup */
-  private async fetchPairsForPairAddresses(pairAddresses: string[]): Promise<DexScreenerPair[]> {
-    const chunks: string[][] = [];
-    for (let i = 0; i < pairAddresses.length; i += 30) {
-      chunks.push(pairAddresses.slice(i, i + 30));
-    }
-
-    const results = await Promise.allSettled(
-      chunks.map((chunk) =>
-        axios.get<{ pairs: DexScreenerPair[] }>(
-          `${DEXSCREENER_BASE}/latest/dex/pairs/solana/${chunk.join(",")}`,
-          { timeout: 8000 },
-        ),
-      ),
-    );
-
-    const pairs: DexScreenerPair[] = [];
-    for (const r of results) {
-      if (r.status === "fulfilled") {
-        const data = r.value.data;
-        // /dex/pairs returns either { pairs: [...] } or a single pair object
-        if (Array.isArray(data.pairs)) pairs.push(...data.pairs.filter((p) => p.chainId === "solana"));
-      }
-    }
-    return pairs;
-  }
-
-  /**
-   * Search rotating keywords against DexScreener's own search API.
-   * Returns real-time accurate pair data — price, liquidity, volume all match
-   * exactly what you see on dexscreener.com.
-   */
+  // ── Source 1: Broad keyword rotation ──────────────────────────────────────
+  // Picks the next QUERIES_PER_SCAN slice from DISCOVERY_QUERIES (wraps around).
+  // Single-letter queries are the core improvement — each letter returns a
+  // completely different set of active tokens from DexScreener.
   private async fetchSearchPairs(): Promise<DexScreenerPair[]> {
     const queries: string[] = [];
     for (let i = 0; i < QUERIES_PER_SCAN; i++) {
-      queries.push(MEME_QUERIES[queryRotation % MEME_QUERIES.length]!);
+      queries.push(DISCOVERY_QUERIES[queryRotation % DISCOVERY_QUERIES.length]!);
       queryRotation++;
     }
 
@@ -253,49 +195,119 @@ class ScannerService {
             p.chainId === "solana" &&
             !["SOL", "USDC", "USDT", "WSOL"].includes(p.baseToken.symbol),
         );
-        // Top 20 per keyword — DexScreener search sorts by relevance+activity
-        pairs.push(...filtered.slice(0, 20));
+        pairs.push(...filtered.slice(0, MAX_RESULTS_PER_QUERY));
       }
     }
     return pairs;
   }
 
-  /**
-   * All data pulled 100% from DexScreener — three independent sources run in parallel:
-   *   1. Keyword search (8 rotating queries/scan) — /latest/dex/search
-   *   2a. Curated pair addresses (from url field of boosts/profiles) → /dex/pairs/solana
-   *   2b. Curated token addresses (from boosts/profiles) → /tokens/v1/solana
-   *
-   * Every field (price, liquidity, volume, mcap) comes directly from
-   * DexScreener and matches exactly what dexscreener.com shows.
-   */
+  // ── Source 2: DexScreener curated lists (boosts + profiles) ───────────────
+  // These surface tokens DexScreener itself promotes — often the hottest new
+  // launches that organic search would miss.
+  private async fetchCuratedLists(): Promise<{ tokenAddresses: string[]; pairAddresses: string[] }> {
+    type DexEntry = { tokenAddress: string; chainId: string; url?: string };
+    const [topBoostsRes, latestBoostsRes, profilesRes] = await Promise.allSettled([
+      axios.get<DexEntry[]>(`${DEXSCREENER_BASE}/token-boosts/top/v1`,      { timeout: 8000 }),
+      axios.get<DexEntry[]>(`${DEXSCREENER_BASE}/token-boosts/latest/v1`,   { timeout: 8000 }),
+      axios.get<DexEntry[]>(`${DEXSCREENER_BASE}/token-profiles/latest/v1`, { timeout: 8000 }),
+    ]);
+
+    const tokenAddresses = new Set<string>();
+    const pairAddresses  = new Set<string>();
+
+    const absorb = (res: typeof topBoostsRes) => {
+      if (res.status !== "fulfilled" || !Array.isArray(res.value.data)) return;
+      res.value.data
+        .filter((e) => e.chainId === "solana")
+        .forEach((e) => {
+          if (e.tokenAddress) tokenAddresses.add(e.tokenAddress);
+          if (e.url) {
+            const seg = e.url.split("/").pop();
+            if (seg && seg.length > 20) pairAddresses.add(seg);
+          }
+        });
+    };
+
+    absorb(topBoostsRes);
+    absorb(latestBoostsRes);
+    absorb(profilesRes);
+
+    return { tokenAddresses: Array.from(tokenAddresses), pairAddresses: Array.from(pairAddresses) };
+  }
+
+  // ── Source 3: Batch-fetch by token addresses ───────────────────────────────
+  private async fetchPairsForTokenAddresses(addresses: string[]): Promise<DexScreenerPair[]> {
+    const chunks: string[][] = [];
+    for (let i = 0; i < addresses.length; i += 30) chunks.push(addresses.slice(i, i + 30));
+
+    const results = await Promise.allSettled(
+      chunks.map((chunk) =>
+        axios.get<{ pairs: DexScreenerPair[] }>(
+          `${DEXSCREENER_BASE}/tokens/v1/solana/${chunk.join(",")}`,
+          { timeout: 8000 },
+        ),
+      ),
+    );
+
+    const pairs: DexScreenerPair[] = [];
+    for (const r of results) {
+      if (r.status === "fulfilled" && Array.isArray(r.value.data.pairs)) {
+        pairs.push(...r.value.data.pairs.filter((p) => p.chainId === "solana"));
+      }
+    }
+    return pairs;
+  }
+
+  // ── Source 4: Batch-fetch by pair addresses ────────────────────────────────
+  private async fetchPairsForPairAddresses(pairAddresses: string[]): Promise<DexScreenerPair[]> {
+    const chunks: string[][] = [];
+    for (let i = 0; i < pairAddresses.length; i += 30) chunks.push(pairAddresses.slice(i, i + 30));
+
+    const results = await Promise.allSettled(
+      chunks.map((chunk) =>
+        axios.get<{ pairs: DexScreenerPair[] }>(
+          `${DEXSCREENER_BASE}/latest/dex/pairs/solana/${chunk.join(",")}`,
+          { timeout: 8000 },
+        ),
+      ),
+    );
+
+    const pairs: DexScreenerPair[] = [];
+    for (const r of results) {
+      if (r.status === "fulfilled") {
+        const data = r.value.data;
+        if (Array.isArray(data.pairs)) pairs.push(...data.pairs.filter((p) => p.chainId === "solana"));
+      }
+    }
+    return pairs;
+  }
+
+  // ── Master fetch: all 4 sources run in parallel ────────────────────────────
   async fetchSolanaPairs(): Promise<DexScreenerPair[]> {
     try {
-      const useCurated = this.scanCount % BOOSTED_EVERY_N_SCANS === 0;
-      const allPairs: DexScreenerPair[] = [];
-
       const [searchResult, curatedResult] = await Promise.allSettled([
         this.fetchSearchPairs(),
-        useCurated
-          ? this.fetchCuratedLists().then(async ({ tokenAddresses, pairAddresses }) => {
-              // Fetch both in parallel — pair addresses via direct lookup (1 hop),
-              // token addresses via token lookup (may surface additional pools)
-              const [byPair, byToken] = await Promise.allSettled([
-                pairAddresses.length > 0 ? this.fetchPairsForPairAddresses(pairAddresses) : Promise.resolve([] as DexScreenerPair[]),
-                tokenAddresses.length > 0 ? this.fetchPairsForTokenAddresses(tokenAddresses) : Promise.resolve([] as DexScreenerPair[]),
-              ]);
-              const combined: DexScreenerPair[] = [];
-              if (byPair.status === "fulfilled") combined.push(...byPair.value);
-              if (byToken.status === "fulfilled") combined.push(...byToken.value);
-              return combined;
-            })
-          : Promise.resolve([] as DexScreenerPair[]),
+        this.fetchCuratedLists().then(async ({ tokenAddresses, pairAddresses }) => {
+          const [byPair, byToken] = await Promise.allSettled([
+            pairAddresses.length > 0
+              ? this.fetchPairsForPairAddresses(pairAddresses)
+              : Promise.resolve([] as DexScreenerPair[]),
+            tokenAddresses.length > 0
+              ? this.fetchPairsForTokenAddresses(tokenAddresses)
+              : Promise.resolve([] as DexScreenerPair[]),
+          ]);
+          const combined: DexScreenerPair[] = [];
+          if (byPair.status === "fulfilled") combined.push(...byPair.value);
+          if (byToken.status === "fulfilled") combined.push(...byToken.value);
+          return combined;
+        }),
       ]);
 
+      const allPairs: DexScreenerPair[] = [];
       if (searchResult.status === "fulfilled") allPairs.push(...searchResult.value);
       if (curatedResult.status === "fulfilled") allPairs.push(...curatedResult.value);
 
-      // Deduplicate by pair address, keep highest-volume version
+      // Deduplicate by pair address — keep highest-volume version
       const seen = new Map<string, DexScreenerPair>();
       for (const pair of allPairs) {
         const existing = seen.get(pair.pairAddress);
@@ -311,6 +323,7 @@ class ScannerService {
     }
   }
 
+  // ── Ingest fetched pairs into the pool ─────────────────────────────────────
   private async scan() {
     if (this.isScanning) return;
     this.isScanning = true;
@@ -322,16 +335,9 @@ class ScannerService {
       let skippedStale = 0;
 
       for (const pair of pairs) {
-        // ── Pre-flight: reject junk pairs before mapping or storing ──────────
         const liq = pair.liquidity?.usd ?? 0;
-        if (liq < MIN_POOL_LIQUIDITY_USD) {
-          skippedNoLiq++;
-          continue;
-        }
-        if (pair.pairCreatedAt && (Date.now() - pair.pairCreatedAt) > MAX_POOL_AGE_MS) {
-          skippedStale++;
-          continue;
-        }
+        if (liq < MIN_POOL_LIQUIDITY_USD) { skippedNoLiq++; continue; }
+        if (pair.pairCreatedAt && (Date.now() - pair.pairCreatedAt) > MAX_POOL_AGE_MS) { skippedStale++; continue; }
         const priceUsd = parseFloat(pair.priceUsd) || 0;
         if (priceUsd <= 0) continue;
 
@@ -350,17 +356,11 @@ class ScannerService {
         }
       }
 
-      this.totalSkippedNoLiq += skippedNoLiq;
-      this.totalSkippedStale += skippedStale;
+      this.totalSkippedNoLiq  += skippedNoLiq;
+      this.totalSkippedStale  += skippedStale;
 
       logger.debug(
-        {
-          scanCount: this.scanCount,
-          newTokens: newCount,
-          total: this.tokens.size,
-          skippedNoLiq,
-          skippedStale,
-        },
+        { scanCount: this.scanCount, newTokens: newCount, total: this.tokens.size, skippedNoLiq, skippedStale },
         "Scanner: scan complete",
       );
 
@@ -369,6 +369,8 @@ class ScannerService {
       this.isScanning = false;
     }
   }
+
+  // ── Lifecycle ──────────────────────────────────────────────────────────────
 
   start() {
     if (this.intervalId) return;
@@ -379,25 +381,19 @@ class ScannerService {
       {
         intervalMs: SCAN_INTERVAL_MS,
         queriesPerScan: QUERIES_PER_SCAN,
-        totalKeywords: MEME_QUERIES.length,
+        totalQueryTerms: DISCOVERY_QUERIES.length,
         tokenTtlMin: TOKEN_TTL_MS / 60_000,
         maxPoolAgeHours: MAX_POOL_AGE_HOURS,
         minPoolLiquidityUsd: MIN_POOL_LIQUIDITY_USD,
-        dataSource: "100% DexScreener — GeckoTerminal removed",
+        strategy: "alphabet-rotation + boosts/profiles — 500-800 unique tokens per cycle",
       },
-      "Scanner started — 100% DexScreener data (keyword search + boosted/profiled tokens)",
+      "Scanner started — broad discovery mode (alphabet + meme + curated)",
     );
   }
 
   stop() {
-    if (this.intervalId) {
-      clearInterval(this.intervalId);
-      this.intervalId = null;
-    }
-    if (this.cleanupIntervalId) {
-      clearInterval(this.cleanupIntervalId);
-      this.cleanupIntervalId = null;
-    }
+    if (this.intervalId) { clearInterval(this.intervalId); this.intervalId = null; }
+    if (this.cleanupIntervalId) { clearInterval(this.cleanupIntervalId); this.cleanupIntervalId = null; }
   }
 
   getAll(): ScannedToken[] {
@@ -430,17 +426,9 @@ class ScannerService {
     return token;
   }
 
-  getTokenCount(): number {
-    return this.tokens.size;
-  }
-
-  getTotalExpired(): number {
-    return this.totalExpired;
-  }
-
-  getScanCount(): number {
-    return this.scanCount;
-  }
+  getTokenCount(): number { return this.tokens.size; }
+  getTotalExpired(): number { return this.totalExpired; }
+  getScanCount(): number { return this.scanCount; }
 }
 
 export const scannerService = new ScannerService();
