@@ -4,30 +4,40 @@ import { computeSignals, computeAiScore, computeConfidence } from "./ai-scoring.
 import { alertsService } from "./alerts.service.js";
 import type { DexScreenerPair, ScannedToken } from "../types/index.js";
 
+// 100% DexScreener — no GeckoTerminal. All data is sourced directly from
+// DexScreener's API so scanner values match exactly what the user sees on
+// the DexScreener website.
 const DEXSCREENER_BASE = "https://api.dexscreener.com";
-const GECKOTERMINAL_BASE = "https://api.geckoterminal.com/api/v2";
 const SCAN_INTERVAL_MS = 4_000;
 const CLEANUP_INTERVAL_MS = 2 * 60 * 1_000;
 const TOKEN_TTL_MS = 15 * 60 * 1_000;
 const HIGH_AI_SCORE_THRESHOLD = 80;
-const QUERIES_PER_SCAN = 5;
-const BOOSTED_EVERY_N_SCANS = 3;
-const GECKO_EVERY_N_SCANS = 2;
+// Run 8 keyword queries per scan (up from 5) to compensate for removed GeckoTerminal
+const QUERIES_PER_SCAN = 8;
+// Run boosted/profiled every scan (up from every 3) — these are DexScreener's
+// own curated token lists and always have accurate data
+const BOOSTED_EVERY_N_SCANS = 1;
 
 // Max age to store in pool — tokens older than this are skipped before storing
 const MAX_POOL_AGE_HOURS = 48;
 const MAX_POOL_AGE_MS = MAX_POOL_AGE_HOURS * 60 * 60 * 1_000;
 
 // Min liquidity to accept — $0 liquidity tokens are useless
-const MIN_POOL_LIQUIDITY_USD = 100;
+// This is DexScreener's real liquidity value — no more fabricated numbers
+const MIN_POOL_LIQUIDITY_USD = 500;
 
-// 30 rotating keywords — meme culture + chain culture + new-launch patterns
+// 50 rotating keywords — broad coverage to discover new Solana memecoins
+// via DexScreener's own search engine (returns accurate, real-time data)
 const MEME_QUERIES = [
   "pump", "pepe", "cat", "dog", "ai", "moon", "based",
   "trump", "elon", "meme", "inu", "shib", "bonk", "wif",
   "sol", "baby", "degen", "giga", "chad", "frog",
   "wojak", "cope", "sigma", "ape", "bear", "bull",
-  "retard", "send", "rip", "wen",
+  "send", "wen", "new", "launch",
+  "solana", "raydium", "meteora", "pumpfun", "letsbonk",
+  "420", "1000x", "gem", "alpha", "fire", "hot",
+  "king", "queen", "max", "ultra", "super", "mega",
+  "dragon", "tiger", "wolf", "eagle",
 ];
 let queryRotation = 0;
 
@@ -177,91 +187,10 @@ class ScannerService {
   }
 
   /**
-   * Fetch genuinely fresh Solana pairs from GeckoTerminal.
-   * /new_pools returns pools sorted by creation time DESC — page 1 = newest on Solana.
-   * This directly addresses old tokens flooding in from keyword search.
+   * Search rotating keywords against DexScreener's own search API.
+   * Returns real-time accurate pair data — price, liquidity, volume all match
+   * exactly what you see on dexscreener.com.
    */
-  private async fetchGeckoTerminalNewPools(): Promise<DexScreenerPair[]> {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    type GeckoPool = any;
-
-    const results = await Promise.allSettled([
-      axios.get<{ data: GeckoPool[] }>(
-        `${GECKOTERMINAL_BASE}/networks/solana/new_pools?page=1`,
-        { timeout: 8000, headers: { Accept: "application/json;version=20230302" } },
-      ),
-      axios.get<{ data: GeckoPool[] }>(
-        `${GECKOTERMINAL_BASE}/networks/solana/new_pools?page=2`,
-        { timeout: 8000, headers: { Accept: "application/json;version=20230302" } },
-      ),
-    ]);
-
-    const pairs: DexScreenerPair[] = [];
-    for (const r of results) {
-      if (r.status !== "fulfilled" || !Array.isArray(r.value.data.data)) continue;
-
-      for (const pool of r.value.data.data) {
-        const attrs = pool.attributes ?? {};
-        const pairCreatedAt = attrs.pool_created_at
-          ? new Date(attrs.pool_created_at).getTime()
-          : undefined;
-
-        const baseTokenId: string = pool.relationships?.base_token?.data?.id ?? "";
-        const baseAddress = baseTokenId.replace(/^solana_/, "");
-
-        const nameParts = ((attrs.name as string) || "").split(" / ");
-        const baseSymbol = nameParts[0]?.trim() || "UNKNOWN";
-        const quoteSymbol = nameParts[1]?.trim() || "SOL";
-
-        if (["SOL", "USDC", "USDT", "WSOL"].includes(baseSymbol)) continue;
-
-        const dexPair: DexScreenerPair = {
-          chainId: "solana",
-          dexId: pool.relationships?.dex?.data?.id || "unknown",
-          url: `https://dexscreener.com/solana/${attrs.address}`,
-          pairAddress: attrs.address || baseAddress,
-          baseToken: { address: baseAddress, name: baseSymbol, symbol: baseSymbol },
-          quoteToken: { address: "", name: quoteSymbol, symbol: quoteSymbol },
-          priceNative: attrs.base_token_price_usd || "0",
-          priceUsd: attrs.base_token_price_usd || "0",
-          txns: {
-            m5: { buys: attrs.transactions?.m5?.buys || 0, sells: attrs.transactions?.m5?.sells || 0 },
-            h1: { buys: attrs.transactions?.h1?.buys || 0, sells: attrs.transactions?.h1?.sells || 0 },
-            h6: { buys: attrs.transactions?.h6?.buys || 0, sells: attrs.transactions?.h6?.sells || 0 },
-            h24: { buys: attrs.transactions?.h24?.buys || 0, sells: attrs.transactions?.h24?.sells || 0 },
-          },
-          volume: {
-            m5: parseFloat(attrs.volume_usd?.m5 || "0"),
-            h1: parseFloat(attrs.volume_usd?.h1 || "0"),
-            h6: parseFloat(attrs.volume_usd?.h6 || "0"),
-            h24: parseFloat(attrs.volume_usd?.h24 || "0"),
-          },
-          priceChange: {
-            m5: parseFloat(attrs.price_change_percentage?.m5 || "0"),
-            h1: parseFloat(attrs.price_change_percentage?.h1 || "0"),
-            h6: parseFloat(attrs.price_change_percentage?.h6 || "0"),
-            h24: parseFloat(attrs.price_change_percentage?.h24 || "0"),
-          },
-          liquidity: {
-            usd: parseFloat(attrs.reserve_in_usd || "0"),
-            base: 0,
-            quote: 0,
-          },
-          fdv: parseFloat(attrs.fdv_usd || "0"),
-          marketCap: parseFloat(attrs.market_cap_usd || "0"),
-          pairCreatedAt,
-          info: { imageUrl: "" },
-        };
-
-        pairs.push(dexPair);
-      }
-    }
-
-    logger.debug({ count: pairs.length }, "Scanner: GeckoTerminal new pools fetched");
-    return pairs;
-  }
-
-  /** Search 5 rotating keyword queries per scan */
   private async fetchSearchPairs(): Promise<DexScreenerPair[]> {
     const queries: string[] = [];
     for (let i = 0; i < QUERIES_PER_SCAN; i++) {
@@ -286,33 +215,36 @@ class ScannerService {
             p.chainId === "solana" &&
             !["SOL", "USDC", "USDT", "WSOL"].includes(p.baseToken.symbol),
         );
-        // Top 10 per keyword — keyword search returns by relevance not age,
-        // GeckoTerminal covers genuinely fresh tokens
-        pairs.push(...filtered.slice(0, 10));
+        // Top 15 per keyword — DexScreener search sorts by relevance+activity
+        pairs.push(...filtered.slice(0, 15));
       }
     }
     return pairs;
   }
 
+  /**
+   * All data pulled 100% from DexScreener — no GeckoTerminal.
+   * Sources:
+   *   1. Keyword search (8 rotating queries/scan) — DexScreener /search
+   *   2. Boosted tokens (every scan) — DexScreener /token-boosts
+   *   3. Token profiles (every scan) — DexScreener /token-profiles
+   * Every field (price, liquidity, volume, mcap) comes directly from
+   * DexScreener and matches what dexscreener.com shows.
+   */
   async fetchSolanaPairs(): Promise<DexScreenerPair[]> {
     try {
       const useBoosted = this.scanCount % BOOSTED_EVERY_N_SCANS === 0;
-      const useGecko = this.scanCount % GECKO_EVERY_N_SCANS === 0;
       const allPairs: DexScreenerPair[] = [];
 
-      const [searchPairs, boostedPairs, geckoPairs] = await Promise.allSettled([
+      const [searchPairs, boostedPairs] = await Promise.allSettled([
         this.fetchSearchPairs(),
         useBoosted
           ? this.fetchBoostedAddresses().then((addrs) => this.fetchPairsForAddresses(addrs))
-          : Promise.resolve([] as DexScreenerPair[]),
-        useGecko
-          ? this.fetchGeckoTerminalNewPools()
           : Promise.resolve([] as DexScreenerPair[]),
       ]);
 
       if (searchPairs.status === "fulfilled") allPairs.push(...searchPairs.value);
       if (boostedPairs.status === "fulfilled") allPairs.push(...boostedPairs.value);
-      if (geckoPairs.status === "fulfilled") allPairs.push(...geckoPairs.value);
 
       // Deduplicate by pair address, keep highest-volume version
       const seen = new Map<string, DexScreenerPair>();
@@ -402,9 +334,9 @@ class ScannerService {
         tokenTtlMin: TOKEN_TTL_MS / 60_000,
         maxPoolAgeHours: MAX_POOL_AGE_HOURS,
         minPoolLiquidityUsd: MIN_POOL_LIQUIDITY_USD,
-        geckoEveryNScans: GECKO_EVERY_N_SCANS,
+        dataSource: "100% DexScreener — GeckoTerminal removed",
       },
-      "Scanner started — keywords + boosted/profiled + GeckoTerminal new pools + age/liq pre-filter",
+      "Scanner started — 100% DexScreener data (keyword search + boosted/profiled tokens)",
     );
   }
 
