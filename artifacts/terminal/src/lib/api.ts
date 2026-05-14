@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { ScannedToken, Position, Portfolio, AnalyticsSnapshot, Alert, AutoTraderStatus, AutoTraderConfig } from "./types";
+import { ScannedToken, Position, Portfolio, AnalyticsSnapshot, Alert, AutoTraderStatus, AutoTraderConfig, CycleRecord } from "./types";
 import { useToast } from "@/hooks/use-toast";
 
 export function useWebSocket() {

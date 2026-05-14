@@ -416,6 +416,29 @@ class ScannerService {
     }
   }
 
+  /**
+   * Fallback lookup by token contract address when pairAddress lookup returns null.
+   * Uses /tokens/v1/solana/{address} and picks the highest-liquidity Solana pair,
+   * preferring the known pairAddress if it shows up.
+   */
+  async getPairByContractAddress(contractAddress: string, preferPairAddress?: string): Promise<DexScreenerPair | null> {
+    try {
+      const res = await axios.get<{ pairs: DexScreenerPair[] }>(
+        `${DEXSCREENER_BASE}/tokens/v1/solana/${contractAddress}`,
+        { timeout: 8000 },
+      );
+      const pairs = (res.data.pairs ?? []).filter((p) => p.chainId === "solana");
+      if (pairs.length === 0) return null;
+      if (preferPairAddress) {
+        const exact = pairs.find((p) => p.pairAddress === preferPairAddress);
+        if (exact) return exact;
+      }
+      return pairs.sort((a, b) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0))[0] ?? null;
+    } catch {
+      return null;
+    }
+  }
+
   async getOrFetchToken(pairAddress: string): Promise<ScannedToken | null> {
     const cached = this.tokens.get(pairAddress);
     if (cached) return cached;

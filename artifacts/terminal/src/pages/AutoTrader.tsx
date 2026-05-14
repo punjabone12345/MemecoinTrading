@@ -61,22 +61,83 @@ function LlmBadge({ verdict, provider, confidence }: { verdict?: string; provide
   );
 }
 
+function AiAnalysisCard({ d }: { d: CycleDecision }) {
+  const hasLlm = d.llmProvider && d.llmProvider !== "none";
+  if (!hasLlm) return null;
+
+  const verdict = d.llmVerdict ?? "TRADE";
+  const providerLabel = d.llmProvider === "gemini" ? "Gemini Flash" : d.llmProvider === "groq" ? "Groq Llama" : d.llmProvider ?? "";
+
+  const verdictStyles: Record<string, { border: string; bg: string; text: string; dot: string }> = {
+    TRADE: { border: "border-emerald-500/30", bg: "bg-emerald-900/20", text: "text-emerald-300", dot: "bg-emerald-400" },
+    RISKY: { border: "border-amber-500/30",   bg: "bg-amber-900/20",   text: "text-amber-300",  dot: "bg-amber-400"  },
+    SKIP:  { border: "border-red-500/30",      bg: "bg-red-900/20",     text: "text-red-300",    dot: "bg-red-400"    },
+  };
+  const s = verdictStyles[verdict] ?? verdictStyles["TRADE"];
+
+  return (
+    <div className={`mx-0 mb-2.5 rounded-xl border ${s.border} ${s.bg} overflow-hidden`}>
+      {/* Header */}
+      <div className={`flex items-center gap-2 px-3 py-2 border-b ${s.border}`}>
+        <div className={`w-1.5 h-1.5 rounded-full ${s.dot} shrink-0`} />
+        <span className={`text-[10px] font-black tracking-widest uppercase ${s.text}`}>{verdict}</span>
+        <span className="text-white/20 text-[9px]">·</span>
+        <span className="text-white/40 text-[9px]">{providerLabel}</span>
+        {d.llmConfidence !== undefined && d.llmConfidence > 0 && (
+          <>
+            <span className="text-white/20 text-[9px]">·</span>
+            <span className="text-white/40 text-[9px]">{d.llmConfidence}% confidence</span>
+          </>
+        )}
+        {d.llmDurationMs !== undefined && (
+          <>
+            <span className="text-white/20 text-[9px]">·</span>
+            <span className="text-white/25 text-[9px]">{d.llmDurationMs}ms</span>
+          </>
+        )}
+      </div>
+      {/* Reasoning */}
+      {d.llmReasoning && (
+        <p className="px-3 pt-2 pb-1.5 text-[11px] text-white/70 leading-snug">{d.llmReasoning}</p>
+      )}
+      {/* Strengths + Risks grid */}
+      {((d.llmStrengths && d.llmStrengths.length > 0) || (d.llmRisks && d.llmRisks.length > 0)) && (
+        <div className="grid grid-cols-2 gap-0 border-t border-white/5">
+          {d.llmStrengths && d.llmStrengths.length > 0 && (
+            <div className="px-3 py-2 border-r border-white/5">
+              <p className="text-[9px] font-bold text-emerald-400/60 uppercase tracking-wider mb-1.5">Strengths</p>
+              {d.llmStrengths.map((s, i) => (
+                <p key={i} className="text-[10px] text-emerald-300/60 leading-snug mb-0.5">↑ {s}</p>
+              ))}
+            </div>
+          )}
+          {d.llmRisks && d.llmRisks.length > 0 && (
+            <div className="px-3 py-2">
+              <p className="text-[9px] font-bold text-red-400/60 uppercase tracking-wider mb-1.5">Risks</p>
+              {d.llmRisks.map((r, i) => (
+                <p key={i} className="text-[10px] text-red-300/60 leading-snug mb-0.5">↓ {r}</p>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function DecisionRow({ d }: { d: CycleDecision }) {
   const isTraded = d.action === "traded";
   const isFiltered = d.action === "filtered";
-  const [expanded, setExpanded] = useState(false);
+  const hasLlm = !!(d.llmProvider && d.llmProvider !== "none");
+  // Auto-expand AI card for traded tokens; collapsed by default for others
+  const [showAi, setShowAi] = useState(isTraded && hasLlm);
 
   const Icon = isTraded ? CheckCircle2 : isFiltered ? XCircle : SkipForward;
   const iconColor = isTraded ? "text-emerald-400" : isFiltered ? "text-red-400" : "text-white/30";
-  const hasLlm = d.llmProvider && d.llmProvider !== "none";
-  const hasDetail = hasLlm && ((d.llmRisks && d.llmRisks.length > 0) || (d.llmStrengths && d.llmStrengths.length > 0));
 
   return (
     <div className="border-b border-white/5 last:border-0">
-      <div
-        className={`flex items-start gap-2.5 py-2.5 ${hasDetail ? "cursor-pointer" : ""}`}
-        onClick={() => hasDetail && setExpanded(e => !e)}
-      >
+      <div className="flex items-start gap-2.5 py-2.5">
         <Icon className={`w-3.5 h-3.5 mt-0.5 shrink-0 ${iconColor}`} />
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
@@ -88,39 +149,28 @@ function DecisionRow({ d }: { d: CycleDecision }) {
             {d.pairAgeMinutes > 0 && (
               <span className="text-white/30 text-[10px]">{holdLabel(d.pairAgeMinutes)} old</span>
             )}
-            <LlmBadge verdict={d.llmVerdict} provider={d.llmProvider} confidence={d.llmConfidence} />
+            {hasLlm && (
+              <button
+                onClick={() => setShowAi(v => !v)}
+                className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded border text-[9px] font-semibold transition-opacity ${
+                  d.llmVerdict === "TRADE" ? "bg-emerald-500/20 text-emerald-300 border-emerald-500/30" :
+                  d.llmVerdict === "RISKY" ? "bg-amber-500/20 text-amber-300 border-amber-500/30" :
+                  "bg-red-500/20 text-red-300 border-red-500/30"
+                }`}
+              >
+                <span>{d.llmVerdict}</span>
+                <span className="opacity-50">·</span>
+                <span className="opacity-60">{d.llmProvider === "gemini" ? "Gemini" : "Groq"}</span>
+                <span className="opacity-40 ml-0.5">{showAi ? "▲" : "▼"}</span>
+              </button>
+            )}
           </div>
           <p className={`text-[10px] mt-0.5 ${isTraded ? "text-emerald-400/80" : isFiltered ? "text-red-400/70" : "text-white/30"}`}>
             {d.reason}
           </p>
-          {hasLlm && d.llmReasoning && (
-            <p className="text-[10px] mt-0.5 text-white/40 italic">{d.llmReasoning}</p>
-          )}
         </div>
-        {hasDetail && (
-          <span className="text-white/20 text-[10px] mt-0.5 shrink-0">{expanded ? "▲" : "▼"}</span>
-        )}
       </div>
-      {expanded && hasDetail && (
-        <div className="ml-6 mb-2.5 grid grid-cols-2 gap-2">
-          {d.llmStrengths && d.llmStrengths.length > 0 && (
-            <div>
-              <p className="text-[9px] font-semibold text-emerald-400/70 uppercase tracking-wide mb-1">Strengths</p>
-              {d.llmStrengths.map((s, i) => (
-                <p key={i} className="text-[10px] text-emerald-300/60 leading-snug">+ {s}</p>
-              ))}
-            </div>
-          )}
-          {d.llmRisks && d.llmRisks.length > 0 && (
-            <div>
-              <p className="text-[9px] font-semibold text-red-400/70 uppercase tracking-wide mb-1">Risks</p>
-              {d.llmRisks.map((r, i) => (
-                <p key={i} className="text-[10px] text-red-300/60 leading-snug">- {r}</p>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
+      {showAi && hasLlm && <AiAnalysisCard d={d} />}
     </div>
   );
 }

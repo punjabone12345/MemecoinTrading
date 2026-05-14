@@ -620,9 +620,20 @@ class AutoTraderService {
 
       for (const c of qualifiedCandidates.slice(0, MAX_VERIFY)) {
         try {
-          const dexPair = await scannerService.getPairFromDex(c.pairAddress);
+          let dexPair = await scannerService.getPairFromDex(c.pairAddress);
+
+          // Fallback: pairAddress lookup can fail for very new or recently re-indexed tokens.
+          // Try the token contract address endpoint (/tokens/v1/solana/{address}) instead.
           if (!dexPair) {
-            decisions.push({ ...c, action: "filtered", reason: "DexScreener: pair not found — likely dead or not yet indexed" });
+            const contractAddress = c.pair.baseToken.address;
+            if (contractAddress) {
+              logger.warn({ symbol: c.symbol, pairAddress: c.pairAddress }, "DexScreener pairAddress lookup returned null — retrying via contract address");
+              dexPair = await scannerService.getPairByContractAddress(contractAddress, c.pairAddress);
+            }
+          }
+
+          if (!dexPair) {
+            decisions.push({ ...c, action: "filtered", reason: "DexScreener: pair not found via both pairAddress and contract address — skipping" });
             continue;
           }
 
