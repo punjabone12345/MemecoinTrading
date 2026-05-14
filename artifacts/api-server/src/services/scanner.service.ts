@@ -124,45 +124,47 @@ class ScannerService {
     }
   }
 
-  private async fetchBoostedAddresses(): Promise<string[]> {
+  /**
+   * Fetch DexScreener's curated token lists (boosts + profiles) and return
+   * both token addresses AND pair addresses extracted from each entry's url field.
+   * The url field encodes the featured pair address directly, so we can fetch
+   * pair data in one step instead of token → pairs (two steps).
+   */
+  private async fetchCuratedLists(): Promise<{ tokenAddresses: string[]; pairAddresses: string[] }> {
+    type DexEntry = { tokenAddress: string; chainId: string; url?: string };
     const [topBoostsRes, latestBoostsRes, profilesRes] = await Promise.allSettled([
-      axios.get<{ tokenAddress: string; chainId: string }[]>(
-        `${DEXSCREENER_BASE}/token-boosts/top/v1`,
-        { timeout: 8000 },
-      ),
-      axios.get<{ tokenAddress: string; chainId: string }[]>(
-        `${DEXSCREENER_BASE}/token-boosts/latest/v1`,
-        { timeout: 8000 },
-      ),
-      axios.get<{ tokenAddress: string; chainId: string }[]>(
-        `${DEXSCREENER_BASE}/token-profiles/latest/v1`,
-        { timeout: 8000 },
-      ),
+      axios.get<DexEntry[]>(`${DEXSCREENER_BASE}/token-boosts/top/v1`,     { timeout: 8000 }),
+      axios.get<DexEntry[]>(`${DEXSCREENER_BASE}/token-boosts/latest/v1`,  { timeout: 8000 }),
+      axios.get<DexEntry[]>(`${DEXSCREENER_BASE}/token-profiles/latest/v1`, { timeout: 8000 }),
     ]);
 
-    const addresses = new Set<string>();
-    if (topBoostsRes.status === "fulfilled" && Array.isArray(topBoostsRes.value.data)) {
-      topBoostsRes.value.data
-        .filter((b) => b.chainId === "solana")
-        .slice(0, 30)
-        .forEach((b) => addresses.add(b.tokenAddress));
-    }
-    if (latestBoostsRes.status === "fulfilled" && Array.isArray(latestBoostsRes.value.data)) {
-      latestBoostsRes.value.data
-        .filter((b) => b.chainId === "solana")
-        .slice(0, 30)
-        .forEach((b) => addresses.add(b.tokenAddress));
-    }
-    if (profilesRes.status === "fulfilled" && Array.isArray(profilesRes.value.data)) {
-      profilesRes.value.data
-        .filter((p) => p.chainId === "solana")
-        .slice(0, 30)
-        .forEach((p) => addresses.add(p.tokenAddress));
-    }
-    return Array.from(addresses);
+    const tokenAddresses = new Set<string>();
+    const pairAddresses  = new Set<string>();
+
+    const absorb = (res: typeof topBoostsRes) => {
+      if (res.status !== "fulfilled" || !Array.isArray(res.value.data)) return;
+      res.value.data
+        .filter((e) => e.chainId === "solana")
+        .forEach((e) => {
+          if (e.tokenAddress) tokenAddresses.add(e.tokenAddress);
+          // Extract the pair address from the DexScreener URL's last path segment.
+          // e.g. https://dexscreener.com/solana/<pairAddress>
+          if (e.url) {
+            const seg = e.url.split("/").pop();
+            if (seg && seg.length > 20) pairAddresses.add(seg);
+          }
+        });
+    };
+
+    absorb(topBoostsRes);
+    absorb(latestBoostsRes);
+    absorb(profilesRes);
+
+    return { tokenAddresses: Array.from(tokenAddresses), pairAddresses: Array.from(pairAddresses) };
   }
 
-  private async fetchPairsForAddresses(addresses: string[]): Promise<DexScreenerPair[]> {
+  /** Fetch pairs by token address — one token can have multiple pools */
+  private async fetchPairsForTokenAddresses(addresses: string[]): Promise<DexScreenerPair[]> {
     const chunks: string[][] = [];
     for (let i = 0; i < addresses.length; i += 30) {
       chunks.push(addresses.slice(i, i + 30));
@@ -181,6 +183,33 @@ class ScannerService {
     for (const r of results) {
       if (r.status === "fulfilled" && Array.isArray(r.value.data.pairs)) {
         pairs.push(...r.value.data.pairs.filter((p) => p.chainId === "solana"));
+      }
+    }
+    return pairs;
+  }
+
+  /** Fetch pairs directly by pair address — fastest single-hop lookup */
+  private async fetchPairsForPairAddresses(pairAddresses: string[]): Promise<DexScreenerPair[]> {
+    const chunks: string[][] = [];
+    for (let i = 0; i < pairAddresses.length; i += 30) {
+      chunks.push(pairAddresses.slice(i, i + 30));
+    }
+
+    const results = await Promise.allSettled(
+      chunks.map((chunk) =>
+        axios.get<{ pairs: DexScreenerPair[] }>(
+          `${DEXSCREENER_BASE}/latest/dex/pairs/solana/${chunk.join(",")}`,
+          { timeout: 8000 },
+        ),
+      ),
+    );
+
+    const pairs: DexScreenerPair[] = [];
+    for (const r of results) {
+      if (r.status === "fulfilled") {
+        const data = r.value.data;
+        // /dex/pairs returns either { pairs: [...] } or a single pair object
+        if (Array.isArray(data.pairs)) pairs.push(...data.pairs.filter((p) => p.chainId === "solana"));
       }
     }
     return pairs;
@@ -223,28 +252,39 @@ class ScannerService {
   }
 
   /**
-   * All data pulled 100% from DexScreener — no GeckoTerminal.
-   * Sources:
-   *   1. Keyword search (8 rotating queries/scan) — DexScreener /search
-   *   2. Boosted tokens (every scan) — DexScreener /token-boosts
-   *   3. Token profiles (every scan) — DexScreener /token-profiles
+   * All data pulled 100% from DexScreener — three independent sources run in parallel:
+   *   1. Keyword search (8 rotating queries/scan) — /latest/dex/search
+   *   2a. Curated pair addresses (from url field of boosts/profiles) → /dex/pairs/solana
+   *   2b. Curated token addresses (from boosts/profiles) → /tokens/v1/solana
+   *
    * Every field (price, liquidity, volume, mcap) comes directly from
-   * DexScreener and matches what dexscreener.com shows.
+   * DexScreener and matches exactly what dexscreener.com shows.
    */
   async fetchSolanaPairs(): Promise<DexScreenerPair[]> {
     try {
-      const useBoosted = this.scanCount % BOOSTED_EVERY_N_SCANS === 0;
+      const useCurated = this.scanCount % BOOSTED_EVERY_N_SCANS === 0;
       const allPairs: DexScreenerPair[] = [];
 
-      const [searchPairs, boostedPairs] = await Promise.allSettled([
+      const [searchResult, curatedResult] = await Promise.allSettled([
         this.fetchSearchPairs(),
-        useBoosted
-          ? this.fetchBoostedAddresses().then((addrs) => this.fetchPairsForAddresses(addrs))
+        useCurated
+          ? this.fetchCuratedLists().then(async ({ tokenAddresses, pairAddresses }) => {
+              // Fetch both in parallel — pair addresses via direct lookup (1 hop),
+              // token addresses via token lookup (may surface additional pools)
+              const [byPair, byToken] = await Promise.allSettled([
+                pairAddresses.length > 0 ? this.fetchPairsForPairAddresses(pairAddresses) : Promise.resolve([] as DexScreenerPair[]),
+                tokenAddresses.length > 0 ? this.fetchPairsForTokenAddresses(tokenAddresses) : Promise.resolve([] as DexScreenerPair[]),
+              ]);
+              const combined: DexScreenerPair[] = [];
+              if (byPair.status === "fulfilled") combined.push(...byPair.value);
+              if (byToken.status === "fulfilled") combined.push(...byToken.value);
+              return combined;
+            })
           : Promise.resolve([] as DexScreenerPair[]),
       ]);
 
-      if (searchPairs.status === "fulfilled") allPairs.push(...searchPairs.value);
-      if (boostedPairs.status === "fulfilled") allPairs.push(...boostedPairs.value);
+      if (searchResult.status === "fulfilled") allPairs.push(...searchResult.value);
+      if (curatedResult.status === "fulfilled") allPairs.push(...curatedResult.value);
 
       // Deduplicate by pair address, keep highest-volume version
       const seen = new Map<string, DexScreenerPair>();
