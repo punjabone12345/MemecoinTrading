@@ -119,9 +119,9 @@ Verdict guide:
   SKIP   — likely late entry, distribution, rug signal, or poor risk/reward`;
 }
 
-// ─── Safe JSON parser — never throws, strips markdown fences ──────────────────
+// ─── Safe JSON parser — never throws, logs raw on failure ─────────────────────
 
-function parseJsonVerdict(raw: string): Omit<LlmAnalysis, "provider" | "durationMs"> | null {
+function parseJsonVerdict(raw: string, provider: string): Omit<LlmAnalysis, "provider" | "durationMs"> | null {
   try {
     // Strip markdown code fences if the model wraps the response
     const cleaned = raw
@@ -129,9 +129,12 @@ function parseJsonVerdict(raw: string): Omit<LlmAnalysis, "provider" | "duration
       .replace(/\s*```\s*$/, "")
       .trim();
 
-    // Some models emit extra text before/after the JSON object — extract the first {...}
+    // Extract the first {...} block — handles stray text before/after
     const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) return null;
+    if (!jsonMatch) {
+      logger.warn({ provider, rawPreview: raw.slice(0, 200) }, "AI: no JSON object found in response");
+      return null;
+    }
 
     const obj = JSON.parse(jsonMatch[0]) as {
       verdict: string;
@@ -152,23 +155,23 @@ function parseJsonVerdict(raw: string): Omit<LlmAnalysis, "provider" | "duration
       : [];
 
     return { verdict, confidence, reasoning, risks, strengths };
-  } catch {
+  } catch (e) {
+    logger.warn({ provider, rawPreview: raw.slice(0, 300), err: (e as Error).message }, "AI: JSON parse failed");
     return null;
   }
 }
 
-// ─── Retry helper with exponential backoff + AbortController timeout ───────────
+// ─── Timeout via Promise.race — works with any async call including Gemini SDK ──
+// AbortController signals are NOT honoured by @google/genai SDK internally,
+// so we use Promise.race to enforce a hard wall-clock limit.
 
-const AI_TIMEOUT_MS = 10_000; // hard 10 s cap per attempt
+const AI_TIMEOUT_MS = 25_000; // gemini-2.5-flash (thinking model) takes ~8-9 s
 
-async function withTimeout<T>(fn: (signal: AbortSignal) => Promise<T>, timeoutMs = AI_TIMEOUT_MS): Promise<T> {
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
-  try {
-    return await fn(ctrl.signal);
-  } finally {
-    clearTimeout(timer);
-  }
+function withTimeout<T>(promise: Promise<T>, timeoutMs = AI_TIMEOUT_MS): Promise<T> {
+  const timeout = new Promise<never>((_, reject) =>
+    setTimeout(() => reject(new Error(`AI request timed out after ${timeoutMs}ms`)), timeoutMs),
+  );
+  return Promise.race([promise, timeout]);
 }
 
 async function withRetry<T>(
@@ -193,6 +196,14 @@ async function withRetry<T>(
 }
 
 // ─── Gemini (primary) ─────────────────────────────────────────────────────────
+// Key findings from live testing:
+// - gemini-2.5-flash is a thinking model: it spends tokens on internal reasoning
+//   BEFORE writing the JSON output. With maxOutputTokens: 512 the output was
+//   always truncated mid-string. 2048 gives it room to think + respond fully.
+// - Typical response time: 8-9 s → timeout must be > 10 s (25 s used).
+// - Only gemini-2.5-flash is available via the Replit integration proxy.
+// - AbortController signals are NOT honoured by @google/genai SDK, so we use
+//   Promise.race() in withTimeout() instead.
 
 async function callGemini(prompt: string): Promise<string> {
   const hasIntegration = Boolean(process.env["AI_INTEGRATIONS_GEMINI_BASE_URL"]);
@@ -200,22 +211,22 @@ async function callGemini(prompt: string): Promise<string> {
   if (!hasIntegration && !hasDirectKey) throw new Error("No Gemini credentials configured");
 
   return withRetry(async () => {
-    return withTimeout(async (_signal) => {
-      const ai = getGeminiClient();
-      const response = await ai.models.generateContent({
-        model: "gemini-2.5-flash",
-        contents: [{ role: "user", parts: [{ text: prompt }] }],
-        config: {
-          temperature: 0.1,
-          maxOutputTokens: 512,
-          // Force JSON-only output — eliminates markdown wrapping
-          responseMimeType: "application/json",
-        },
-      });
-      const text = response.text ?? "";
-      if (!text) throw new Error("Gemini returned empty response");
-      return text;
+    const ai = getGeminiClient();
+    const geminiCall = ai.models.generateContent({
+      model: "gemini-2.5-flash",
+      contents: [{ role: "user", parts: [{ text: prompt }] }],
+      config: {
+        temperature: 0.1,
+        // 2048 tokens: enough for thinking model internal reasoning + full JSON output.
+        // 512 was the root cause of truncated responses ("Unterminated string" errors).
+        maxOutputTokens: 2048,
+        responseMimeType: "application/json",
+      },
     });
+    const response = await withTimeout(geminiCall);
+    const text = response.text ?? "";
+    if (!text) throw new Error("Gemini returned empty response");
+    return text;
   }, 2, "gemini");
 }
 
@@ -223,38 +234,36 @@ async function callGemini(prompt: string): Promise<string> {
 
 async function callGroq(prompt: string): Promise<string> {
   const apiKey = process.env["GROQ_API_KEY"];
-  if (!apiKey) throw new Error("GROQ_API_KEY not set");
+  if (!apiKey) throw new Error("GROQ_API_KEY not set — set the secret to enable Groq fallback");
 
   return withRetry(async () => {
-    return withTimeout(async (signal) => {
-      const res = await axios.post(
-        "https://api.groq.com/openai/v1/chat/completions",
-        {
-          model: "llama-3.3-70b-versatile",
-          messages: [
-            {
-              role: "system",
-              content: "You are an expert Solana memecoin trader. Always respond with ONLY valid JSON — no markdown, no extra text, no code fences.",
-            },
-            { role: "user", content: prompt },
-          ],
-          temperature: 0.1,
-          max_tokens: 300,
-          response_format: { type: "json_object" }, // Forces strict JSON from Groq
-        },
-        {
-          timeout: AI_TIMEOUT_MS,
-          signal,
-          headers: {
-            Authorization: `Bearer ${apiKey}`,
-            "Content-Type": "application/json",
+    const groqCall = axios.post(
+      "https://api.groq.com/openai/v1/chat/completions",
+      {
+        model: "llama-3.3-70b-versatile",
+        messages: [
+          {
+            role: "system",
+            content: "You are an expert Solana memecoin trader. Respond ONLY with a valid JSON object — no markdown, no explanation outside the JSON.",
           },
+          { role: "user", content: prompt },
+        ],
+        temperature: 0.1,
+        max_tokens: 400,
+        response_format: { type: "json_object" },
+      },
+      {
+        timeout: AI_TIMEOUT_MS,
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
         },
-      );
-      const text: string = res.data?.choices?.[0]?.message?.content ?? "";
-      if (!text) throw new Error("Groq returned empty response");
-      return text;
-    });
+      },
+    );
+    const res = await withTimeout(groqCall);
+    const text: string = res.data?.choices?.[0]?.message?.content ?? "";
+    if (!text) throw new Error("Groq returned empty response");
+    return text;
   }, 2, "groq");
 }
 
@@ -345,10 +354,10 @@ export async function analyseTokenWithAi(input: TokenAnalysisInput): Promise<Llm
   const start = Date.now();
   const prompt = buildPrompt(input);
 
-  // ── Try Gemini (up to 2 retries, 10 s timeout per attempt) ──────────────────
+  // ── Try Gemini (up to 2 retries, 25 s timeout — thinking model takes 8-9 s) ──
   try {
     const raw = await callGemini(prompt);
-    const parsed = parseJsonVerdict(raw);
+    const parsed = parseJsonVerdict(raw, "gemini");
     if (parsed) {
       const result: LlmAnalysis = { ...parsed, provider: "gemini", durationMs: Date.now() - start };
       logger.info(
@@ -357,15 +366,15 @@ export async function analyseTokenWithAi(input: TokenAnalysisInput): Promise<Llm
       );
       return result;
     }
-    throw new Error("Gemini JSON parse failed even after retries");
+    throw new Error("Gemini JSON parse failed — raw response was logged above");
   } catch (geminiErr) {
     logger.warn({ err: (geminiErr as Error).message, symbol: input.symbol }, "AI analysis: Gemini failed — trying Groq");
   }
 
-  // ── Fallback: Groq (up to 2 retries, 10 s timeout per attempt) ──────────────
+  // ── Fallback: Groq (up to 2 retries, 25 s timeout) ───────────────────────────
   try {
     const raw = await callGroq(prompt);
-    const parsed = parseJsonVerdict(raw);
+    const parsed = parseJsonVerdict(raw, "groq");
     if (parsed) {
       const result: LlmAnalysis = { ...parsed, provider: "groq", durationMs: Date.now() - start };
       logger.info(
@@ -374,7 +383,7 @@ export async function analyseTokenWithAi(input: TokenAnalysisInput): Promise<Llm
       );
       return result;
     }
-    throw new Error("Groq JSON parse failed even after retries");
+    throw new Error("Groq JSON parse failed — raw response was logged above");
   } catch (groqErr) {
     logger.warn({ err: (groqErr as Error).message, symbol: input.symbol }, "AI analysis: Groq also failed — using heuristic fallback");
   }

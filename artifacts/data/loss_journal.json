@@ -1,5 +1,32 @@
 [
   {
+    "positionId": "881e2995-0d5a-420b-9262-3702c616298c",
+    "symbol": "ANTROPIANS",
+    "contractAddress": "8tX4ZoxhnuaQrK2H59omSEQXCHTNwFn9vZUg1psh3W5Z",
+    "openedAt": "2026-05-15T02:29:02.330Z",
+    "closedAt": "2026-05-15T02:30:28.039Z",
+    "holdTimeMs": 85709,
+    "pnlSol": -0.05295524509803923,
+    "pnlPercent": -10.591049019607846,
+    "aiScore": 77,
+    "confidence": 100,
+    "entryMcapUsd": 100651,
+    "entryLiquidityUsd": 27575.02,
+    "slPercent": 6,
+    "tpPercent": 35,
+    "tags": [
+      "rug_speed",
+      "borderline_score",
+      "thin_liquidity"
+    ],
+    "warnings": [
+      "Closed in only 1.4m — instant rug despite all filters passing",
+      "AI score was 77 — only 5pts above the 72 minimum. Low-conviction entry.",
+      "Entry liquidity was $28K — thin pool makes exit expensive and rug risk higher"
+    ],
+    "recordedAt": 1778812228040
+  },
+  {
     "positionId": "b5c6e7fe-e35d-43bf-bc2d-e36cad3adfac",
     "symbol": "团结",
     "contractAddress": "H9nrHLjxrWPzA4N6YDiCAoSD5aXMJ3APnfJuEfSbpump",
