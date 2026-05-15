@@ -1,1 +1,24 @@
-[]
+[
+  {
+    "positionId": "c9fbac4f-fced-495a-9815-2b71265252ed",
+    "symbol": "鲁比奥",
+    "tokenName": "Lǔ bǐ ào",
+    "pairAddress": "HVuABUU6r2tqFAcSPpV7tQkKfGn1XcDaBKAe2PJtCZL1",
+    "contractAddress": "DRLPc8B6ngiaaoktNT79nfSPb5dyuT3b89f5xjhopump",
+    "imageUrl": "https://cdn.dexscreener.com/cms/images/1EqXO540lw63LHVu?width=800&height=800&quality=95&format=auto",
+    "entryPrice": 0.0002915,
+    "sizeSol": 0.5,
+    "slPercent": 6,
+    "tpPercent": 35,
+    "slPrice": 0.00027401,
+    "tpPrice": 0.000393525,
+    "entryMarketCap": 207868,
+    "entryLiquidityUsd": 37312.77,
+    "tpMarketCap": 280621.80000000005,
+    "slMarketCap": 195395.91999999998,
+    "aiScore": 75,
+    "confidence": 100,
+    "openedAt": "2026-05-15T04:02:59.209Z",
+    "status": "open"
+  }
+]
