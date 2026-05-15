@@ -7,6 +7,43 @@ router.get("/healthz", (_req, res) => {
   res.json({ status: "ok" });
 });
 
+// ─── Env diagnostic — visit /api/debug/env to see what keys the server has ───
+// Safe: never prints actual key values, only whether each var is set/unset.
+router.get("/debug/env", (_req, res) => {
+  const vars: Record<string, string> = {};
+
+  // All vars we care about for AI
+  const watchKeys = [
+    "GEMINI_API_KEY",
+    "AI_INTEGRATIONS_GEMINI_API_KEY",
+    "AI_INTEGRATIONS_GEMINI_BASE_URL",
+    "GROQ_API_KEY",
+    "NODE_ENV",
+    "PORT",
+  ];
+
+  for (const key of watchKeys) {
+    const val = process.env[key];
+    if (val === undefined) {
+      vars[key] = "❌ NOT SET";
+    } else if (val === "") {
+      vars[key] = "⚠️ SET BUT EMPTY";
+    } else {
+      // Show first 6 chars + mask the rest so user can confirm the key
+      vars[key] = `✅ SET — starts with "${val.slice(0, 6)}…" (${val.length} chars)`;
+    }
+  }
+
+  // Also dump ALL env var KEY NAMES so user can spot typos
+  const allKeys = Object.keys(process.env).sort();
+
+  res.json({
+    message: "Env diagnostic — values are masked for safety",
+    aiVars: vars,
+    allKeyNames: allKeys,
+  });
+});
+
 // ─── Live AI debug endpoint ────────────────────────────────────────────────────
 // Runs a real analyseTokenWithAi() call and returns the result.
 // Used by the in-app "Test Gemini" button to confirm AI is working.
