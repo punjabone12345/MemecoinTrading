@@ -1,1 +1,24 @@
-[]
+[
+  {
+    "positionId": "01ea710f-f2a1-4e8b-bec5-436a866a3be3",
+    "symbol": "CHINA",
+    "tokenName": "CHINA",
+    "pairAddress": "vmpdZCZt1LMZgCzxDfNmhnvmgg8H7jazK7xjVFfA9MS",
+    "contractAddress": "Cx3HSpdXGNZZfe15ehj9mcARsDwfVeo4hWCEbWVtoUV8",
+    "imageUrl": "",
+    "entryPrice": 0.0001324,
+    "sizeSol": 0.5,
+    "slPercent": 8,
+    "tpPercent": 35,
+    "slPrice": 0.000121808,
+    "tpPrice": 0.00017874,
+    "entryMarketCap": 130002,
+    "entryLiquidityUsd": 202632.17,
+    "tpMarketCap": 175502.7,
+    "slMarketCap": 119601.84000000001,
+    "aiScore": 78,
+    "confidence": 100,
+    "openedAt": "2026-05-15T04:37:26.580Z",
+    "status": "open"
+  }
+]

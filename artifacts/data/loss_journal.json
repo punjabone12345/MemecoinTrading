@@ -1,5 +1,65 @@
 [
   {
+    "positionId": "8325a6cf-94a1-40fc-b2fb-d9b6ce38815a",
+    "symbol": "◎",
+    "contractAddress": "CQMtJmAwFv1oAobMwRfv6ir4efTWdhfNp7S1R72Rpump",
+    "openedAt": "2026-05-15T04:40:27.991Z",
+    "closedAt": "2026-05-15T04:41:15.643Z",
+    "holdTimeMs": 47652,
+    "pnlSol": -0.06203216128645145,
+    "pnlPercent": -12.40643225729029,
+    "aiScore": 73,
+    "confidence": 100,
+    "entryMcapUsd": 74055,
+    "entryLiquidityUsd": 22713.97,
+    "slPercent": 6,
+    "tpPercent": 35,
+    "tags": [
+      "rug_speed",
+      "borderline_score",
+      "thin_liquidity",
+      "micro_cap"
+    ],
+    "warnings": [
+      "Closed in only 0.8m — instant rug despite all filters passing",
+      "AI score was 73 — only 1pts above the 72 minimum. Low-conviction entry.",
+      "Entry liquidity was $23K — thin pool makes exit expensive and rug risk higher",
+      "Entry mcap was $74K — micro-cap is higher risk for rug"
+    ],
+    "recordedAt": 1778820075645,
+    "isWin": false
+  },
+  {
+    "positionId": "55cc5567-121b-4640-9ebe-5b07b43f0c57",
+    "symbol": "VARRR",
+    "contractAddress": "FvfLQLLpsWPU2MTrH7qNc8ikkNn3MyRHtCdatctppump",
+    "openedAt": "2026-05-15T04:11:23.077Z",
+    "closedAt": "2026-05-15T04:13:44.427Z",
+    "holdTimeMs": 141350,
+    "pnlSol": -0.049474863647142486,
+    "pnlPercent": -9.894972729428497,
+    "aiScore": 72,
+    "confidence": 100,
+    "entryMcapUsd": 81106,
+    "entryLiquidityUsd": 23246.6,
+    "slPercent": 8,
+    "tpPercent": 35,
+    "tags": [
+      "rug_speed",
+      "borderline_score",
+      "thin_liquidity",
+      "micro_cap"
+    ],
+    "warnings": [
+      "Closed in only 2.4m — instant rug despite all filters passing",
+      "AI score was 72 — only 0pts above the 72 minimum. Low-conviction entry.",
+      "Entry liquidity was $23K — thin pool makes exit expensive and rug risk higher",
+      "Entry mcap was $81K — micro-cap is higher risk for rug"
+    ],
+    "recordedAt": 1778818424429,
+    "isWin": false
+  },
+  {
     "positionId": "d2ba7fd8-4713-4b8c-b263-431e9117d114",
     "symbol": "UNCH",
     "contractAddress": "7meLoWBJZZVKViuziac1DQe1LDG3cAWxk6pBkspDpump",
