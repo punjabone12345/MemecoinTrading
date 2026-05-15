@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { usePositions, useClosedPositions, useClosePosition, useDeleteClosedTrade, useEditClosedTrade } from "@/lib/api";
-import { TrendingUp, TrendingDown, Clock, ExternalLink, X, Trash2, Pencil, AlertTriangle } from "lucide-react";
+import { TrendingUp, TrendingDown, Clock, ExternalLink, X, Trash2, Pencil, AlertTriangle, ChevronDown, ChevronUp } from "lucide-react";
 
 function formatPrice(price: number): string {
   if (!price) return "—";
@@ -38,6 +38,94 @@ function toIST(iso: string): string {
   });
 }
 
+function ProviderBadge({ provider, verdict, confidence }: {
+  provider?: string;
+  verdict?: string;
+  confidence?: number;
+}) {
+  if (!provider || provider === "none") return null;
+  const colors: Record<string, string> = {
+    gemini: "bg-blue-500/15 text-blue-400 border-blue-500/20",
+    groq: "bg-purple-500/15 text-purple-400 border-purple-500/20",
+    heuristic: "bg-yellow-500/15 text-yellow-400 border-yellow-500/20",
+  };
+  const icons: Record<string, string> = {
+    gemini: "✦",
+    groq: "⚡",
+    heuristic: "⚙",
+  };
+  const cls = colors[provider] ?? "bg-white/10 text-white/50 border-white/10";
+  return (
+    <span className={`inline-flex items-center gap-1 text-[9px] font-bold px-1.5 py-0.5 rounded border ${cls}`}>
+      {icons[provider] ?? "•"} {provider.toUpperCase()}
+      {verdict && <span className="opacity-70">· {verdict}</span>}
+      {confidence !== undefined && <span className="opacity-50">· {confidence}%</span>}
+    </span>
+  );
+}
+
+function AiAnalysisPanel({ reasoning, risks, strengths, provider, verdict, confidence, durationMs }: {
+  reasoning?: string;
+  risks?: string[];
+  strengths?: string[];
+  provider?: string;
+  verdict?: string;
+  confidence?: number;
+  durationMs?: number;
+}) {
+  if (!reasoning && (!risks?.length) && (!strengths?.length)) return null;
+
+  const verdictColor =
+    verdict === "TRADE" ? "text-emerald-400" :
+    verdict === "RISKY" ? "text-yellow-400" :
+    verdict === "SKIP" ? "text-red-400" : "text-white/50";
+
+  return (
+    <div className="bg-white/3 border border-white/8 rounded-xl p-3 space-y-2">
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        <div className="flex items-center gap-1.5">
+          <span className="text-[10px] font-bold text-white/40 uppercase tracking-wider">AI Analysis</span>
+          <ProviderBadge provider={provider} verdict={verdict} confidence={confidence} />
+        </div>
+        {durationMs && (
+          <span className="text-[9px] text-white/20">{(durationMs / 1000).toFixed(1)}s</span>
+        )}
+      </div>
+
+      {reasoning && (
+        <p className="text-[11px] text-white/70 leading-relaxed">{reasoning}</p>
+      )}
+
+      {(strengths?.length || risks?.length) ? (
+        <div className="grid grid-cols-2 gap-2">
+          {strengths && strengths.length > 0 && (
+            <div className="space-y-1">
+              <p className="text-[9px] font-bold text-emerald-400/70 uppercase tracking-wider">Strengths</p>
+              {strengths.map((s, i) => (
+                <p key={i} className="text-[10px] text-emerald-400/80 flex gap-1">
+                  <span className="shrink-0">↑</span>
+                  <span>{s}</span>
+                </p>
+              ))}
+            </div>
+          )}
+          {risks && risks.length > 0 && (
+            <div className="space-y-1">
+              <p className="text-[9px] font-bold text-red-400/70 uppercase tracking-wider">Risks</p>
+              {risks.map((r, i) => (
+                <p key={i} className="text-[10px] text-red-400/80 flex gap-1">
+                  <span className="shrink-0">↓</span>
+                  <span>{r}</span>
+                </p>
+              ))}
+            </div>
+          )}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 const TABS = ["Open", "Closed"] as const;
 
 interface EditLossState {
@@ -55,6 +143,7 @@ export default function Positions() {
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [editLoss, setEditLoss] = useState<EditLossState | null>(null);
   const [editNote, setEditNote] = useState("");
+  const [expandedAi, setExpandedAi] = useState<Set<string>>(new Set());
 
   const { data: positionsData } = usePositions();
   const { data: closedPositions = [] } = useClosedPositions();
@@ -63,6 +152,15 @@ export default function Positions() {
   const editClosedTrade = useEditClosedTrade();
 
   const openPositions = positionsData?.positions ?? [];
+
+  function toggleAi(id: string) {
+    setExpandedAi((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
 
   function openEditLoss(p: typeof closedPositions[0]) {
     setEditNote(p.note ?? "");
@@ -79,7 +177,6 @@ export default function Positions() {
 
   function submitMarkAsLoss() {
     if (!editLoss) return;
-    // Compute the full SL loss: sizeSol × (slPercent / 100) with fees
     const slPnlPercent = -(editLoss.slPercent);
     const grossReturn = editLoss.sizeSol * (editLoss.slPrice / editLoss.entryPrice);
     const fees = (grossReturn + editLoss.sizeSol) * 0.003 + editLoss.sizeSol * 0.005;
@@ -127,6 +224,8 @@ export default function Positions() {
             const pnl = p.livePnlSol ?? 0;
             const pnlPct = p.livePnlPercent ?? 0;
             const isWin = pnl >= 0;
+            const aiExpanded = expandedAi.has(p.positionId);
+            const hasAi = !!(p.llmReasoning || p.llmRisks?.length || p.llmStrengths?.length);
 
             return (
               <div key={p.positionId} className={`bg-[#0d0d18] border rounded-2xl overflow-hidden ${isWin ? "border-emerald-500/20" : "border-red-500/20"}`}>
@@ -135,6 +234,9 @@ export default function Positions() {
                     {isWin ? <TrendingUp className="w-4 h-4 text-emerald-400" /> : <TrendingDown className="w-4 h-4 text-red-400" />}
                     <span className="font-black text-white text-base">${p.symbol}</span>
                     <span className="text-white/40 text-xs">{p.tokenName}</span>
+                    {p.llmProvider && (
+                      <ProviderBadge provider={p.llmProvider} verdict={p.llmVerdict} confidence={p.llmConfidence} />
+                    )}
                   </div>
                   <div className={`text-sm font-black ${isWin ? "text-emerald-400" : "text-red-400"}`}>
                     {isWin ? "+" : ""}{pnl.toFixed(4)} SOL
@@ -186,6 +288,30 @@ export default function Positions() {
                     </div>
                   </div>
 
+                  {/* AI Analysis expandable */}
+                  {hasAi && (
+                    <div>
+                      <button
+                        onClick={() => toggleAi(p.positionId)}
+                        className="flex items-center gap-1.5 text-[10px] text-white/30 hover:text-white/60 transition-colors py-1"
+                      >
+                        {aiExpanded ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+                        {aiExpanded ? "Hide" : "Show"} AI reasoning
+                      </button>
+                      {aiExpanded && (
+                        <AiAnalysisPanel
+                          reasoning={p.llmReasoning}
+                          risks={p.llmRisks}
+                          strengths={p.llmStrengths}
+                          provider={p.llmProvider}
+                          verdict={p.llmVerdict}
+                          confidence={p.llmConfidence}
+                          durationMs={p.llmDurationMs}
+                        />
+                      )}
+                    </div>
+                  )}
+
                   <div className="bg-white/4 rounded-lg px-3 py-2">
                     <p className="text-white/30 text-[10px] mb-0.5">Contract Address</p>
                     <p className="font-mono text-[10px] text-white/70 break-all">{p.contractAddress || p.pairAddress}</p>
@@ -232,6 +358,8 @@ export default function Positions() {
             const reasonColor = p.closeReason === "take_profit" ? "text-emerald-400 bg-emerald-500/15" : p.closeReason === "stop_loss" ? "text-red-400 bg-red-500/15" : "text-white/50 bg-white/8";
             const reasonLabel = p.closeReason === "take_profit" ? "✅ TP Hit" : p.closeReason === "stop_loss" ? "🛑 SL Hit" : "⚪ Manual";
             const isConfirming = confirmDeleteId === p.positionId;
+            const aiExpanded = expandedAi.has(p.positionId);
+            const hasAi = !!(p.llmReasoning || p.llmRisks?.length || p.llmStrengths?.length);
 
             return (
               <div key={p.positionId} className="bg-[#0d0d18] border border-white/8 rounded-xl overflow-hidden">
@@ -239,6 +367,9 @@ export default function Positions() {
                   <div className="flex items-center gap-2 flex-wrap">
                     <span className="font-black text-white">${p.symbol}</span>
                     <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${reasonColor}`}>{reasonLabel}</span>
+                    {p.llmProvider && (
+                      <ProviderBadge provider={p.llmProvider} verdict={p.llmVerdict} confidence={p.llmConfidence} />
+                    )}
                     {p.note && (
                       <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-400 flex items-center gap-1">
                         <AlertTriangle className="w-2.5 h-2.5" />
@@ -279,6 +410,31 @@ export default function Positions() {
                     </div>
                   )}
                 </div>
+
+                {/* AI Analysis expandable for closed trades */}
+                {hasAi && (
+                  <div className="px-4 pb-2">
+                    <button
+                      onClick={() => toggleAi(p.positionId)}
+                      className="flex items-center gap-1.5 text-[10px] text-white/30 hover:text-white/60 transition-colors py-1"
+                    >
+                      {aiExpanded ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+                      {aiExpanded ? "Hide" : "Show"} AI reasoning
+                    </button>
+                    {aiExpanded && (
+                      <AiAnalysisPanel
+                        reasoning={p.llmReasoning}
+                        risks={p.llmRisks}
+                        strengths={p.llmStrengths}
+                        provider={p.llmProvider}
+                        verdict={p.llmVerdict}
+                        confidence={p.llmConfidence}
+                        durationMs={p.llmDurationMs}
+                      />
+                    )}
+                  </div>
+                )}
+
                 <div className="px-4 pb-3 flex items-center justify-between gap-2">
                   <a
                     href={`https://dexscreener.com/solana/${p.contractAddress || p.pairAddress}`}
@@ -290,7 +446,6 @@ export default function Positions() {
                   </a>
 
                   <div className="flex items-center gap-1.5">
-                    {/* Mark as loss button */}
                     {!isConfirming && (
                       <button
                         onClick={() => openEditLoss(p)}
@@ -302,7 +457,6 @@ export default function Positions() {
                       </button>
                     )}
 
-                    {/* Delete trade with confirm */}
                     {isConfirming ? (
                       <div className="flex items-center gap-1.5">
                         <span className="text-[10px] text-white/50">Remove & restore balance?</span>

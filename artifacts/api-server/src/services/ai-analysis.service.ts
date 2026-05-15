@@ -30,6 +30,7 @@ export interface LlmAnalysis {
 export interface TokenAnalysisInput {
   symbol: string;
   name: string;
+  contractAddress: string;
   pairAddress: string;
   pairAgeMinutes: number;
   priceUsd: number;
@@ -67,12 +68,17 @@ function buildPrompt(t: TokenAnalysisInput): string {
   const fdvRatio = t.marketCapUsd > 0 && t.fdv > 0 ? (t.fdv / t.marketCapUsd).toFixed(1) : "?";
   const vol1hMcapPct = t.marketCapUsd > 0 ? ((t.volume1hUsd / t.marketCapUsd) * 100).toFixed(0) : "?";
 
-  return `You are an expert Solana memecoin trader. Analyse this token and decide whether to open a paper trade.
+  return `You are an expert Solana memecoin trader with deep experience avoiding rug pulls and catching early-stage pumps. Analyse this token and decide whether to open a paper trade.
 
-TOKEN DATA
+TOKEN IDENTITY
 ───────────────────────────────
 Name / Symbol   : ${t.name} / $${t.symbol}
+Contract (CA)   : ${t.contractAddress}
 DEX             : ${t.dexId}
+DexScreener     : https://dexscreener.com/solana/${t.contractAddress}
+
+TOKEN METRICS
+───────────────────────────────
 Pair Age        : ${ageLabel}
 Price           : $${t.priceUsd}
 Market Cap      : $${t.marketCapUsd.toLocaleString()}
@@ -102,21 +108,28 @@ Data confidence : ${t.confidence}%
 TASK
 ───────────────────────────────
 Output ONLY valid JSON. No markdown, no explanation outside the JSON.
-Analyse ENTRY TIMING — is this an early-stage pump or already distributed/topped?
+
+CRITICAL — be a SCEPTICAL trader. Default to SKIP unless the signal is genuinely strong.
+Ask yourself:
+1. Is the 1h pump still ongoing (confirmed by 5m momentum) or already peaked?
+2. Is liquidity real and deep enough to exit without extreme slippage?
+3. Does the buy ratio indicate genuine organic demand vs bot accumulation?
+4. Is this token less than 2h old with unproven longevity? (Higher rug risk)
+5. Could the CA be a known scam, clone, or honeypot?
 
 Required JSON format:
 {
   "verdict": "TRADE" | "SKIP" | "RISKY",
   "confidence": <0-100>,
-  "reasoning": "<1-2 sentences max>",
-  "risks": ["<concise risk 1>", "<concise risk 2>"],
+  "reasoning": "<2-3 sentences explaining the key decision factor>",
+  "risks": ["<concise risk 1>", "<concise risk 2>", "<concise risk 3>"],
   "strengths": ["<concise strength 1>", "<concise strength 2>"]
 }
 
 Verdict guide:
-  TRADE  — strong early signal, good risk/reward, proceed
-  RISKY  — some red flags but potential; tighter SL will be applied automatically
-  SKIP   — likely late entry, distribution, rug signal, or poor risk/reward`;
+  TRADE  — strong early signal, momentum confirmed by 5m, healthy liquidity, good risk/reward
+  RISKY  — borderline signal with real concerns; tighter SL will be applied automatically
+  SKIP   — late entry, peaked pump, thin liquidity, suspicious buy ratio, likely rug, or insufficient conviction`;
 }
 
 // ─── Safe JSON parser — never throws, logs raw on failure ─────────────────────
@@ -165,7 +178,7 @@ function parseJsonVerdict(raw: string, provider: string): Omit<LlmAnalysis, "pro
 // AbortController signals are NOT honoured by @google/genai SDK internally,
 // so we use Promise.race to enforce a hard wall-clock limit.
 
-const AI_TIMEOUT_MS = 25_000; // gemini-2.5-flash (thinking model) takes ~8-9 s
+const AI_TIMEOUT_MS = 40_000; // gemini-2.5-flash (thinking model) takes 8-15 s with longer prompts
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs = AI_TIMEOUT_MS): Promise<T> {
   const timeout = new Promise<never>((_, reject) =>
@@ -217,10 +230,10 @@ async function callGemini(prompt: string): Promise<string> {
       contents: [{ role: "user", parts: [{ text: prompt }] }],
       config: {
         temperature: 0.1,
-        // 2048 tokens: enough for thinking model internal reasoning + full JSON output.
-        // 512 was the root cause of truncated responses ("Unterminated string" errors).
-        maxOutputTokens: 2048,
-        responseMimeType: "application/json",
+        // 8192 tokens: thinking models consume tokens on internal reasoning before
+        // writing the JSON output. 2048 was too small for the longer CA-enriched prompt.
+        // 8192 gives ample room for think + respond without truncation.
+        maxOutputTokens: 8192,
       },
     });
     const response = await withTimeout(geminiCall);
@@ -441,6 +454,7 @@ export function buildAnalysisInput(
   name: string,
   aiScore: number,
   confidence: number,
+  contractAddress?: string,
 ): TokenAnalysisInput {
   const pairAgeMinutes = pair.pairCreatedAt
     ? (Date.now() - pair.pairCreatedAt) / 60_000
@@ -454,6 +468,7 @@ export function buildAnalysisInput(
   return {
     symbol,
     name,
+    contractAddress: contractAddress ?? pair.baseToken?.address ?? pair.pairAddress,
     pairAddress: pair.pairAddress,
     pairAgeMinutes,
     priceUsd: parseFloat(pair.priceUsd) || 0,

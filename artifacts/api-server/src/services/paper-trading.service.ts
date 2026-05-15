@@ -9,6 +9,7 @@ import { lossJournalService } from "./loss-journal.service.js";
 import { getDynamicRisk } from "./ai-scoring.service.js";
 import { sendTelegram, toIST } from "../lib/telegram.js";
 import type { Position, Portfolio, CloseReason, ScannedToken } from "../types/index.js";
+import type { LlmAnalysis } from "./ai-analysis.service.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.join(__dirname, "..", "..", "data");
@@ -137,7 +138,7 @@ class PaperTradingService {
     return this.closedTrades.some((t) => t.contractAddress === contractAddress);
   }
 
-  async buyDirect(token: ScannedToken, sizeSol: number, slOverridePct?: number): Promise<Position> {
+  async buyDirect(token: ScannedToken, sizeSol: number, slOverridePct?: number, llmAnalysis?: LlmAnalysis): Promise<Position> {
     if (sizeSol <= 0) throw new Error("sizeSol must be positive");
     if (sizeSol > this.solBalance) {
       throw new Error(`Insufficient balance. Available: ${this.solBalance.toFixed(4)} SOL`);
@@ -204,6 +205,15 @@ class PaperTradingService {
       confidence: token.confidence,
       openedAt: new Date().toISOString(),
       status: "open",
+      ...(llmAnalysis ? {
+        llmVerdict: llmAnalysis.verdict,
+        llmProvider: llmAnalysis.provider,
+        llmConfidence: llmAnalysis.confidence,
+        llmReasoning: llmAnalysis.reasoning,
+        llmRisks: llmAnalysis.risks,
+        llmStrengths: llmAnalysis.strengths,
+        llmDurationMs: llmAnalysis.durationMs,
+      } : {}),
     };
 
     this.openPositions.set(position.positionId, position);

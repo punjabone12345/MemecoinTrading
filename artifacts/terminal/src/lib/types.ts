@@ -21,6 +21,13 @@ export interface Position {
   closeReason?: "manual" | "stop_loss" | "take_profit";
   pnlSol?: number; pnlPercent?: number; holdTimeMs?: number;
   note?: string;
+  llmVerdict?: "TRADE" | "SKIP" | "RISKY";
+  llmProvider?: "gemini" | "groq" | "heuristic" | "none";
+  llmConfidence?: number;
+  llmReasoning?: string;
+  llmRisks?: string[];
+  llmStrengths?: string[];
+  llmDurationMs?: number;
   // live fields (from getOpenPositionsWithLivePnl)
   livePnlSol?: number; livePnlPercent?: number; currentPrice?: number;
 }

@@ -709,7 +709,8 @@ class AutoTraderService {
         token.confidence = c.confidence;
 
         // ── Layer 6: LLM pre-trade analysis (Gemini → Groq fallback) ──────────
-        const analysisInput = buildAnalysisInput(c.pair, c.symbol, c.tokenName, c.aiScore, c.confidence);
+        const contractAddress = c.pair?.baseToken?.address ?? token.address;
+        const analysisInput = buildAnalysisInput(c.pair, c.symbol, c.tokenName, c.aiScore, c.confidence, contractAddress);
         const llm = await analyseTokenWithAi(analysisInput);
 
         const llmFields = {
@@ -750,7 +751,7 @@ class AutoTraderService {
         }
 
         try {
-          const position = await paperTradingService.buyDirect(token, solPerTrade, effectiveSlPercent);
+          const position = await paperTradingService.buyDirect(token, solPerTrade, effectiveSlPercent, llm);
           const llmTag = llm.provider !== "none"
             ? ` | LLM:${llm.verdict}(${llm.provider},${llm.confidence}%)`
             : " | LLM:unavailable";

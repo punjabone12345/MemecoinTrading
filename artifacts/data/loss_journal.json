@@ -1,5 +1,55 @@
 [
   {
+    "positionId": "df8005d7-ea59-49f3-aea7-325db9d9affc",
+    "symbol": "Ebola",
+    "contractAddress": "5vicJEyYTDBqMsKe74vWQeDVMe5cmeA3vr1AT8RXb9t1",
+    "openedAt": "2026-05-15T08:34:15.951Z",
+    "closedAt": "2026-05-15T08:36:45.350Z",
+    "holdTimeMs": 149399,
+    "pnlSol": 0.17206305309734532,
+    "pnlPercent": 34.41261061946906,
+    "aiScore": 77,
+    "confidence": 100,
+    "entryMcapUsd": 135633,
+    "entryLiquidityUsd": 30075.9,
+    "slPercent": 8,
+    "tpPercent": 35,
+    "tags": [
+      "quick_tp",
+      "strong_win"
+    ],
+    "warnings": [
+      "Fast TP hit in 2.5m — strong early momentum",
+      "Strong gain of +34.4% — excellent risk/reward"
+    ],
+    "recordedAt": 1778834205351,
+    "isWin": true
+  },
+  {
+    "positionId": "01ea710f-f2a1-4e8b-bec5-436a866a3be3",
+    "symbol": "CHINA",
+    "contractAddress": "Cx3HSpdXGNZZfe15ehj9mcARsDwfVeo4hWCEbWVtoUV8",
+    "openedAt": "2026-05-15T04:37:26.580Z",
+    "closedAt": "2026-05-15T08:34:45.363Z",
+    "holdTimeMs": 14238783,
+    "pnlSol": -0.045379999999999976,
+    "pnlPercent": -9.075999999999995,
+    "aiScore": 78,
+    "confidence": 100,
+    "entryMcapUsd": 130002,
+    "entryLiquidityUsd": 202632.17,
+    "slPercent": 8,
+    "tpPercent": 35,
+    "tags": [
+      "no_ai_recovery"
+    ],
+    "warnings": [
+      "Held 237.3m — token stalled and drained slowly"
+    ],
+    "recordedAt": 1778834085364,
+    "isWin": false
+  },
+  {
     "positionId": "8325a6cf-94a1-40fc-b2fb-d9b6ce38815a",
     "symbol": "◎",
     "contractAddress": "CQMtJmAwFv1oAobMwRfv6ir4efTWdhfNp7S1R72Rpump",
