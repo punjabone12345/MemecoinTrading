@@ -348,11 +348,43 @@ function heuristicFallback(input: TokenAnalysisInput): Omit<LlmAnalysis, "provid
   };
 }
 
+// ─── Startup env check — logged once when the module is first imported ────────
+// This will appear in server logs immediately on startup, making it easy to
+// confirm whether the Replit Gemini integration env vars are present.
+logger.info(
+  {
+    geminiIntegration: Boolean(process.env["AI_INTEGRATIONS_GEMINI_BASE_URL"]),
+    geminiDirectKey:   Boolean(process.env["GEMINI_API_KEY"]),
+    groqKey:           Boolean(process.env["GROQ_API_KEY"]),
+    geminiBaseUrl:     process.env["AI_INTEGRATIONS_GEMINI_BASE_URL"]?.slice(0, 50) ?? "NOT SET",
+  },
+  "AI service loaded — provider env check",
+);
+
 // ─── Main export ──────────────────────────────────────────────────────────────
 
 export async function analyseTokenWithAi(input: TokenAnalysisInput): Promise<LlmAnalysis> {
   const start = Date.now();
-  const prompt = buildPrompt(input);
+
+  // Log env state on EVERY call so we can see exactly what the process has
+  // at the moment a real token is evaluated (not just at startup).
+  const hasGeminiIntegration = Boolean(process.env["AI_INTEGRATIONS_GEMINI_BASE_URL"]);
+  const hasGeminiDirectKey   = Boolean(process.env["GEMINI_API_KEY"]);
+  const hasGroqKey           = Boolean(process.env["GROQ_API_KEY"]);
+
+  logger.info(
+    { symbol: input.symbol, hasGeminiIntegration, hasGeminiDirectKey, hasGroqKey },
+    "AI analysis: starting evaluation",
+  );
+
+  let prompt: string;
+  try {
+    prompt = buildPrompt(input);
+  } catch (promptErr) {
+    logger.error({ symbol: input.symbol, err: (promptErr as Error).message, input }, "AI analysis: buildPrompt crashed — using heuristic");
+    const heuristic = heuristicFallback(input);
+    return { ...heuristic, provider: "heuristic", durationMs: Date.now() - start };
+  }
 
   // ── Try Gemini (up to 2 retries, 25 s timeout — thinking model takes 8-9 s) ──
   try {
@@ -368,7 +400,10 @@ export async function analyseTokenWithAi(input: TokenAnalysisInput): Promise<Llm
     }
     throw new Error("Gemini JSON parse failed — raw response was logged above");
   } catch (geminiErr) {
-    logger.warn({ err: (geminiErr as Error).message, symbol: input.symbol }, "AI analysis: Gemini failed — trying Groq");
+    logger.warn(
+      { err: (geminiErr as Error).message, stack: (geminiErr as Error).stack?.split("\n")[1]?.trim(), symbol: input.symbol },
+      "AI analysis: Gemini failed — trying Groq",
+    );
   }
 
   // ── Fallback: Groq (up to 2 retries, 25 s timeout) ───────────────────────────

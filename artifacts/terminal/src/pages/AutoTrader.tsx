@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { useAutoTraderStatus, useAutoTraderConfig, useUpdateAutoTraderConfig, usePauseAutoTrader, useResumeAutoTrader, useAutoTraderHistory } from "@/lib/api";
-import { Play, Pause, Settings, Zap, Shield, TrendingUp, Clock, ChevronDown, ChevronUp, CheckCircle2, XCircle, SkipForward } from "lucide-react";
+import { Play, Pause, Settings, Zap, Shield, TrendingUp, Clock, ChevronDown, ChevronUp, CheckCircle2, XCircle, SkipForward, FlaskConical, Loader2 } from "lucide-react";
 import type { CycleDecision } from "@/lib/types";
 
 function ConfigRow({ label, field, value, step, onChange, unit }: {
@@ -175,6 +175,120 @@ function DecisionRow({ d }: { d: CycleDecision }) {
   );
 }
 
+type AiTestState =
+  | { status: "idle" }
+  | { status: "loading" }
+  | { status: "ok"; provider: string; verdict: string; confidence: number; durationMs: number; reasoning: string; risks: string[]; strengths: string[] }
+  | { status: "error"; error: string };
+
+function AiDebugPanel() {
+  const [result, setResult] = useState<AiTestState>({ status: "idle" });
+
+  const runTest = async () => {
+    setResult({ status: "loading" });
+    try {
+      const res = await fetch("/api/debug/ai-test", { signal: AbortSignal.timeout(35_000) });
+      const data = await res.json() as { ok: boolean; result?: { provider: string; verdict: string; confidence: number; durationMs: number; reasoning: string; risks: string[]; strengths: string[] }; error?: string };
+      if (data.ok && data.result) {
+        setResult({ status: "ok", ...data.result });
+      } else {
+        setResult({ status: "error", error: data.error ?? "Unknown error" });
+      }
+    } catch (e) {
+      setResult({ status: "error", error: (e as Error).message });
+    }
+  };
+
+  const isGemini = result.status === "ok" && result.provider === "gemini";
+  const isHeuristic = result.status === "ok" && result.provider === "heuristic";
+
+  return (
+    <div className="bg-[#0d0d18] border border-white/8 rounded-xl overflow-hidden">
+      <div className="flex items-center justify-between px-4 py-3 border-b border-white/5">
+        <div className="flex items-center gap-2">
+          <FlaskConical className="w-4 h-4 text-violet-400" />
+          <p className="text-sm font-bold text-white/70">Live AI Test</p>
+          <span className="text-[9px] text-white/30 bg-white/5 px-1.5 py-0.5 rounded">gemini-2.5-flash</span>
+        </div>
+        <button
+          onClick={runTest}
+          disabled={result.status === "loading"}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-violet-600/80 text-white text-[11px] font-bold active:scale-95 transition-all disabled:opacity-50"
+        >
+          {result.status === "loading"
+            ? <><Loader2 className="w-3 h-3 animate-spin" /> Testing...</>
+            : <><FlaskConical className="w-3 h-3" /> Test Gemini</>}
+        </button>
+      </div>
+
+      <div className="px-4 py-3">
+        {result.status === "idle" && (
+          <p className="text-white/30 text-xs text-center py-2">Press "Test Gemini" to run a live AI analysis. Takes ~10 seconds.</p>
+        )}
+
+        {result.status === "loading" && (
+          <div className="flex items-center gap-2 py-3 justify-center">
+            <Loader2 className="w-4 h-4 text-violet-400 animate-spin" />
+            <p className="text-violet-300 text-xs">Calling Gemini 2.5 Flash… (~10 seconds)</p>
+          </div>
+        )}
+
+        {result.status === "ok" && (
+          <div className="space-y-2">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className={`inline-flex items-center gap-1.5 px-2 py-1 rounded-lg text-xs font-black ${
+                result.verdict === "TRADE" ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
+                : result.verdict === "RISKY" ? "bg-amber-500/20 text-amber-300 border border-amber-500/30"
+                : "bg-red-500/20 text-red-300 border border-red-500/30"
+              }`}>
+                {result.verdict}
+              </span>
+              <span className={`text-xs font-bold px-2 py-1 rounded-lg border ${
+                isGemini ? "bg-blue-500/15 text-blue-300 border-blue-500/25"
+                : isHeuristic ? "bg-red-500/15 text-red-300 border-red-500/25"
+                : "bg-white/10 text-white/50 border-white/10"
+              }`}>
+                {isGemini ? "✓ Gemini" : isHeuristic ? "✗ Heuristic (AI failed)" : result.provider}
+              </span>
+              <span className="text-white/40 text-[10px]">{result.confidence}% confidence</span>
+              <span className="text-white/30 text-[10px]">{result.durationMs.toLocaleString()}ms</span>
+            </div>
+            {result.reasoning && (
+              <p className="text-white/60 text-[11px] leading-snug border-l-2 border-violet-500/30 pl-2">{result.reasoning}</p>
+            )}
+            <div className="grid grid-cols-2 gap-2">
+              {result.strengths?.length > 0 && (
+                <div>
+                  <p className="text-[9px] font-bold text-emerald-400/60 uppercase tracking-wider mb-1">Strengths</p>
+                  {result.strengths.map((s, i) => <p key={i} className="text-[10px] text-emerald-300/60 leading-snug">↑ {s}</p>)}
+                </div>
+              )}
+              {result.risks?.length > 0 && (
+                <div>
+                  <p className="text-[9px] font-bold text-red-400/60 uppercase tracking-wider mb-1">Risks</p>
+                  {result.risks.map((r, i) => <p key={i} className="text-[10px] text-red-300/60 leading-snug">↓ {r}</p>)}
+                </div>
+              )}
+            </div>
+            {isHeuristic && (
+              <p className="text-red-400/80 text-[10px] bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2">
+                Gemini failed — check server logs for "AI analysis: Gemini failed" to see the exact error.
+              </p>
+            )}
+          </div>
+        )}
+
+        {result.status === "error" && (
+          <div className="bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2">
+            <p className="text-red-400 text-xs font-bold mb-1">Test Failed</p>
+            <p className="text-red-300/70 text-[10px]">{result.error}</p>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function AutoTrader() {
   const { data: status } = useAutoTraderStatus();
   const { data: config } = useAutoTraderConfig();
@@ -239,6 +353,9 @@ export default function AutoTrader() {
 
   return (
     <div className="px-4 py-4 space-y-4">
+      {/* AI Debug Panel */}
+      <AiDebugPanel />
+
       {/* Status Card */}
       <div className={`relative rounded-2xl overflow-hidden border p-5 ${isRunning ? "bg-emerald-900/20 border-emerald-500/25" : "bg-red-900/20 border-red-500/25"}`}>
         <div className="flex items-start justify-between">

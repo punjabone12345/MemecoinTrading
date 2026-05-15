@@ -1,4 +1,4 @@
-import { Router, type IRouter } from "express";
+import { type Request, type Response, Router, type IRouter } from "express";
 import { analyseTokenWithAi } from "../services/ai-analysis.service.js";
 
 const router: IRouter = Router();
@@ -7,13 +7,22 @@ router.get("/healthz", (_req, res) => {
   res.json({ status: "ok" });
 });
 
-router.get("/debug/ai-test", async (_req, res) => {
+// ─── Live AI debug endpoint ────────────────────────────────────────────────────
+// Runs a real analyseTokenWithAi() call and returns the result.
+// Used by the in-app "Test Gemini" button to confirm AI is working.
+// Gemini takes ~10 s so we disable socket timeouts for this route only.
+router.get("/debug/ai-test", async (req: Request, res: Response) => {
+  // Prevent the socket from being closed before Gemini responds (~10 s)
+  req.socket?.setTimeout(0);
+  req.socket?.setKeepAlive(true);
+  res.setTimeout(35_000);
+
   const start = Date.now();
   try {
     const result = await analyseTokenWithAi({
       symbol: "TESTTOKEN",
       name: "Test Token",
-      pairAddress: "test",
+      pairAddress: "test-pair",
       dexId: "raydium",
       pairAgeMinutes: 45,
       priceUsd: 0.00000042,
