@@ -230,12 +230,11 @@ export function useResetAccount() {
       if (!res.ok) throw new Error("Reset failed");
     },
     onSuccess: () => {
-      // Immediately wipe cached data so stale trades don't show
       queryClient.setQueryData(["closed-positions"], []);
       queryClient.setQueryData(["positions"], { positions: [], portfolio: null });
       queryClient.setQueryData(["portfolio"], null);
       queryClient.setQueryData(["analytics"], null);
-      // Then force a fresh fetch for everything
+      queryClient.setQueryData(["loss-journal"], null);
       queryClient.invalidateQueries();
     },
   });
@@ -409,6 +408,35 @@ export function useLossJournal() {
     },
     refetchInterval: 30_000,
     staleTime: 15_000,
+  });
+}
+
+export function useDeleteJournalEntry() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (positionId: string) => {
+      const res = await fetch(apiUrl(`/api/loss-journal/entries/${positionId}`), { method: "DELETE" });
+      if (!res.ok) {
+        const json = await res.json();
+        throw new Error(json.error ?? "Delete failed");
+      }
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["loss-journal"] });
+    },
+  });
+}
+
+export function useClearJournal() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async () => {
+      const res = await fetch(apiUrl("/api/loss-journal/entries"), { method: "DELETE" });
+      if (!res.ok) throw new Error("Clear failed");
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["loss-journal"] });
+    },
   });
 }
 

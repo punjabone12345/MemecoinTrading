@@ -87,7 +87,8 @@ export type LossTag =
   | "rug_speed" | "fast_rug" | "slow_dump" | "no_ai_recovery"
   | "borderline_score" | "borderline_conf"
   | "thin_liquidity" | "micro_cap" | "large_cap"
-  | "high_fdv_risk" | "fake_price";
+  | "high_fdv_risk" | "fake_price"
+  | "quick_tp" | "strong_win" | "high_score_win" | "good_liquidity_win" | "momentum_win";
 
 export interface LossJournalEntry {
   positionId: string;
@@ -108,6 +109,7 @@ export interface LossJournalEntry {
   warnings: string[];
   recordedAt: number;
   note?: string;
+  isWin: boolean;
 }
 
 export interface FilterSuggestion {
@@ -121,9 +123,15 @@ export interface FilterSuggestion {
 
 export interface LossInsights {
   totalLosses: number;
+  totalWins: number;
+  totalTrades: number;
   totalLossSol: number;
+  totalWinSol: number;
   avgLossSol: number;
+  avgWinSol: number;
   avgHoldMinutes: number;
+  avgWinHoldMinutes: number;
+  avgLossHoldMinutes: number;
   tagFrequency: Record<string, number>;
   tagPercentage: Record<string, number>;
   avgAiScore: number;
@@ -136,6 +144,8 @@ export interface LossInsights {
   longLosses: number;
   suggestions: FilterSuggestion[];
   recentLosses: LossJournalEntry[];
+  recentWins: LossJournalEntry[];
+  allEntries: LossJournalEntry[];
 }
 
 export interface CycleRecord {

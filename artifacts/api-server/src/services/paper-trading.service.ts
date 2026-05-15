@@ -306,10 +306,8 @@ class PaperTradingService {
     this.persistOpen();
     this.persistHistory();
 
-    // Record losses in the self-learning journal
-    if (pnlSol < 0) {
-      lossJournalService.record(closed);
-    }
+    // Record every trade in the journal (wins + losses)
+    lossJournalService.record(closed);
 
     logger.info({ positionId, symbol: pos.symbol, reason, pnlSol: pnlSol.toFixed(4) }, "Position closed");
 

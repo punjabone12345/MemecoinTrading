@@ -1,5 +1,6 @@
 import { Router, type IRouter } from "express";
 import { paperTradingService } from "../services/paper-trading.service.js";
+import { lossJournalService } from "../services/loss-journal.service.js";
 
 const router: IRouter = Router();
 
@@ -40,7 +41,8 @@ router.post("/paper-sell", async (req, res) => {
 
 router.post("/reset", (_req, res) => {
   paperTradingService.reset();
-  res.json({ success: true, message: "Account reset to 100 SOL" });
+  lossJournalService.clear();
+  res.json({ success: true, message: "Account reset to 100 SOL and trade journal cleared" });
 });
 
 export default router;
