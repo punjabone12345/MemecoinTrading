@@ -134,7 +134,7 @@ const DEFAULT_CONFIG: AutoTraderConfig = {
   maxMcapUsd: 10_000_000,       // $10M ceiling — already-pumped, no room to run
 
   // ── Pair age ──────────────────────────────────────────────────────────────
-  minPairAgeMinutes: 15,        // 15 min — rugs almost always die in <10 min
+  minPairAgeMinutes: 10,        // 10 min — filters 3-7m instant rugs, catches the true first leg
   maxPairAgeHours: 48,          // 48h max — trade fresh/active tokens only
 
   // ── Rug guards ────────────────────────────────────────────────────────────

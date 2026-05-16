@@ -492,6 +492,59 @@ class PaperTradingService {
           continue;
         }
 
+        // ── Trailing stop: ratchet SL up as price climbs ──────────────────
+        // Tiers lock in profit so a reversal after a big pump never turns into
+        // a full loss. SL only ever moves UP — never down.
+        //
+        //  Price gain from entry  │  SL moves to
+        //  ───────────────────────┼──────────────────────────────
+        //  ≥ +50%                 │  entry price (break-even)
+        //  ≥ +100%                │  entry × 1.40  (lock +40%)
+        //  ≥ +150%                │  entry × 1.80  (lock +80%)
+        //  ≥ +200%                │  entry × 2.20  (lock +120%)
+        {
+          const pnlPctRaw = pos.entryPrice > 0 ? (price - pos.entryPrice) / pos.entryPrice * 100 : 0;
+          let newSlPrice: number | null = null;
+          let trailLabel = "";
+
+          if (pnlPctRaw >= 200 && pos.slPrice < pos.entryPrice * 2.20) {
+            newSlPrice = pos.entryPrice * 2.20;
+            trailLabel = "lock +120% (price ≥ +200%)";
+          } else if (pnlPctRaw >= 150 && pos.slPrice < pos.entryPrice * 1.80) {
+            newSlPrice = pos.entryPrice * 1.80;
+            trailLabel = "lock +80% (price ≥ +150%)";
+          } else if (pnlPctRaw >= 100 && pos.slPrice < pos.entryPrice * 1.40) {
+            newSlPrice = pos.entryPrice * 1.40;
+            trailLabel = "lock +40% (price ≥ +100%)";
+          } else if (pnlPctRaw >= 50 && pos.slPrice < pos.entryPrice) {
+            newSlPrice = pos.entryPrice;
+            trailLabel = "break-even (price ≥ +50%)";
+          }
+
+          if (newSlPrice !== null) {
+            const updatedPos: Position = { ...pos, slPrice: newSlPrice };
+            this.openPositions.set(pos.positionId, updatedPos);
+            void this.upsertPosition(updatedPos);
+            this.broadcastPositions();
+            logger.info(
+              { symbol: pos.symbol, pnlPct: pnlPctRaw.toFixed(0), newSlPrice: formatPrice(newSlPrice), was: formatPrice(pos.slPrice), tier: trailLabel },
+              "Trailing SL ratcheted up — profit locked",
+            );
+            void sendTelegram(
+              `🔒 <b>TRAILING SL LOCKED — $${pos.symbol}</b>\n` +
+              `──────────────────────\n` +
+              `📈 Current gain: <b>+${pnlPctRaw.toFixed(0)}%</b>\n` +
+              `🛡️ New SL: <b>$${formatPrice(newSlPrice)}</b> (${trailLabel})\n` +
+              `🎯 TP still at: $${formatPrice(pos.tpPrice)} (+${pos.tpPercent}%)\n` +
+              `🕐 ${toIST(new Date())}`,
+            );
+            // Use updated pos for subsequent SL/TP checks this cycle
+            // (re-read from map to get fresh slPrice)
+            const refreshed = this.openPositions.get(pos.positionId);
+            if (refreshed) Object.assign(pos, refreshed);
+          }
+        }
+
         if (price <= pos.slPrice) {
           logger.info({ symbol: pos.symbol, price, slPrice: pos.slPrice }, "Stop loss triggered");
           await this.close(pos.positionId, "stop_loss");
