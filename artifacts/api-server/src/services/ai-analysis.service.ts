@@ -212,6 +212,7 @@ async function callGemini(prompt: string): Promise<string> {
       config: {
         temperature: 0.1,
         maxOutputTokens: 2048,
+        thinkingConfig: { thinkingBudget: 0 },
       },
     });
     const response = await withTimeout(geminiCall);
