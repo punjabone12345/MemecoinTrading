@@ -128,6 +128,21 @@ export interface Position {
   llmRisks?: string[];
   llmStrengths?: string[];
   llmDurationMs?: number;
+  // Extended AI dual-validation fields
+  llmScore?: number;
+  llmRiskLevel?: string;
+  llmSecondaryVerdict?: string;
+  llmSecondaryProvider?: string;
+  // Tiered partial-close tracking
+  tp1Price?: number;
+  tp2Price?: number;
+  tp1SellPct?: number;
+  tp2SellPct?: number;
+  tp1Hit?: boolean;
+  tp2Hit?: boolean;
+  remainingSizeSol?: number;
+  partialPnlSol?: number;
+  pairAgeMinutes?: number;
 }
 
 export interface Portfolio {

@@ -4,7 +4,6 @@ import { query, execute } from "../lib/db.js";
 import { scannerService } from "./scanner.service.js";
 import { alertsService } from "./alerts.service.js";
 import { lossJournalService } from "./loss-journal.service.js";
-import { getDynamicRisk } from "./ai-scoring.service.js";
 import { sendTelegram, toIST } from "../lib/telegram.js";
 import type { Position, Portfolio, CloseReason, ScannedToken } from "../types/index.js";
 import type { LlmAnalysis } from "./ai-analysis.service.js";
@@ -13,7 +12,7 @@ const INITIAL_BALANCE_SOL = 100;
 const FEE_RATE = 0.003;
 const SLIPPAGE_RATE = 0.005;
 
-const MAX_HOLD_MS = 48 * 60 * 60 * 1_000;
+const MAX_HOLD_MS = 24 * 60 * 60 * 1_000;
 
 function formatHoldTime(ms: number): string {
   const totalMins = Math.floor(ms / 60_000);
@@ -78,6 +77,20 @@ function rowToPosition(r: DbRow): Position {
     llmRisks: r.llm_risks as string[] | undefined,
     llmStrengths: r.llm_strengths as string[] | undefined,
     llmDurationMs: r.llm_duration_ms !== null ? Number(r.llm_duration_ms) : undefined,
+    imageUrl: r.image_url as string ?? "",
+    tp1Price: r.tp1_price != null ? Number(r.tp1_price) : undefined,
+    tp2Price: r.tp2_price != null ? Number(r.tp2_price) : undefined,
+    tp1SellPct: r.tp1_sell_pct != null ? Number(r.tp1_sell_pct) : undefined,
+    tp2SellPct: r.tp2_sell_pct != null ? Number(r.tp2_sell_pct) : undefined,
+    tp1Hit: Boolean(r.tp1_hit),
+    tp2Hit: Boolean(r.tp2_hit),
+    remainingSizeSol: r.remaining_size_sol != null ? Number(r.remaining_size_sol) : undefined,
+    partialPnlSol: r.partial_pnl_sol != null ? Number(r.partial_pnl_sol) : undefined,
+    pairAgeMinutes: r.pair_age_minutes != null ? Number(r.pair_age_minutes) : undefined,
+    llmScore: r.llm_score != null ? Number(r.llm_score) : undefined,
+    llmRiskLevel: r.llm_risk_level as string | undefined,
+    llmSecondaryVerdict: r.llm_secondary_verdict as string | undefined,
+    llmSecondaryProvider: r.llm_secondary_provider as string | undefined,
   };
 }
 
@@ -152,11 +165,17 @@ class PaperTradingService {
           ai_score, confidence, status, opened_at, closed_at, exit_price,
           pnl_sol, pnl_percent, hold_time_ms, close_reason, note,
           llm_verdict, llm_provider, llm_confidence, llm_reasoning,
-          llm_risks, llm_strengths, llm_duration_ms, updated_at
+          llm_risks, llm_strengths, llm_duration_ms,
+          tp1_price, tp2_price, tp1_sell_pct, tp2_sell_pct,
+          tp1_hit, tp2_hit, remaining_size_sol, partial_pnl_sol,
+          pair_age_minutes, llm_score, llm_risk_level,
+          llm_secondary_verdict, llm_secondary_provider,
+          updated_at
         ) VALUES (
           $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,
           $16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,
-          $29,$30,$31,$32,$33,NOW()
+          $29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,
+          $42,$43,$44,$45,$46,NOW()
         )
         ON CONFLICT (position_id) DO UPDATE SET
           symbol = EXCLUDED.symbol,
@@ -176,6 +195,14 @@ class PaperTradingService {
           llm_risks = EXCLUDED.llm_risks,
           llm_strengths = EXCLUDED.llm_strengths,
           llm_duration_ms = EXCLUDED.llm_duration_ms,
+          tp1_hit = EXCLUDED.tp1_hit,
+          tp2_hit = EXCLUDED.tp2_hit,
+          remaining_size_sol = EXCLUDED.remaining_size_sol,
+          partial_pnl_sol = EXCLUDED.partial_pnl_sol,
+          llm_score = EXCLUDED.llm_score,
+          llm_risk_level = EXCLUDED.llm_risk_level,
+          llm_secondary_verdict = EXCLUDED.llm_secondary_verdict,
+          llm_secondary_provider = EXCLUDED.llm_secondary_provider,
           updated_at = NOW()`,
         [
           pos.positionId, pos.symbol, pos.tokenName ?? null, pos.pairAddress,
@@ -190,6 +217,13 @@ class PaperTradingService {
           pos.llmRisks ? JSON.stringify(pos.llmRisks) : null,
           pos.llmStrengths ? JSON.stringify(pos.llmStrengths) : null,
           pos.llmDurationMs ?? null,
+          pos.tp1Price ?? null, pos.tp2Price ?? null,
+          pos.tp1SellPct ?? null, pos.tp2SellPct ?? null,
+          pos.tp1Hit ?? false, pos.tp2Hit ?? false,
+          pos.remainingSizeSol ?? null, pos.partialPnlSol ?? null,
+          pos.pairAgeMinutes ?? null,
+          pos.llmScore ?? null, pos.llmRiskLevel ?? null,
+          pos.llmSecondaryVerdict ?? null, pos.llmSecondaryProvider ?? null,
         ],
       );
     } catch (err) {
@@ -214,7 +248,7 @@ class PaperTradingService {
   }
 
   private totalOpenSol(): number {
-    return Array.from(this.openPositions.values()).reduce((s, p) => s + p.sizeSol, 0);
+    return Array.from(this.openPositions.values()).reduce((s, p) => s + (p.remainingSizeSol ?? p.sizeSol), 0);
   }
 
   hasOpenPositionForContract(contractAddress: string): boolean {
@@ -237,6 +271,7 @@ class PaperTradingService {
     }
 
     let verifiedPriceUsd = token.priceUsd;
+    let pairAgeMinutes = 30; // default: 30m if pair age unknown
     try {
       const dexPair = await scannerService.getPairFromDex(token.pairAddress);
       const dexPrice = parseFloat(dexPair?.priceUsd ?? "0");
@@ -252,14 +287,42 @@ class PaperTradingService {
       } else {
         logger.warn({ symbol: token.symbol }, "DexScreener returned no price at entry — using scanner price");
       }
+      if (dexPair?.pairCreatedAt) {
+        pairAgeMinutes = (Date.now() - dexPair.pairCreatedAt) / 60_000;
+      }
     } catch (err) {
       logger.warn({ err, symbol: token.symbol }, "DexScreener price verification failed at entry — using scanner price");
     }
 
-    const { slPercent: defaultSlPct, tpPercent } = getDynamicRisk(token.aiScore);
-    const slPercent = slOverridePct !== undefined ? slOverridePct : defaultSlPct;
-    const slPrice = verifiedPriceUsd * (1 - slPercent / 100);
-    const tpPrice = verifiedPriceUsd * (1 + tpPercent / 100);
+    // Age-based SL/TP tiers — fresher pairs get wider TP targets (more room to run)
+    // and wider SL (more volatile). Each tier has TP1 + TP2 partial-close levels.
+    let slPercent: number;
+    let tpPercent: number;
+    let tp1Pct: number;
+    let tp1SellPct: number;
+    let tp2Pct: number;
+    let tp2SellPct: number;
+
+    if (pairAgeMinutes < 60) {
+      // < 1h — aggressive targets, high volatility window
+      slPercent = 25;  tp1Pct = 100; tp1SellPct = 40;
+      tp2Pct = 300;    tp2SellPct = 40;  tpPercent = 300;
+    } else if (pairAgeMinutes < 360) {
+      // 1–6h — momentum established, moderate risk
+      slPercent = 20;  tp1Pct = 80;  tp1SellPct = 50;
+      tp2Pct = 200;    tp2SellPct = 40;  tpPercent = 200;
+    } else {
+      // 6–24h — conservative, price more predictable
+      slPercent = 15;  tp1Pct = 60;  tp1SellPct = 60;
+      tp2Pct = 150;    tp2SellPct = 30;  tpPercent = 150;
+    }
+
+    if (slOverridePct !== undefined) slPercent = slOverridePct;
+
+    const slPrice  = verifiedPriceUsd * (1 - slPercent / 100);
+    const tp1Price = verifiedPriceUsd * (1 + tp1Pct / 100);
+    const tp2Price = verifiedPriceUsd * (1 + tp2Pct / 100);
+    const tpPrice  = tp2Price; // TP2 = main recorded TP; runner after TP2 uses trailing SL
 
     const entryMarketCap = token.marketCap;
     const entryLiquidityUsd = token.liquidity;
@@ -289,6 +352,15 @@ class PaperTradingService {
       confidence: token.confidence,
       openedAt: new Date().toISOString(),
       status: "open",
+      tp1Price,
+      tp2Price,
+      tp1SellPct,
+      tp2SellPct,
+      tp1Hit: false,
+      tp2Hit: false,
+      remainingSizeSol: sizeSol,
+      partialPnlSol: 0,
+      pairAgeMinutes,
       ...(llmAnalysis ? {
         llmVerdict: llmAnalysis.verdict,
         llmProvider: llmAnalysis.provider,
@@ -297,6 +369,10 @@ class PaperTradingService {
         llmRisks: llmAnalysis.risks,
         llmStrengths: llmAnalysis.strengths,
         llmDurationMs: llmAnalysis.durationMs,
+        llmScore: llmAnalysis.llmScore,
+        llmRiskLevel: llmAnalysis.llmRiskLevel,
+        llmSecondaryVerdict: llmAnalysis.secondaryVerdict,
+        llmSecondaryProvider: llmAnalysis.secondaryProvider,
       } : {}),
     };
 
@@ -320,8 +396,9 @@ class PaperTradingService {
       `🎯 <b>Target MCap (TP):</b> ${tpMarketCap > 0 ? formatMcap(tpMarketCap) : "N/A"}\n` +
       `🛑 <b>MCap at SL:</b> ${slMarketCap > 0 ? formatMcap(slMarketCap) : "N/A"}\n` +
       `\n` +
-      `📦 Size: ${sizeSol} SOL\n` +
+      `📦 Size: ${sizeSol} SOL | Age: ${pairAgeMinutes < 60 ? `${Math.round(pairAgeMinutes)}m` : `${(pairAgeMinutes / 60).toFixed(1)}h`}\n` +
       `🤖 AI Score: ${token.aiScore} | Confidence: ${token.confidence}%\n` +
+      `🎯 <b>TP1:</b> $${formatPrice(tp1Price)} (+${tp1Pct}%, sell ${tp1SellPct}%) | <b>TP2:</b> $${formatPrice(tp2Price)} (+${tp2Pct}%, sell ${tp2SellPct}%)\n` +
       `🕐 Time: ${toIST(new Date())}\n` +
       `🔗 <a href="https://dexscreener.com/solana/${token.address}">View on DexScreener</a>`,
     );
@@ -336,15 +413,77 @@ class PaperTradingService {
     return this.buyDirect(token, sizeSol);
   }
 
-  private computePnl(pos: Position, exitPrice: number): { pnlSol: number; pnlPercent: number; netReturn: number } {
-    const grossReturn = pos.sizeSol * (exitPrice / pos.entryPrice);
+  private computePnl(pos: Position, exitPrice: number, sizeOverrideSol?: number): { pnlSol: number; pnlPercent: number; netReturn: number } {
+    const effectiveSize = sizeOverrideSol ?? pos.sizeSol;
+    const grossReturn = effectiveSize * (exitPrice / pos.entryPrice);
     const exitFee = grossReturn * FEE_RATE;
-    const slippage = pos.sizeSol * SLIPPAGE_RATE;
-    const entryFee = pos.sizeSol * FEE_RATE;
+    const slippage = effectiveSize * SLIPPAGE_RATE;
+    const entryFee = effectiveSize * FEE_RATE;
     const netReturn = grossReturn - exitFee - slippage;
-    const pnlSol = netReturn - pos.sizeSol - entryFee;
-    const pnlPercent = (pnlSol / pos.sizeSol) * 100;
+    const pnlSol = netReturn - effectiveSize - entryFee;
+    const pnlPercent = (pnlSol / effectiveSize) * 100;
     return { pnlSol, pnlPercent, netReturn };
+  }
+
+  // Sell a partial tranche at tp1/tp2. Fully synchronous except for fire-and-forget
+  // DB/Telegram side effects. Sets tp1Hit/tp2Hit immediately to prevent double-triggers
+  // on the 1s cache-check interval.
+  private partialClose(positionId: string, tpLabel: "tp1" | "tp2", currentPrice: number): void {
+    const pos = this.openPositions.get(positionId);
+    if (!pos) return;
+
+    const isTP1 = tpLabel === "tp1";
+    if (isTP1 && pos.tp1Hit) return;
+    if (!isTP1 && pos.tp2Hit) return;
+
+    const sellPct       = isTP1 ? (pos.tp1SellPct ?? 40) : (pos.tp2SellPct ?? 40);
+    const remainingSize = pos.remainingSizeSol ?? pos.sizeSol;
+    const soldSizeSol   = remainingSize * (sellPct / 100);
+    const grossReturn   = soldSizeSol * (currentPrice / pos.entryPrice);
+    const exitFee       = grossReturn * FEE_RATE;
+    const slippage      = soldSizeSol * SLIPPAGE_RATE;
+    const netReturn     = grossReturn - exitFee - slippage;
+    const pnlSol        = netReturn - soldSizeSol;
+    const sign          = pnlSol >= 0 ? "+" : "";
+
+    this.solBalance += netReturn;
+
+    const newRemaining  = remainingSize - soldSizeSol;
+    const newPartialPnl = (pos.partialPnlSol ?? 0) + pnlSol;
+
+    const updatedPos: Position = {
+      ...pos,
+      tp1Hit: isTP1 ? true : pos.tp1Hit,
+      tp2Hit: !isTP1 ? true : pos.tp2Hit,
+      remainingSizeSol: newRemaining,
+      partialPnlSol: newPartialPnl,
+      // After TP2: move SL to break-even; set tpPrice unreachably high so the
+      // trailing-SL mechanism (not the TP check) handles the runner exit.
+      ...(!isTP1 ? { slPrice: pos.entryPrice, tpPrice: pos.entryPrice * 51 } : {}),
+    };
+
+    this.openPositions.set(positionId, updatedPos);
+    void this.upsertPosition(updatedPos);
+    this.broadcastPositions();
+
+    logger.info(
+      {
+        symbol: pos.symbol, tpLabel, sellPct, soldSizeSol: soldSizeSol.toFixed(4),
+        pnlSol: pnlSol.toFixed(4), newRemaining: newRemaining.toFixed(4),
+        price: formatPrice(currentPrice),
+      },
+      `Partial close (${tpLabel.toUpperCase()}) executed — profit locked`,
+    );
+
+    void sendTelegram(
+      `🎯 <b>${tpLabel.toUpperCase()} HIT — $${pos.symbol}</b>\n` +
+      `──────────────────────\n` +
+      `💰 Sold ${sellPct}% at $${formatPrice(currentPrice)}\n` +
+      `📈 Chunk P&L: <b>${sign}${pnlSol.toFixed(4)} SOL</b>\n` +
+      `📦 Remaining: ${newRemaining.toFixed(4)} SOL\n` +
+      `${!isTP1 ? "🛡️ SL moved to break-even — runner protected\n" : ""}` +
+      `🕐 ${toIST(new Date())}`,
+    );
   }
 
   async close(positionId: string, reason: CloseReason): Promise<Position> {
@@ -374,7 +513,12 @@ class PaperTradingService {
       }
     }
 
-    const { pnlSol, pnlPercent, netReturn } = this.computePnl(pos, exitPrice);
+    // Use remaining size (after any partial closes) for final P&L computation.
+    // Add accumulated partial-close P&L to get the total position P&L.
+    const remainingSize = pos.remainingSizeSol ?? pos.sizeSol;
+    const { pnlSol: closePnl, netReturn } = this.computePnl(pos, exitPrice, remainingSize);
+    const pnlSol = closePnl + (pos.partialPnlSol ?? 0);
+    const pnlPercent = pos.sizeSol > 0 ? (pnlSol / pos.sizeSol) * 100 : closePnl;
 
     this.solBalance += netReturn;
 
@@ -554,6 +698,20 @@ class PaperTradingService {
           continue;
         }
 
+        // TP1 partial close — sell first tranche, keep running
+        if (!pos.tp1Hit && pos.tp1Price && price >= pos.tp1Price) {
+          this.partialClose(pos.positionId, "tp1", price);
+          continue;
+        }
+
+        // TP2 partial close — sell second tranche, move SL to break-even
+        if (pos.tp1Hit && !pos.tp2Hit && pos.tp2Price && price >= pos.tp2Price) {
+          this.partialClose(pos.positionId, "tp2", price);
+          continue;
+        }
+
+        // Final TP: close remaining runner (tpPrice is set very high after TP2;
+        // this also handles legacy positions without tiered TP fields)
         if (price >= pos.tpPrice) {
           const currentLiq = dexPair?.liquidity?.usd ?? 0;
           const currentVol5m = dexPair?.volume?.m5 ?? 0;
@@ -595,9 +753,10 @@ class PaperTradingService {
           continue;
         }
 
+        // 24h max hold — close stale positions to free capital
         const holdMs = Date.now() - new Date(pos.openedAt).getTime();
         if (holdMs > MAX_HOLD_MS) {
-          logger.warn({ symbol: pos.symbol, holdHours: (holdMs / 3_600_000).toFixed(1) }, "Auto-closing stale position (>48h)");
+          logger.warn({ symbol: pos.symbol, holdHours: (holdMs / 3_600_000).toFixed(1) }, "Auto-closing stale position (>24h)");
           await this.close(pos.positionId, "manual");
         }
       } catch (err) {
@@ -623,6 +782,18 @@ class PaperTradingService {
         if (price <= pos.slPrice) {
           logger.info({ symbol: pos.symbol, price, slPrice: pos.slPrice, source: "cache-fast" }, "Stop loss triggered (fast cache check)");
           void this.close(pos.positionId, "stop_loss");
+          continue;
+        }
+
+        // TP1 partial close (fast path)
+        if (!pos.tp1Hit && pos.tp1Price && price >= pos.tp1Price) {
+          this.partialClose(pos.positionId, "tp1", price);
+          continue;
+        }
+
+        // TP2 partial close (fast path)
+        if (pos.tp1Hit && !pos.tp2Hit && pos.tp2Price && price >= pos.tp2Price) {
+          this.partialClose(pos.positionId, "tp2", price);
           continue;
         }
 

@@ -94,54 +94,38 @@ export interface AutoTraderStatus {
   config: AutoTraderConfig;
 }
 
-// ─── Default config: high-conviction, selective entries only ──────────────────
-//
-// Philosophy: FEWER trades, BETTER trades. Every filter exists to avoid:
-//   (a) Late entries on already-pumped tokens (distribution phase)
-//   (b) Rug pulls with fake or thin liquidity / volume
-//   (c) Ghost tokens with no real recent activity
-//
-// Why these numbers:
-//   minAiScore: 72       → top ~15% of scanned tokens — real signals only
-//   minConfidence: 65    → data quality gate — don't trade on unreliable data
-//   minLiquidityUsd: 20K → proper exit depth; 0.5 SOL in $8K pool = huge slippage
-//   minBuyRatio1h: 0.60  → clear buyer majority, not a coin flip
-//   minPriceChange1h: 8  → real momentum, not noise
-//   minVolume1hUsd: 2K   → actively traded RIGHT NOW
-//   minPairAgeMinutes: 15 → survived critical first window (most rugs die <10m)
-//   maxPriceDropH6Pct: -20 → don't trade tokens falling on longer timeframe
-//
+// ─── Default config ────────────────────────────────────────────────────────────
 const DEFAULT_CONFIG: AutoTraderConfig = {
   solPerTrade: 0.5,
-  maxConcurrentTrades: 3,
+  maxConcurrentTrades: 1,
 
   // ── AI quality ────────────────────────────────────────────────────────────
-  minAiScore: 72,
-  minConfidence: 65,
+  minAiScore: 78,
+  minConfidence: 72,
 
   // ── Liquidity & volume ────────────────────────────────────────────────────
-  minLiquidityUsd: 20_000,      // $20K — proper exit depth for 0.5 SOL trade
-  minVolume24hUsd: 5_000,       // $5K 24h — proven trading activity
-  minVolume1hUsd:  2_000,       // $2K last hour — actively traded RIGHT NOW
+  minLiquidityUsd:  30_000,     // $30K — meaningful exit depth
+  minVolume24hUsd:  35_000,     // $35K 24h — proven trading activity
+  minVolume1hUsd:   15_000,     // $15K last hour — actively traded RIGHT NOW
 
   // ── Momentum ─────────────────────────────────────────────────────────────
-  minBuyRatio1h: 0.58,          // 58% buys — catch early pumps before buy ratio peaks
-  minPriceChange1h: 5,          // +5% minimum — catch pumps in their first leg, not mid-way
-  minTransactions24h: 50,       // 50+ txns — real wallets, not ghost chain
+  minBuyRatio1h:    0.62,       // 62% buys — clear buyer majority
+  minPriceChange1h: 18,         // +18% — real momentum, not noise
+  minTransactions24h: 250,      // 250+ txns — organic activity, not ghosts
 
   // ── Market cap sweet spot ────────────────────────────────────────────────
   minMcapUsd: 50_000,           // $50K floor — tiny caps are almost always rugs
-  maxMcapUsd: 10_000_000,       // $10M ceiling — already-pumped, no room to run
+  maxMcapUsd:  5_000_000,       // $5M ceiling — still has room to run
 
   // ── Pair age ──────────────────────────────────────────────────────────────
-  minPairAgeMinutes: 10,        // 10 min — filters 3-7m instant rugs, catches the true first leg
-  maxPairAgeHours: 48,          // 48h max — trade fresh/active tokens only
+  minPairAgeMinutes: 15,        // 15 min — survived critical first window
+  maxPairAgeHours:   24,        // 24h max — trade fresh tokens only
 
   // ── Rug guards ────────────────────────────────────────────────────────────
-  minLiquidityMcapRatio: 0.05,  // 5% liq/mcap — tighter pool drain guard
-  maxFdvMcapRatio: 6.0,         // FDV ≤ 6× mcap — less supply overhang risk
-  maxPriceDropH6Pct: -20,       // not crashed >20% in last 6h
-  maxPriceDropH24Pct: -40,      // not crashed >40% in last 24h
+  minLiquidityMcapRatio: 0.12,  // 12% liq/mcap — strong liquidity depth
+  maxFdvMcapRatio:       3.0,   // FDV ≤ 3× mcap — no massive supply overhang
+  maxPriceDropH6Pct:   -15,     // not crashed >15% in last 6h
+  maxPriceDropH24Pct:  -25,     // not crashed >25% in last 24h
 };
 
 // ─── Anti-rug + quality filter ────────────────────────────────────────────────
@@ -354,6 +338,17 @@ class AutoTraderService {
   isPaused(): boolean { return this.paused; }
   getHistory(): CycleRecord[] { return [...this.history].reverse(); }
 
+  private dailyLossPausedUntil = 0;
+
+  private getDailyLoss(): number {
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+    const todayTs = todayStart.getTime();
+    return paperTradingService.getClosedTrades()
+      .filter(t => t.closedAt && new Date(t.closedAt).getTime() >= todayTs)
+      .reduce((s, t) => s + (t.pnlSol ?? 0), 0);
+  }
+
   getStatus(): AutoTraderStatus {
     return {
       paused: this.paused,
@@ -425,6 +420,27 @@ class AutoTraderService {
 
   private async run(): Promise<void> {
     if (this.running || this.paused) return;
+
+    // Daily loss cap: if today's cumulative loss >= 2 SOL, pause for 24h
+    if (this.dailyLossPausedUntil > Date.now()) {
+      const resumeInHours = Math.ceil((this.dailyLossPausedUntil - Date.now()) / 3_600_000);
+      logger.info({ resumeInHours }, "Auto-trader: skipping cycle — daily loss cap active");
+      return;
+    }
+    const dailyLoss = this.getDailyLoss();
+    if (dailyLoss <= -2) {
+      this.dailyLossPausedUntil = Date.now() + 24 * 3_600_000;
+      logger.warn({ dailyLoss: dailyLoss.toFixed(4) }, "Auto-trader: daily loss cap hit (-2 SOL) — pausing 24h");
+      void sendTelegram(
+        `🚨 <b>DAILY LOSS CAP HIT</b>\n` +
+        `──────────────────────\n` +
+        `📉 Today's losses: <b>${dailyLoss.toFixed(4)} SOL</b>\n` +
+        `⏸️ Bot auto-paused for 24 hours to protect capital.\n` +
+        `🔔 Resumes at ${toIST(new Date(this.dailyLossPausedUntil))}`,
+      );
+      return;
+    }
+
     this.running = true;
     this.nextRunAt = Date.now() + AUTO_TRADE_INTERVAL_MS;
     const cycleId = ++this.cycleCounter;
@@ -740,32 +756,32 @@ class AutoTraderService {
           continue;
         }
 
-        // If RISKY, tighten stop-loss by 2 percentage points
-        let effectiveSlPercent = c.slPercent;
+        // RISKY = Gemini PASS + Groq FAIL → use reduced size from AI recommendation
+        // Age-based SL/TP is computed inside buyDirect — no manual SL override needed
+        const tradeSizeSol = llm.recommendedSizeSol ?? solPerTrade;
         if (llm.verdict === "RISKY") {
-          effectiveSlPercent = Math.max(c.slPercent - 2, 4);
           logger.info(
-            { symbol: c.symbol, provider: llm.provider, originalSl: c.slPercent, effectiveSl: effectiveSlPercent, reasoning: llm.reasoning },
-            "Auto-trader: LLM flagged RISKY — tightening SL",
+            { symbol: c.symbol, provider: llm.provider, tradeSizeSol, secondaryVerdict: llm.secondaryVerdict, reasoning: llm.reasoning },
+            "Auto-trader: LLM RISKY — reduced trade size (dual AI disagreement)",
           );
         }
 
         try {
-          const position = await paperTradingService.buyDirect(token, solPerTrade, effectiveSlPercent, llm);
+          const position = await paperTradingService.buyDirect(token, tradeSizeSol, undefined, llm);
           const llmTag = llm.provider !== "none"
-            ? ` | LLM:${llm.verdict}(${llm.provider},${llm.confidence}%)`
+            ? ` | LLM:${llm.verdict}(${llm.provider},${llm.llmScore ?? "-"}/10)`
             : " | LLM:unavailable";
           decisions.push({
             ...c,
             ...llmFields,
             action: "traded",
-            reason: `Opened ${solPerTrade} SOL | Score ${c.aiScore} | SL -${effectiveSlPercent}% | TP +${c.tpPercent}%${llmTag} | DexLiq $${Math.round(c.liquidityUsd).toLocaleString()} ✓`,
+            reason: `Opened ${tradeSizeSol} SOL | Score ${c.aiScore} | Age-based SL/TP${llmTag} | DexLiq $${Math.round(c.liquidityUsd).toLocaleString()} ✓`,
             positionId: position.positionId,
           });
           tradesOpened++;
           this.totalTradesOpened++;
           logger.info(
-            { positionId: position.positionId, symbol: c.symbol, aiScore: c.aiScore, llmVerdict: llm.verdict, llmProvider: llm.provider, dexLiq: c.liquidityUsd },
+            { positionId: position.positionId, symbol: c.symbol, aiScore: c.aiScore, tradeSizeSol, llmVerdict: llm.verdict, llmProvider: llm.provider, dexLiq: c.liquidityUsd },
             "Auto-trader: LLM-verified trade opened",
           );
         } catch (err) {
