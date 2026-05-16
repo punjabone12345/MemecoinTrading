@@ -1,5 +1,61 @@
 [
   {
+    "positionId": "685227b5-e02a-40b4-8b45-43233df91869",
+    "symbol": "LastDance",
+    "contractAddress": "EkRyMsQU77pPPFb9pLgVEToCbNZiHR8nvuw9NFnVpump",
+    "openedAt": "2026-05-15T08:38:15.935Z",
+    "closedAt": "2026-05-15T08:49:27.157Z",
+    "holdTimeMs": 671222,
+    "pnlSol": -0.05143137886597937,
+    "pnlPercent": -10.286275773195875,
+    "aiScore": 77,
+    "confidence": 100,
+    "entryMcapUsd": 153234,
+    "entryLiquidityUsd": 33840.9,
+    "slPercent": 8,
+    "tpPercent": 35,
+    "tags": [
+      "fast_rug",
+      "borderline_score",
+      "thin_liquidity"
+    ],
+    "warnings": [
+      "Closed in 11.2m — fast dump, likely late entry",
+      "AI score was 77 — only 5pts above the 72 minimum. Low-conviction entry.",
+      "Entry liquidity was $34K — thin pool makes exit expensive and rug risk higher"
+    ],
+    "recordedAt": 1778834967158,
+    "isWin": false
+  },
+  {
+    "positionId": "6d5931a4-4fdb-4dd6-8760-ea943d1f83f4",
+    "symbol": "NPC",
+    "contractAddress": "6z8pZHwmq13kZch2eK8sVGz9GFyagKzHg6tUTgEKpump",
+    "openedAt": "2026-05-15T08:39:43.234Z",
+    "closedAt": "2026-05-15T08:48:27.121Z",
+    "holdTimeMs": 523887,
+    "pnlSol": -0.07067605177993525,
+    "pnlPercent": -14.135210355987049,
+    "aiScore": 77,
+    "confidence": 100,
+    "entryMcapUsd": 154600,
+    "entryLiquidityUsd": 31992.63,
+    "slPercent": 8,
+    "tpPercent": 35,
+    "tags": [
+      "fast_rug",
+      "borderline_score",
+      "thin_liquidity"
+    ],
+    "warnings": [
+      "Closed in 8.7m — fast dump, likely late entry",
+      "AI score was 77 — only 5pts above the 72 minimum. Low-conviction entry.",
+      "Entry liquidity was $32K — thin pool makes exit expensive and rug risk higher"
+    ],
+    "recordedAt": 1778834907122,
+    "isWin": false
+  },
+  {
     "positionId": "df8005d7-ea59-49f3-aea7-325db9d9affc",
     "symbol": "Ebola",
     "contractAddress": "5vicJEyYTDBqMsKe74vWQeDVMe5cmeA3vr1AT8RXb9t1",

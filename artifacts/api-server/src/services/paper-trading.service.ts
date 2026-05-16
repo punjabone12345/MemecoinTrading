@@ -459,11 +459,14 @@ class PaperTradingService {
           const MAX_PRICE_MULTIPLIER = 50;       // 5000% gain = fake price, not real
           const MIN_VOL_FOR_LARGE_MOVE = 100;    // must have $100+ volume if price >500% up
 
-          // Guard 1: liquidity drained
-          if (currentLiq > 0 && currentLiq < MIN_TP_LIQUIDITY_USD) {
+          // Guard 1: liquidity drained + suspicious price (rug pattern)
+          // Only override TP→SL when the price multiplier is ALSO high (>5x).
+          // A legitimate 35-80% TP with temporarily low liquidity is still a real win.
+          // A fake rug price showing >5x with no liquidity IS the manipulated-data scenario.
+          if (currentLiq > 0 && currentLiq < MIN_TP_LIQUIDITY_USD && priceMultiplier > 5) {
             logger.warn(
-              { symbol: pos.symbol, price, tpPrice: pos.tpPrice, currentLiq },
-              "TP rejected: liquidity drained (<$5K) — likely rug, closing at SL"
+              { symbol: pos.symbol, price, tpPrice: pos.tpPrice, currentLiq, priceMultiplier: priceMultiplier.toFixed(1) },
+              "TP rejected: liquidity drained (<$5K) AND price >5x — likely rug, closing at SL"
             );
             await this.close(pos.positionId, "stop_loss");
             continue;
@@ -666,9 +669,49 @@ class PaperTradingService {
     );
   }
 
+  // ── Fast in-memory TP/SL check (every 5 s, no API calls) ──────────────────
+  // Uses prices already cached in latestPrices (updated by the 10s DexScreener
+  // checker) and the scanner's own in-memory token pool (refreshed every 8 s).
+  // This catches spikes that fall back within the 10-second polling window.
+  private checkStopsFromCache(): void {
+    for (const pos of Array.from(this.openPositions.values())) {
+      try {
+        // Try scanner cache first (freshest — updated every 8s)
+        const scannerCached = scannerService.getByPairAddress(pos.pairAddress);
+        if (scannerCached && scannerCached.priceUsd > 0) {
+          this.latestPrices.set(pos.pairAddress, { price: scannerCached.priceUsd, ts: Date.now() });
+        }
+
+        const cached = this.latestPrices.get(pos.pairAddress);
+        if (!cached || cached.price <= 0) continue;
+
+        const price = cached.price;
+        const priceMultiplier = pos.entryPrice > 0 ? price / pos.entryPrice : 1;
+
+        if (price <= pos.slPrice) {
+          logger.info({ symbol: pos.symbol, price, slPrice: pos.slPrice, source: "cache-fast" }, "Stop loss triggered (fast cache check)");
+          void this.close(pos.positionId, "stop_loss");
+          continue;
+        }
+
+        if (price >= pos.tpPrice) {
+          // Apply only the two guards that don't need fresh DexScreener data
+          if (priceMultiplier > 50) continue; // fake price — let the slow checker handle it
+          logger.info({ symbol: pos.symbol, price, tpPrice: pos.tpPrice, priceMultiplier: priceMultiplier.toFixed(2), source: "cache-fast" }, "Take profit triggered (fast cache check)");
+          void this.close(pos.positionId, "take_profit");
+        }
+      } catch (err) {
+        // Swallow — fast check is best-effort only
+      }
+    }
+  }
+
   startStopChecker() {
-    setInterval(() => void this.checkStopsForAll(), 30_000);
-    logger.info("Stop/TP checker started — checking every 30s");
+    // Fast pass: every 5 s using cached prices (no DexScreener API calls)
+    setInterval(() => this.checkStopsFromCache(), 5_000);
+    // Full pass: every 10 s with fresh DexScreener prices + all guards
+    setInterval(() => void this.checkStopsForAll(), 10_000);
+    logger.info("Stop/TP checker started — checking every 10s (full) + 5s (cache-fast)");
   }
 }
 
