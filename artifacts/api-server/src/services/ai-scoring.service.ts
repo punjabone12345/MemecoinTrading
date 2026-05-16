@@ -182,20 +182,23 @@ export function computeConfidence(pair: DexScreenerPair): number {
 /**
  * Dynamic SL/TP percentages based on AI score tier.
  *
- * Philosophy: tighter stops, realistic targets.
- * Memecoins are volatile — a wide -20% SL means guaranteed large loss on bad trades.
- * Tighter SL means smaller losses when wrong, and we MUST be selective about entries.
+ * Philosophy: LET WINNERS RUN. Memecoins are early-pump plays — they either
+ * rug fast (SL catches it at -8 to -12%) or they pump 2-10x. Exiting at 35-50%
+ * means you always sell into the first leg and miss the real move.
+ *
+ * Risk/reward at 100% TP + 8% SL = 12.5:1 → break-even at only 7% win rate.
  *
  * Score  | SL    | TP    | Rationale
  * ──────────────────────────────────────────────────────────
- * 90+    | -10%  | 80%   | High conviction early pump — great risk/reward
- * 80-89  | -9%   | 50%   | Strong signal — solid but not moonshot
- * 72-79  | -8%   | 35%   | Good signal — conservative target
- * <72    | -7%   | 25%   | Lower conviction — tight in/out
+ * 90+    | -12%  | 250%  | Highest conviction early entry — target 3.5x
+ * 80-89  | -10%  | 200%  | Strong early pump — target 3x
+ * 75-79  | -9%   | 150%  | Good signal — target 2.5x
+ * 72-74  | -8%   | 100%  | Minimum TP — always aim for at least 2x
+ * <72    | -8%   | 100%  | Same floor — never set TP below 100%
  */
 export function getDynamicRisk(score: number): { slPercent: number; tpPercent: number } {
-  if (score >= 90) return { slPercent: 10, tpPercent: 80 };
-  if (score >= 80) return { slPercent: 9,  tpPercent: 50 };
-  if (score >= 72) return { slPercent: 8,  tpPercent: 35 };
-  return { slPercent: 7, tpPercent: 25 };
+  if (score >= 90) return { slPercent: 12, tpPercent: 250 };
+  if (score >= 80) return { slPercent: 10, tpPercent: 200 };
+  if (score >= 75) return { slPercent: 9,  tpPercent: 150 };
+  return { slPercent: 8, tpPercent: 100 };
 }

@@ -65,71 +65,33 @@ function buildPrompt(t: TokenAnalysisInput): string {
   const total5m = t.buys5m + t.sells5m;
   const buyRatio5m = total5m > 0 ? ((t.buys5m / total5m) * 100).toFixed(0) : "?";
   const liqMcapPct = t.marketCapUsd > 0 ? ((t.liquidityUsd / t.marketCapUsd) * 100).toFixed(1) : "?";
-  const fdvRatio = t.marketCapUsd > 0 && t.fdv > 0 ? (t.fdv / t.marketCapUsd).toFixed(1) : "?";
   const vol1hMcapPct = t.marketCapUsd > 0 ? ((t.volume1hUsd / t.marketCapUsd) * 100).toFixed(0) : "?";
 
-  return `You are an expert Solana memecoin trader with deep experience avoiding rug pulls and catching early-stage pumps. Analyse this token and decide whether to open a paper trade.
+  return `You are an aggressive Solana memecoin trader specialising in catching early pumps. This token already passed strict quant filters (AI score ${t.aiScore}/100). Your job is to decide if the momentum is real and still in the EARLY STAGE of a pump that can 2-5x from here.
 
-TOKEN IDENTITY
-───────────────────────────────
-Name / Symbol   : ${t.name} / $${t.symbol}
-Contract (CA)   : ${t.contractAddress}
-DEX             : ${t.dexId}
-DexScreener     : https://dexscreener.com/solana/${t.contractAddress}
+TOKEN: ${t.name} / $${t.symbol} | Age: ${ageLabel} | MCap: $${t.marketCapUsd.toLocaleString()} | Liq: $${t.liquidityUsd.toLocaleString()} (${liqMcapPct}% of mcap)
+PRICE: 5m ${t.priceChange5m >= 0 ? "+" : ""}${t.priceChange5m.toFixed(1)}% | 1h ${t.priceChange1h >= 0 ? "+" : ""}${t.priceChange1h.toFixed(1)}% | 6h ${t.priceChange6h >= 0 ? "+" : ""}${t.priceChange6h.toFixed(1)}%
+VOLUME: 1h $${t.volume1hUsd.toLocaleString()} (${vol1hMcapPct}% of mcap) | 24h $${t.volume24hUsd.toLocaleString()}
+BUYS: 1h ${buyRatio1h}% buys (${t.buys1h}/${t.sells1h}) | 5m ${buyRatio5m}% buys (${t.buys5m}/${t.sells5m}) | Txns24h: ${t.txns24h}
+QUANT: score ${t.aiScore}/100 | confidence ${t.confidence}%
 
-TOKEN METRICS
-───────────────────────────────
-Pair Age        : ${ageLabel}
-Price           : $${t.priceUsd}
-Market Cap      : $${t.marketCapUsd.toLocaleString()}
-FDV             : $${t.fdv.toLocaleString()} (${fdvRatio}× mcap)
-Liquidity       : $${t.liquidityUsd.toLocaleString()} (${liqMcapPct}% of mcap)
+DECISION FRAMEWORK — output ONLY valid JSON, no markdown.
 
-PRICE ACTION
-───────────────────────────────
-5m change       : ${t.priceChange5m >= 0 ? "+" : ""}${t.priceChange5m.toFixed(1)}%
-1h change       : ${t.priceChange1h >= 0 ? "+" : ""}${t.priceChange1h.toFixed(1)}%
-6h change       : ${t.priceChange6h >= 0 ? "+" : ""}${t.priceChange6h.toFixed(1)}%
-24h change      : ${t.priceChange24h >= 0 ? "+" : ""}${t.priceChange24h.toFixed(1)}%
+TRADE: momentum is fresh and still building (5m positive, buy pressure strong, liq healthy) — early stage, high chance of 2-5x
+RISKY: signal is real but has one concern (very new, moderate liq, slight stall in 5m) — trade with tighter SL
+SKIP: ONLY if you see a clear rug signal (liq draining, 5m dumping hard, 99% buys = bot, already 500%+ in 1h and stalling)
 
-TRADING ACTIVITY
-───────────────────────────────
-Volume 1h       : $${t.volume1hUsd.toLocaleString()} (${vol1hMcapPct}% of mcap)
-Volume 24h      : $${t.volume24hUsd.toLocaleString()}
-Buy ratio 1h    : ${buyRatio1h}% (${t.buys1h} buys / ${t.sells1h} sells)
-Buy ratio 5m    : ${buyRatio5m}% (${t.buys5m} buys / ${t.sells5m} sells)
-Txns 24h        : ${t.txns24h}
+Key insight: if 1h is +20-100% AND 5m is still positive → the pump is NOT over, we are in the middle of it. TRADE.
+If 1h is +200%+ AND 5m is flat/negative → the pump may be exhausted. Lean RISKY or SKIP.
+Fresh pair (<2h) with strong buy ratio + volume = HIGH potential early entry. Do NOT skip just because it's young.
 
-QUANT MODEL
-───────────────────────────────
-AI score        : ${t.aiScore}/100 (already passed ≥72 quant filter)
-Data confidence : ${t.confidence}%
-
-TASK
-───────────────────────────────
-Output ONLY valid JSON. No markdown, no explanation outside the JSON.
-
-CRITICAL — be a SCEPTICAL trader. Default to SKIP unless the signal is genuinely strong.
-Ask yourself:
-1. Is the 1h pump still ongoing (confirmed by 5m momentum) or already peaked?
-2. Is liquidity real and deep enough to exit without extreme slippage?
-3. Does the buy ratio indicate genuine organic demand vs bot accumulation?
-4. Is this token less than 2h old with unproven longevity? (Higher rug risk)
-5. Could the CA be a known scam, clone, or honeypot?
-
-Required JSON format:
 {
   "verdict": "TRADE" | "SKIP" | "RISKY",
   "confidence": <0-100>,
-  "reasoning": "<2-3 sentences explaining the key decision factor>",
-  "risks": ["<concise risk 1>", "<concise risk 2>", "<concise risk 3>"],
-  "strengths": ["<concise strength 1>", "<concise strength 2>"]
-}
-
-Verdict guide:
-  TRADE  — strong early signal, momentum confirmed by 5m, healthy liquidity, good risk/reward
-  RISKY  — borderline signal with real concerns; tighter SL will be applied automatically
-  SKIP   — late entry, peaked pump, thin liquidity, suspicious buy ratio, likely rug, or insufficient conviction`;
+  "reasoning": "<2 sentences: why this is/isn't an early pump worth catching>",
+  "risks": ["<risk 1>", "<risk 2>"],
+  "strengths": ["<strength 1>", "<strength 2>"]
+}`;
 }
 
 // ─── Safe JSON parser — never throws, logs raw on failure ─────────────────────

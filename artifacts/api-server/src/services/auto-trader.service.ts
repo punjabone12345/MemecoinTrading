@@ -125,8 +125,8 @@ const DEFAULT_CONFIG: AutoTraderConfig = {
   minVolume1hUsd:  2_000,       // $2K last hour — actively traded RIGHT NOW
 
   // ── Momentum ─────────────────────────────────────────────────────────────
-  minBuyRatio1h: 0.60,          // 60% buys — clear buyer conviction
-  minPriceChange1h: 8,          // +8% minimum — real momentum, not noise
+  minBuyRatio1h: 0.58,          // 58% buys — catch early pumps before buy ratio peaks
+  minPriceChange1h: 5,          // +5% minimum — catch pumps in their first leg, not mid-way
   minTransactions24h: 50,       // 50+ txns — real wallets, not ghost chain
 
   // ── Market cap sweet spot ────────────────────────────────────────────────
