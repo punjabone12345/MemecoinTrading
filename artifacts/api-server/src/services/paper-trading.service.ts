@@ -351,6 +351,12 @@ class PaperTradingService {
     const pos = this.openPositions.get(positionId);
     if (!pos) throw new Error(`Position not found: ${positionId}`);
 
+    // Remove from open map IMMEDIATELY — before any async work.
+    // This means a concurrent 1s-interval close call gets `undefined`
+    // here and throws safely, preventing double-PnL accounting.
+    this.openPositions.delete(positionId);
+    this.openContracts.delete(pos.contractAddress);
+
     let exitPrice: number;
     const latestEntry = this.latestPrices.get(pos.pairAddress);
     if (latestEntry && latestEntry.price > 0 && Date.now() - latestEntry.ts < 60_000) {
@@ -385,9 +391,6 @@ class PaperTradingService {
       pnlPercent,
       holdTimeMs,
     };
-
-    this.openPositions.delete(positionId);
-    this.openContracts.delete(pos.contractAddress);
     this.closedTrades.unshift(closed);
     void this.upsertPosition(closed);
 
@@ -635,9 +638,9 @@ class PaperTradingService {
   }
 
   startStopChecker() {
-    setInterval(() => this.checkStopsFromCache(), 5_000);
-    setInterval(() => void this.checkStopsForAll(), 10_000);
-    logger.info("Stop/TP checker started — checking every 10s (full) + 5s (cache-fast)");
+    setInterval(() => this.checkStopsFromCache(), 1_000);
+    setInterval(() => void this.checkStopsForAll(), 5_000);
+    logger.info("Stop/TP checker started — checking every 5s (full DexScreener) + 1s (cache-fast)");
   }
 
   // ── Read methods ─────────────────────────────────────────────────────────────
