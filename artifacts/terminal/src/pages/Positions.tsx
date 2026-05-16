@@ -138,10 +138,21 @@ interface EditLossState {
   currentPnlSol: number;
 }
 
+interface MarkTpState {
+  positionId: string;
+  symbol: string;
+  sizeSol: number;
+  tpPercent: number;
+  tpPrice: number;
+  entryPrice: number;
+  currentPnlSol: number;
+}
+
 export default function Positions() {
   const [tab, setTab] = useState<"Open" | "Closed">("Open");
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [editLoss, setEditLoss] = useState<EditLossState | null>(null);
+  const [markTp, setMarkTp] = useState<MarkTpState | null>(null);
   const [editNote, setEditNote] = useState("");
   const [expandedAi, setExpandedAi] = useState<Set<string>>(new Set());
 
@@ -172,6 +183,38 @@ export default function Positions() {
       slPrice: p.slPrice,
       entryPrice: p.entryPrice,
       currentPnlSol: p.pnlSol ?? 0,
+    });
+  }
+
+  function openMarkTpModal(p: typeof closedPositions[0]) {
+    setEditNote("");
+    setMarkTp({
+      positionId: p.positionId,
+      symbol: p.symbol,
+      sizeSol: p.sizeSol,
+      tpPercent: p.tpPercent,
+      tpPrice: p.tpPrice,
+      entryPrice: p.entryPrice,
+      currentPnlSol: p.pnlSol ?? 0,
+    });
+  }
+
+  function submitMarkAsTp() {
+    if (!markTp) return;
+    const grossReturn = markTp.sizeSol * (markTp.tpPrice / markTp.entryPrice);
+    const fees = (grossReturn + markTp.sizeSol) * 0.003 + markTp.sizeSol * 0.005;
+    const tpPnlSol = grossReturn - markTp.sizeSol - fees;
+    const tpPnlPercent = markTp.tpPercent;
+
+    editClosedTrade.mutate({
+      positionId: markTp.positionId,
+      pnlSol: tpPnlSol,
+      pnlPercent: tpPnlPercent,
+      exitPrice: markTp.tpPrice,
+      closeReason: "take_profit",
+      note: editNote || "Manually marked as TP (checker missed the peak)",
+    }, {
+      onSuccess: () => setMarkTp(null),
     });
   }
 
@@ -447,14 +490,24 @@ export default function Positions() {
 
                   <div className="flex items-center gap-1.5">
                     {!isConfirming && (
-                      <button
-                        onClick={() => openEditLoss(p)}
-                        className="flex items-center gap-1 text-[10px] text-amber-400/60 hover:text-amber-400 transition-colors py-1 px-1.5 rounded"
-                        title="Mark this trade as a loss (e.g. fake price from DexScreener)"
-                      >
-                        <Pencil className="w-3 h-3" />
-                        Mark Loss
-                      </button>
+                      <div className="flex items-center gap-1">
+                        <button
+                          onClick={() => openMarkTpModal(p)}
+                          className="flex items-center gap-1 text-[10px] text-emerald-400/60 hover:text-emerald-400 transition-colors py-1 px-1.5 rounded"
+                          title="Mark this trade as a TP win (checker missed the peak)"
+                        >
+                          <TrendingUp className="w-3 h-3" />
+                          Mark TP
+                        </button>
+                        <button
+                          onClick={() => openEditLoss(p)}
+                          className="flex items-center gap-1 text-[10px] text-amber-400/60 hover:text-amber-400 transition-colors py-1 px-1.5 rounded"
+                          title="Mark this trade as a loss (e.g. fake price from DexScreener)"
+                        >
+                          <Pencil className="w-3 h-3" />
+                          Mark Loss
+                        </button>
+                      </div>
                     )}
 
                     {isConfirming ? (
@@ -552,6 +605,69 @@ export default function Positions() {
                 className="flex-1 py-2.5 rounded-xl bg-red-500/20 border border-red-500/30 text-red-400 text-sm font-bold active:scale-95 transition-all disabled:opacity-50"
               >
                 {editClosedTrade.isPending ? "Saving…" : "Confirm Loss"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Mark as TP modal */}
+      {markTp && (
+        <div className="fixed inset-0 z-50 flex items-end justify-center sm:items-center p-4 bg-black/60 backdrop-blur-sm" onClick={() => setMarkTp(null)}>
+          <div
+            className="bg-[#0d0d18] border border-emerald-500/30 rounded-2xl p-5 w-full max-w-sm space-y-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center gap-2">
+              <TrendingUp className="w-5 h-5 text-emerald-400" />
+              <h2 className="text-white font-bold text-base">Mark as TP Win</h2>
+            </div>
+
+            <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-lg p-3 text-xs text-emerald-300 space-y-1">
+              <p className="font-semibold">${markTp.symbol} — Missed peak correction</p>
+              <p className="text-emerald-300/70">
+                This will set the P&L to the full take-profit amount (+{markTp.tpPercent}%) and mark it as a win.
+                Use this when the token reached its target but the checker missed the spike.
+              </p>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3 text-xs">
+              <div className="bg-white/4 rounded-lg p-2.5">
+                <p className="text-white/40 mb-1">Current P&L</p>
+                <p className={`font-bold ${markTp.currentPnlSol >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                  {markTp.currentPnlSol >= 0 ? "+" : ""}{markTp.currentPnlSol.toFixed(4)} SOL
+                </p>
+              </div>
+              <div className="bg-emerald-500/10 rounded-lg p-2.5">
+                <p className="text-white/40 mb-1">Will become</p>
+                <p className="font-bold text-emerald-400">+{markTp.tpPercent}% (TP)</p>
+              </div>
+            </div>
+
+            <div>
+              <label className="text-xs text-white/40 mb-1.5 block">Note (optional)</label>
+              <input
+                type="text"
+                value={editNote}
+                onChange={(e) => setEditNote(e.target.value)}
+                placeholder="e.g. Checker missed the peak — token hit target"
+                className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-xs text-white placeholder:text-white/25 focus:outline-none focus:border-emerald-500/40"
+              />
+            </div>
+
+            <div className="flex gap-2">
+              <button
+                onClick={() => setMarkTp(null)}
+                className="flex-1 py-2.5 rounded-xl bg-white/8 text-white/50 text-sm font-semibold active:scale-95 transition-all"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={submitMarkAsTp}
+                disabled={editClosedTrade.isPending}
+                className="flex-1 py-2.5 rounded-xl bg-emerald-500/20 border border-emerald-500/30 text-emerald-400 text-sm font-bold active:scale-95 transition-all disabled:opacity-50"
+              >
+                {editClosedTrade.isPending ? "Saving…" : "Confirm TP Win"}
               </button>
             </div>
           </div>

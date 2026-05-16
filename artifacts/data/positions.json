@@ -1,1 +1,38 @@
-[]
+[
+  {
+    "positionId": "cc361180-5f6f-4799-870d-893e8d079106",
+    "symbol": "WANTED",
+    "tokenName": "WANTED",
+    "pairAddress": "9xbKoYQdyR5tAhgh3EoSP55gi8nhd14GX2kfW8tjGCcK",
+    "contractAddress": "F9jxTiYP1EN7mBs9Tt2Zs1wunwq5tirkRQVvc78Fpump",
+    "imageUrl": "https://cdn.dexscreener.com/cms/images/L_nw9xzRKQP0vhms?width=800&height=800&quality=95&format=auto",
+    "entryPrice": 0.0002518,
+    "sizeSol": 0.5,
+    "slPercent": 7,
+    "tpPercent": 50,
+    "slPrice": 0.00023417399999999997,
+    "tpPrice": 0.0003777,
+    "entryMarketCap": 253277,
+    "entryLiquidityUsd": 41878.36,
+    "tpMarketCap": 379915.5,
+    "slMarketCap": 235547.61,
+    "aiScore": 83,
+    "confidence": 100,
+    "openedAt": "2026-05-16T03:33:26.442Z",
+    "status": "open",
+    "llmVerdict": "RISKY",
+    "llmProvider": "gemini",
+    "llmConfidence": 75,
+    "llmReasoning": "The token exhibits strong early momentum, high trading volume, and consistent buy pressure, indicating significant interest. However, its extremely young age (45m) introduces a substantial rug pull risk, requiring a very tight stop-loss.",
+    "llmRisks": [
+      "Extremely young token (45m) with high rug potential",
+      "Already significant pump (+548%) could lead to rapid correction",
+      "Memecoin market is inherently volatile and speculative"
+    ],
+    "llmStrengths": [
+      "Strong positive 5m momentum and very high trading volume",
+      "Consistent strong buy ratios indicate genuine demand"
+    ],
+    "llmDurationMs": 19588
+  }
+]
