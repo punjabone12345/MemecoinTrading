@@ -187,6 +187,67 @@ registerCommandHandler(async (command: string) => {
 const server = http.createServer(app);
 initWebSocketServer(server);
 
+// ── Auto-migrate DB tables on every startup ──────────────────────────────────
+// Runs CREATE TABLE IF NOT EXISTS so it's safe to run repeatedly.
+// This ensures Render (and any fresh deployment) always has the schema ready.
+if (process.env["DATABASE_URL"]) {
+  try {
+    const { pool: dbPool } = await import("./lib/db.js");
+    const migClient = await dbPool.connect();
+    try {
+      await migClient.query(`
+        CREATE TABLE IF NOT EXISTS positions (
+          id TEXT PRIMARY KEY, symbol TEXT NOT NULL, name TEXT NOT NULL,
+          pair_address TEXT NOT NULL, contract_address TEXT, dex_id TEXT,
+          entry_price DOUBLE PRECISION NOT NULL, current_price DOUBLE PRECISION NOT NULL,
+          size_sol DOUBLE PRECISION NOT NULL, size_usd DOUBLE PRECISION NOT NULL,
+          pnl_usd DOUBLE PRECISION NOT NULL DEFAULT 0, pnl_pct DOUBLE PRECISION NOT NULL DEFAULT 0,
+          status TEXT NOT NULL DEFAULT 'open', opened_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          closed_at TIMESTAMPTZ, close_reason TEXT, tp1_hit BOOLEAN DEFAULT FALSE,
+          tp2_hit BOOLEAN DEFAULT FALSE, peak_price DOUBLE PRECISION,
+          ai_score INTEGER, confidence INTEGER, llm_verdict TEXT, llm_provider TEXT,
+          llm_confidence INTEGER, llm_score INTEGER, llm_risk_level TEXT,
+          llm_reasoning TEXT, llm_risks JSONB, llm_strengths JSONB, llm_duration_ms INTEGER,
+          pair_age_minutes DOUBLE PRECISION, liquidity_usd DOUBLE PRECISION,
+          market_cap_usd DOUBLE PRECISION, volume_24h_usd DOUBLE PRECISION,
+          volume_1h_usd DOUBLE PRECISION, price_change_1h DOUBLE PRECISION,
+          buy_ratio_1h DOUBLE PRECISION, txns_24h INTEGER,
+          recommended_size_sol DOUBLE PRECISION, secondary_verdict TEXT, secondary_provider TEXT
+        )
+      `);
+      await migClient.query(`
+        CREATE TABLE IF NOT EXISTS loss_journal (
+          id TEXT PRIMARY KEY, symbol TEXT NOT NULL, pair_address TEXT NOT NULL,
+          entry_price DOUBLE PRECISION NOT NULL, exit_price DOUBLE PRECISION NOT NULL,
+          size_sol DOUBLE PRECISION NOT NULL, pnl_usd DOUBLE PRECISION NOT NULL,
+          pnl_pct DOUBLE PRECISION NOT NULL, close_reason TEXT NOT NULL,
+          opened_at TIMESTAMPTZ NOT NULL, closed_at TIMESTAMPTZ NOT NULL,
+          ai_score INTEGER, llm_verdict TEXT, llm_provider TEXT, llm_reasoning TEXT,
+          lesson TEXT, tags JSONB
+        )
+      `);
+      await migClient.query(`
+        CREATE TABLE IF NOT EXISTS alerts (
+          id TEXT PRIMARY KEY, type TEXT NOT NULL, title TEXT NOT NULL,
+          message TEXT NOT NULL, data JSONB, read BOOLEAN DEFAULT FALSE,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `);
+      await migClient.query(`
+        CREATE TABLE IF NOT EXISTS watchlist (
+          id TEXT PRIMARY KEY, symbol TEXT NOT NULL, pair_address TEXT NOT NULL,
+          contract_address TEXT, name TEXT, added_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), notes TEXT
+        )
+      `);
+      logger.info("DB migration: all tables ready");
+    } finally {
+      migClient.release();
+    }
+  } catch (migErr) {
+    logger.warn({ err: (migErr as Error).message }, "DB migration: failed (continuing anyway)");
+  }
+}
+
 // Initialise DB-backed services before accepting traffic
 await lossJournalService.init();
 await paperTradingService.init();
