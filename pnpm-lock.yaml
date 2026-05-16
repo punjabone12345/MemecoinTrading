@@ -169,6 +169,9 @@ importers:
       '@google/genai':
         specifier: ^2.2.0
         version: 2.2.0
+      '@types/pg':
+        specifier: ^8.18.0
+        version: 8.18.0
       axios:
         specifier: ^1.16.0
         version: 1.16.0
@@ -181,6 +184,9 @@ importers:
       express:
         specifier: ^5
         version: 5.2.1
+      pg:
+        specifier: ^8.20.0
+        version: 8.20.0
       pino:
         specifier: ^9
         version: 9.14.0

@@ -11,10 +11,12 @@
   },
   "dependencies": {
     "@google/genai": "^2.2.0",
+    "@types/pg": "^8.18.0",
     "axios": "^1.16.0",
     "cookie-parser": "^1.4.7",
     "cors": "^2",
     "express": "^5",
+    "pg": "^8.20.0",
     "pino": "^9",
     "pino-http": "^10",
     "ws": "^8.20.0"

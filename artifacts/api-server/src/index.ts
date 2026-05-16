@@ -6,6 +6,7 @@ import { scannerService } from "./services/scanner.service.js";
 import { paperTradingService } from "./services/paper-trading.service.js";
 import { autoTraderService } from "./services/auto-trader.service.js";
 import { startCommandPolling, registerCommandHandler, toIST, sendTelegram, isTelegramConfigured } from "./lib/telegram.js";
+import { lossJournalService } from "./services/loss-journal.service.js";
 
 const rawPort = process.env["PORT"] ?? "8080";
 const port = Number(rawPort);
@@ -185,6 +186,10 @@ registerCommandHandler(async (command: string) => {
 
 const server = http.createServer(app);
 initWebSocketServer(server);
+
+// Initialise DB-backed services before accepting traffic
+await lossJournalService.init();
+await paperTradingService.init();
 
 server.listen(port, () => {
   logger.info({ port }, "Apex Meme Trader AI — server listening");

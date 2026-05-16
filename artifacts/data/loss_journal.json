@@ -1,5 +1,31 @@
 [
   {
+    "positionId": "cc361180-5f6f-4799-870d-893e8d079106",
+    "symbol": "WANTED",
+    "contractAddress": "F9jxTiYP1EN7mBs9Tt2Zs1wunwq5tirkRQVvc78Fpump",
+    "openedAt": "2026-05-16T03:33:26.442Z",
+    "closedAt": "2026-05-16T03:40:56.476Z",
+    "holdTimeMs": 450034,
+    "pnlSol": -0.08369996028594118,
+    "pnlPercent": -16.739992057188235,
+    "aiScore": 83,
+    "confidence": 100,
+    "entryMcapUsd": 253277,
+    "entryLiquidityUsd": 41878.36,
+    "slPercent": 7,
+    "tpPercent": 50,
+    "tags": [
+      "fast_rug",
+      "high_fdv_risk"
+    ],
+    "warnings": [
+      "Closed in 7.5m — fast dump, likely late entry",
+      "TP was +50% but trade still lost — wide TP on a risky token is a bad combo"
+    ],
+    "recordedAt": 1778902856477,
+    "isWin": false
+  },
+  {
     "positionId": "685227b5-e02a-40b4-8b45-43233df91869",
     "symbol": "LastDance",
     "contractAddress": "EkRyMsQU77pPPFb9pLgVEToCbNZiHR8nvuw9NFnVpump",

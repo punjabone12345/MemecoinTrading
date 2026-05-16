@@ -1,8 +1,6 @@
 import { randomUUID } from "crypto";
-import fs from "fs";
-import path from "path";
-import { fileURLToPath } from "url";
 import { logger } from "../lib/logger.js";
+import { query, execute } from "../lib/db.js";
 import { scannerService } from "./scanner.service.js";
 import { alertsService } from "./alerts.service.js";
 import { lossJournalService } from "./loss-journal.service.js";
@@ -11,49 +9,21 @@ import { sendTelegram, toIST } from "../lib/telegram.js";
 import type { Position, Portfolio, CloseReason, ScannedToken } from "../types/index.js";
 import type { LlmAnalysis } from "./ai-analysis.service.js";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DATA_DIR = path.join(__dirname, "..", "..", "data");
-const POSITIONS_FILE = path.join(DATA_DIR, "positions.json");
-const HISTORY_FILE = path.join(DATA_DIR, "trades_history.json");
-
 const INITIAL_BALANCE_SOL = 100;
 const FEE_RATE = 0.003;
 const SLIPPAGE_RATE = 0.005;
 
-// After this many ms with no priceable data from DexScreener, treat as rug
-const RUG_TIMEOUT_MS = 8 * 60 * 1_000;
-
-function ensureDataDir() {
-  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
-}
-
-function readJson<T>(file: string, fallback: T): T {
-  try {
-    if (!fs.existsSync(file)) return fallback;
-    return JSON.parse(fs.readFileSync(file, "utf8")) as T;
-  } catch {
-    return fallback;
-  }
-}
-
-function writeJson(file: string, data: unknown) {
-  try {
-    ensureDataDir();
-    fs.writeFileSync(file, JSON.stringify(data, null, 2));
-  } catch (err) {
-    logger.error({ err, file }, "Failed to persist data");
-  }
-}
+const MAX_HOLD_MS = 48 * 60 * 60 * 1_000;
 
 function formatHoldTime(ms: number): string {
   const totalMins = Math.floor(ms / 60_000);
   const hours = Math.floor(totalMins / 60);
   const mins = totalMins % 60;
-  if (hours > 0) return `${hours}h ${mins}m`;
-  return `${mins}m`;
+  return hours > 0 ? `${hours}h ${mins}m` : `${mins}m`;
 }
 
 function formatPrice(price: number): string {
+  if (!price) return "0";
   if (price < 0.0001) return price.toFixed(10);
   if (price < 0.01) return price.toFixed(8);
   if (price < 1) return price.toFixed(6);
@@ -67,53 +37,172 @@ function formatMcap(mcap: number): string {
   return `$${mcap.toFixed(0)}`;
 }
 
+// ─── DB row ↔ Position mappers ────────────────────────────────────────────────
+
+type DbRow = Record<string, unknown>;
+
+function rowToPosition(r: DbRow): Position {
+  return {
+    positionId: r.position_id as string,
+    symbol: r.symbol as string,
+    tokenName: r.token_name as string | undefined,
+    pairAddress: r.pair_address as string,
+    contractAddress: r.contract_address as string,
+    entryPrice: Number(r.entry_price),
+    sizeSol: Number(r.size_sol),
+    slPercent: Number(r.sl_percent),
+    tpPercent: Number(r.tp_percent),
+    slPrice: Number(r.sl_price),
+    tpPrice: Number(r.tp_price),
+    entryMarketCap: Number(r.entry_market_cap ?? 0),
+    entryLiquidityUsd: Number(r.entry_liquidity_usd ?? 0),
+    tpMarketCap: Number(r.tp_market_cap ?? 0),
+    slMarketCap: Number(r.sl_market_cap ?? 0),
+    aiScore: Number(r.ai_score ?? 0),
+    confidence: Number(r.confidence ?? 0),
+    status: r.status as "open" | "closed",
+    openedAt: r.opened_at instanceof Date ? r.opened_at.toISOString() : r.opened_at as string,
+    closedAt: r.closed_at
+      ? (r.closed_at instanceof Date ? r.closed_at.toISOString() : r.closed_at as string)
+      : undefined,
+    exitPrice: r.exit_price !== null ? Number(r.exit_price) : undefined,
+    pnlSol: r.pnl_sol !== null ? Number(r.pnl_sol) : undefined,
+    pnlPercent: r.pnl_percent !== null ? Number(r.pnl_percent) : undefined,
+    holdTimeMs: r.hold_time_ms !== null ? Number(r.hold_time_ms) : undefined,
+    closeReason: r.close_reason as CloseReason | undefined,
+    note: r.note as string | undefined,
+    llmVerdict: r.llm_verdict as string | undefined,
+    llmProvider: r.llm_provider as string | undefined,
+    llmConfidence: r.llm_confidence !== null ? Number(r.llm_confidence) : undefined,
+    llmReasoning: r.llm_reasoning as string | undefined,
+    llmRisks: r.llm_risks as string[] | undefined,
+    llmStrengths: r.llm_strengths as string[] | undefined,
+    llmDurationMs: r.llm_duration_ms !== null ? Number(r.llm_duration_ms) : undefined,
+  };
+}
+
+// ─── Service ──────────────────────────────────────────────────────────────────
+
 class PaperTradingService {
   private openPositions: Map<string, Position> = new Map();
   private closedTrades: Position[] = [];
   private solBalance = INITIAL_BALANCE_SOL;
-  private openContracts: Set<string> = new Set(); // keyed by token contract address, not symbol
+  private openContracts: Set<string> = new Set();
   private positionBroadcaster: (() => void) | null = null;
-  // Latest verified price from DexScreener per pairAddress — updated by stop checker every 30s
   private latestPrices: Map<string, { price: number; ts: number }> = new Map();
 
-  constructor() {
-    this.loadFromDisk();
+  // Must be called and awaited before starting the server
+  async init(): Promise<void> {
+    await this.loadFromDb();
   }
 
-  private loadFromDisk() {
-    ensureDataDir();
-    const open = readJson<Position[]>(POSITIONS_FILE, []);
-    const history = readJson<Position[]>(HISTORY_FILE, []);
+  private async loadFromDb(): Promise<void> {
+    try {
+      const rows = await query<DbRow>(
+        "SELECT * FROM positions ORDER BY opened_at ASC"
+      );
 
-    this.closedTrades = history;
+      const open: Position[] = [];
+      const closed: Position[] = [];
 
-    for (const pos of open) {
-      if (pos.status === "open") {
+      for (const row of rows) {
+        const pos = rowToPosition(row);
+        if (pos.status === "open") open.push(pos);
+        else closed.push(pos);
+      }
+
+      // Most-recent closed trade first
+      closed.sort((a, b) =>
+        new Date(b.closedAt ?? b.openedAt).getTime() -
+        new Date(a.closedAt ?? a.openedAt).getTime()
+      );
+
+      this.closedTrades = closed;
+      this.openPositions.clear();
+      this.openContracts.clear();
+
+      for (const pos of open) {
         this.openPositions.set(pos.positionId, pos);
         this.openContracts.add(pos.contractAddress);
-        this.solBalance -= pos.sizeSol;
       }
+
+      const closedPnl = this.closedTrades.reduce((s, t) => s + (t.pnlSol ?? 0), 0);
+      this.solBalance = INITIAL_BALANCE_SOL - this.totalOpenSol() + closedPnl;
+
+      logger.info(
+        {
+          openPositions: this.openPositions.size,
+          closedTrades: this.closedTrades.length,
+          solBalance: this.solBalance.toFixed(4),
+        },
+        "Paper trading state restored from database",
+      );
+    } catch (err) {
+      logger.error({ err }, "Failed to load from database — starting fresh");
     }
-
-    const closedPnl = this.closedTrades.reduce((s, t) => s + (t.pnlSol ?? 0), 0);
-    this.solBalance = INITIAL_BALANCE_SOL - this.totalOpenSol() + closedPnl;
-
-    logger.info(
-      { openPositions: this.openPositions.size, closedTrades: this.closedTrades.length, solBalance: this.solBalance.toFixed(4) },
-      "Paper trading state restored from disk",
-    );
   }
 
-  private totalOpenSol(): number {
-    return Array.from(this.openPositions.values()).reduce((s, p) => s + p.sizeSol, 0);
+  private async upsertPosition(pos: Position): Promise<void> {
+    try {
+      await execute(
+        `INSERT INTO positions (
+          position_id, symbol, token_name, pair_address, contract_address,
+          size_sol, entry_price, tp_price, sl_price, tp_percent, sl_percent,
+          entry_market_cap, entry_liquidity_usd, tp_market_cap, sl_market_cap,
+          ai_score, confidence, status, opened_at, closed_at, exit_price,
+          pnl_sol, pnl_percent, hold_time_ms, close_reason, note,
+          llm_verdict, llm_provider, llm_confidence, llm_reasoning,
+          llm_risks, llm_strengths, llm_duration_ms, updated_at
+        ) VALUES (
+          $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,
+          $16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,
+          $29,$30,$31,$32,$33,NOW()
+        )
+        ON CONFLICT (position_id) DO UPDATE SET
+          symbol = EXCLUDED.symbol,
+          token_name = EXCLUDED.token_name,
+          status = EXCLUDED.status,
+          closed_at = EXCLUDED.closed_at,
+          exit_price = EXCLUDED.exit_price,
+          pnl_sol = EXCLUDED.pnl_sol,
+          pnl_percent = EXCLUDED.pnl_percent,
+          hold_time_ms = EXCLUDED.hold_time_ms,
+          close_reason = EXCLUDED.close_reason,
+          note = EXCLUDED.note,
+          llm_verdict = EXCLUDED.llm_verdict,
+          llm_provider = EXCLUDED.llm_provider,
+          llm_confidence = EXCLUDED.llm_confidence,
+          llm_reasoning = EXCLUDED.llm_reasoning,
+          llm_risks = EXCLUDED.llm_risks,
+          llm_strengths = EXCLUDED.llm_strengths,
+          llm_duration_ms = EXCLUDED.llm_duration_ms,
+          updated_at = NOW()`,
+        [
+          pos.positionId, pos.symbol, pos.tokenName ?? null, pos.pairAddress,
+          pos.contractAddress, pos.sizeSol, pos.entryPrice, pos.tpPrice, pos.slPrice,
+          pos.tpPercent, pos.slPercent, pos.entryMarketCap ?? 0, pos.entryLiquidityUsd ?? 0,
+          pos.tpMarketCap ?? 0, pos.slMarketCap ?? 0, pos.aiScore ?? 0, pos.confidence ?? 0,
+          pos.status, pos.openedAt, pos.closedAt ?? null, pos.exitPrice ?? null,
+          pos.pnlSol ?? null, pos.pnlPercent ?? null, pos.holdTimeMs ?? null,
+          pos.closeReason ?? null, pos.note ?? null,
+          pos.llmVerdict ?? null, pos.llmProvider ?? null, pos.llmConfidence ?? null,
+          pos.llmReasoning ?? null,
+          pos.llmRisks ? JSON.stringify(pos.llmRisks) : null,
+          pos.llmStrengths ? JSON.stringify(pos.llmStrengths) : null,
+          pos.llmDurationMs ?? null,
+        ],
+      );
+    } catch (err) {
+      logger.error({ err, positionId: pos.positionId }, "Failed to upsert position to DB");
+    }
   }
 
-  private persistOpen() {
-    writeJson(POSITIONS_FILE, Array.from(this.openPositions.values()));
-  }
-
-  private persistHistory() {
-    writeJson(HISTORY_FILE, this.closedTrades);
+  private async deletePositionFromDb(positionId: string): Promise<void> {
+    try {
+      await execute("DELETE FROM positions WHERE position_id = $1", [positionId]);
+    } catch (err) {
+      logger.error({ err, positionId }, "Failed to delete position from DB");
+    }
   }
 
   setPositionBroadcaster(fn: () => void) {
@@ -124,15 +213,14 @@ class PaperTradingService {
     this.positionBroadcaster?.();
   }
 
+  private totalOpenSol(): number {
+    return Array.from(this.openPositions.values()).reduce((s, p) => s + p.sizeSol, 0);
+  }
+
   hasOpenPositionForContract(contractAddress: string): boolean {
     return this.openContracts.has(contractAddress);
   }
 
-  /**
-   * Returns true if this contract address has EVER been traded —
-   * either currently open OR already closed. Used to enforce the
-   * "one trade per coin, ever" rule and prevent re-entry after SL/TP.
-   */
   hasEverTradedContract(contractAddress: string): boolean {
     if (this.openContracts.has(contractAddress)) return true;
     return this.closedTrades.some((t) => t.contractAddress === contractAddress);
@@ -148,8 +236,6 @@ class PaperTradingService {
       throw new Error(`Already have an open position for contract ${token.address} (${token.symbol})`);
     }
 
-    // Always verify entry price directly from DexScreener — scanner cache (esp. GeckoTerminal)
-    // can have stale or inaccurate prices that don't match what DexScreener actually shows.
     let verifiedPriceUsd = token.priceUsd;
     try {
       const dexPair = await scannerService.getPairFromDex(token.pairAddress);
@@ -162,7 +248,6 @@ class PaperTradingService {
           );
         }
         verifiedPriceUsd = dexPrice;
-        // Also update the latestPrices cache so PnL is immediately correct
         this.latestPrices.set(token.pairAddress, { price: dexPrice, ts: Date.now() });
       } else {
         logger.warn({ symbol: token.symbol }, "DexScreener returned no price at entry — using scanner price");
@@ -176,7 +261,6 @@ class PaperTradingService {
     const slPrice = verifiedPriceUsd * (1 - slPercent / 100);
     const tpPrice = verifiedPriceUsd * (1 + tpPercent / 100);
 
-    // Market cap projections
     const entryMarketCap = token.marketCap;
     const entryLiquidityUsd = token.liquidity;
     const tpMarketCap = entryMarketCap > 0 ? entryMarketCap * (1 + tpPercent / 100) : 0;
@@ -218,14 +302,12 @@ class PaperTradingService {
 
     this.openPositions.set(position.positionId, position);
     this.openContracts.add(token.address);
-    this.persistOpen();
+    void this.upsertPosition(position);
 
     logger.info({ positionId: position.positionId, symbol: token.symbol, aiScore: token.aiScore, slPercent, tpPercent }, "Position opened");
 
-    alertsService.tradeOpened(position.positionId, token.symbol, sizeSol, token.pairAddress);
-
     void sendTelegram(
-      `🟢 <b>TRADE OPENED — $${token.symbol}</b>\n` +
+      `🟢 <b>NEW TRADE — $${token.symbol}</b>\n` +
       `──────────────────────\n` +
       `🏷️ Token: <b>${token.name}</b>\n` +
       `📍 CA: <code>${token.address}</code>\n` +
@@ -269,11 +351,6 @@ class PaperTradingService {
     const pos = this.openPositions.get(positionId);
     if (!pos) throw new Error(`Position not found: ${positionId}`);
 
-    // Resolve exit price — always prefer a DexScreener-verified price:
-    // 1. latestPrices cache (fresh from stop checker or entry verification)
-    // 2. fresh DexScreener fetch
-    // 3. slPrice when closing as stop_loss (rug with no available price)
-    // 4. entryPrice as absolute last resort (0% PnL — prefer slPrice for stop_loss)
     let exitPrice: number;
     const latestEntry = this.latestPrices.get(pos.pairAddress);
     if (latestEntry && latestEntry.price > 0 && Date.now() - latestEntry.ts < 60_000) {
@@ -285,7 +362,6 @@ class PaperTradingService {
         exitPrice = dexPrice;
         this.latestPrices.set(pos.pairAddress, { price: dexPrice, ts: Date.now() });
       } else if (reason === "stop_loss") {
-        // No live price and closing as stop-loss → use slPrice (reflects the actual loss)
         exitPrice = pos.slPrice;
       } else {
         exitPrice = pos.entryPrice;
@@ -313,10 +389,8 @@ class PaperTradingService {
     this.openPositions.delete(positionId);
     this.openContracts.delete(pos.contractAddress);
     this.closedTrades.unshift(closed);
-    this.persistOpen();
-    this.persistHistory();
+    void this.upsertPosition(closed);
 
-    // Record every trade in the journal (wins + losses)
     lossJournalService.record(closed);
 
     logger.info({ positionId, symbol: pos.symbol, reason, pnlSol: pnlSol.toFixed(4) }, "Position closed");
@@ -370,23 +444,18 @@ class PaperTradingService {
     return closed;
   }
 
-  async checkStopsForAll(): Promise<void> {
-    const MAX_HOLD_MS = 48 * 60 * 60 * 1_000; // auto-close after 48h (stuck/illiquid)
+  // ── Stop/TP checker ──────────────────────────────────────────────────────────
 
+  async checkStopsForAll(): Promise<void> {
     for (const pos of Array.from(this.openPositions.values())) {
       try {
-        // Always fetch fresh from DexScreener — this is the authoritative price source.
-        // Scanner cache (especially GeckoTerminal) can lag or be stale.
         let price: number | null = null;
         const dexPair = await scannerService.getPairFromDex(pos.pairAddress);
         const dexPrice = parseFloat(dexPair?.priceUsd ?? "0");
         if (dexPrice > 0) {
           price = dexPrice;
-          // Keep latestPrices cache fresh for live PnL display
           this.latestPrices.set(pos.pairAddress, { price: dexPrice, ts: Date.now() });
         } else {
-          // DexScreener returned 0/null — token may have rugged (liquidity drained)
-          // Fall back to scanner cache as last resort
           const cached = scannerService.getByPairAddress(pos.pairAddress);
           if (cached && cached.priceUsd > 0) {
             price = cached.priceUsd;
@@ -394,11 +463,6 @@ class PaperTradingService {
           }
         }
 
-        // ── MID-HOLD LIQUIDITY DRAIN DETECTION ────────────────────────────
-        // If current liquidity has dropped to <10% of entry liquidity and it's
-        // been at least 2 minutes (giving time for initial data to settle),
-        // the pool is being drained — close immediately at stop loss.
-        // This catches rugs where price hasn't fallen yet but LP is being pulled.
         const currentLiqMidHold = dexPair?.liquidity?.usd ?? 0;
         const holdMsCheck = Date.now() - new Date(pos.openedAt).getTime();
         if (
@@ -408,7 +472,7 @@ class PaperTradingService {
           currentLiqMidHold < pos.entryLiquidityUsd * 0.1
         ) {
           logger.warn(
-            { symbol: pos.symbol, entryLiq: pos.entryLiquidityUsd, currentLiq: currentLiqMidHold, dropPct: ((1 - currentLiqMidHold / pos.entryLiquidityUsd) * 100).toFixed(0) },
+            { symbol: pos.symbol, entryLiq: pos.entryLiquidityUsd, currentLiq: currentLiqMidHold },
             "Stop checker: liquidity drained >90% since entry — rug detected, closing at SL"
           );
           await this.close(pos.positionId, "stop_loss");
@@ -416,17 +480,11 @@ class PaperTradingService {
         }
 
         if (!price || price <= 0) {
-          // No price from DexScreener or cache — check if this looks like a rug
           const holdMs = Date.now() - new Date(pos.openedAt).getTime();
           const lastKnown = this.latestPrices.get(pos.pairAddress);
           const msWithoutPrice = lastKnown ? Date.now() - lastKnown.ts : holdMs;
-
-          // Reduced from 8 minutes to 3 minutes — don't hold a dead token long
           if (holdMs > 3 * 60_000 && msWithoutPrice > 3 * 60_000) {
-            logger.warn(
-              { symbol: pos.symbol, holdMs, msWithoutPrice },
-              "Stop checker: no price for 3+ minutes — treating as rug, closing at SL"
-            );
+            logger.warn({ symbol: pos.symbol, holdMs, msWithoutPrice }, "Stop checker: no price for 3+ minutes — treating as rug, closing at SL");
             await this.close(pos.positionId, "stop_loss");
           } else {
             logger.warn({ symbol: pos.symbol }, "Stop checker: no DexScreener price yet — will retry");
@@ -441,48 +499,32 @@ class PaperTradingService {
         }
 
         if (price >= pos.tpPrice) {
-          // ── FAKE PRICE DETECTION (LESSON LEARNED FROM REAL LOSSES) ────────
-          // DexScreener sometimes shows astronomically fake prices on dead tokens:
-          // a single dust buy on a $0 pool creates a price of $999999 which
-          // falsely triggers TP and records a fake profit while the coin is -100%.
-          //
-          // Three guards before accepting any TP:
-          //   1. Liquidity floor: pool must have >$5K remaining
-          //   2. Price sanity cap: exit price can't be >50x entry (5000% gain impossible
-          //      on a token we only target up to 80% TP — any reading above that is fake data)
-          //   3. Volume sanity: if price moved >500% but 5m volume < $100, it's manipulated
-          const currentLiq  = dexPair?.liquidity?.usd ?? 0;
+          const currentLiq = dexPair?.liquidity?.usd ?? 0;
           const currentVol5m = dexPair?.volume?.m5 ?? 0;
           const priceMultiplier = pos.entryPrice > 0 ? price / pos.entryPrice : 1;
 
-          const MIN_TP_LIQUIDITY_USD = 5_000;   // raised from $2K — thin pools are fake
-          const MAX_PRICE_MULTIPLIER = 50;       // 5000% gain = fake price, not real
-          const MIN_VOL_FOR_LARGE_MOVE = 100;    // must have $100+ volume if price >500% up
+          const MIN_TP_LIQUIDITY_USD = 5_000;
+          const MAX_PRICE_MULTIPLIER = 50;
+          const MIN_VOL_FOR_LARGE_MOVE = 100;
 
-          // Guard 1: liquidity drained + suspicious price (rug pattern)
-          // Only override TP→SL when the price multiplier is ALSO high (>5x).
-          // A legitimate 35-80% TP with temporarily low liquidity is still a real win.
-          // A fake rug price showing >5x with no liquidity IS the manipulated-data scenario.
           if (currentLiq > 0 && currentLiq < MIN_TP_LIQUIDITY_USD && priceMultiplier > 5) {
             logger.warn(
-              { symbol: pos.symbol, price, tpPrice: pos.tpPrice, currentLiq, priceMultiplier: priceMultiplier.toFixed(1) },
+              { symbol: pos.symbol, price, currentLiq, priceMultiplier: priceMultiplier.toFixed(1) },
               "TP rejected: liquidity drained (<$5K) AND price >5x — likely rug, closing at SL"
             );
             await this.close(pos.positionId, "stop_loss");
             continue;
           }
 
-          // Guard 2: astronomically fake price (the +9999999 SOL bug)
           if (priceMultiplier > MAX_PRICE_MULTIPLIER) {
             logger.warn(
-              { symbol: pos.symbol, price, entryPrice: pos.entryPrice, priceMultiplier: priceMultiplier.toFixed(0) },
+              { symbol: pos.symbol, price, priceMultiplier: priceMultiplier.toFixed(0) },
               `TP rejected: price is ${priceMultiplier.toFixed(0)}x entry — fake/manipulated data, closing at SL`
             );
             await this.close(pos.positionId, "stop_loss");
             continue;
           }
 
-          // Guard 3: big price move with no real volume = single dust buy manipulation
           if (priceMultiplier > 5 && currentVol5m < MIN_VOL_FOR_LARGE_MOVE) {
             logger.warn(
               { symbol: pos.symbol, price, priceMultiplier: priceMultiplier.toFixed(1), currentVol5m },
@@ -492,12 +534,11 @@ class PaperTradingService {
             continue;
           }
 
-          logger.info({ symbol: pos.symbol, price, tpPrice: pos.tpPrice, currentLiq, priceMultiplier: priceMultiplier.toFixed(2) }, "Take profit triggered");
+          logger.info({ symbol: pos.symbol, price, tpPrice: pos.tpPrice, priceMultiplier: priceMultiplier.toFixed(2) }, "Take profit triggered");
           await this.close(pos.positionId, "take_profit");
           continue;
         }
 
-        // Auto-close stuck / illiquid positions after 48 hours
         const holdMs = Date.now() - new Date(pos.openedAt).getTime();
         if (holdMs > MAX_HOLD_MS) {
           logger.warn({ symbol: pos.symbol, holdHours: (holdMs / 3_600_000).toFixed(1) }, "Auto-closing stale position (>48h)");
@@ -509,174 +550,9 @@ class PaperTradingService {
     }
   }
 
-  getOpenPositions(): Position[] {
-    return Array.from(this.openPositions.values()).sort(
-      (a, b) => new Date(b.openedAt).getTime() - new Date(a.openedAt).getTime(),
-    );
-  }
-
-  getOpenPositionsWithLivePnl(): (Position & { livePnlSol: number; livePnlPercent: number; currentPrice: number })[] {
-    return this.getOpenPositions().map((pos) => {
-      // Priority: (1) DexScreener-verified latestPrices cache updated by stop checker every 30s
-      //           (2) scanner cache as fallback
-      //           (3) slPrice if token has been unresolvable long enough (likely rugged)
-      //           (4) entryPrice only for brand-new positions not yet priced by the stop checker
-      const latestEntry = this.latestPrices.get(pos.pairAddress);
-      const scannerToken = scannerService.getByPairAddress(pos.pairAddress);
-
-      let currentPrice: number;
-      if (latestEntry && latestEntry.price > 0) {
-        currentPrice = latestEntry.price;
-      } else if (scannerToken && scannerToken.priceUsd > 0) {
-        currentPrice = scannerToken.priceUsd;
-      } else {
-        // Token not priceable — check if it's been open long enough to be suspicious
-        const holdMs = Date.now() - new Date(pos.openedAt).getTime();
-        if (holdMs > RUG_TIMEOUT_MS) {
-          // Show stop-loss price so the card reflects the true worst-case loss
-          currentPrice = pos.slPrice;
-        } else {
-          // Brand-new position, stop checker hasn't run yet — use entry price (0% PnL)
-          currentPrice = pos.entryPrice;
-        }
-      }
-
-      const { pnlSol, pnlPercent } = this.computePnl(pos, currentPrice);
-      return { ...pos, livePnlSol: pnlSol, livePnlPercent: pnlPercent, currentPrice };
-    });
-  }
-
-  getClosedTrades(): Position[] {
-    return this.closedTrades;
-  }
-
-  getAllTrades(): Position[] {
-    return [...this.getOpenPositions(), ...this.closedTrades];
-  }
-
-  getPositionById(positionId: string): Position | undefined {
-    return this.openPositions.get(positionId) ?? this.closedTrades.find((t) => t.positionId === positionId);
-  }
-
-  getPortfolio(): Portfolio {
-    const openWithPnl = this.getOpenPositionsWithLivePnl();
-    const closedPnl = this.closedTrades.reduce((s, t) => s + (t.pnlSol ?? 0), 0);
-    const openValue = openWithPnl.reduce((s, p) => s + p.sizeSol + p.livePnlSol, 0);
-    const totalPnlSol = closedPnl;
-
-    return {
-      solBalance: this.solBalance,
-      initialBalance: INITIAL_BALANCE_SOL,
-      totalPnlSol,
-      totalPnlPercent: (totalPnlSol / INITIAL_BALANCE_SOL) * 100,
-      openPositionsCount: this.openPositions.size,
-      openPositionsValueSol: openValue,
-    };
-  }
-
-  deleteClosedTrade(positionId: string): void {
-    const idx = this.closedTrades.findIndex((t) => t.positionId === positionId);
-    if (idx === -1) throw new Error(`Closed trade not found: ${positionId}`);
-
-    const trade = this.closedTrades[idx];
-    this.closedTrades.splice(idx, 1);
-
-    // Recompute balance from remaining history (same logic as loadFromDisk)
-    const closedPnl = this.closedTrades.reduce((s, t) => s + (t.pnlSol ?? 0), 0);
-    this.solBalance = INITIAL_BALANCE_SOL - this.totalOpenSol() + closedPnl;
-
-    this.persistHistory();
-    this.broadcastPositions();
-
-    logger.info(
-      { positionId, symbol: trade.symbol, pnlSol: trade.pnlSol, newBalance: this.solBalance.toFixed(4) },
-      "Closed trade deleted — balance recomputed",
-    );
-  }
-
-  /**
-   * Edit a closed trade's outcome.
-   * Use this to correct fake profits caused by manipulated DexScreener prices
-   * (e.g. +9999999 SOL from thin-pool price manipulation).
-   *
-   * Providing closeReason="stop_loss" with pnlOverrideSol=-(slPercent loss)
-   * will mark it as a full stop-loss and recompute the account balance.
-   */
-  editClosedTrade(
-    positionId: string,
-    patch: {
-      pnlSol?: number;
-      pnlPercent?: number;
-      exitPrice?: number;
-      closeReason?: "manual" | "stop_loss" | "take_profit";
-      note?: string;
-    },
-  ): Position {
-    const idx = this.closedTrades.findIndex((t) => t.positionId === positionId);
-    if (idx === -1) throw new Error(`Closed trade not found: ${positionId}`);
-
-    const old = this.closedTrades[idx];
-
-    const updated: Position = {
-      ...old,
-      ...(patch.exitPrice !== undefined  ? { exitPrice: patch.exitPrice }   : {}),
-      ...(patch.pnlSol !== undefined     ? { pnlSol: patch.pnlSol }         : {}),
-      ...(patch.pnlPercent !== undefined ? { pnlPercent: patch.pnlPercent } : {}),
-      ...(patch.closeReason !== undefined ? { closeReason: patch.closeReason } : {}),
-      ...(patch.note !== undefined ? { note: patch.note } : {}),
-    };
-
-    this.closedTrades[idx] = updated;
-
-    // Recompute balance from all closed trades
-    const closedPnl = this.closedTrades.reduce((s, t) => s + (t.pnlSol ?? 0), 0);
-    this.solBalance = INITIAL_BALANCE_SOL - this.totalOpenSol() + closedPnl;
-
-    this.persistHistory();
-    this.broadcastPositions();
-
-    // Re-record in loss journal if the updated trade is a loss
-    if ((updated.pnlSol ?? 0) < 0) {
-      lossJournalService.reRecord(updated);
-    }
-
-    logger.info(
-      { positionId, symbol: old.symbol, oldPnl: old.pnlSol, newPnl: updated.pnlSol, newBalance: this.solBalance.toFixed(4) },
-      "Closed trade edited — balance recomputed",
-    );
-
-    return updated;
-  }
-
-  reset(): void {
-    const hadPositions = this.openPositions.size;
-    const oldBalance = this.solBalance;
-    this.openPositions.clear();
-    this.openContracts.clear();
-    this.closedTrades = [];
-    this.solBalance = INITIAL_BALANCE_SOL;
-    this.persistOpen();
-    this.persistHistory();
-    logger.info("Paper trading account reset to 100 SOL");
-    this.broadcastPositions();
-    void sendTelegram(
-      `🔄 <b>ACCOUNT RESET</b>\n` +
-      `──────────────────────\n` +
-      `🗑️ Cleared: <b>${hadPositions} open position${hadPositions !== 1 ? "s" : ""}</b> & all trade history\n` +
-      `💰 Old Balance: <b>${oldBalance.toFixed(4)} SOL</b>\n` +
-      `✅ New Balance: <b>${INITIAL_BALANCE_SOL.toFixed(4)} SOL</b>\n` +
-      `🕐 ${toIST(new Date())}`,
-    );
-  }
-
-  // ── Fast in-memory TP/SL check (every 5 s, no API calls) ──────────────────
-  // Uses prices already cached in latestPrices (updated by the 10s DexScreener
-  // checker) and the scanner's own in-memory token pool (refreshed every 8 s).
-  // This catches spikes that fall back within the 10-second polling window.
   private checkStopsFromCache(): void {
     for (const pos of Array.from(this.openPositions.values())) {
       try {
-        // Try scanner cache first (freshest — updated every 8s)
         const scannerCached = scannerService.getByPairAddress(pos.pairAddress);
         if (scannerCached && scannerCached.priceUsd > 0) {
           this.latestPrices.set(pos.pairAddress, { price: scannerCached.priceUsd, ts: Date.now() });
@@ -695,23 +571,163 @@ class PaperTradingService {
         }
 
         if (price >= pos.tpPrice) {
-          // Apply only the two guards that don't need fresh DexScreener data
-          if (priceMultiplier > 50) continue; // fake price — let the slow checker handle it
+          if (priceMultiplier > 50) continue;
           logger.info({ symbol: pos.symbol, price, tpPrice: pos.tpPrice, priceMultiplier: priceMultiplier.toFixed(2), source: "cache-fast" }, "Take profit triggered (fast cache check)");
           void this.close(pos.positionId, "take_profit");
         }
-      } catch (err) {
-        // Swallow — fast check is best-effort only
+      } catch (_err) {
+        // fast check is best-effort
       }
     }
   }
 
   startStopChecker() {
-    // Fast pass: every 5 s using cached prices (no DexScreener API calls)
     setInterval(() => this.checkStopsFromCache(), 5_000);
-    // Full pass: every 10 s with fresh DexScreener prices + all guards
     setInterval(() => void this.checkStopsForAll(), 10_000);
     logger.info("Stop/TP checker started — checking every 10s (full) + 5s (cache-fast)");
+  }
+
+  // ── Read methods ─────────────────────────────────────────────────────────────
+
+  getOpenPositions(): Position[] {
+    return Array.from(this.openPositions.values());
+  }
+
+  getClosedTrades(): Position[] {
+    return [...this.closedTrades];
+  }
+
+  getPositionById(positionId: string): Position | undefined {
+    return this.openPositions.get(positionId) ?? this.closedTrades.find(t => t.positionId === positionId);
+  }
+
+  getOpenPositionsWithLivePnl(): (Position & { livePnlSol: number; livePnlPercent: number; currentPrice: number })[] {
+    return this.getOpenPositions().map((pos) => {
+      const latestEntry = this.latestPrices.get(pos.pairAddress);
+      const scannerToken = scannerService.getByPairAddress(pos.pairAddress);
+
+      let currentPrice: number;
+      if (latestEntry && latestEntry.price > 0) {
+        currentPrice = latestEntry.price;
+      } else if (scannerToken && scannerToken.priceUsd > 0) {
+        currentPrice = scannerToken.priceUsd;
+      } else if (pos.slPrice > 0 && Date.now() - new Date(pos.openedAt).getTime() > 5 * 60_000) {
+        currentPrice = pos.slPrice;
+      } else {
+        currentPrice = pos.entryPrice;
+      }
+
+      const { pnlSol, pnlPercent } = this.computePnl(pos, currentPrice);
+      return { ...pos, livePnlSol: pnlSol, livePnlPercent: pnlPercent, currentPrice };
+    });
+  }
+
+  getPortfolio(): Portfolio {
+    const openWithPnl = this.getOpenPositionsWithLivePnl();
+    const closedPnl = this.closedTrades.reduce((s, t) => s + (t.pnlSol ?? 0), 0);
+    const openValue = openWithPnl.reduce((s, p) => s + p.sizeSol + p.livePnlSol, 0);
+
+    return {
+      solBalance: this.solBalance,
+      initialBalance: INITIAL_BALANCE_SOL,
+      totalPnlSol: closedPnl,
+      totalPnlPercent: (closedPnl / INITIAL_BALANCE_SOL) * 100,
+      openPositionsCount: this.openPositions.size,
+      openPositionsValueSol: openValue,
+    };
+  }
+
+  // ── Mutation methods ──────────────────────────────────────────────────────────
+
+  deleteClosedTrade(positionId: string): void {
+    const idx = this.closedTrades.findIndex((t) => t.positionId === positionId);
+    if (idx === -1) throw new Error(`Closed trade not found: ${positionId}`);
+
+    const trade = this.closedTrades[idx];
+    this.closedTrades.splice(idx, 1);
+
+    const closedPnl = this.closedTrades.reduce((s, t) => s + (t.pnlSol ?? 0), 0);
+    this.solBalance = INITIAL_BALANCE_SOL - this.totalOpenSol() + closedPnl;
+
+    void this.deletePositionFromDb(positionId);
+    this.broadcastPositions();
+
+    logger.info({ positionId, symbol: trade.symbol, pnlSol: trade.pnlSol, newBalance: this.solBalance.toFixed(4) }, "Closed trade deleted — balance recomputed");
+  }
+
+  editClosedTrade(
+    positionId: string,
+    patch: {
+      pnlSol?: number;
+      pnlPercent?: number;
+      exitPrice?: number;
+      closeReason?: "manual" | "stop_loss" | "take_profit";
+      note?: string;
+    },
+  ): Position {
+    const idx = this.closedTrades.findIndex((t) => t.positionId === positionId);
+    if (idx === -1) throw new Error(`Closed trade not found: ${positionId}`);
+
+    const old = this.closedTrades[idx];
+    const updated: Position = {
+      ...old,
+      ...(patch.exitPrice !== undefined  ? { exitPrice: patch.exitPrice }   : {}),
+      ...(patch.pnlSol !== undefined     ? { pnlSol: patch.pnlSol }         : {}),
+      ...(patch.pnlPercent !== undefined ? { pnlPercent: patch.pnlPercent } : {}),
+      ...(patch.closeReason !== undefined ? { closeReason: patch.closeReason } : {}),
+      ...(patch.note !== undefined ? { note: patch.note } : {}),
+    };
+
+    this.closedTrades[idx] = updated;
+
+    const closedPnl = this.closedTrades.reduce((s, t) => s + (t.pnlSol ?? 0), 0);
+    this.solBalance = INITIAL_BALANCE_SOL - this.totalOpenSol() + closedPnl;
+
+    void this.upsertPosition(updated);
+    this.broadcastPositions();
+
+    if ((updated.pnlSol ?? 0) < 0) {
+      lossJournalService.reRecord(updated);
+    }
+
+    logger.info(
+      { positionId, symbol: old.symbol, oldPnl: old.pnlSol, newPnl: updated.pnlSol, newBalance: this.solBalance.toFixed(4) },
+      "Closed trade edited — balance recomputed",
+    );
+
+    return updated;
+  }
+
+  reset(): void {
+    const hadPositions = this.openPositions.size;
+    const oldBalance = this.solBalance;
+    const allIds = [
+      ...Array.from(this.openPositions.keys()),
+      ...this.closedTrades.map(t => t.positionId),
+    ];
+
+    this.openPositions.clear();
+    this.openContracts.clear();
+    this.closedTrades = [];
+    this.solBalance = INITIAL_BALANCE_SOL;
+
+    // Delete all positions from DB
+    void (async () => {
+      for (const id of allIds) {
+        await this.deletePositionFromDb(id);
+      }
+    })();
+
+    logger.info("Paper trading account reset to 100 SOL");
+    this.broadcastPositions();
+    void sendTelegram(
+      `🔄 <b>ACCOUNT RESET</b>\n` +
+      `──────────────────────\n` +
+      `🗑️ Cleared: <b>${hadPositions} open position${hadPositions !== 1 ? "s" : ""}</b> & all trade history\n` +
+      `💰 Old Balance: <b>${oldBalance.toFixed(4)} SOL</b>\n` +
+      `✅ New Balance: <b>${INITIAL_BALANCE_SOL.toFixed(4)} SOL</b>\n` +
+      `🕐 ${toIST(new Date())}`,
+    );
   }
 }
 
