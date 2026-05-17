@@ -175,10 +175,26 @@ function DecisionRow({ d }: { d: CycleDecision }) {
   );
 }
 
+type AiTestResult = {
+  provider: string;
+  verdict: string;
+  confidence: number;
+  durationMs: number;
+  reasoning: string;
+  risks: string[];
+  strengths: string[];
+  secondaryVerdict?: string;
+  secondaryProvider?: string;
+  stage?: string;
+  potential?: string;
+  concern?: string;
+  llmScore?: number;
+};
+
 type AiTestState =
   | { status: "idle" }
   | { status: "loading" }
-  | { status: "ok"; provider: string; verdict: string; confidence: number; durationMs: number; reasoning: string; risks: string[]; strengths: string[] }
+  | ({ status: "ok" } & AiTestResult)
   | { status: "error"; error: string };
 
 function AiDebugPanel() {
@@ -188,7 +204,7 @@ function AiDebugPanel() {
     setResult({ status: "loading" });
     try {
       const res = await fetch("/api/debug/ai-test", { signal: AbortSignal.timeout(35_000) });
-      const data = await res.json() as { ok: boolean; result?: { provider: string; verdict: string; confidence: number; durationMs: number; reasoning: string; risks: string[]; strengths: string[] }; error?: string };
+      const data = await res.json() as { ok: boolean; result?: AiTestResult; error?: string };
       if (data.ok && data.result) {
         setResult({ status: "ok", ...data.result });
       } else {
@@ -199,8 +215,8 @@ function AiDebugPanel() {
     }
   };
 
-  const isGemini = result.status === "ok" && result.provider === "gemini";
   const isHeuristic = result.status === "ok" && result.provider === "heuristic";
+  const isGroq      = result.status === "ok" && result.provider === "groq";
 
   return (
     <div className="bg-[#0d0d18] border border-white/8 rounded-xl overflow-hidden">
@@ -208,7 +224,7 @@ function AiDebugPanel() {
         <div className="flex items-center gap-2">
           <FlaskConical className="w-4 h-4 text-violet-400" />
           <p className="text-sm font-bold text-white/70">Live AI Test</p>
-          <span className="text-[9px] text-white/30 bg-white/5 px-1.5 py-0.5 rounded">gemini-2.5-flash</span>
+          <span className="text-[9px] text-white/30 bg-white/5 px-1.5 py-0.5 rounded">Groq Dual Model</span>
         </div>
         <button
           onClick={runTest}
@@ -217,62 +233,109 @@ function AiDebugPanel() {
         >
           {result.status === "loading"
             ? <><Loader2 className="w-3 h-3 animate-spin" /> Testing...</>
-            : <><FlaskConical className="w-3 h-3" /> Test Gemini</>}
+            : <><FlaskConical className="w-3 h-3" /> Test AI</>}
         </button>
       </div>
 
       <div className="px-4 py-3">
         {result.status === "idle" && (
-          <p className="text-white/30 text-xs text-center py-2">Press "Test Gemini" to run a live AI analysis. Takes ~10 seconds.</p>
+          <p className="text-white/30 text-xs text-center py-2">Press "Test AI" to run a live dual-model analysis.</p>
         )}
 
         {result.status === "loading" && (
           <div className="flex items-center gap-2 py-3 justify-center">
             <Loader2 className="w-4 h-4 text-violet-400 animate-spin" />
-            <p className="text-violet-300 text-xs">Calling Gemini 2.5 Flash… (~10 seconds)</p>
+            <p className="text-violet-300 text-xs">Running Llama + Mixtral in parallel…</p>
           </div>
         )}
 
         {result.status === "ok" && (
-          <div className="space-y-2">
+          <div className="space-y-2.5">
+            {/* Verdict + provider row */}
             <div className="flex items-center gap-2 flex-wrap">
-              <span className={`inline-flex items-center gap-1.5 px-2 py-1 rounded-lg text-xs font-black ${
+              <span className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg text-xs font-black ${
                 result.verdict === "TRADE" ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
                 : result.verdict === "RISKY" ? "bg-amber-500/20 text-amber-300 border border-amber-500/30"
                 : "bg-red-500/20 text-red-300 border border-red-500/30"
               }`}>
                 {result.verdict}
               </span>
-              <span className={`text-xs font-bold px-2 py-1 rounded-lg border ${
-                isGemini ? "bg-blue-500/15 text-blue-300 border-blue-500/25"
+              <span className={`text-[10px] font-bold px-2 py-1 rounded-lg border ${
+                isGroq      ? "bg-violet-500/15 text-violet-300 border-violet-500/25"
                 : isHeuristic ? "bg-red-500/15 text-red-300 border-red-500/25"
                 : "bg-white/10 text-white/50 border-white/10"
               }`}>
-                {isGemini ? "✓ Gemini" : isHeuristic ? "✗ Heuristic (AI failed)" : result.provider}
+                {isGroq ? "✓ Llama + Mixtral" : isHeuristic ? "✗ Heuristic fallback" : result.provider}
               </span>
-              <span className="text-white/40 text-[10px]">{result.confidence}% confidence</span>
-              <span className="text-white/30 text-[10px]">{result.durationMs.toLocaleString()}ms</span>
+              <span className="text-white/35 text-[10px]">{result.confidence}% confidence</span>
+              <span className="text-white/25 text-[10px]">{result.durationMs.toLocaleString()}ms</span>
             </div>
-            {result.reasoning && (
-              <p className="text-white/60 text-[11px] leading-snug border-l-2 border-violet-500/30 pl-2">{result.reasoning}</p>
+
+            {/* Model agreement row */}
+            {result.secondaryVerdict && result.secondaryVerdict !== "N/A" && (
+              <div className="flex items-center gap-2 text-[10px]">
+                <span className="text-white/30">Llama:</span>
+                <span className={result.verdict === "SKIP" ? "text-red-400" : "text-emerald-400"}>
+                  {result.verdict === "TRADE" || result.verdict === "RISKY" ? "PASS" : "FAIL"}
+                </span>
+                <span className="text-white/20">·</span>
+                <span className="text-white/30">Mixtral:</span>
+                <span className={result.secondaryVerdict === "PASS" ? "text-emerald-400" : "text-red-400"}>
+                  {result.secondaryVerdict}
+                </span>
+                {result.secondaryVerdict !== (result.verdict === "SKIP" ? "FAIL" : "PASS") && (
+                  <span className="text-amber-400/70 text-[9px]">split decision</span>
+                )}
+              </div>
             )}
-            <div className="grid grid-cols-2 gap-2">
-              {result.strengths?.length > 0 && (
-                <div>
-                  <p className="text-[9px] font-bold text-emerald-400/60 uppercase tracking-wider mb-1">Strengths</p>
-                  {result.strengths.map((s, i) => <p key={i} className="text-[10px] text-emerald-300/60 leading-snug">↑ {s}</p>)}
-                </div>
-              )}
-              {result.risks?.length > 0 && (
-                <div>
-                  <p className="text-[9px] font-bold text-red-400/60 uppercase tracking-wider mb-1">Risks</p>
-                  {result.risks.map((r, i) => <p key={i} className="text-[10px] text-red-300/60 leading-snug">↓ {r}</p>)}
-                </div>
-              )}
-            </div>
+
+            {/* Stage / Potential chips */}
+            {(result.stage || result.potential) && (
+              <div className="flex items-center gap-2 flex-wrap">
+                {result.stage && result.stage !== "Unknown" && (
+                  <span className="text-[9px] px-2 py-0.5 rounded bg-white/5 text-white/40">
+                    Stage: <span className="text-white/60 font-semibold">{result.stage}</span>
+                  </span>
+                )}
+                {result.potential && result.potential !== "Unknown" && (
+                  <span className={`text-[9px] px-2 py-0.5 rounded font-semibold ${
+                    result.potential.toLowerCase().includes("dump")
+                      ? "bg-red-500/10 text-red-400"
+                      : "bg-emerald-500/10 text-emerald-400"
+                  }`}>
+                    {result.potential}
+                  </span>
+                )}
+              </div>
+            )}
+
+            {/* Trader verdict line */}
+            {result.reasoning && (
+              <p className="text-white/60 text-[11px] leading-snug border-l-2 border-violet-500/30 pl-2 italic">
+                "{result.reasoning}"
+              </p>
+            )}
+
+            {/* Concern */}
+            {result.concern && result.concern !== "None" && (
+              <div className="flex items-start gap-1.5 bg-amber-500/8 border border-amber-500/15 rounded-lg px-2.5 py-1.5">
+                <span className="text-amber-400 text-[10px] mt-px">⚠</span>
+                <p className="text-amber-300/70 text-[10px] leading-snug">{result.concern}</p>
+              </div>
+            )}
+
+            {/* Risks */}
+            {result.risks?.length > 0 && (
+              <div className="space-y-0.5">
+                {result.risks.map((r, i) => (
+                  <p key={i} className="text-[10px] text-red-300/60 leading-snug">↓ {r}</p>
+                ))}
+              </div>
+            )}
+
             {isHeuristic && (
               <p className="text-red-400/80 text-[10px] bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2">
-                Gemini failed — check server logs for "AI analysis: Gemini failed" to see the exact error.
+                Both AI models failed — running heuristic fallback. Check GROQ_API_KEY in server config.
               </p>
             )}
           </div>

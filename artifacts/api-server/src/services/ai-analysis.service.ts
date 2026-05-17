@@ -1,17 +1,6 @@
 import axios from "axios";
-import { GoogleGenAI } from "@google/genai";
 import { logger } from "../lib/logger.js";
 import type { DexScreenerPair } from "../types/index.js";
-
-// ─── Gemini client ─────────────────────────────────────────────────────────────
-function getGeminiClient(): GoogleGenAI {
-  const baseUrl = process.env["AI_INTEGRATIONS_GEMINI_BASE_URL"];
-  const apiKey  = process.env["AI_INTEGRATIONS_GEMINI_API_KEY"] ?? process.env["GEMINI_API_KEY"] ?? "no-key";
-  if (baseUrl) {
-    return new GoogleGenAI({ apiKey, httpOptions: { apiVersion: "", baseUrl } });
-  }
-  return new GoogleGenAI({ apiKey });
-}
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -23,13 +12,16 @@ export interface LlmAnalysis {
   reasoning: string;
   risks: string[];
   strengths: string[];
-  provider: "gemini" | "groq" | "heuristic" | "none";
+  provider: "groq" | "heuristic" | "none";
   durationMs: number;
   recommendedSizeSol?: number;
   llmScore?: number;
   llmRiskLevel?: string;
   secondaryVerdict?: string;
   secondaryProvider?: string;
+  stage?: string;
+  potential?: string;
+  concern?: string;
 }
 
 export interface TokenAnalysisInput {
@@ -59,112 +51,104 @@ export interface TokenAnalysisInput {
 }
 
 // ─── Prompt builder ───────────────────────────────────────────────────────────
-// Pre-computes all 10 filter results from raw data and embeds ✓/✗ in the prompt.
-// The AI only needs to count the marks and apply the scoring rule — no subjective
-// judgment on data-driven checks. This makes verdicts fast, consistent, and
-// resistant to model hallucination about numbers.
 
 function buildPrompt(t: TokenAnalysisInput): string {
   const ageLabel = t.pairAgeMinutes < 60
     ? `${Math.round(t.pairAgeMinutes)}m`
     : `${(t.pairAgeMinutes / 60).toFixed(1)}h`;
 
-  const total1h        = t.buys1h + t.sells1h;
-  const buyRatio1h     = total1h > 0 ? t.buys1h / total1h : 0;
-  const liqMcapRatio   = t.marketCapUsd > 0 ? t.liquidityUsd / t.marketCapUsd : 0;
-  const fdvMcapRatio   = t.marketCapUsd > 0 && t.fdv > 0 ? t.fdv / t.marketCapUsd : 99;
-  const vol1hAnnualized = t.volume1hUsd * 24;
-  const tick = (v: boolean) => v ? "✓" : "✗";
+  const total1h    = t.buys1h + t.sells1h;
+  const buyRatio1h = total1h > 0 ? `${(t.buys1h / total1h * 100).toFixed(0)}%` : "N/A";
 
-  const f1  = vol1hAnnualized >= t.volume24hUsd * 2;
-  const f2  = liqMcapRatio >= 0.12;
-  const f3  = fdvMcapRatio <= 3;
-  const f4  = buyRatio1h >= 0.62;
-  const f5  = t.priceChange1h >= 18 && t.priceChange1h <= 90;
-  const f6  = t.pairAgeMinutes >= 15 && t.pairAgeMinutes <= 1440;
-  const f7  = t.volume24hUsd >= 35_000;
-  const f8  = t.volume1hUsd >= 15_000;
-  const f9  = t.marketCapUsd >= 50_000 && t.marketCapUsd <= 5_000_000;
-  const f10 = t.txns24h >= 250;
+  const fmt = (usd: number) =>
+    usd >= 1_000_000 ? `$${(usd / 1_000_000).toFixed(2)}M` : `$${Math.round(usd / 1_000)}K`;
 
-  return `You are a Solana memecoin trade validator. Evaluate this token and output ONLY the result block.
+  return `You are an experienced Solana memecoin trader with 3 years of experience. This token has already passed all basic filters. Your job is NOT to recheck numbers — your job is to think like a trader and judge if this has real moonshot potential right now.
 
-TOKEN: ${t.name} ($${t.symbol}) | Age: ${ageLabel} | MCap: $${t.marketCapUsd.toLocaleString()} | AI Score: ${t.aiScore}/100
-LIQUIDITY: $${t.liquidityUsd.toLocaleString()} | Liq/MCap: ${(liqMcapRatio * 100).toFixed(1)}%
-VOLUME: 1h $${t.volume1hUsd.toLocaleString()} (×24=$${Math.round(vol1hAnnualized).toLocaleString()}) | 24h $${t.volume24hUsd.toLocaleString()}
-MOMENTUM: 1h ${t.priceChange1h >= 0 ? "+" : ""}${t.priceChange1h.toFixed(1)}% | Buy ratio 1h: ${(buyRatio1h * 100).toFixed(0)}% | Txns 24h: ${t.txns24h}
-STRUCTURE: FDV/MCap ${fdvMcapRatio.toFixed(2)}
+Token: ${t.name} ($${t.symbol})
+MCap: ${fmt(t.marketCapUsd)}
+Liquidity: ${fmt(t.liquidityUsd)}
+Vol 1h: ${fmt(t.volume1hUsd)}
+Vol 24h: ${fmt(t.volume24hUsd)}
+Buy Ratio 1h: ${buyRatio1h}
+1h Price Change: ${t.priceChange1h >= 0 ? "+" : ""}${t.priceChange1h.toFixed(1)}%
+6h Price Change: ${t.priceChange6h >= 0 ? "+" : ""}${t.priceChange6h.toFixed(1)}%
+Pair Age: ${ageLabel}
+Txns 24h: ${t.txns24h}
+Top 10 Holders: N/A
+LP Status: Unverified
 
-10 FILTERS — count the ✓ marks:
-1. Vol 1h ×24 ≥ 2× Vol 24h? (momentum accelerating)        ${tick(f1)}
-2. Liq/MCap ≥ 0.12? (exit depth sufficient)                ${tick(f2)}
-3. FDV/MCap ≤ 3? (no supply overhang)                      ${tick(f3)}
-4. Buy ratio 1h ≥ 62%? (buyer majority)                    ${tick(f4)}
-5. 1h change between 18% and 90%? (real pump, not stale)   ${tick(f5)}
-6. Pair age 15m–24h? (survived rug window, not too old)    ${tick(f6)}
-7. Vol 24h ≥ $35K? (proven trading activity)               ${tick(f7)}
-8. Vol 1h ≥ $15K? (active right now)                       ${tick(f8)}
-9. MCap $50K–$5M? (viable range)                           ${tick(f9)}
-10. Txns 24h ≥ 250? (organic, not bot-only)                ${tick(f10)}
+Think about these questions in your head:
 
-Scoring (count ONLY the ✓ marks shown above):
-10/10 = PASS — Low Risk (0.5 SOL)
-8–9/10 = PASS — Medium Risk (0.5 SOL)
-7/10 = PASS — High Risk (0.25 SOL)
-Below 7 = FAIL
+1. MOMENTUM QUALITY
+Is the volume accelerating or just a one-time spike?
+Is buy ratio genuinely dominant or barely above 50%?
+Is the 1h move organic or does it look like a pump?
 
-Output EXACTLY this format, nothing else:
+2. ENTRY TIMING
+Is this early stage (still room to grow) or has it already peaked?
+MCap vs liquidity — is there realistic 3x–10x left?
+
+3. RISK PATTERN
+Does the holder % suggest one whale controlling price?
+Does the age vs volume pattern look organic or manipulated?
+
+4. CONVICTION
+If you were trading your own money right now, would you enter this trade with confidence?
+
+Based on your trader instinct and the above thinking, return EXACTLY this format, nothing else:
+
 RESULT: PASS or FAIL
-SCORE: X/10
-RISK: Low or Medium or High
-SIZE: 0.5 SOL or 0.25 SOL
-REASON: one line`;
+CONFIDENCE: 1-10
+STAGE: Early or Mid or Late
+POTENTIAL: 2x or 5x or 10x+ or Dump incoming
+CONCERN: one line if any red flag
+VERDICT: one line trader opinion`;
 }
 
-// ─── PASS/FAIL response parser ─────────────────────────────────────────────────
+// ─── Response parser ──────────────────────────────────────────────────────────
 
-interface ParsedPassFail {
+interface ParsedTraderVerdict {
   passFailResult: "PASS" | "FAIL";
-  llmScore: number;
-  llmRiskLevel: string;
-  recommendedSizeSol: number;
-  reasoning: string;
+  confidence: number;
+  stage: string;
+  potential: string;
+  concern: string;
+  verdictLine: string;
 }
 
-function parsePassFailVerdict(raw: string, provider: string): ParsedPassFail | null {
+function parseTraderVerdict(raw: string, label: string): ParsedTraderVerdict | null {
   try {
     const lines = raw.trim().split("\n").map(l => l.trim()).filter(Boolean);
 
-    const resultLine = lines.find(l => /^RESULT:/i.test(l));
-    const scoreLine  = lines.find(l => /^SCORE:/i.test(l));
-    const riskLine   = lines.find(l => /^RISK:/i.test(l));
-    const sizeLine   = lines.find(l => /^SIZE:/i.test(l));
-    const reasonLine = lines.find(l => /^REASON:/i.test(l));
+    const get = (key: string): string => {
+      const line = lines.find(l => new RegExp(`^${key}\\s*:`, "i").test(l));
+      return line ? line.replace(new RegExp(`^${key}\\s*:\\s*`, "i"), "").trim() : "";
+    };
 
-    if (!resultLine) {
-      logger.warn({ provider, rawPreview: raw.slice(0, 200) }, "AI: no RESULT line found in response");
+    const resultRaw = get("RESULT");
+    if (!resultRaw) {
+      logger.warn({ label, rawPreview: raw.slice(0, 200) }, "AI: no RESULT line found in response");
       return null;
     }
 
-    const passFailResult: "PASS" | "FAIL" = resultLine.toUpperCase().includes("PASS") ? "PASS" : "FAIL";
+    const passFailResult: "PASS" | "FAIL" = resultRaw.toUpperCase().includes("PASS") ? "PASS" : "FAIL";
 
-    const scoreMatch  = scoreLine?.match(/(\d+)/);
-    const llmScore    = scoreMatch ? Math.min(10, Math.max(0, parseInt(scoreMatch[1], 10))) : 0;
+    const confMatch = get("CONFIDENCE").match(/(\d+)/);
+    const confidence = confMatch ? Math.min(10, Math.max(1, parseInt(confMatch[1], 10))) : 5;
 
-    const riskRaw     = riskLine?.replace(/^RISK:/i, "").trim() ?? "High";
-    const llmRiskLevel = ["Low", "Medium", "High"].find(
-      r => riskRaw.toLowerCase().includes(r.toLowerCase()),
-    ) ?? "High";
+    const stageRaw = get("STAGE");
+    const stage = ["Early", "Mid", "Late"].find(s =>
+      stageRaw.toLowerCase().includes(s.toLowerCase()),
+    ) ?? (stageRaw || "Unknown");
 
-    const recommendedSizeSol = sizeLine?.includes("0.25") ? 0.25 : 0.5;
+    const potential = get("POTENTIAL") || "Unknown";
+    const concern   = get("CONCERN")   || "None";
+    const verdictLine = get("VERDICT") || resultRaw;
 
-    const reasoning = reasonLine
-      ? reasonLine.replace(/^REASON:/i, "").trim().slice(0, 200)
-      : "No reason provided.";
-
-    return { passFailResult, llmScore, llmRiskLevel, recommendedSizeSol, reasoning };
+    return { passFailResult, confidence, stage, potential, concern, verdictLine };
   } catch (e) {
-    logger.warn({ provider, rawPreview: raw.slice(0, 300), err: (e as Error).message }, "AI: parsePassFailVerdict failed");
+    logger.warn({ label, rawPreview: raw.slice(0, 300), err: (e as Error).message }, "AI: parseTraderVerdict failed");
     return null;
   }
 }
@@ -197,34 +181,9 @@ async function withRetry<T>(fn: () => Promise<T>, retries: number, label: string
   throw lastErr;
 }
 
-// ─── Gemini ───────────────────────────────────────────────────────────────────
+// ─── Groq caller (shared, model-agnostic) ─────────────────────────────────────
 
-async function callGemini(prompt: string): Promise<string> {
-  const hasIntegration = Boolean(process.env["AI_INTEGRATIONS_GEMINI_BASE_URL"]);
-  const hasDirectKey   = Boolean(process.env["GEMINI_API_KEY"]);
-  if (!hasIntegration && !hasDirectKey) throw new Error("No Gemini credentials configured");
-
-  return withRetry(async () => {
-    const ai = getGeminiClient();
-    const geminiCall = ai.models.generateContent({
-      model: "gemini-2.5-flash",
-      contents: [{ role: "user", parts: [{ text: prompt }] }],
-      config: {
-        temperature: 0.1,
-        maxOutputTokens: 2048,
-        thinkingConfig: { thinkingBudget: 0 },
-      },
-    });
-    const response = await withTimeout(geminiCall);
-    const text = response.text ?? "";
-    if (!text) throw new Error("Gemini returned empty response");
-    return text;
-  }, 2, "gemini");
-}
-
-// ─── Groq ─────────────────────────────────────────────────────────────────────
-
-async function callGroq(prompt: string): Promise<string> {
+async function callGroqModel(prompt: string, model: string, label: string): Promise<string> {
   const apiKey = process.env["GROQ_API_KEY"];
   if (!apiKey) throw new Error("GROQ_API_KEY not set");
 
@@ -233,16 +192,16 @@ async function callGroq(prompt: string): Promise<string> {
       axios.post(
         "https://api.groq.com/openai/v1/chat/completions",
         {
-          model: "llama-3.3-70b-versatile",
+          model,
           messages: [
             {
               role: "system",
-              content: "You are a Solana memecoin trade validator. Output ONLY the result block in the exact format specified. No extra text.",
+              content: "You are an experienced Solana memecoin trader. Output ONLY the result block in the exact format specified. No extra text, no markdown, no explanation.",
             },
             { role: "user", content: prompt },
           ],
-          temperature: 0.1,
-          max_tokens: 200,
+          temperature: 0.3,
+          max_tokens: 300,
         },
         {
           timeout: AI_TIMEOUT_MS,
@@ -254,12 +213,12 @@ async function callGroq(prompt: string): Promise<string> {
       ),
     );
     const text: string = res.data?.choices?.[0]?.message?.content ?? "";
-    if (!text) throw new Error("Groq returned empty response");
+    if (!text) throw new Error(`${label} returned empty response`);
     return text;
-  }, 2, "groq");
+  }, 2, label);
 }
 
-// ─── Heuristic fallback ──────────────────────────────────────────────────────
+// ─── Heuristic fallback ───────────────────────────────────────────────────────
 // Runs when ALL LLM providers fail. Never blocks a trade just because AI is down.
 
 function heuristicFallback(input: TokenAnalysisInput): Omit<LlmAnalysis, "provider" | "durationMs"> {
@@ -277,7 +236,7 @@ function heuristicFallback(input: TokenAnalysisInput): Omit<LlmAnalysis, "provid
   if (input.pairAgeMinutes < 120) { score += 20; strengths.push(`Fresh ${Math.round(input.pairAgeMinutes)}m`); }
   else if (input.pairAgeMinutes > 1440) risks.push("Pair >24h old");
 
-  const total1h = input.buys1h + input.sells1h;
+  const total1h  = input.buys1h + input.sells1h;
   const buyRatio = total1h > 0 ? input.buys1h / total1h : 0;
   if (buyRatio >= 0.62) { score += 15; strengths.push(`Buy pressure ${(buyRatio * 100).toFixed(0)}%`); }
   else risks.push(`Weak buy ratio ${(buyRatio * 100).toFixed(0)}%`);
@@ -300,37 +259,27 @@ function heuristicFallback(input: TokenAnalysisInput): Omit<LlmAnalysis, "provid
   };
 }
 
-// ─── Startup env check ────────────────────────────────────────────────────────
+// ─── Startup log ──────────────────────────────────────────────────────────────
+
 logger.info(
-  {
-    geminiIntegration: Boolean(process.env["AI_INTEGRATIONS_GEMINI_BASE_URL"]),
-    geminiDirectKey:   Boolean(process.env["GEMINI_API_KEY"]),
-    groqKey:           Boolean(process.env["GROQ_API_KEY"]),
-    geminiBaseUrl:     process.env["AI_INTEGRATIONS_GEMINI_BASE_URL"]?.slice(0, 50) ?? "NOT SET",
-  },
-  "AI service loaded — provider env check",
+  { groqKey: Boolean(process.env["GROQ_API_KEY"]) },
+  "AI service loaded — Groq dual-model (llama-3.3-70b-versatile + mixtral-8x7b-32768)",
 );
 
 // ─── Main export ──────────────────────────────────────────────────────────────
-// Dual-AI validation: Gemini + Groq called in PARALLEL.
+// Dual-Groq validation: llama-3.3-70b-versatile + mixtral-8x7b-32768 in PARALLEL.
 //
 // Combined verdict:
-//   Gemini PASS + Groq PASS (or N/A)  →  TRADE at AI-recommended size
-//   Gemini PASS + Groq FAIL            →  RISKY at 0.25 SOL (reduced conviction)
-//   Gemini FAIL (regardless of Groq)   →  SKIP
-//   Gemini unavailable                 →  Groq alone or heuristic fallback
+//   Both PASS          → TRADE at 0.5 SOL
+//   One PASS one FAIL  → RISKY at 0.25 SOL (split decision)
+//   Both FAIL          → SKIP
+//   Both unavailable   → heuristic fallback
 
 export async function analyseTokenWithAi(input: TokenAnalysisInput): Promise<LlmAnalysis> {
-  const start = Date.now();
+  const start     = Date.now();
+  const hasGroqKey = Boolean(process.env["GROQ_API_KEY"]);
 
-  const hasGeminiIntegration = Boolean(process.env["AI_INTEGRATIONS_GEMINI_BASE_URL"]);
-  const hasGeminiDirectKey   = Boolean(process.env["GEMINI_API_KEY"]);
-  const hasGroqKey           = Boolean(process.env["GROQ_API_KEY"]);
-
-  logger.info(
-    { symbol: input.symbol, hasGeminiIntegration, hasGeminiDirectKey, hasGroqKey },
-    "AI analysis: starting evaluation",
-  );
+  logger.info({ symbol: input.symbol, hasGroqKey }, "AI analysis: starting evaluation");
 
   let prompt: string;
   try {
@@ -341,94 +290,76 @@ export async function analyseTokenWithAi(input: TokenAnalysisInput): Promise<Llm
     return { ...h, provider: "heuristic", durationMs: Date.now() - start };
   }
 
-  // ── Fire both AI calls in parallel ────────────────────────────────────────
-  const [geminiSettled, groqSettled] = await Promise.allSettled([
-    (hasGeminiIntegration || hasGeminiDirectKey)
-      ? callGemini(prompt)
-      : Promise.reject(new Error("Gemini not configured")),
-    hasGroqKey
-      ? callGroq(prompt)
-      : Promise.reject(new Error("Groq not configured")),
-  ]);
-
-  const geminiParsed = geminiSettled.status === "fulfilled"
-    ? parsePassFailVerdict(geminiSettled.value, "gemini")
-    : null;
-
-  const groqParsed = groqSettled.status === "fulfilled"
-    ? parsePassFailVerdict(groqSettled.value, "groq")
-    : null;
-
-  // groqAvailable = key is set (even if request failed — key present means it's a validator)
-  const groqAvailable = hasGroqKey;
-
-  logger.info(
-    {
-      symbol: input.symbol,
-      gemini: geminiParsed
-        ? `${geminiParsed.passFailResult} ${geminiParsed.llmScore}/10`
-        : geminiSettled.status === "rejected"
-          ? `ERR: ${(geminiSettled.reason as Error).message?.slice(0, 60)}`
-          : "parse_fail",
-      groq: groqParsed
-        ? `${groqParsed.passFailResult} ${groqParsed.llmScore}/10`
-        : groqAvailable ? "fail/parse_fail" : "N/A",
-      durationMs: Date.now() - start,
-    },
-    "AI analysis: dual verdict",
-  );
-
-  // ── No Gemini result → try Groq alone, then heuristic ─────────────────────
-  if (!geminiParsed) {
-    if (groqParsed) {
-      const verdict: LlmVerdict = groqParsed.passFailResult === "PASS" ? "TRADE" : "SKIP";
-      logger.info({ symbol: input.symbol, verdict, groqScore: groqParsed.llmScore }, "AI analysis: Groq-only verdict (Gemini failed)");
-      return {
-        verdict,
-        confidence: groqParsed.llmScore * 10,
-        reasoning: groqParsed.reasoning,
-        risks: [], strengths: [],
-        provider: "groq",
-        durationMs: Date.now() - start,
-        recommendedSizeSol: groqParsed.recommendedSizeSol,
-        llmScore: groqParsed.llmScore,
-        llmRiskLevel: groqParsed.llmRiskLevel,
-        secondaryVerdict: "N/A",
-        secondaryProvider: "N/A",
-      };
-    }
+  if (!hasGroqKey) {
+    logger.warn({ symbol: input.symbol }, "AI analysis: Groq not configured — heuristic fallback");
     const h = heuristicFallback(input);
-    logger.warn({ symbol: input.symbol }, "AI analysis: both Gemini and Groq failed — heuristic fallback");
     return { ...h, provider: "heuristic", durationMs: Date.now() - start };
   }
 
-  // ── Combined verdict logic ─────────────────────────────────────────────────
-  const geminiPass = geminiParsed.passFailResult === "PASS";
-  const groqPass   = groqParsed?.passFailResult === "PASS";
+  // ── Fire both Groq models in parallel ─────────────────────────────────────
+  const [llamaSettled, mixtralSettled] = await Promise.allSettled([
+    callGroqModel(prompt, "llama-3.3-70b-versatile", "llama"),
+    callGroqModel(prompt, "mixtral-8x7b-32768",       "mixtral"),
+  ]);
+
+  const llamaParsed   = llamaSettled.status   === "fulfilled" ? parseTraderVerdict(llamaSettled.value,   "llama")   : null;
+  const mixtralParsed = mixtralSettled.status === "fulfilled" ? parseTraderVerdict(mixtralSettled.value, "mixtral") : null;
+
+  const durationMs = Date.now() - start;
+
+  const llamaLog   = llamaParsed
+    ? `${llamaParsed.passFailResult} ${llamaParsed.confidence}/10`
+    : `ERR: ${((llamaSettled as PromiseRejectedResult).reason as Error)?.message?.slice(0, 60) ?? "parse_fail"}`;
+  const mixtralLog = mixtralParsed
+    ? `${mixtralParsed.passFailResult} ${mixtralParsed.confidence}/10`
+    : `ERR: ${((mixtralSettled as PromiseRejectedResult).reason as Error)?.message?.slice(0, 60) ?? "parse_fail"}`;
+
+  logger.info({ symbol: input.symbol, llama: llamaLog, mixtral: mixtralLog, durationMs }, "AI analysis: dual verdict");
+
+  // ── Both failed → heuristic ────────────────────────────────────────────────
+  if (!llamaParsed && !mixtralParsed) {
+    logger.warn({ symbol: input.symbol }, "AI analysis: both Groq models failed — heuristic fallback");
+    const h = heuristicFallback(input);
+    return { ...h, provider: "heuristic", durationMs };
+  }
+
+  // ── Pick primary (llama preferred), secondary whichever else responded ─────
+  const primary       = llamaParsed ?? mixtralParsed!;
+  const secondary     = llamaParsed && mixtralParsed ? mixtralParsed : null;
+  const primaryLabel  = llamaParsed ? "llama-3.3-70b" : "mixtral-8x7b";
+  const secondaryLabel = secondary ? "mixtral-8x7b" : "N/A";
+
+  const primaryPass   = primary.passFailResult   === "PASS";
+  const secondaryPass = secondary?.passFailResult === "PASS";
 
   let verdict: LlmVerdict;
   let recommendedSizeSol: number;
+  let llmRiskLevel: string;
 
-  if (geminiPass && (!groqAvailable || groqPass)) {
-    verdict = "TRADE";
-    recommendedSizeSol = geminiParsed.recommendedSizeSol ?? 0.5;
-  } else if (geminiPass && groqAvailable && groqParsed && !groqPass) {
-    // Gemini PASS but Groq FAIL → lower conviction, half size
-    verdict = "RISKY";
+  if (!secondary) {
+    verdict            = primaryPass ? "TRADE" : "SKIP";
+    recommendedSizeSol = primaryPass ? 0.5 : 0;
+    llmRiskLevel       = primary.confidence >= 8 ? "Low" : primary.confidence >= 6 ? "Medium" : "High";
+  } else if (primaryPass && secondaryPass) {
+    verdict            = "TRADE";
+    recommendedSizeSol = 0.5;
+    llmRiskLevel       = primary.confidence >= 8 ? "Low" : "Medium";
+  } else if (primaryPass !== secondaryPass) {
+    verdict            = "RISKY";
     recommendedSizeSol = 0.25;
+    llmRiskLevel       = "High";
   } else {
-    // Gemini FAIL → skip regardless
-    verdict = "SKIP";
+    verdict            = "SKIP";
     recommendedSizeSol = 0;
+    llmRiskLevel       = "High";
   }
 
-  const durationMs = Date.now() - start;
   logger.info(
     {
       symbol: input.symbol,
       verdict,
-      geminiScore: geminiParsed.llmScore,
-      groqScore: groqParsed?.llmScore ?? "N/A",
+      llama:   llamaParsed?.passFailResult   ?? "N/A",
+      mixtral: mixtralParsed?.passFailResult ?? "N/A",
       recommendedSizeSol,
       durationMs,
     },
@@ -437,17 +368,20 @@ export async function analyseTokenWithAi(input: TokenAnalysisInput): Promise<Llm
 
   return {
     verdict,
-    confidence: geminiParsed.llmScore * 10,
-    reasoning: geminiParsed.reasoning,
-    risks: [],
-    strengths: [],
-    provider: "gemini",
+    confidence: primary.confidence * 10,
+    reasoning:  primary.verdictLine,
+    risks:      primary.concern && primary.concern !== "None" ? [primary.concern] : [],
+    strengths:  [],
+    provider:   "groq",
     durationMs,
     recommendedSizeSol,
-    llmScore: geminiParsed.llmScore,
-    llmRiskLevel: geminiParsed.llmRiskLevel,
-    secondaryVerdict: groqAvailable && groqParsed ? groqParsed.passFailResult : "unavailable",
-    secondaryProvider: groqAvailable ? "groq" : "unavailable",
+    llmScore:         primary.confidence,
+    llmRiskLevel,
+    secondaryVerdict: secondary ? secondary.passFailResult : "N/A",
+    secondaryProvider: secondaryLabel,
+    stage:     primary.stage,
+    potential: primary.potential,
+    concern:   primary.concern,
   };
 }
 
@@ -476,15 +410,15 @@ export function buildAnalysisInput(
     contractAddress: contractAddress ?? pair.baseToken?.address ?? pair.pairAddress,
     pairAddress: pair.pairAddress,
     pairAgeMinutes,
-    priceUsd: parseFloat(pair.priceUsd) || 0,
-    marketCapUsd: pair.marketCap || pair.fdv || 0,
-    fdv: pair.fdv || 0,
-    liquidityUsd: pair.liquidity?.usd || 0,
-    volume1hUsd: pair.volume?.h1 || 0,
-    volume24hUsd: pair.volume?.h24 || 0,
-    priceChange5m: pair.priceChange?.m5 || 0,
-    priceChange1h: pair.priceChange?.h1 || 0,
-    priceChange6h: pair.priceChange?.h6 || 0,
+    priceUsd:      parseFloat(pair.priceUsd) || 0,
+    marketCapUsd:  pair.marketCap || pair.fdv || 0,
+    fdv:           pair.fdv || 0,
+    liquidityUsd:  pair.liquidity?.usd || 0,
+    volume1hUsd:   pair.volume?.h1 || 0,
+    volume24hUsd:  pair.volume?.h24 || 0,
+    priceChange5m:  pair.priceChange?.m5 || 0,
+    priceChange1h:  pair.priceChange?.h1 || 0,
+    priceChange6h:  pair.priceChange?.h6 || 0,
     priceChange24h: pair.priceChange?.h24 || 0,
     buys1h,
     sells1h,
