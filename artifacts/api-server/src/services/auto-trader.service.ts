@@ -100,30 +100,30 @@ const DEFAULT_CONFIG: AutoTraderConfig = {
   maxConcurrentTrades: 3,       // 3 slots — catch more pumps simultaneously
 
   // ── AI quality ────────────────────────────────────────────────────────────
-  minAiScore: 62,               // lowered from 78 — early-stage coins score lower before 1h pumps big
-  minConfidence: 55,            // lowered from 72
+  minAiScore: 62,               // early-stage coins score lower before 1h pumps big
+  minConfidence: 55,
 
   // ── Liquidity & volume ────────────────────────────────────────────────────
-  minLiquidityUsd:  8_000,      // $8K — pump.fun launches start thin
+  minLiquidityUsd:  15_000,     // $15K min — meaningful pool depth for safe exit
   minVolume24hUsd:  8_000,      // $8K 24h — early stage, 24h hasn't accumulated yet
-  minVolume1hUsd:   2_000,      // $2K last hour — only need some activity right now
+  minVolume1hUsd:   2_000,      // $2K last hour — need some activity right now
 
   // ── Momentum ─────────────────────────────────────────────────────────────
-  minBuyRatio1h:    0.55,       // 55% buys — mild majority still bullish
-  minPriceChange1h: 5,          // +5% 1h — catch coins BEFORE they go parabolic, not after
+  minBuyRatio1h:    0.64,       // 1.8:1 buy:sell ratio — strong buy pressure minimum
+  minPriceChange1h: 5,          // +5% 1h — catch coins BEFORE they go parabolic
   minTransactions24h: 40,       // 40 txns — very early stage still valid
 
   // ── Market cap sweet spot ────────────────────────────────────────────────
-  minMcapUsd: 15_000,           // $15K — small caps have most upside
-  maxMcapUsd:  2_000_000,       // $2M ceiling — under $2M still has 5-50x potential
+  minMcapUsd:  20_000,          // $20K min — must have real market
+  maxMcapUsd: 400_000,          // $400K ceiling — under $400K still has 10-50x potential
 
   // ── Pair age ──────────────────────────────────────────────────────────────
-  minPairAgeMinutes: 5,         // 5 min — survive initial few mins only, catch early
-  maxPairAgeHours:   6,         // 6h max — only trade FRESH tokens, not yesterday's news
+  minPairAgeMinutes: 5,         // 5 min — survive the initial few minutes
+  maxPairAgeHours:   6,         // 6h max — fresh tokens only
 
   // ── Rug guards ────────────────────────────────────────────────────────────
-  minLiquidityMcapRatio: 0.03,  // 3% liq/mcap — pump.fun pools are thin early
-  maxFdvMcapRatio:       8.0,   // FDV ≤ 8× mcap — pump.fun can have higher ratios
+  minLiquidityMcapRatio: 0.12,  // 12% liq/mcap — meaningful pool backing required
+  maxFdvMcapRatio:       8.0,   // FDV ≤ 8× mcap
   maxPriceDropH6Pct:   -20,     // not crashed >20% in last 6h
   maxPriceDropH24Pct:  -30,     // not crashed >30% in last 24h
 };
@@ -263,6 +263,32 @@ export function qualityFilter(pair: DexScreenerPair, cfg: AutoTraderConfig): Fil
     return fail(`6h dump ${pc6h.toFixed(1)}% — rug or dead momentum`);
   if (pc24h < cfg.maxPriceDropH24Pct)
     return fail(`24h dump ${pc24h.toFixed(1)}% — severe decline`);
+
+  // ── Layer 3b — Advanced moonshot quality gates ────────────────────────────
+  // These use derived ratios from existing DexScreener data to filter out
+  // fake volume, ghost pools, and coins without genuine buyer interest.
+
+  // Volume/Liquidity ratio: too low = ghost token, too high = wash/fake volume
+  const volLiqRatio = liq > 0 && vol1h > 0 ? vol1h / liq : 0;
+  if (vol1h > 0 && liq > 0) {
+    if (volLiqRatio < 0.3)
+      return fail(`Vol/Liq ${volLiqRatio.toFixed(2)}x < 0.3x — not enough real interest relative to pool size`);
+    if (volLiqRatio > 8)
+      return fail(`Vol/Liq ${volLiqRatio.toFixed(1)}x > 8x — likely wash/fake volume manipulation`);
+  }
+
+  // Minimum recent buy transactions in 5m (proxy for unique buyers in window)
+  // Only apply after 10m to avoid rejecting brand-new launches
+  if (ageMin > 10 && total5m > 0 && buys5m < 5)
+    return fail(`Only ${buys5m} buy txns in last 5m — insufficient buyer activity (need ≥5)`);
+
+  // Volume growth: 5m pace vs 1h baseline
+  // If 5m annualised is < 25% of 1h volume, momentum is clearly dying
+  if (vol5m > 0 && vol1h > 0 && ageMin > 20) {
+    const pacedHourlyVol = vol5m * 12;
+    if (pacedHourlyVol < vol1h * 0.25)
+      return fail(`Volume fading: 5m pace ~$${Math.round(pacedHourlyVol).toLocaleString()}/hr vs $${Math.round(vol1h).toLocaleString()}/hr 1h avg — momentum declining`);
+  }
 
   // ═══════════════════════════════════════════════════════════════════════════
   // LAYER 4 — MOMENTUM FRESHNESS

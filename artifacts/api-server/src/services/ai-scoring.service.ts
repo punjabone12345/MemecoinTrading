@@ -107,17 +107,16 @@ export function computeSignals(pair: DexScreenerPair): TokenSignals {
   }
 
   // ── 3. Liquidity depth (max 15 pts) ───────────────────────────────────────
-  // Higher weight on mid-tier liquidity ($20K-$200K) — deep enough for real trading
-  // but not so deep it's already a large-cap. Very thin liquidity (<$10K) is dangerous.
+  // Calibrated to the new $15K minimum — reward pools with $15K-$200K which are
+  // deep enough for safe entry/exit but still in the early-stage sweet spot.
   let liquidityScore = 0;
-  if (liq >= 500_000)      liquidityScore = 15;
-  else if (liq >= 200_000) liquidityScore = 14;
-  else if (liq >= 100_000) liquidityScore = 12;
-  else if (liq >= 50_000)  liquidityScore = 10;
-  else if (liq >= 25_000)  liquidityScore = 7;
-  else if (liq >= 10_000)  liquidityScore = 4;
-  else if (liq >= 5_000)   liquidityScore = 1;
-  else                     liquidityScore = 0; // dangerous
+  if (liq >= 200_000)      liquidityScore = 15;
+  else if (liq >= 80_000)  liquidityScore = 14;
+  else if (liq >= 40_000)  liquidityScore = 12;
+  else if (liq >= 25_000)  liquidityScore = 10;
+  else if (liq >= 15_000)  liquidityScore = 7;  // minimum viable entry
+  else if (liq >= 8_000)   liquidityScore = 3;  // below floor — low score
+  else                     liquidityScore = 0;  // dangerous
 
   // ── 4. Volume intensity: hourly volume / market cap (max 20 pts) ──────────
   // High vol/mcap ratio means the token is trading its entire market cap in an
@@ -136,16 +135,16 @@ export function computeSignals(pair: DexScreenerPair): TokenSignals {
   }
 
   // ── 5. Mcap sweet spot (max 15 pts) ───────────────────────────────────────
-  // Target the $100K–$2M range: small enough to 5-10x, large enough to be real.
-  // Sub-$50K is either a fresh launch (risky) or a rug remnant.
+  // Target $20K–$400K — small enough for 10-50x, still has real market activity.
+  // Above $400K has diminishing moonshot potential; below $20K is often fake/dust.
   let mcapScore = 0;
-  if (marketCap >= 200_000 && marketCap <= 1_000_000)       mcapScore = 15;
-  else if (marketCap > 1_000_000 && marketCap <= 3_000_000) mcapScore = 12;
-  else if (marketCap > 3_000_000 && marketCap <= 8_000_000) mcapScore = 9;
-  else if (marketCap > 8_000_000 && marketCap <= 20_000_000) mcapScore = 5;
-  else if (marketCap >= 100_000 && marketCap < 200_000)     mcapScore = 11;
-  else if (marketCap >= 50_000 && marketCap < 100_000)      mcapScore = 7;
-  else if (marketCap > 0 && marketCap < 50_000)             mcapScore = 2;
+  if (marketCap >= 30_000 && marketCap <= 200_000)          mcapScore = 15;  // prime early-pump zone
+  else if (marketCap > 200_000 && marketCap <= 400_000)     mcapScore = 13;  // still in target range
+  else if (marketCap >= 20_000 && marketCap < 30_000)       mcapScore = 10;  // micro launch — riskier
+  else if (marketCap > 400_000 && marketCap <= 1_000_000)   mcapScore = 7;   // decent but less upside
+  else if (marketCap > 1_000_000 && marketCap <= 3_000_000) mcapScore = 4;   // large for a memecoin
+  else if (marketCap > 3_000_000)                           mcapScore = 1;   // not our target
+  else if (marketCap > 0 && marketCap < 20_000)             mcapScore = 2;   // dust / not real
   else                                                       mcapScore = 0;
 
   return {

@@ -496,20 +496,26 @@ class PaperTradingService {
     this.openPositions.delete(positionId);
     this.openContracts.delete(pos.contractAddress);
 
+    // Stop-loss in paper trading always fills at the stated SL price.
+    // Using the stale cached price (which may have already crashed far below SL)
+    // was causing exits at -40/-55% when SL was -25%. In a real exchange a SL
+    // is a limit order at slPrice; we honour that guarantee here.
     let exitPrice: number;
-    const latestEntry = this.latestPrices.get(pos.pairAddress);
-    if (latestEntry && latestEntry.price > 0 && Date.now() - latestEntry.ts < 60_000) {
-      exitPrice = latestEntry.price;
+    if (reason === "stop_loss") {
+      exitPrice = pos.slPrice;
     } else {
-      const dexPair = await scannerService.getPairFromDex(pos.pairAddress);
-      const dexPrice = parseFloat(dexPair?.priceUsd ?? "0");
-      if (dexPrice > 0) {
-        exitPrice = dexPrice;
-        this.latestPrices.set(pos.pairAddress, { price: dexPrice, ts: Date.now() });
-      } else if (reason === "stop_loss") {
-        exitPrice = pos.slPrice;
+      const latestEntry = this.latestPrices.get(pos.pairAddress);
+      if (latestEntry && latestEntry.price > 0 && Date.now() - latestEntry.ts < 60_000) {
+        exitPrice = latestEntry.price;
       } else {
-        exitPrice = pos.entryPrice;
+        const dexPair = await scannerService.getPairFromDex(pos.pairAddress);
+        const dexPrice = parseFloat(dexPair?.priceUsd ?? "0");
+        if (dexPrice > 0) {
+          exitPrice = dexPrice;
+          this.latestPrices.set(pos.pairAddress, { price: dexPrice, ts: Date.now() });
+        } else {
+          exitPrice = pos.entryPrice;
+        }
       }
     }
 
@@ -593,11 +599,45 @@ class PaperTradingService {
 
   // ── Stop/TP checker ──────────────────────────────────────────────────────────
 
+  // Fetch all open position prices in PARALLEL — prevents the sequential
+  // await-per-position delay that caused 3-6s gaps on 3 open positions.
+  private async refreshPositionPrices(): Promise<void> {
+    const positions = Array.from(this.openPositions.values());
+    if (positions.length === 0) return;
+    await Promise.allSettled(
+      positions.map(async (pos) => {
+        try {
+          const dexPair = await scannerService.getPairFromDex(pos.pairAddress);
+          const dexPrice = parseFloat(dexPair?.priceUsd ?? "0");
+          if (dexPrice > 0) {
+            this.latestPrices.set(pos.pairAddress, { price: dexPrice, ts: Date.now() });
+          } else {
+            const cached = scannerService.getByPairAddress(pos.pairAddress);
+            if (cached && cached.priceUsd > 0)
+              this.latestPrices.set(pos.pairAddress, { price: cached.priceUsd, ts: Date.now() });
+          }
+        } catch { /* best-effort */ }
+      }),
+    );
+  }
+
   async checkStopsForAll(): Promise<void> {
-    for (const pos of Array.from(this.openPositions.values())) {
+    const positions = Array.from(this.openPositions.values());
+    if (positions.length === 0) return;
+
+    // Fetch ALL positions' DexScreener data in parallel (was sequential → caused 3–6s lag)
+    const pairFetches = await Promise.allSettled(
+      positions.map(pos => scannerService.getPairFromDex(pos.pairAddress)),
+    );
+
+    for (let i = 0; i < positions.length; i++) {
+      const pos = positions[i];
+      // Skip if already closed by a concurrent check while we were fetching
+      if (!this.openPositions.has(pos.positionId)) continue;
+
       try {
+        const dexPair = pairFetches[i].status === "fulfilled" ? pairFetches[i].value : null;
         let price: number | null = null;
-        const dexPair = await scannerService.getPairFromDex(pos.pairAddress);
         const dexPrice = parseFloat(dexPair?.priceUsd ?? "0");
         if (dexPrice > 0) {
           price = dexPrice;
@@ -809,9 +849,14 @@ class PaperTradingService {
   }
 
   startStopChecker() {
-    setInterval(() => this.checkStopsFromCache(), 1_000);
+    // 500ms — ultra-fast cache check using latest prices already in memory
+    setInterval(() => this.checkStopsFromCache(), 500);
+    // 2s  — parallel refresh of ALL open positions from DexScreener simultaneously
+    //        (replaces the old sequential loop that took 3-6s per 3 positions)
+    setInterval(() => void this.refreshPositionPrices(), 2_000);
+    // 5s  — full trailing SL + liquidity drain check with fresh parallel pair data
     setInterval(() => void this.checkStopsForAll(), 5_000);
-    logger.info("Stop/TP checker started — checking every 5s (full DexScreener) + 1s (cache-fast)");
+    logger.info("Stop/TP checker started — 500ms cache + 2s parallel price refresh + 5s full check");
   }
 
   // ── Read methods ─────────────────────────────────────────────────────────────
