@@ -97,35 +97,35 @@ export interface AutoTraderStatus {
 // ─── Default config ────────────────────────────────────────────────────────────
 const DEFAULT_CONFIG: AutoTraderConfig = {
   solPerTrade: 0.5,
-  maxConcurrentTrades: 1,
+  maxConcurrentTrades: 3,       // 3 slots — catch more pumps simultaneously
 
   // ── AI quality ────────────────────────────────────────────────────────────
-  minAiScore: 78,
-  minConfidence: 72,
+  minAiScore: 62,               // lowered from 78 — early-stage coins score lower before 1h pumps big
+  minConfidence: 55,            // lowered from 72
 
   // ── Liquidity & volume ────────────────────────────────────────────────────
-  minLiquidityUsd:  30_000,     // $30K — meaningful exit depth
-  minVolume24hUsd:  35_000,     // $35K 24h — proven trading activity
-  minVolume1hUsd:   15_000,     // $15K last hour — actively traded RIGHT NOW
+  minLiquidityUsd:  8_000,      // $8K — pump.fun launches start thin
+  minVolume24hUsd:  8_000,      // $8K 24h — early stage, 24h hasn't accumulated yet
+  minVolume1hUsd:   2_000,      // $2K last hour — only need some activity right now
 
   // ── Momentum ─────────────────────────────────────────────────────────────
-  minBuyRatio1h:    0.62,       // 62% buys — clear buyer majority
-  minPriceChange1h: 18,         // +18% — real momentum, not noise
-  minTransactions24h: 250,      // 250+ txns — organic activity, not ghosts
+  minBuyRatio1h:    0.55,       // 55% buys — mild majority still bullish
+  minPriceChange1h: 5,          // +5% 1h — catch coins BEFORE they go parabolic, not after
+  minTransactions24h: 40,       // 40 txns — very early stage still valid
 
   // ── Market cap sweet spot ────────────────────────────────────────────────
-  minMcapUsd: 50_000,           // $50K floor — tiny caps are almost always rugs
-  maxMcapUsd:  5_000_000,       // $5M ceiling — still has room to run
+  minMcapUsd: 15_000,           // $15K — small caps have most upside
+  maxMcapUsd:  2_000_000,       // $2M ceiling — under $2M still has 5-50x potential
 
   // ── Pair age ──────────────────────────────────────────────────────────────
-  minPairAgeMinutes: 15,        // 15 min — survived critical first window
-  maxPairAgeHours:   24,        // 24h max — trade fresh tokens only
+  minPairAgeMinutes: 5,         // 5 min — survive initial few mins only, catch early
+  maxPairAgeHours:   6,         // 6h max — only trade FRESH tokens, not yesterday's news
 
   // ── Rug guards ────────────────────────────────────────────────────────────
-  minLiquidityMcapRatio: 0.12,  // 12% liq/mcap — strong liquidity depth
-  maxFdvMcapRatio:       3.0,   // FDV ≤ 3× mcap — no massive supply overhang
-  maxPriceDropH6Pct:   -15,     // not crashed >15% in last 6h
-  maxPriceDropH24Pct:  -25,     // not crashed >25% in last 24h
+  minLiquidityMcapRatio: 0.03,  // 3% liq/mcap — pump.fun pools are thin early
+  maxFdvMcapRatio:       8.0,   // FDV ≤ 8× mcap — pump.fun can have higher ratios
+  maxPriceDropH6Pct:   -20,     // not crashed >20% in last 6h
+  maxPriceDropH24Pct:  -30,     // not crashed >30% in last 24h
 };
 
 // ─── Anti-rug + quality filter ────────────────────────────────────────────────
@@ -289,17 +289,18 @@ export function qualityFilter(pair: DexScreenerPair, cfg: AutoTraderConfig): Fil
   // Note: we only apply the strictest checks here. The AI score already
   // penalises late-stage pumps via the entry timing component.
 
-  // 5a. 1h pump already >200% and 5m not confirming — definitely late
-  if (pc1h > 200 && (pc5m !== null && pc5m < 3))
-    return fail(`Late pump: +${pc1h.toFixed(0)}% in 1h but 5m only ${pc5m?.toFixed(1)}% — distribution phase, momentum exhausted`);
+  // 5a. Massive 1h pump with momentum DEAD in 5m — distribution phase
+  // Only block if 1h is truly parabolic (>300%) AND 5m is clearly negative
+  if (pc1h > 300 && (pc5m !== null && pc5m < -2))
+    return fail(`Late pump: +${pc1h.toFixed(0)}% in 1h but 5m now ${pc5m?.toFixed(1)}% — distribution phase, momentum gone`);
 
-  // 5b. 1h pump >100% with negative 5m — clear reversal signal
-  if (pc1h > 100 && (pc5m !== null && pc5m < 0))
+  // 5b. Large pump + clear 5m reversal — rolling over
+  // Raised threshold: only block if >250% in 1h AND 5m strongly negative
+  if (pc1h > 250 && (pc5m !== null && pc5m < -5))
     return fail(`Pump reversal: +${pc1h.toFixed(0)}% in 1h but 5m now ${pc5m?.toFixed(1)}% — price rolling over`);
 
-  // 5c. Dead cat bounce — 6h significantly negative but 1h bounced
-  // This is typically a relief rally before further decline
-  if (pc6h < -15 && pc1h < 20)
+  // 5c. Dead cat bounce — 6h significantly negative but 1h bounced only weakly
+  if (pc6h < -20 && pc1h < 15)
     return fail(`Dead cat bounce: -${Math.abs(pc6h).toFixed(0)}% in 6h with only +${pc1h.toFixed(0)}% recovery — likely short-lived relief rally`);
 
   // 5d. Very recent activity check: if there are near-zero transactions in 5m

@@ -11,11 +11,19 @@ const DEXSCREENER_BASE = "https://api.dexscreener.com";
 // Scanner uses at most CONCURRENCY requests at a time with 200 ms between
 // batches → ~4 req/s peak for scanning, leaving ~1 req/s headroom for
 // the auto-trader's per-trade verification calls.
-const SCAN_INTERVAL_MS      = 8_000;  // 8 s between ticks (was 5 s)
-const QUERIES_PER_SCAN      = 20;     // queries per tick (was 30) — 20/8s = 2.5 req/s
+const SCAN_INTERVAL_MS      = 5_000;  // 5 s between ticks — faster discovery
+const QUERIES_PER_SCAN      = 15;     // queries per tick — 15/5s = 3 req/s
 const SCAN_CONCURRENCY      = 5;      // max parallel DexScreener requests at once
-const SCAN_BATCH_DELAY_MS   = 200;    // ms pause between batches of SCAN_CONCURRENCY
+const SCAN_BATCH_DELAY_MS   = 150;    // ms pause between batches of SCAN_CONCURRENCY
 const MAX_RESULTS_PER_QUERY = 30;     // DexScreener returns up to 30 per search
+
+// Fast new-pairs watcher — runs every 15 s specifically to catch brand new launches
+const NEW_PAIRS_INTERVAL_MS = 15_000;
+// These high-signal queries consistently surface pump.fun launches and fresh memecoins
+const TRENDING_QUERIES = [
+  "pump", "new", "launch", "gem", "moon", "1000x", "alpha", "fire",
+  "bonk", "dog", "cat", "pepe", "ai", "sol", "meme",
+];
 
 // ─── Pool lifecycle ───────────────────────────────────────────────────────────
 const CLEANUP_INTERVAL_MS  = 2 * 60 * 1_000;
@@ -143,10 +151,12 @@ export function mapPairToToken(pair: DexScreenerPair): ScannedToken {
 class ScannerService {
   private tokens: Map<string, ScannedToken> = new Map();
   private intervalId: ReturnType<typeof setInterval> | null = null;
+  private newPairsIntervalId: ReturnType<typeof setInterval> | null = null;
   private cleanupIntervalId: ReturnType<typeof setInterval> | null = null;
   private broadcaster: ((tokens: ScannedToken[]) => void) | null = null;
   private alreadyAlertedHighScore: Set<string> = new Set();
   private isScanning = false;
+  private isTrendingScanning = false;
   private scanCount = 0;
   private totalExpired = 0;
   private totalSkippedStale = 0;
@@ -390,29 +400,86 @@ class ScannerService {
     }
   }
 
+  // ── Source 5: Fast trending scan — high-signal queries every 15 s ────────────
+  // Specifically targets pump.fun and trending tokens to catch launches early.
+  private async scanTrending(): Promise<void> {
+    if (this.isTrendingScanning) return;
+    this.isTrendingScanning = true;
+    try {
+      // Pick 5 random queries from the trending list each run for variety
+      const shuffled = [...TRENDING_QUERIES].sort(() => Math.random() - 0.5).slice(0, 5);
+      const results = await Promise.allSettled(
+        shuffled.map((q) =>
+          axios.get<{ pairs: DexScreenerPair[] }>(
+            `${DEXSCREENER_BASE}/latest/dex/search?q=${encodeURIComponent(q)}`,
+            { timeout: 8_000 },
+          ),
+        ),
+      );
+
+      let newCount = 0;
+      for (const r of results) {
+        if (r.status !== "fulfilled" || !Array.isArray(r.value.data.pairs)) continue;
+        const filtered = r.value.data.pairs.filter(
+          (p) =>
+            p.chainId === "solana" &&
+            !["SOL", "USDC", "USDT", "WSOL"].includes(p.baseToken.symbol) &&
+            (p.liquidity?.usd ?? 0) >= MIN_POOL_LIQUIDITY_USD &&
+            (parseFloat(p.priceUsd) || 0) > 0,
+        );
+        for (const pair of filtered.slice(0, MAX_RESULTS_PER_QUERY)) {
+          if (pair.pairCreatedAt && (Date.now() - pair.pairCreatedAt) > MAX_POOL_AGE_MS) continue;
+          const token = mapPairToToken(pair);
+          const isNew = !this.tokens.has(token.pairAddress);
+          this.tokens.set(token.pairAddress, token);
+          if (isNew) newCount++;
+
+          if (token.aiScore >= HIGH_AI_SCORE_THRESHOLD && !this.alreadyAlertedHighScore.has(token.pairAddress)) {
+            this.alreadyAlertedHighScore.add(token.pairAddress);
+            alertsService.highAiScore(token.symbol, token.aiScore, token.pairAddress);
+            setTimeout(() => this.alreadyAlertedHighScore.delete(token.pairAddress), 300_000);
+          }
+        }
+      }
+
+      if (newCount > 0) {
+        logger.debug({ newCount, total: this.tokens.size }, "Scanner fast-trending: new tokens ingested");
+        this.broadcaster?.(this.getAll());
+      }
+    } catch (err) {
+      logger.warn({ err: (err as Error).message }, "Scanner fast-trending: error");
+    } finally {
+      this.isTrendingScanning = false;
+    }
+  }
+
   // ── Lifecycle ──────────────────────────────────────────────────────────────
 
   start() {
     if (this.intervalId) return;
     void this.scan();
+    void this.scanTrending();
     this.intervalId = setInterval(() => void this.scan(), SCAN_INTERVAL_MS);
+    this.newPairsIntervalId = setInterval(() => void this.scanTrending(), NEW_PAIRS_INTERVAL_MS);
     this.cleanupIntervalId = setInterval(() => this.cleanup(), CLEANUP_INTERVAL_MS);
     logger.info(
       {
         intervalMs: SCAN_INTERVAL_MS,
+        trendingIntervalMs: NEW_PAIRS_INTERVAL_MS,
         queriesPerScan: QUERIES_PER_SCAN,
         totalQueryTerms: DISCOVERY_QUERIES.length,
         tokenTtlMin: TOKEN_TTL_MS / 60_000,
         maxPoolAgeHours: MAX_POOL_AGE_HOURS,
         minPoolLiquidityUsd: MIN_POOL_LIQUIDITY_USD,
-        strategy: "alphabet-rotation + boosts/profiles — 500-800 unique tokens per cycle",
+        strategy: "alphabet-rotation + boosts/profiles + fast-trending(15s)",
       },
-      "Scanner started — broad discovery mode (alphabet + meme + curated)",
+      "Scanner started — broad discovery mode (alphabet + meme + curated + fast-trending)",
     );
   }
 
   stop() {
     if (this.intervalId) { clearInterval(this.intervalId); this.intervalId = null; }
+    if (this.newPairsIntervalId) { clearInterval(this.newPairsIntervalId); this.newPairsIntervalId = null; }
     if (this.cleanupIntervalId) { clearInterval(this.cleanupIntervalId); this.cleanupIntervalId = null; }
   }
 

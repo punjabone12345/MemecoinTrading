@@ -53,13 +53,19 @@ export function computeSignals(pair: DexScreenerPair): TokenSignals {
   //   • Classic distribution: retail latecomers while early buyers exit
   let timingScore = 0;
 
-  // Case 1: Already pumped massively in 1h with stalling/negative 5m → LATE, penalise hard
-  if (pc1h > 300 && pc5m < 5) {
-    timingScore = 4;  // nearly dead signal — likely distributing
-  } else if (pc1h > 150 && pc5m < 0) {
-    timingScore = 6;  // pumped hard, now reversing — dangerous entry
-  } else if (pc1h > 100 && pc5m < 2) {
-    timingScore = 10; // strong 1h pump but momentum stalling
+  // Case 1: Already pumped hard in 1h — check 5m to see if momentum is STILL alive
+  if (pc1h > 300 && pc5m < 0) {
+    timingScore = 4;  // massive pump + reversing in 5m → distributing, very dangerous
+  } else if (pc1h > 300 && pc5m < 5) {
+    timingScore = 8;  // massive pump but 5m is flat — might still squeeze, risky
+  } else if (pc1h > 150 && pc5m < -3) {
+    timingScore = 6;  // pumped hard and clearly reversing now → avoid
+  } else if (pc1h > 100 && pc5m >= 8) {
+    timingScore = 20; // big 1h AND still ripping in 5m → momentum confirmed, valid entry
+  } else if (pc1h > 100 && pc5m >= 3) {
+    timingScore = 14; // big 1h and 5m still positive → late but moving
+  } else if (pc1h > 100 && pc5m < 0) {
+    timingScore = 7;  // big 1h, now negative 5m → rolling over, avoid
   } else {
     // Normal scoring — reward fresh momentum
     // Base from 1h:
