@@ -96,7 +96,7 @@ export function usePositions() {
       const json = await res.json();
       return (json.data ?? json) as { positions: Position[]; portfolio: Portfolio };
     },
-    refetchInterval: 5000,
+    refetchInterval: 1000,
   });
 }
 
@@ -119,7 +119,7 @@ export function usePortfolio() {
       const json = await res.json();
       return (json.data ?? json) as Portfolio;
     },
-    refetchInterval: 5000,
+    refetchInterval: 1000,
   });
 }
 
