@@ -6,6 +6,7 @@ import { scannerService } from "./scanner.service.js";
 import { computeSignals, computeAiScore, computeConfidence, getDynamicRisk } from "./ai-scoring.service.js";
 import { mapPairToToken } from "./scanner.service.js";
 import { analyseTokenWithAi, buildAnalysisInput } from "./ai-analysis.service.js";
+import { checkTokenSafety } from "./rugcheck.service.js";
 import type { DexScreenerPair } from "../types/index.js";
 
 const DEXSCREENER_BASE = "https://api.dexscreener.com";
@@ -751,8 +752,42 @@ class AutoTraderService {
         token.aiScore = c.aiScore;
         token.confidence = c.confidence;
 
-        // ── Layer 6: LLM pre-trade analysis (Gemini → Groq fallback) ──────────
-        const contractAddress = c.pair?.baseToken?.address ?? token.address;
+        // ── Layer 6: RugCheck on-chain safety gate ─────────────────────────────
+        // Runs BEFORE the LLM call (cheap API, saves LLM quota on obvious rugs).
+        // Checks: mint authority, freeze authority, LP lock, top holder
+        // concentration, danger-level risks, insider networks, rugged flag.
+        const mintAddress = c.pair?.baseToken?.address ?? token.address;
+        const pairAgeMin  = c.pair?.pairCreatedAt
+          ? (Date.now() - c.pair.pairCreatedAt) / 60_000
+          : 999; // unknown age → don't block on LP-lock age check
+
+        const rugResult = await checkTokenSafety(mintAddress, pairAgeMin);
+
+        if (!rugResult.pass) {
+          decisions.push({
+            ...c,
+            action: "filtered",
+            reason: rugResult.reason,
+          });
+          logger.warn(
+            { symbol: c.symbol, mintAddress: mintAddress.slice(0, 8) + "…", reason: rugResult.reason },
+            "Auto-trader: RugCheck BLOCKED — trade rejected",
+          );
+          continue;
+        }
+
+        // Attach RugCheck warns to LLM context so they factor into the verdict
+        const rugWarnSummary = rugResult.warnRisks.length > 0
+          ? ` | RugCheck warns: ${rugResult.warnRisks.join(", ")}`
+          : "";
+
+        logger.info(
+          { symbol: c.symbol, rugScore: rugResult.score, lpLockedPct: rugResult.lpLockedPct, topHolderPct: rugResult.topHolderPct },
+          "Auto-trader: RugCheck PASSED — proceeding to LLM analysis",
+        );
+
+        // ── Layer 7: LLM pre-trade analysis (Gemini → Groq fallback) ──────────
+        const contractAddress = mintAddress;
         const analysisInput = buildAnalysisInput(c.pair, c.symbol, c.tokenName, c.aiScore, c.confidence, contractAddress);
         const llm = await analyseTokenWithAi(analysisInput);
 
