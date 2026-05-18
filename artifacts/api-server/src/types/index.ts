@@ -91,7 +91,7 @@ export interface ScannedToken {
 }
 
 export type PositionStatus = "open" | "closed";
-export type CloseReason = "manual" | "stop_loss" | "take_profit";
+export type CloseReason = "manual" | "stop_loss" | "take_profit" | "rug_detected";
 
 export interface Position {
   positionId: string;

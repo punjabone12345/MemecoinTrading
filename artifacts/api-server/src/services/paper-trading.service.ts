@@ -497,12 +497,19 @@ class PaperTradingService {
     this.openContracts.delete(pos.contractAddress);
 
     // Stop-loss in paper trading always fills at the stated SL price.
-    // Using the stale cached price (which may have already crashed far below SL)
-    // was causing exits at -40/-55% when SL was -25%. In a real exchange a SL
-    // is a limit order at slPrice; we honour that guarantee here.
+    // Rug detected = LP fully drained → exit at ~2% of entry (98% loss).
+    // For all other reasons, use latest real price from DexScreener.
     let exitPrice: number;
     if (reason === "stop_loss") {
       exitPrice = pos.slPrice;
+    } else if (reason === "rug_detected") {
+      // LP drained to near-zero — real exit value is essentially zero.
+      // We use 2% of entry price to reflect slippage into a drained pool.
+      exitPrice = pos.entryPrice * 0.02;
+      logger.warn(
+        { symbol: pos.symbol, entryPrice: pos.entryPrice, rugExitPrice: exitPrice },
+        "Rug exit: LP drained — recording ~98% loss"
+      );
     } else {
       const latestEntry = this.latestPrices.get(pos.pairAddress);
       if (latestEntry && latestEntry.price > 0 && Date.now() - latestEntry.ts < 60_000) {
@@ -572,6 +579,20 @@ class PaperTradingService {
         `──────────────────────\n` +
         `📍 CA: <code>${pos.contractAddress}</code>\n` +
         `💰 Entry: $${formatPrice(pos.entryPrice)} → Exit: $${formatPrice(exitPrice)}\n` +
+        `📉 P&L: <b>${sign}${pnlPercent.toFixed(1)}% | ${sign}${pnlSol.toFixed(4)} SOL</b>\n` +
+        `⏱️ Hold Time: ${holdLabel}\n` +
+        `💼 Balance Now: ${portfolio.solBalance.toFixed(4)} SOL\n` +
+        `🕐 Time: ${toIST(new Date())}\n` +
+        `🔗 <a href="https://dexscreener.com/solana/${pos.contractAddress}">View on DexScreener</a>`,
+      );
+    } else if (reason === "rug_detected") {
+      alertsService.stopLossHit(positionId, pos.symbol, pnlSol, pos.pairAddress);
+      void sendTelegram(
+        `☠️ <b>RUG DETECTED — $${pos.symbol}</b>\n` +
+        `──────────────────────\n` +
+        `📍 CA: <code>${pos.contractAddress}</code>\n` +
+        `💀 Liquidity drained to near-zero after entry\n` +
+        `💰 Entry: $${formatPrice(pos.entryPrice)} → Rug exit: $${formatPrice(exitPrice)}\n` +
         `📉 P&L: <b>${sign}${pnlPercent.toFixed(1)}% | ${sign}${pnlSol.toFixed(4)} SOL</b>\n` +
         `⏱️ Hold Time: ${holdLabel}\n` +
         `💼 Balance Now: ${portfolio.solBalance.toFixed(4)} SOL\n` +
@@ -652,6 +673,19 @@ class PaperTradingService {
 
         const currentLiqMidHold = dexPair?.liquidity?.usd ?? 0;
         const holdMsCheck = Date.now() - new Date(pos.openedAt).getTime();
+
+        // Absolute rug floor: if live liquidity is below $500 regardless of entry,
+        // the pool is effectively dead — record as a near-total loss immediately.
+        if (currentLiqMidHold > 0 && currentLiqMidHold < 500 && holdMsCheck > 60_000) {
+          logger.warn(
+            { symbol: pos.symbol, currentLiq: currentLiqMidHold },
+            "Stop checker: absolute liquidity <$500 — pool drained to near-zero, recording rug loss"
+          );
+          await this.close(pos.positionId, "rug_detected");
+          continue;
+        }
+
+        // Relative rug: liquidity drained >90% vs entry after 2+ minutes
         if (
           pos.entryLiquidityUsd > 0 &&
           currentLiqMidHold > 0 &&
@@ -660,9 +694,9 @@ class PaperTradingService {
         ) {
           logger.warn(
             { symbol: pos.symbol, entryLiq: pos.entryLiquidityUsd, currentLiq: currentLiqMidHold },
-            "Stop checker: liquidity drained >90% since entry — rug detected, closing at SL"
+            "Stop checker: liquidity drained >90% since entry — rug detected"
           );
-          await this.close(pos.positionId, "stop_loss");
+          await this.close(pos.positionId, "rug_detected");
           continue;
         }
 
@@ -757,16 +791,26 @@ class PaperTradingService {
           const currentVol5m = dexPair?.volume?.m5 ?? 0;
           const priceMultiplier = pos.entryPrice > 0 ? price / pos.entryPrice : 1;
 
-          const MIN_TP_LIQUIDITY_USD = 5_000;
           const MAX_PRICE_MULTIPLIER = 50;
           const MIN_VOL_FOR_LARGE_MOVE = 100;
 
-          if (currentLiq > 0 && currentLiq < MIN_TP_LIQUIDITY_USD && priceMultiplier > 5) {
+          // Any TP trigger with near-zero liquidity = price is fake/stale.
+          // The token is rugged — record as rug loss, not a profit.
+          if (currentLiq > 0 && currentLiq < 500) {
             logger.warn(
               { symbol: pos.symbol, price, currentLiq, priceMultiplier: priceMultiplier.toFixed(1) },
-              "TP rejected: liquidity drained (<$5K) AND price >5x — likely rug, closing at SL"
+              "TP rejected: liquidity <$500 — pool drained, recording rug loss"
             );
-            await this.close(pos.positionId, "stop_loss");
+            await this.close(pos.positionId, "rug_detected");
+            continue;
+          }
+
+          if (currentLiq > 0 && currentLiq < 5_000 && priceMultiplier > 3) {
+            logger.warn(
+              { symbol: pos.symbol, price, currentLiq, priceMultiplier: priceMultiplier.toFixed(1) },
+              "TP rejected: liquidity <$5K with price >3x — likely manipulated, recording rug loss"
+            );
+            await this.close(pos.positionId, "rug_detected");
             continue;
           }
 

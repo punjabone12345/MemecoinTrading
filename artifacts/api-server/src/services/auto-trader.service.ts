@@ -97,35 +97,35 @@ export interface AutoTraderStatus {
 // ─── Default config ────────────────────────────────────────────────────────────
 const DEFAULT_CONFIG: AutoTraderConfig = {
   solPerTrade: 0.5,
-  maxConcurrentTrades: 3,       // 3 slots — catch more pumps simultaneously
+  maxConcurrentTrades: 3,
 
   // ── AI quality ────────────────────────────────────────────────────────────
-  minAiScore: 62,               // early-stage coins score lower before 1h pumps big
-  minConfidence: 55,
+  minAiScore: 72,               // raised: only high-conviction entries
+  minConfidence: 65,            // raised: need solid data quality
 
   // ── Liquidity & volume ────────────────────────────────────────────────────
-  minLiquidityUsd:  15_000,     // $15K min — meaningful pool depth for safe exit
-  minVolume24hUsd:  8_000,      // $8K 24h — early stage, 24h hasn't accumulated yet
-  minVolume1hUsd:   2_000,      // $2K last hour — need some activity right now
+  minLiquidityUsd:  30_000,     // raised $15K→$30K: deeper pools are much harder to rug
+  minVolume24hUsd:  15_000,     // raised: ensures real organic trading history
+  minVolume1hUsd:   5_000,      // raised: strong activity happening RIGHT NOW
 
   // ── Momentum ─────────────────────────────────────────────────────────────
-  minBuyRatio1h:    0.64,       // 1.8:1 buy:sell ratio — strong buy pressure minimum
-  minPriceChange1h: 5,          // +5% 1h — catch coins BEFORE they go parabolic
-  minTransactions24h: 40,       // 40 txns — very early stage still valid
+  minBuyRatio1h:    0.68,       // raised: stronger buy conviction required
+  minPriceChange1h: 8,          // raised: needs meaningful momentum, not just +5%
+  minTransactions24h: 80,       // raised: more activity = more organic market
 
   // ── Market cap sweet spot ────────────────────────────────────────────────
-  minMcapUsd:  20_000,          // $20K min — must have real market
-  maxMcapUsd: 400_000,          // $400K ceiling — under $400K still has 10-50x potential
+  minMcapUsd:  30_000,          // raised: avoid dust/fake micro-caps
+  maxMcapUsd: 400_000,          // $400K ceiling — still has 10-50x potential
 
   // ── Pair age ──────────────────────────────────────────────────────────────
-  minPairAgeMinutes: 5,         // 5 min — survive the initial few minutes
+  minPairAgeMinutes: 10,        // raised 5→10 min: survive the highest-risk early window
   maxPairAgeHours:   6,         // 6h max — fresh tokens only
 
   // ── Rug guards ────────────────────────────────────────────────────────────
-  minLiquidityMcapRatio: 0.12,  // 12% liq/mcap — meaningful pool backing required
-  maxFdvMcapRatio:       8.0,   // FDV ≤ 8× mcap
-  maxPriceDropH6Pct:   -20,     // not crashed >20% in last 6h
-  maxPriceDropH24Pct:  -30,     // not crashed >30% in last 24h
+  minLiquidityMcapRatio: 0.18,  // raised 12%→18%: stronger pool backing required
+  maxFdvMcapRatio:       6.0,   // tightened 8→6: less unlocked supply overhang allowed
+  maxPriceDropH6Pct:   -15,     // tightened: reject anything down >15% in 6h
+  maxPriceDropH24Pct:  -25,     // tightened: reject anything down >25% in 24h
 };
 
 // ─── Anti-rug + quality filter ────────────────────────────────────────────────
@@ -180,35 +180,30 @@ export function qualityFilter(pair: DexScreenerPair, cfg: AutoTraderConfig): Fil
   // LAYER 2 — RUG DETECTION (hardcoded — cannot be overridden by config)
   // ═══════════════════════════════════════════════════════════════════════════
 
-  // 2a. Pool drain — extreme volume spike in 5m relative to liquidity is a
-  //     classic rug signal. BUT: during a legitimate pump, 5m volume is HIGH
-  //     while price goes UP. We only flag drain when volume is extreme (>150%
-  //     of LP) OR when high volume coincides with a falling price (selling into
-  //     LP = actual drain). A rising price with high volume = healthy pump.
+  // 2a. Pool drain — extreme volume spike in 5m relative to liquidity.
+  //     Lowered threshold: even 1.5× is dangerous (was 2×).
   const drainRatio = liq > 0 ? vol5m / liq : 0;
   if (vol5m > 0 && liq > 0) {
-    // Absolute drain: 5m vol > 2× LP regardless of price direction
-    if (drainRatio >= 2.0)
+    if (drainRatio >= 1.5)
       return fail(`Pool drain: 5m vol $${Math.round(vol5m).toLocaleString()} is ${(drainRatio * 100).toFixed(0)}% of liquidity — LP being drained`);
-    // Moderate drain WITH falling price: selling into LP, price collapsing
-    if (drainRatio >= 0.75 && (pc5m !== null && pc5m < -5))
+    // Any drain WITH falling price = selling into LP
+    if (drainRatio >= 0.5 && (pc5m !== null && pc5m < -3))
       return fail(`Pool drain + dump: 5m vol ${(drainRatio * 100).toFixed(0)}% of LP and price down ${pc5m?.toFixed(1)}% — LP being drained`);
   }
 
-  // 2b. Bot accumulation (5m) — ≥95% buys in the last 5 min with real activity.
-  //     Organic trading always has some sellers. Near-100% buys = insider/bot
-  //     buying everything before pulling LP.
-  if (total5m >= 10 && buyRatio5m >= 0.95)
+  // 2b. Bot accumulation (5m)
+  if (total5m >= 8 && buyRatio5m >= 0.93)
     return fail(`Bot buying: ${(buyRatio5m * 100).toFixed(0)}% buys in last 5m (${total5m} txns) — pre-rug accumulation`);
 
-  // 2c. Insider-dominated 1h — same logic over a longer window. ≥92% buys
-  //     with ≥40 transactions means no organic market — just insiders.
-  if (total1h >= 40 && buyRatio1h >= 0.92)
+  // 2c. Insider-dominated 1h
+  if (total1h >= 30 && buyRatio1h >= 0.90)
     return fail(`Insider buying: ${(buyRatio1h * 100).toFixed(0)}% buys in 1h (${total1h} txns) — no organic sellers`);
 
-  // 2d. Wash trading — zero sells but massive buy count = fake volume signal.
-  if (sells1h === 0 && buys1h >= 30)
+  // 2d. Wash trading — zero or near-zero sells = fake volume
+  if (sells1h === 0 && buys1h >= 20)
     return fail(`Wash trade: ${buys1h} buys / 0 sells in 1h — artificial volume`);
+  if (sells1h <= 2 && buys1h >= 40)
+    return fail(`Near-wash trade: ${buys1h} buys / only ${sells1h} sells in 1h — almost no organic selling`);
 
   // 2e. Thin liquidity vs market cap — easy to drain the entire pool.
   const liqMcapRatio = liq / mcap;
@@ -218,6 +213,11 @@ export function qualityFilter(pair: DexScreenerPair, cfg: AutoTraderConfig): Fil
   // 2f. FDV inflation — massive unissued/locked supply that will dump.
   if (fdv > 0 && mcap > 0 && fdv / mcap > cfg.maxFdvMcapRatio)
     return fail(`FDV ${(fdv / mcap).toFixed(1)}× mcap > ${cfg.maxFdvMcapRatio}× max — supply dump risk`);
+
+  // 2g. Absolute liquidity floor — pools under $20K are trivially drained
+  //     even if they technically pass the liq/mcap ratio check.
+  if (liq < 20_000)
+    return fail(`Absolute liquidity $${Math.round(liq).toLocaleString()} < $20K — too thin to exit safely`);
 
   // ═══════════════════════════════════════════════════════════════════════════
   // LAYER 3 — CONFIG-DRIVEN QUALITY GATES
