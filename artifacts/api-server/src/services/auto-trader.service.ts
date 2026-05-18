@@ -98,35 +98,35 @@ export interface AutoTraderStatus {
 // ─── Default config ────────────────────────────────────────────────────────────
 const DEFAULT_CONFIG: AutoTraderConfig = {
   solPerTrade: 0.5,
-  maxConcurrentTrades: 3,
+  maxConcurrentTrades: 5,       // raised 3→5: more concurrent trades = more opportunity
 
   // ── AI quality ────────────────────────────────────────────────────────────
-  minAiScore: 72,               // raised: only high-conviction entries
-  minConfidence: 65,            // raised: need solid data quality
+  minAiScore: 65,               // loosened 72→65: let decent setups through
+  minConfidence: 58,            // loosened 65→58: accept slightly lower data quality
 
   // ── Liquidity & volume ────────────────────────────────────────────────────
-  minLiquidityUsd:  30_000,     // raised $15K→$30K: deeper pools are much harder to rug
-  minVolume24hUsd:  15_000,     // raised: ensures real organic trading history
-  minVolume1hUsd:   5_000,      // raised: strong activity happening RIGHT NOW
+  minLiquidityUsd:  20_000,     // loosened $30K→$20K: still avoids thin pools
+  minVolume24hUsd:   8_000,     // loosened 15K→8K: catches earlier-stage tokens
+  minVolume1hUsd:    2_000,     // loosened 5K→2K: allow quieter but valid setups
 
   // ── Momentum ─────────────────────────────────────────────────────────────
-  minBuyRatio1h:    0.68,       // raised: stronger buy conviction required
-  minPriceChange1h: 8,          // raised: needs meaningful momentum, not just +5%
-  minTransactions24h: 80,       // raised: more activity = more organic market
+  minBuyRatio1h:    0.58,       // loosened 0.68→0.58: 58% buys still bullish
+  minPriceChange1h: 4,          // loosened 8→4: allow quieter breakouts
+  minTransactions24h: 50,       // loosened 80→50: smaller but real organic markets
 
   // ── Market cap sweet spot ────────────────────────────────────────────────
-  minMcapUsd:  30_000,          // raised: avoid dust/fake micro-caps
-  maxMcapUsd: 400_000,          // $400K ceiling — still has 10-50x potential
+  minMcapUsd:  15_000,          // loosened 30K→15K: catch early gems
+  maxMcapUsd: 700_000,          // raised 400K→700K: still strong upside potential
 
   // ── Pair age ──────────────────────────────────────────────────────────────
-  minPairAgeMinutes: 10,        // raised 5→10 min: survive the highest-risk early window
-  maxPairAgeHours:   6,         // 6h max — fresh tokens only
+  minPairAgeMinutes:  5,        // loosened 10→5 min: earlier entry opportunity
+  maxPairAgeHours:   12,        // raised 6→12h: catch tokens still in price discovery
 
   // ── Rug guards ────────────────────────────────────────────────────────────
-  minLiquidityMcapRatio: 0.18,  // raised 12%→18%: stronger pool backing required
-  maxFdvMcapRatio:       6.0,   // tightened 8→6: less unlocked supply overhang allowed
-  maxPriceDropH6Pct:   -15,     // tightened: reject anything down >15% in 6h
-  maxPriceDropH24Pct:  -25,     // tightened: reject anything down >25% in 24h
+  minLiquidityMcapRatio: 0.10,  // loosened 18%→10%: realistic for small caps
+  maxFdvMcapRatio:       8.0,   // loosened 6→8: more room on supply overhang
+  maxPriceDropH6Pct:   -22,     // loosened -15→-22: allow post-dip recoveries
+  maxPriceDropH24Pct:  -38,     // loosened -25→-38: don't block recovery setups
 };
 
 // ─── Anti-rug + quality filter ────────────────────────────────────────────────
