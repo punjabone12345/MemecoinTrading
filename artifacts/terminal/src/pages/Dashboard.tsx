@@ -182,9 +182,20 @@ export default function Dashboard() {
                   </div>
 
                   <div className="mt-2 flex justify-between items-center">
-                    <div className="flex gap-3 text-xs">
+                    <div className="flex gap-3 text-xs flex-wrap">
                       <span className="text-emerald-400">TP +{p.tpPercent}% → {formatMcap(p.tpMarketCap)}</span>
-                      <span className="text-red-400">SL -{p.slPercent}%</span>
+                      {p.slPrice > p.entryPrice * 1.01 ? (
+                        <span className="text-amber-400 font-semibold">
+                          🔒 SL +{((p.slPrice / p.entryPrice - 1) * 100).toFixed(0)}% locked
+                        </span>
+                      ) : (
+                        <span className="text-red-400">SL -{p.slPercent}%</span>
+                      )}
+                      {p.rugScore !== undefined && (
+                        <span className={`font-mono ${p.rugScore < 300 ? "text-emerald-400/70" : p.rugScore < 600 ? "text-amber-400/70" : "text-red-400/70"}`}>
+                          RC:{p.rugScore}
+                        </span>
+                      )}
                     </div>
                     <a
                       href={`https://dexscreener.com/solana/${p.contractAddress || p.pairAddress}`}

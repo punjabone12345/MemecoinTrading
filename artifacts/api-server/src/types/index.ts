@@ -143,6 +143,11 @@ export interface Position {
   remainingSizeSol?: number;
   partialPnlSol?: number;
   pairAgeMinutes?: number;
+  // RugCheck on-chain safety data (stored at entry time)
+  rugScore?: number;
+  rugLpLockedPct?: number;
+  rugTopHolderPct?: number;
+  rugWarnRisks?: string[];
 }
 
 export interface Portfolio {

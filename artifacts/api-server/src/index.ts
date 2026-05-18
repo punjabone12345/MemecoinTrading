@@ -266,6 +266,18 @@ if (process.env["DATABASE_URL"]) {
           contract_address TEXT, name TEXT, added_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), notes TEXT
         )
       `);
+      // Add RugCheck columns to positions table (idempotent)
+      const positionRugCols: [string, string][] = [
+        ["rug_score",          "NUMERIC"],
+        ["rug_lp_locked_pct",  "NUMERIC"],
+        ["rug_top_holder_pct", "NUMERIC"],
+        ["rug_warn_risks",     "TEXT"],
+      ];
+      for (const [col, type] of positionRugCols) {
+        await migClient.query(
+          `ALTER TABLE positions ADD COLUMN IF NOT EXISTS ${col} ${type}`
+        );
+      }
       logger.info("DB migration: all tables ready");
     } finally {
       migClient.release();

@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { usePositions, useClosedPositions, useClosePosition, useDeleteClosedTrade, useEditClosedTrade } from "@/lib/api";
-import { TrendingUp, TrendingDown, Clock, ExternalLink, X, Trash2, Pencil, AlertTriangle, ChevronDown, ChevronUp } from "lucide-react";
+import { TrendingUp, TrendingDown, Clock, ExternalLink, X, Trash2, Pencil, AlertTriangle, ChevronDown, ChevronUp, ShieldCheck, ShieldAlert } from "lucide-react";
 
 function formatPrice(price: number): string {
   if (!price) return "—";
@@ -301,8 +301,21 @@ export default function Positions() {
                       <span className="font-mono text-emerald-400">${formatPrice(p.tpPrice)} (+{p.tpPercent}%)</span>
                     </div>
                     <div className="flex justify-between">
-                      <span className="text-red-400">SL Price</span>
-                      <span className="font-mono text-red-400">${formatPrice(p.slPrice)} (-{p.slPercent}%)</span>
+                      {p.slPrice > p.entryPrice * 1.01 ? (
+                        <>
+                          <span className="text-amber-400 flex items-center gap-1 font-semibold">
+                            🔒 Trailing SL
+                          </span>
+                          <span className="font-mono text-amber-400 font-bold">
+                            ${formatPrice(p.slPrice)} (+{((p.slPrice / p.entryPrice - 1) * 100).toFixed(0)}% locked)
+                          </span>
+                        </>
+                      ) : (
+                        <>
+                          <span className="text-red-400">SL Price</span>
+                          <span className="font-mono text-red-400">${formatPrice(p.slPrice)} (-{p.slPercent}%)</span>
+                        </>
+                      )}
                     </div>
                   </div>
 
@@ -355,6 +368,54 @@ export default function Positions() {
                     </div>
                   )}
 
+                  {/* RugCheck safety summary */}
+                  {(p.rugScore !== undefined || p.rugLpLockedPct !== undefined) && (
+                    <div className="bg-white/4 rounded-lg px-3 py-2 space-y-1.5">
+                      <div className="flex items-center gap-1.5 mb-1">
+                        {(p.rugScore ?? 0) < 400 ? (
+                          <ShieldCheck className="w-3 h-3 text-emerald-400" />
+                        ) : (
+                          <ShieldAlert className="w-3 h-3 text-amber-400" />
+                        )}
+                        <span className="text-[10px] font-semibold text-white/50 uppercase tracking-wide">RugCheck</span>
+                      </div>
+                      <div className="flex flex-wrap gap-1.5">
+                        {p.rugScore !== undefined && (
+                          <span className={`text-[10px] px-2 py-0.5 rounded-full font-mono font-bold ${
+                            p.rugScore < 300 ? "bg-emerald-500/15 text-emerald-400" :
+                            p.rugScore < 600 ? "bg-amber-500/15 text-amber-400" :
+                            "bg-red-500/15 text-red-400"
+                          }`}>
+                            Score {p.rugScore}/1000
+                          </span>
+                        )}
+                        {p.rugLpLockedPct !== undefined && (
+                          <span className={`text-[10px] px-2 py-0.5 rounded-full font-mono ${
+                            p.rugLpLockedPct > 50 ? "bg-emerald-500/15 text-emerald-400" :
+                            p.rugLpLockedPct > 0  ? "bg-amber-500/15 text-amber-400" :
+                            "bg-orange-500/15 text-orange-400"
+                          }`}>
+                            LP {p.rugLpLockedPct.toFixed(0)}% locked
+                          </span>
+                        )}
+                        {p.rugTopHolderPct !== undefined && p.rugTopHolderPct > 3 && (
+                          <span className={`text-[10px] px-2 py-0.5 rounded-full font-mono ${
+                            p.rugTopHolderPct < 10 ? "bg-amber-500/15 text-amber-400" :
+                            p.rugTopHolderPct < 20 ? "bg-orange-500/15 text-orange-400" :
+                            "bg-red-500/15 text-red-400"
+                          }`}>
+                            Top holder {p.rugTopHolderPct.toFixed(1)}%
+                          </span>
+                        )}
+                        {p.rugWarnRisks?.map((risk) => (
+                          <span key={risk} className="text-[10px] px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-400/80 italic">
+                            {risk}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
                   <div className="bg-white/4 rounded-lg px-3 py-2">
                     <p className="text-white/30 text-[10px] mb-0.5">Contract Address</p>
                     <p className="font-mono text-[10px] text-white/70 break-all">{p.contractAddress || p.pairAddress}</p>
@@ -398,8 +459,8 @@ export default function Positions() {
             const pnlPct = p.pnlPercent ?? 0;
             const isWin = pnl >= 0;
             const isFakeLooking = isWin && pnl > p.sizeSol * 2;
-            const reasonColor = p.closeReason === "take_profit" ? "text-emerald-400 bg-emerald-500/15" : p.closeReason === "stop_loss" ? "text-red-400 bg-red-500/15" : "text-white/50 bg-white/8";
-            const reasonLabel = p.closeReason === "take_profit" ? "✅ TP Hit" : p.closeReason === "stop_loss" ? "🛑 SL Hit" : "⚪ Manual";
+            const reasonColor = p.closeReason === "take_profit" ? "text-emerald-400 bg-emerald-500/15" : p.closeReason === "rug_detected" ? "text-red-400 bg-red-500/20" : p.closeReason === "stop_loss" ? "text-red-400 bg-red-500/15" : "text-white/50 bg-white/8";
+            const reasonLabel = p.closeReason === "take_profit" ? "✅ TP Hit" : p.closeReason === "rug_detected" ? "☠️ Rug" : p.closeReason === "stop_loss" ? "🛑 SL Hit" : "⚪ Manual";
             const isConfirming = confirmDeleteId === p.positionId;
             const aiExpanded = expandedAi.has(p.positionId);
             const hasAi = !!(p.llmReasoning || p.llmRisks?.length || p.llmStrengths?.length);

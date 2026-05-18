@@ -1,5 +1,6 @@
 import { randomUUID } from "crypto";
 import { logger } from "../lib/logger.js";
+import { type RugCheckResult } from "./rugcheck.service.js";
 import { query, execute } from "../lib/db.js";
 import { scannerService } from "./scanner.service.js";
 import { alertsService } from "./alerts.service.js";
@@ -91,6 +92,10 @@ function rowToPosition(r: DbRow): Position {
     llmRiskLevel: r.llm_risk_level as string | undefined,
     llmSecondaryVerdict: r.llm_secondary_verdict as string | undefined,
     llmSecondaryProvider: r.llm_secondary_provider as string | undefined,
+    rugScore: r.rug_score != null ? Number(r.rug_score) : undefined,
+    rugLpLockedPct: r.rug_lp_locked_pct != null ? Number(r.rug_lp_locked_pct) : undefined,
+    rugTopHolderPct: r.rug_top_holder_pct != null ? Number(r.rug_top_holder_pct) : undefined,
+    rugWarnRisks: r.rug_warn_risks ? JSON.parse(r.rug_warn_risks as string) as string[] : undefined,
   };
 }
 
@@ -170,12 +175,13 @@ class PaperTradingService {
           tp1_hit, tp2_hit, remaining_size_sol, partial_pnl_sol,
           pair_age_minutes, llm_score, llm_risk_level,
           llm_secondary_verdict, llm_secondary_provider,
+          rug_score, rug_lp_locked_pct, rug_top_holder_pct, rug_warn_risks,
           updated_at
         ) VALUES (
           $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,
           $16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,
           $29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,
-          $42,$43,$44,$45,$46,NOW()
+          $42,$43,$44,$45,$46,$47,$48,$49,$50,NOW()
         )
         ON CONFLICT (position_id) DO UPDATE SET
           symbol = EXCLUDED.symbol,
@@ -203,6 +209,10 @@ class PaperTradingService {
           llm_risk_level = EXCLUDED.llm_risk_level,
           llm_secondary_verdict = EXCLUDED.llm_secondary_verdict,
           llm_secondary_provider = EXCLUDED.llm_secondary_provider,
+          rug_score = EXCLUDED.rug_score,
+          rug_lp_locked_pct = EXCLUDED.rug_lp_locked_pct,
+          rug_top_holder_pct = EXCLUDED.rug_top_holder_pct,
+          rug_warn_risks = EXCLUDED.rug_warn_risks,
           updated_at = NOW()`,
         [
           pos.positionId, pos.symbol, pos.tokenName ?? null, pos.pairAddress,
@@ -224,6 +234,9 @@ class PaperTradingService {
           pos.pairAgeMinutes ?? null,
           pos.llmScore ?? null, pos.llmRiskLevel ?? null,
           pos.llmSecondaryVerdict ?? null, pos.llmSecondaryProvider ?? null,
+          pos.rugScore ?? null, pos.rugLpLockedPct ?? null,
+          pos.rugTopHolderPct ?? null,
+          pos.rugWarnRisks ? JSON.stringify(pos.rugWarnRisks) : null,
         ],
       );
     } catch (err) {
@@ -260,7 +273,7 @@ class PaperTradingService {
     return this.closedTrades.some((t) => t.contractAddress === contractAddress);
   }
 
-  async buyDirect(token: ScannedToken, sizeSol: number, slOverridePct?: number, llmAnalysis?: LlmAnalysis): Promise<Position> {
+  async buyDirect(token: ScannedToken, sizeSol: number, slOverridePct?: number, llmAnalysis?: LlmAnalysis, rugCheck?: RugCheckResult): Promise<Position> {
     if (sizeSol <= 0) throw new Error("sizeSol must be positive");
     if (sizeSol > this.solBalance) {
       throw new Error(`Insufficient balance. Available: ${this.solBalance.toFixed(4)} SOL`);
@@ -373,6 +386,12 @@ class PaperTradingService {
         llmRiskLevel: llmAnalysis.llmRiskLevel,
         llmSecondaryVerdict: llmAnalysis.secondaryVerdict,
         llmSecondaryProvider: llmAnalysis.secondaryProvider,
+      } : {}),
+      ...(rugCheck ? {
+        rugScore: rugCheck.score,
+        rugLpLockedPct: rugCheck.lpLockedPct,
+        rugTopHolderPct: rugCheck.topHolderPct,
+        rugWarnRisks: rugCheck.warnRisks,
       } : {}),
     };
 

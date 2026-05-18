@@ -28,8 +28,21 @@ export interface Position {
   llmRisks?: string[];
   llmStrengths?: string[];
   llmDurationMs?: number;
+  llmScore?: number; llmRiskLevel?: string;
+  llmSecondaryVerdict?: string; llmSecondaryProvider?: string;
+  // tiered TP tracking
+  tp1Price?: number; tp2Price?: number;
+  tp1Hit?: boolean; tp2Hit?: boolean;
+  remainingSizeSol?: number; partialPnlSol?: number;
+  pairAgeMinutes?: number;
+  // RugCheck on-chain safety data captured at entry
+  rugScore?: number;
+  rugLpLockedPct?: number;
+  rugTopHolderPct?: number;
+  rugWarnRisks?: string[];
   // live fields (from getOpenPositionsWithLivePnl)
   livePnlSol?: number; livePnlPercent?: number; currentPrice?: number;
+  entryLiquidityUsd?: number;
 }
 
 export interface Portfolio {
