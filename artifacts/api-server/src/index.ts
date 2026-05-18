@@ -217,15 +217,42 @@ if (process.env["DATABASE_URL"]) {
       `);
       await migClient.query(`
         CREATE TABLE IF NOT EXISTS loss_journal (
-          id TEXT PRIMARY KEY, symbol TEXT NOT NULL, pair_address TEXT NOT NULL,
-          entry_price DOUBLE PRECISION NOT NULL, exit_price DOUBLE PRECISION NOT NULL,
-          size_sol DOUBLE PRECISION NOT NULL, pnl_usd DOUBLE PRECISION NOT NULL,
-          pnl_pct DOUBLE PRECISION NOT NULL, close_reason TEXT NOT NULL,
-          opened_at TIMESTAMPTZ NOT NULL, closed_at TIMESTAMPTZ NOT NULL,
-          ai_score INTEGER, llm_verdict TEXT, llm_provider TEXT, llm_reasoning TEXT,
-          lesson TEXT, tags JSONB
+          position_id TEXT PRIMARY KEY, symbol TEXT NOT NULL, contract_address TEXT,
+          opened_at TIMESTAMPTZ, closed_at TIMESTAMPTZ,
+          hold_time_ms BIGINT, pnl_sol DOUBLE PRECISION, pnl_percent DOUBLE PRECISION,
+          ai_score INTEGER, confidence INTEGER,
+          entry_mcap_usd DOUBLE PRECISION, entry_liquidity_usd DOUBLE PRECISION,
+          sl_percent DOUBLE PRECISION, tp_percent DOUBLE PRECISION,
+          tags JSONB, warnings JSONB, recorded_at BIGINT, note TEXT, is_win BOOLEAN
         )
       `);
+      await migClient.query(`
+        DO $$ BEGIN
+          IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='loss_journal' AND column_name='id') THEN
+            ALTER TABLE loss_journal RENAME COLUMN id TO position_id;
+          END IF;
+        END $$;
+      `).catch(() => {});
+      const lossJournalCols = [
+        ["contract_address", "TEXT"],
+        ["hold_time_ms", "BIGINT"],
+        ["pnl_sol", "DOUBLE PRECISION"],
+        ["pnl_percent", "DOUBLE PRECISION"],
+        ["confidence", "INTEGER"],
+        ["entry_mcap_usd", "DOUBLE PRECISION"],
+        ["entry_liquidity_usd", "DOUBLE PRECISION"],
+        ["sl_percent", "DOUBLE PRECISION"],
+        ["tp_percent", "DOUBLE PRECISION"],
+        ["warnings", "JSONB"],
+        ["recorded_at", "BIGINT"],
+        ["note", "TEXT"],
+        ["is_win", "BOOLEAN"],
+      ];
+      for (const [col, type] of lossJournalCols) {
+        await migClient.query(
+          `ALTER TABLE loss_journal ADD COLUMN IF NOT EXISTS ${col} ${type}`
+        );
+      }
       await migClient.query(`
         CREATE TABLE IF NOT EXISTS alerts (
           id TEXT PRIMARY KEY, type TEXT NOT NULL, title TEXT NOT NULL,
