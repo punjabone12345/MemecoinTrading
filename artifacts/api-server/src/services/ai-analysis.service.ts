@@ -166,14 +166,14 @@ async function callGemini(prompt: string, timeoutMs: number): Promise<string> {
 
 // ─── Groq (fallback) ──────────────────────────────────────────────────────────
 
-async function callGroq(prompt: string, timeoutMs: number): Promise<string> {
+async function callGroqModel(prompt: string, model: string, timeoutMs: number): Promise<string> {
   const apiKey = process.env["GROQ_API_KEY"];
   if (!apiKey) throw new Error("GROQ_API_KEY not set");
 
   const res = await axios.post(
     "https://api.groq.com/openai/v1/chat/completions",
     {
-      model: "llama-3.3-70b-versatile",
+      model,
       messages: [
         {
           role: "system",
@@ -201,14 +201,15 @@ async function callGroq(prompt: string, timeoutMs: number): Promise<string> {
 
 // ─── Main export: analyse a token with LLM before trading ────────────────────
 
-const GEMINI_TIMEOUT_MS = 6_000;
-const GROQ_TIMEOUT_MS   = 5_000;
+const GEMINI_TIMEOUT_MS      = 3_000;   // fail fast — quota errors respond quickly
+const GROQ_FAST_TIMEOUT_MS   = 8_000;   // llama-3.1-8b-instant — very fast model
+const GROQ_FALLBACK_TIMEOUT_MS = 12_000; // llama-3.3-70b-versatile — slower but smarter
 
 export async function analyseTokenWithAi(input: TokenAnalysisInput): Promise<LlmAnalysis> {
   const start = Date.now();
   const prompt = buildPrompt(input);
 
-  // ── Try Gemini first ────────────────────────────────────────────────────────
+  // ── Try Gemini first (fast fail — quota errors come back in <1s) ────────────
   try {
     const raw = await callGemini(prompt, GEMINI_TIMEOUT_MS);
     const parsed = parseJsonVerdict(raw);
@@ -222,24 +223,41 @@ export async function analyseTokenWithAi(input: TokenAnalysisInput): Promise<Llm
     }
     throw new Error("Gemini JSON parse failed");
   } catch (geminiErr) {
-    logger.warn({ err: geminiErr, symbol: input.symbol }, "AI analysis: Gemini failed — trying Groq");
+    logger.warn({ err: (geminiErr as Error).message, symbol: input.symbol }, "AI analysis: Gemini failed — trying Groq fast");
   }
 
-  // ── Fallback: Groq ──────────────────────────────────────────────────────────
+  // ── Groq primary: llama-3.1-8b-instant (very fast, ~1-2s) ───────────────────
   try {
-    const raw = await callGroq(prompt, GROQ_TIMEOUT_MS);
+    const raw = await callGroqModel(prompt, "llama-3.1-8b-instant", GROQ_FAST_TIMEOUT_MS);
     const parsed = parseJsonVerdict(raw);
     if (parsed) {
       const result: LlmAnalysis = { ...parsed, provider: "groq", durationMs: Date.now() - start };
       logger.info(
-        { symbol: input.symbol, verdict: result.verdict, confidence: result.confidence, durationMs: result.durationMs },
-        "AI analysis: Groq verdict",
+        { symbol: input.symbol, verdict: result.verdict, confidence: result.confidence, model: "8b-instant", durationMs: result.durationMs },
+        "AI analysis: Groq (8b-instant) verdict",
       );
       return result;
     }
-    throw new Error("Groq JSON parse failed");
+    throw new Error("Groq 8b JSON parse failed");
+  } catch (groqFastErr) {
+    logger.warn({ err: (groqFastErr as Error).message, symbol: input.symbol }, "AI analysis: Groq 8b-instant failed — trying 70b fallback");
+  }
+
+  // ── Groq fallback: llama-3.3-70b-versatile (smarter, slower) ────────────────
+  try {
+    const raw = await callGroqModel(prompt, "llama-3.3-70b-versatile", GROQ_FALLBACK_TIMEOUT_MS);
+    const parsed = parseJsonVerdict(raw);
+    if (parsed) {
+      const result: LlmAnalysis = { ...parsed, provider: "groq", durationMs: Date.now() - start };
+      logger.info(
+        { symbol: input.symbol, verdict: result.verdict, confidence: result.confidence, model: "70b-versatile", durationMs: result.durationMs },
+        "AI analysis: Groq (70b-versatile) verdict",
+      );
+      return result;
+    }
+    throw new Error("Groq 70b JSON parse failed");
   } catch (groqErr) {
-    logger.warn({ err: groqErr, symbol: input.symbol }, "AI analysis: Groq also failed — proceeding without LLM");
+    logger.warn({ err: (groqErr as Error).message, symbol: input.symbol }, "AI analysis: all LLM providers failed — failing closed");
   }
 
   // ── Both failed — fail CLOSED (never trade without LLM confirmation) ─────────

@@ -25,6 +25,7 @@ export interface AutoTraderConfig {
   // Activity / momentum
   minBuyRatio1h: number;       // 0–1, e.g. 0.55 = 55% buys
   minPriceChange1h: number;    // %, must be positive momentum
+  maxPriceChange1h: number;    // %, cap to avoid chasing already-pumped tokens
   minTransactions24h: number;
   // Market cap sweet spot
   minMcapUsd: number;
@@ -120,26 +121,27 @@ const DEFAULT_CONFIG: AutoTraderConfig = {
   minConfidence: 65,
 
   // ── Liquidity & volume ────────────────────────────────────────────────────
-  minLiquidityUsd: 20_000,      // $20K — proper exit depth for 0.5 SOL trade
-  minVolume24hUsd: 5_000,       // $5K 24h — proven trading activity
-  minVolume1hUsd:  2_000,       // $2K last hour — actively traded RIGHT NOW
+  minLiquidityUsd: 18_000,      // $18K — slightly relaxed for more opportunities
+  minVolume24hUsd: 25_000,      // $25K 24h — proven meaningful trading activity
+  minVolume1hUsd:  6_000,       // $6K last hour — actively traded RIGHT NOW
 
   // ── Momentum ─────────────────────────────────────────────────────────────
-  minBuyRatio1h: 0.60,          // 60% buys — clear buyer conviction
-  minPriceChange1h: 8,          // +8% minimum — real momentum, not noise
-  minTransactions24h: 50,       // 50+ txns — real wallets, not ghost chain
+  minBuyRatio1h: 0.62,          // 62% buys — clear buyer conviction
+  minPriceChange1h: 5,          // +5% minimum — catches earlier-stage moves
+  maxPriceChange1h: 70,         // +70% max — avoid tokens that already pumped
+  minTransactions24h: 100,      // 100+ txns — real wallets, not ghost chain
 
   // ── Market cap sweet spot ────────────────────────────────────────────────
-  minMcapUsd: 50_000,           // $50K floor — tiny caps are almost always rugs
-  maxMcapUsd: 10_000_000,       // $10M ceiling — already-pumped, no room to run
+  minMcapUsd: 25_000,           // $25K floor — more small-cap opportunities
+  maxMcapUsd: 650_000,          // $650K ceiling — tight cap keeps us in early stage
 
   // ── Pair age ──────────────────────────────────────────────────────────────
-  minPairAgeMinutes: 15,        // 15 min — rugs almost always die in <10 min
-  maxPairAgeHours: 48,          // 48h max — trade fresh/active tokens only
+  minPairAgeMinutes: 8,         // 8 min — catch earlier moves (most rugs die in <3 min)
+  maxPairAgeHours: 8,           // 8h max — fresh/active tokens only, no stale pumps
 
   // ── Rug guards ────────────────────────────────────────────────────────────
-  minLiquidityMcapRatio: 0.05,  // 5% liq/mcap — tighter pool drain guard
-  maxFdvMcapRatio: 6.0,         // FDV ≤ 6× mcap — less supply overhang risk
+  minLiquidityMcapRatio: 0.12,  // 12% liq/mcap — stronger pool drain guard
+  maxFdvMcapRatio: 3.5,         // FDV ≤ 3.5× mcap — much tighter supply overhang
   maxPriceDropH6Pct: -20,       // not crashed >20% in last 6h
   maxPriceDropH24Pct: -40,      // not crashed >40% in last 24h
 };
@@ -267,6 +269,9 @@ export function qualityFilter(pair: DexScreenerPair, cfg: AutoTraderConfig): Fil
   // Momentum — must be actively pumping, not a ghost from hours ago
   if (pc1h < cfg.minPriceChange1h)
     return fail(`1h change ${pc1h.toFixed(1)}% < +${cfg.minPriceChange1h}% min`);
+  // Cap: already-pumped token with 70%+ 1h gain is late entry, high reversal risk
+  if (cfg.maxPriceChange1h > 0 && pc1h > cfg.maxPriceChange1h)
+    return fail(`1h change ${pc1h.toFixed(1)}% > ${cfg.maxPriceChange1h}% max — likely already pumped, late entry risk`);
 
   // Market cap sweet spot
   if (mcap < cfg.minMcapUsd)
@@ -622,8 +627,14 @@ class AutoTraderService {
         try {
           let dexPair = await scannerService.getPairFromDex(c.pairAddress);
 
-          // Fallback: pairAddress lookup can fail for very new or recently re-indexed tokens.
-          // Try the token contract address endpoint (/tokens/v1/solana/{address}) instead.
+          // Fallback 1: pairAddress lookup can fail for very new or recently re-indexed tokens.
+          // Wait 1s and retry once — DexScreener indexing can lag a few seconds.
+          if (!dexPair) {
+            await new Promise(r => setTimeout(r, 1_000));
+            dexPair = await scannerService.getPairFromDex(c.pairAddress);
+          }
+
+          // Fallback 2: Try the token contract address endpoint instead.
           if (!dexPair) {
             const contractAddress = c.pair.baseToken.address;
             if (contractAddress) {
@@ -633,7 +644,8 @@ class AutoTraderService {
           }
 
           if (!dexPair) {
-            decisions.push({ ...c, action: "filtered", reason: "DexScreener: pair not found via both pairAddress and contract address — skipping" });
+            decisions.push({ ...c, action: "filtered", reason: "DexScreener: pair not verified (may be delisted or very new) — skipping to protect capital" });
+            logger.warn({ symbol: c.symbol, pairAddress: c.pairAddress }, "DexScreener verification failed after retry + contract fallback");
             continue;
           }
 

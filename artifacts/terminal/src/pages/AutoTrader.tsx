@@ -365,6 +365,7 @@ export default function AutoTrader() {
           <ConfigRow label="Min Vol 1h" field="minVolume1hUsd" value={localConfig.minVolume1hUsd} step={500} onChange={handleChange} unit="USD" />
           <ConfigRow label="Min Buy Ratio 1h" field="minBuyRatio1h" value={localConfig.minBuyRatio1h} step={0.01} onChange={handleChange} unit="0.0–1.0" />
           <ConfigRow label="Min 1h Change" field="minPriceChange1h" value={localConfig.minPriceChange1h} step={0.5} onChange={handleChange} unit="%" />
+          <ConfigRow label="Max 1h Change" field="maxPriceChange1h" value={localConfig.maxPriceChange1h} step={5} onChange={handleChange} unit="% (late pump guard)" />
           <ConfigRow label="Min Transactions 24h" field="minTransactions24h" value={localConfig.minTransactions24h} onChange={handleChange} unit="txns" />
         </Section>
 

@@ -15,8 +15,8 @@ const MAX_RESULTS_PER_QUERY = 30;   // DexScreener returns up to 30 per search
 
 // ─── Pool lifecycle ───────────────────────────────────────────────────────────
 const CLEANUP_INTERVAL_MS  = 2 * 60 * 1_000;
-const TOKEN_TTL_MS         = 45 * 60 * 1_000;   // keep tokens for 45 min
-const MAX_POOL_AGE_HOURS   = 72;
+const TOKEN_TTL_MS         = 20 * 60 * 1_000;   // 20 min since first seen — forces pool rotation
+const MAX_POOL_AGE_HOURS   = 10;                 // aligned with maxPairAgeHours filter
 const MAX_POOL_AGE_MS      = MAX_POOL_AGE_HOURS * 60 * 60 * 1_000;
 const MIN_POOL_LIQUIDITY_USD = 500;              // wide net — auto-trader filters more tightly
 const HIGH_AI_SCORE_THRESHOLD = 65;
@@ -138,6 +138,10 @@ export function mapPairToToken(pair: DexScreenerPair): ScannedToken {
 
 class ScannerService {
   private tokens: Map<string, ScannedToken> = new Map();
+  // Tracks when each token was FIRST added — used for TTL expiry.
+  // lastUpdated on the token itself is refreshed every scan cycle,
+  // so we can't use it for expiry — it would prevent rotation.
+  private tokenFirstSeen: Map<string, number> = new Map();
   private intervalId: ReturnType<typeof setInterval> | null = null;
   private cleanupIntervalId: ReturnType<typeof setInterval> | null = null;
   private broadcaster: ((tokens: ScannedToken[]) => void) | null = null;
@@ -155,15 +159,20 @@ class ScannerService {
   private cleanup() {
     const cutoff = Date.now() - TOKEN_TTL_MS;
     let removed = 0;
-    for (const [addr, token] of this.tokens) {
-      if (token.lastUpdated < cutoff) {
+    for (const [addr] of this.tokens) {
+      // Expire based on when we FIRST saw the token, not when we last updated it.
+      // This forces pool rotation — popular tokens that keep showing in search
+      // results still cycle out after TOKEN_TTL_MS (20 min).
+      const firstSeen = this.tokenFirstSeen.get(addr) ?? 0;
+      if (firstSeen < cutoff) {
         this.tokens.delete(addr);
+        this.tokenFirstSeen.delete(addr);
         removed++;
       }
     }
     if (removed > 0) {
       this.totalExpired += removed;
-      logger.debug({ removed, remaining: this.tokens.size, totalExpired: this.totalExpired }, "Scanner: expired stale tokens");
+      logger.debug({ removed, remaining: this.tokens.size, totalExpired: this.totalExpired }, "Scanner: expired stale tokens (firstSeen TTL)");
     }
   }
 
@@ -344,7 +353,12 @@ class ScannerService {
         const token = mapPairToToken(pair);
         const isNew = !this.tokens.has(token.pairAddress);
         this.tokens.set(token.pairAddress, token);
-        if (isNew) newCount++;
+        if (isNew) {
+          newCount++;
+          // Record first-seen timestamp — used by cleanup() for TTL-based expiry.
+          // We never update this so popular tokens still cycle out after 20 min.
+          this.tokenFirstSeen.set(token.pairAddress, Date.now());
+        }
 
         if (
           token.aiScore >= HIGH_AI_SCORE_THRESHOLD &&

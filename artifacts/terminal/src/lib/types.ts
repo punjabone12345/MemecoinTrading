@@ -57,7 +57,7 @@ export interface AutoTraderConfig {
   solPerTrade: number; maxConcurrentTrades: number;
   minAiScore: number; minConfidence: number;
   minLiquidityUsd: number; minVolume24hUsd: number; minVolume1hUsd: number;
-  minBuyRatio1h: number; minPriceChange1h: number; minTransactions24h: number;
+  minBuyRatio1h: number; minPriceChange1h: number; maxPriceChange1h: number; minTransactions24h: number;
   minMcapUsd: number; maxMcapUsd: number;
   minPairAgeMinutes: number; maxPairAgeHours: number;
   minLiquidityMcapRatio: number; maxFdvMcapRatio: number;
