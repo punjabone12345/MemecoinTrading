@@ -1,1 +1,24 @@
-[]
+[
+  {
+    "positionId": "adbe4cd7-beef-431c-b9ab-53fad7bc0897",
+    "symbol": "ROT",
+    "tokenName": "Hot Boy Summer",
+    "pairAddress": "AN2zgKTtgkXYQY8buCQX4VyqxgDEGjdUUyDDhZKJtJBf",
+    "contractAddress": "V3E7W2bzHYzdLGtx9S1ySx1wwcqd1yNPt8mVsWTpump",
+    "imageUrl": "https://cdn.dexscreener.com/cms/images/X2up_K8t-f9_ZSQQ?width=800&height=800&quality=95&format=auto",
+    "entryPrice": 0.00007148,
+    "sizeSol": 0.5,
+    "slPercent": 8,
+    "tpPercent": 35,
+    "slPrice": 0.0000657616,
+    "tpPrice": 0.00009649800000000001,
+    "entryMarketCap": 71487,
+    "entryLiquidityUsd": 20805,
+    "tpMarketCap": 96507.45000000001,
+    "slMarketCap": 65768.04000000001,
+    "aiScore": 73,
+    "confidence": 100,
+    "openedAt": "2026-05-19T14:37:38.826Z",
+    "status": "open"
+  }
+]
