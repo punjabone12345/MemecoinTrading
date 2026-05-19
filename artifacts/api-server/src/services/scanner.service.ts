@@ -8,26 +8,32 @@ const DEXSCREENER_BASE = "https://api.dexscreener.com";
 
 // ─── Timing & limits ─────────────────────────────────────────────────────────
 // Budget: DexScreener public limit ≈ 300 req/min (5 req/s).
-// Scanner uses at most CONCURRENCY requests at a time with 200 ms between
-// batches → ~4 req/s peak for scanning, leaving ~1 req/s headroom for
-// the auto-trader's per-trade verification calls.
-const SCAN_INTERVAL_MS      = 5_000;  // 5 s between ticks — faster discovery
-const QUERIES_PER_SCAN      = 15;     // queries per tick — 15/5s = 3 req/s
-const SCAN_CONCURRENCY      = 5;      // max parallel DexScreener requests at once
-const SCAN_BATCH_DELAY_MS   = 150;    // ms pause between batches of SCAN_CONCURRENCY
+// Scanner uses at most CONCURRENCY requests at a time with 80 ms between
+// batches → ~6 req/s peak for DexScreener, leaving headroom for verification.
+// GeckoTerminal free tier: 30 req/min → 3 pages every 10s = 18 req/min.
+const SCAN_INTERVAL_MS      = 5_000;  // 5 s between ticks
+const QUERIES_PER_SCAN      = 30;     // queries per tick — 30/5s = 6 req/s
+const SCAN_CONCURRENCY      = 8;      // max parallel DexScreener requests at once
+const SCAN_BATCH_DELAY_MS   = 80;     // ms pause between batches
 const MAX_RESULTS_PER_QUERY = 30;     // DexScreener returns up to 30 per search
 
-// Fast new-pairs watcher — runs every 15 s specifically to catch brand new launches
-const NEW_PAIRS_INTERVAL_MS = 15_000;
+// Fast new-pairs watcher — DexScreener keyword scan every 8 s
+const NEW_PAIRS_INTERVAL_MS = 8_000;
+// GeckoTerminal new + trending pools — independent source, runs every 10 s
+const GT_SCAN_INTERVAL_MS   = 10_000;
+
 // These high-signal queries consistently surface pump.fun launches and fresh memecoins
 const TRENDING_QUERIES = [
   "pump", "new", "launch", "gem", "moon", "1000x", "alpha", "fire",
   "bonk", "dog", "cat", "pepe", "ai", "sol", "meme",
+  "inu", "baby", "shib", "doge", "floki", "elon", "trump", "chad",
+  "pnut", "wif", "myro", "bome", "popcat", "fwog", "chillguy",
+  "giga", "sigma", "based", "degen", "wagmi", "send", "gg",
 ];
 
 // ─── Pool lifecycle ───────────────────────────────────────────────────────────
 const CLEANUP_INTERVAL_MS  = 2 * 60 * 1_000;
-const TOKEN_TTL_MS         = 20 * 60 * 1_000;   // keep tokens for 20 min (was 45) — faster churn = fresher pool
+const TOKEN_TTL_MS         = 45 * 60 * 1_000;   // keep tokens for 45 min — larger pool at any time
 const MAX_POOL_AGE_HOURS   = 72;
 const MAX_POOL_AGE_MS      = MAX_POOL_AGE_HOURS * 60 * 60 * 1_000;
 const MIN_POOL_LIQUIDITY_USD = 500;              // wide net — auto-trader filters more tightly
@@ -148,15 +154,40 @@ export function mapPairToToken(pair: DexScreenerPair): ScannedToken {
 
 // ─── Scanner class ────────────────────────────────────────────────────────────
 
+// Shared GeckoTerminal pool type used across discovery methods
+type GtPool = {
+  attributes: {
+    address: string;
+    name: string;
+    dex_id: string;
+    reserve_in_usd: string;
+    volume_usd: { m5?: string; h1?: string; h6?: string; h24: string };
+    fdv_usd: string | null;
+    market_cap_usd: string | null;
+    base_token_price_usd: string;
+    transactions: {
+      m5?: { buys?: number; sells?: number };
+      h1?: { buys?: number; sells?: number };
+      h6?: { buys?: number; sells?: number };
+      h24?: { buys?: number; sells?: number };
+    };
+    price_change_percentage: { m5?: string; h1?: string; h6?: string; h24?: string };
+    pool_created_at: string | null;
+  };
+  relationships: { base_token: { data: { id: string } } };
+};
+
 class ScannerService {
   private tokens: Map<string, ScannedToken> = new Map();
   private intervalId: ReturnType<typeof setInterval> | null = null;
   private newPairsIntervalId: ReturnType<typeof setInterval> | null = null;
+  private gtIntervalId: ReturnType<typeof setInterval> | null = null;
   private cleanupIntervalId: ReturnType<typeof setInterval> | null = null;
   private broadcaster: ((tokens: ScannedToken[]) => void) | null = null;
   private alreadyAlertedHighScore: Set<string> = new Set();
   private isScanning = false;
   private isTrendingScanning = false;
+  private isGtScanning = false;
   private scanCount = 0;
   private totalExpired = 0;
   private totalSkippedStale = 0;
@@ -406,8 +437,8 @@ class ScannerService {
     if (this.isTrendingScanning) return;
     this.isTrendingScanning = true;
     try {
-      // Pick 5 random queries from the trending list each run for variety
-      const shuffled = [...TRENDING_QUERIES].sort(() => Math.random() - 0.5).slice(0, 5);
+      // Pick 10 random queries from the trending list each run for variety
+      const shuffled = [...TRENDING_QUERIES].sort(() => Math.random() - 0.5).slice(0, 10);
       const results = await Promise.allSettled(
         shuffled.map((q) =>
           axios.get<{ pairs: DexScreenerPair[] }>(
@@ -453,33 +484,147 @@ class ScannerService {
     }
   }
 
+  // ── Source 6: GeckoTerminal new pools + trending — full discovery ─────────
+  // GeckoTerminal indexes every Solana pool independently of DexScreener.
+  // /new_pools returns the most recently created pools — the freshest launches.
+  // /trending_pools returns pools with the highest recent activity.
+  // Both endpoints are free, no API key needed.
+
+  private convertGtPoolToPair(pool: GtPool): DexScreenerPair | null {
+    const attr = pool.attributes;
+    const liq   = parseFloat(attr.reserve_in_usd) || 0;
+    if (liq < MIN_POOL_LIQUIDITY_USD) return null;
+    const price = parseFloat(attr.base_token_price_usd) || 0;
+    if (price <= 0) return null;
+
+    // Extract Solana token CA from relationship id ("solana_<address>")
+    const rawId = pool.relationships?.base_token?.data?.id ?? "";
+    const tokenAddress = rawId.replace(/^solana_/, "");
+    if (!tokenAddress || tokenAddress.length < 20) return null;
+
+    const createdAt = attr.pool_created_at ? new Date(attr.pool_created_at).getTime() : undefined;
+    if (createdAt && (Date.now() - createdAt) > MAX_POOL_AGE_MS) return null;
+
+    const vol24 = parseFloat(attr.volume_usd?.h24) || 0;
+    const vol1h = parseFloat(attr.volume_usd?.h1 ?? "0") || 0;
+    const vol5m = parseFloat(attr.volume_usd?.m5 ?? "0") || 0;
+    const mcap  = parseFloat(attr.market_cap_usd ?? attr.fdv_usd ?? "0") || 0;
+    const fdv   = parseFloat(attr.fdv_usd ?? "0") || mcap;
+    const sym   = attr.name.split(/[\s/]+/)[0] ?? "UNKNOWN";
+
+    return {
+      chainId: "solana",
+      dexId: attr.dex_id ?? "unknown",
+      url: `https://www.geckoterminal.com/solana/pools/${attr.address}`,
+      pairAddress: attr.address,
+      baseToken: { address: tokenAddress, name: sym, symbol: sym },
+      quoteToken: { address: "", name: "SOL", symbol: "SOL" },
+      priceNative: String(price),
+      priceUsd: String(price),
+      txns: {
+        m5:  { buys: attr.transactions?.m5?.buys ?? 0,  sells: attr.transactions?.m5?.sells ?? 0 },
+        h1:  { buys: attr.transactions?.h1?.buys ?? 0,  sells: attr.transactions?.h1?.sells ?? 0 },
+        h6:  { buys: attr.transactions?.h6?.buys ?? 0,  sells: attr.transactions?.h6?.sells ?? 0 },
+        h24: { buys: attr.transactions?.h24?.buys ?? 0, sells: attr.transactions?.h24?.sells ?? 0 },
+      },
+      volume: { m5: vol5m, h1: vol1h, h6: 0, h24: vol24 },
+      priceChange: {
+        m5:  parseFloat(attr.price_change_percentage?.m5  ?? "0") || 0,
+        h1:  parseFloat(attr.price_change_percentage?.h1  ?? "0") || 0,
+        h6:  parseFloat(attr.price_change_percentage?.h6  ?? "0") || 0,
+        h24: parseFloat(attr.price_change_percentage?.h24 ?? "0") || 0,
+      },
+      liquidity: { usd: liq, base: 0, quote: 0 },
+      fdv,
+      marketCap: mcap,
+      pairCreatedAt: createdAt,
+      info: {},
+    };
+  }
+
+  private async scanGeckoTerminal(): Promise<void> {
+    if (this.isGtScanning) return;
+    this.isGtScanning = true;
+    try {
+      type GtResponse = { data: GtPool[] };
+      const GT_BASE = "https://api.geckoterminal.com/api/v2";
+      const GT_HEADERS = { Accept: "application/json;version=20230302" };
+
+      // Fetch new pools (pages 1-3) AND trending pools in parallel
+      const [p1, p2, p3, trend] = await Promise.allSettled([
+        axios.get<GtResponse>(`${GT_BASE}/networks/solana/new_pools?page=1`, { timeout: 12_000, headers: GT_HEADERS }),
+        axios.get<GtResponse>(`${GT_BASE}/networks/solana/new_pools?page=2`, { timeout: 12_000, headers: GT_HEADERS }),
+        axios.get<GtResponse>(`${GT_BASE}/networks/solana/new_pools?page=3`, { timeout: 12_000, headers: GT_HEADERS }),
+        axios.get<GtResponse>(`${GT_BASE}/networks/solana/trending_pools?page=1`, { timeout: 12_000, headers: GT_HEADERS }),
+      ]);
+
+      const allGtPools: GtPool[] = [];
+      for (const r of [p1, p2, p3, trend]) {
+        if (r.status === "fulfilled" && Array.isArray(r.value.data?.data)) {
+          allGtPools.push(...r.value.data.data);
+        }
+      }
+
+      let newCount = 0;
+      for (const pool of allGtPools) {
+        const pair = this.convertGtPoolToPair(pool);
+        if (!pair) continue;
+
+        const token = mapPairToToken(pair);
+        const isNew = !this.tokens.has(token.pairAddress);
+        this.tokens.set(token.pairAddress, token);
+        if (isNew) newCount++;
+
+        if (token.aiScore >= HIGH_AI_SCORE_THRESHOLD && !this.alreadyAlertedHighScore.has(token.pairAddress)) {
+          this.alreadyAlertedHighScore.add(token.pairAddress);
+          alertsService.highAiScore(token.symbol, token.aiScore, token.pairAddress);
+          setTimeout(() => this.alreadyAlertedHighScore.delete(token.pairAddress), 300_000);
+        }
+      }
+
+      if (newCount > 0) {
+        logger.debug({ newCount, gtPoolsFetched: allGtPools.length, total: this.tokens.size }, "Scanner GT: new tokens ingested");
+        this.broadcaster?.(this.getAll());
+      }
+    } catch (err) {
+      logger.warn({ err: (err as Error).message }, "Scanner GT: error");
+    } finally {
+      this.isGtScanning = false;
+    }
+  }
+
   // ── Lifecycle ──────────────────────────────────────────────────────────────
 
   start() {
     if (this.intervalId) return;
     void this.scan();
     void this.scanTrending();
-    this.intervalId = setInterval(() => void this.scan(), SCAN_INTERVAL_MS);
-    this.newPairsIntervalId = setInterval(() => void this.scanTrending(), NEW_PAIRS_INTERVAL_MS);
-    this.cleanupIntervalId = setInterval(() => this.cleanup(), CLEANUP_INTERVAL_MS);
+    void this.scanGeckoTerminal();
+    this.intervalId       = setInterval(() => void this.scan(),               SCAN_INTERVAL_MS);
+    this.newPairsIntervalId = setInterval(() => void this.scanTrending(),     NEW_PAIRS_INTERVAL_MS);
+    this.gtIntervalId     = setInterval(() => void this.scanGeckoTerminal(),  GT_SCAN_INTERVAL_MS);
+    this.cleanupIntervalId = setInterval(() => this.cleanup(),                CLEANUP_INTERVAL_MS);
     logger.info(
       {
         intervalMs: SCAN_INTERVAL_MS,
         trendingIntervalMs: NEW_PAIRS_INTERVAL_MS,
+        gtIntervalMs: GT_SCAN_INTERVAL_MS,
         queriesPerScan: QUERIES_PER_SCAN,
         totalQueryTerms: DISCOVERY_QUERIES.length,
+        trendingQueryTerms: TRENDING_QUERIES.length,
         tokenTtlMin: TOKEN_TTL_MS / 60_000,
         maxPoolAgeHours: MAX_POOL_AGE_HOURS,
         minPoolLiquidityUsd: MIN_POOL_LIQUIDITY_USD,
-        strategy: "alphabet-rotation + boosts/profiles + fast-trending(15s)",
+        strategy: "DexScreener(30q/5s) + curated + trending(10q/8s) + GeckoTerminal-new+trending(10s)",
       },
-      "Scanner started — broad discovery mode (alphabet + meme + curated + fast-trending)",
+      "Scanner started — MAXIMUM COVERAGE MODE (DexScreener + GeckoTerminal dual-source)",
     );
   }
 
   stop() {
-    if (this.intervalId) { clearInterval(this.intervalId); this.intervalId = null; }
-    if (this.newPairsIntervalId) { clearInterval(this.newPairsIntervalId); this.newPairsIntervalId = null; }
+    if (this.intervalId)        { clearInterval(this.intervalId);        this.intervalId = null; }
+    if (this.newPairsIntervalId){ clearInterval(this.newPairsIntervalId); this.newPairsIntervalId = null; }
+    if (this.gtIntervalId)      { clearInterval(this.gtIntervalId);      this.gtIntervalId = null; }
     if (this.cleanupIntervalId) { clearInterval(this.cleanupIntervalId); this.cleanupIntervalId = null; }
   }
 
@@ -602,22 +747,6 @@ class ScannerService {
 
   private async lookupViaGeckoTerminal(contractAddress: string): Promise<DexScreenerPair[]> {
     try {
-      type GtPool = {
-        attributes: {
-          address: string;
-          name: string;
-          dex_id: string;
-          reserve_in_usd: string;
-          volume_usd: { h24: string };
-          fdv_usd: string | null;
-          market_cap_usd: string | null;
-          base_token_price_usd: string;
-          transactions: { h1?: { buys?: number; sells?: number }; h24?: { buys?: number; sells?: number } };
-          price_change_percentage: { h1?: string; h24?: string };
-          pool_created_at: string | null;
-        };
-        relationships: { base_token: { data: { id: string } } };
-      };
       type GtResponse = { data: GtPool[] };
 
       const res = await axios.get<GtResponse>(
@@ -626,13 +755,13 @@ class ScannerService {
       );
       const pools = res.data?.data ?? [];
 
+      // Use convertGtPoolToPair but override tokenAddress with the known contractAddress
       return pools.slice(0, 5).map((pool): DexScreenerPair => {
         const attr = pool.attributes;
         const liq   = parseFloat(attr.reserve_in_usd) || 0;
         const vol24 = parseFloat(attr.volume_usd?.h24) || 0;
         const price = parseFloat(attr.base_token_price_usd) || 0;
         const mcap  = parseFloat(attr.market_cap_usd ?? attr.fdv_usd ?? "0") || 0;
-        // Derive a symbol from pool name (e.g. "TOKEN / SOL" → "TOKEN")
         const sym   = attr.name.split(/[\s/]+/)[0] ?? "UNKNOWN";
         return {
           chainId: "solana",
@@ -644,8 +773,8 @@ class ScannerService {
           priceNative: String(price),
           priceUsd: String(price),
           txns: {
-            m5:  { buys: 0, sells: 0 },
-            h1:  { buys: attr.transactions?.h1?.buys ?? 0, sells: attr.transactions?.h1?.sells ?? 0 },
+            m5:  { buys: attr.transactions?.m5?.buys ?? 0,  sells: attr.transactions?.m5?.sells ?? 0 },
+            h1:  { buys: attr.transactions?.h1?.buys ?? 0,  sells: attr.transactions?.h1?.sells ?? 0 },
             h6:  { buys: 0, sells: 0 },
             h24: { buys: attr.transactions?.h24?.buys ?? 0, sells: attr.transactions?.h24?.sells ?? 0 },
           },
