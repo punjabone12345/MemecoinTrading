@@ -3,7 +3,7 @@ import { logger } from "../lib/logger.js";
 import { sendTelegram, isTelegramConfigured, toIST, startHeartbeat } from "../lib/telegram.js";
 import { paperTradingService } from "./paper-trading.service.js";
 import { scannerService } from "./scanner.service.js";
-import { computeSignals, computeAiScore, computeConfidence, getDynamicRisk } from "./ai-scoring.service.js";
+import { computeSignals, computeAiScore, computeConfidence, getDynamicRisk, computeEntryBoosts } from "./ai-scoring.service.js";
 import { mapPairToToken } from "./scanner.service.js";
 import { analyseTokenWithAi, buildAnalysisInput } from "./ai-analysis.service.js";
 import { checkTokenSafety } from "./rugcheck.service.js";
@@ -24,9 +24,11 @@ export interface AutoTraderConfig {
   minVolume24hUsd: number;
   minVolume1hUsd: number;
   // Activity / momentum
-  minBuyRatio1h: number;       // 0–1, e.g. 0.55 = 55% buys
-  minPriceChange1h: number;    // %, must be positive momentum
+  minBuyRatio1h: number;        // 0–1, e.g. 0.55 = 55% buys
+  minPriceChange1h: number;     // %, must be positive momentum
+  maxPriceChange1h: number;     // %, reject vertical/parabolic pumps above this
   minTransactions24h: number;
+  minUniqueBuyers: number;      // proxy: buy txns in 1h (DexScreener has no wallet count)
   // Market cap sweet spot
   minMcapUsd: number;
   maxMcapUsd: number;
@@ -98,35 +100,37 @@ export interface AutoTraderStatus {
 // ─── Default config ────────────────────────────────────────────────────────────
 const DEFAULT_CONFIG: AutoTraderConfig = {
   solPerTrade: 0.5,
-  maxConcurrentTrades: 5,       // raised 3→5: more concurrent trades = more opportunity
+  maxConcurrentTrades: 3,
 
   // ── AI quality ────────────────────────────────────────────────────────────
-  minAiScore: 65,               // loosened 72→65: let decent setups through
-  minConfidence: 58,            // loosened 65→58: accept slightly lower data quality
+  minAiScore:    78,            // high-conviction only
+  minConfidence: 72,            // solid data quality required
 
   // ── Liquidity & volume ────────────────────────────────────────────────────
-  minLiquidityUsd:  20_000,     // loosened $30K→$20K: still avoids thin pools
-  minVolume24hUsd:   8_000,     // loosened 15K→8K: catches earlier-stage tokens
-  minVolume1hUsd:    2_000,     // loosened 5K→2K: allow quieter but valid setups
+  minLiquidityUsd:  28_000,     // deep pool for safe exit
+  minVolume24hUsd:  45_000,     // proven organic trading history
+  minVolume1hUsd:   12_000,     // strong activity RIGHT NOW
 
   // ── Momentum ─────────────────────────────────────────────────────────────
-  minBuyRatio1h:    0.58,       // loosened 0.68→0.58: 58% buys still bullish
-  minPriceChange1h: 4,          // loosened 8→4: allow quieter breakouts
-  minTransactions24h: 50,       // loosened 80→50: smaller but real organic markets
+  minBuyRatio1h:    0.68,       // 68% buy dominance — strong conviction
+  minPriceChange1h: 8,          // meaningful momentum, not flat
+  maxPriceChange1h: 55,         // reject vertical pumps — don't buy the top
+  minTransactions24h: 180,      // high activity = real organic market
+  minUniqueBuyers:  35,         // proxy: buy txns in 1h (no wallet-count API)
 
   // ── Market cap sweet spot ────────────────────────────────────────────────
-  minMcapUsd:  15_000,          // loosened 30K→15K: catch early gems
-  maxMcapUsd: 700_000,          // raised 400K→700K: still strong upside potential
+  minMcapUsd:   35_000,         // avoid dust/fake micro-caps
+  maxMcapUsd:  450_000,         // strong upside potential remains
 
   // ── Pair age ──────────────────────────────────────────────────────────────
-  minPairAgeMinutes:  5,        // loosened 10→5 min: earlier entry opportunity
-  maxPairAgeHours:   12,        // raised 6→12h: catch tokens still in price discovery
+  minPairAgeMinutes: 12,        // survive first high-risk window
+  maxPairAgeHours:    4,        // fresh tokens — price discovery still active
 
   // ── Rug guards ────────────────────────────────────────────────────────────
-  minLiquidityMcapRatio: 0.10,  // loosened 18%→10%: realistic for small caps
-  maxFdvMcapRatio:       8.0,   // loosened 6→8: more room on supply overhang
-  maxPriceDropH6Pct:   -22,     // loosened -15→-22: allow post-dip recoveries
-  maxPriceDropH24Pct:  -38,     // loosened -25→-38: don't block recovery setups
+  minLiquidityMcapRatio: 0.16,  // strong pool backing required
+  maxFdvMcapRatio:       2.5,   // almost no unlocked supply overhang
+  maxPriceDropH6Pct:   -18,     // reject heavy 6h dumps
+  maxPriceDropH24Pct:  -28,     // reject severe declines
 };
 
 // ─── Anti-rug + quality filter ────────────────────────────────────────────────
@@ -274,8 +278,8 @@ export function qualityFilter(pair: DexScreenerPair, cfg: AutoTraderConfig): Fil
   if (vol1h > 0 && liq > 0) {
     if (volLiqRatio < 0.3)
       return fail(`Vol/Liq ${volLiqRatio.toFixed(2)}x < 0.3x — not enough real interest relative to pool size`);
-    if (volLiqRatio > 8)
-      return fail(`Vol/Liq ${volLiqRatio.toFixed(1)}x > 8x — likely wash/fake volume manipulation`);
+    if (volLiqRatio > 5)
+      return fail(`Vol/Liq ${volLiqRatio.toFixed(1)}x > 5x — likely wash/fake volume manipulation`);
   }
 
   // Minimum recent buy transactions in 5m (proxy for unique buyers in window)
@@ -290,6 +294,45 @@ export function qualityFilter(pair: DexScreenerPair, cfg: AutoTraderConfig): Fil
     if (pacedHourlyVol < vol1h * 0.25)
       return fail(`Volume fading: 5m pace ~$${Math.round(pacedHourlyVol).toLocaleString()}/hr vs $${Math.round(vol1h).toLocaleString()}/hr 1h avg — momentum declining`);
   }
+
+  // ── Layer 3b — Extended config gates ──────────────────────────────────────
+
+  // Parabolic / vertical pump ceiling — don't buy the top
+  if (pc1h > cfg.maxPriceChange1h)
+    return fail(`Vertical pump: +${pc1h.toFixed(0)}% in 1h > ${cfg.maxPriceChange1h}% max — parabolic, not a healthy entry`);
+
+  // Unique buyer depth (proxy: buy txn count in 1h — DexScreener has no wallet-count API)
+  if (total1h >= 10 && buys1h < cfg.minUniqueBuyers)
+    return fail(`Weak participation: only ${buys1h} buy txns in 1h < ${cfg.minUniqueBuyers} min — not enough buyers`);
+
+  // ── Layer 3c — Hard manipulation & entry-quality rejections ───────────────
+
+  // Sellers dominating right now — don't buy into active distribution
+  if (total5m >= 10 && buyRatio5m < 0.40)
+    return fail(`Sell dominant 5m: ${(buyRatio5m * 100).toFixed(0)}% buys in last 5m (${total5m} txns) — sellers in control`);
+
+  // Volume spike without buyer participation — classic wash/fake volume pattern
+  if (vol5m > 0 && vol1h > 0 && total5m > 0) {
+    const expected5mPace = vol1h / 12;
+    const volSpike = vol5m / expected5mPace;
+    if (volSpike > 4 && buys5m < 8)
+      return fail(`Fake volume spike: 5m vol ${volSpike.toFixed(1)}x above 1h avg but only ${buys5m} buys — wash trading suspected`);
+  }
+
+  // Retracement >35% of 1h gain in last 5m — heavy selling into the pump
+  if (pc1h > 15 && pc5m !== null && pc5m < -4) {
+    const retracePct = (Math.abs(pc5m) / pc1h) * 100;
+    if (retracePct > 35)
+      return fail(`Heavy retracement: -${Math.abs(pc5m).toFixed(1)}% in 5m = ${retracePct.toFixed(0)}% of 1h gain — distribution into the pump`);
+  }
+
+  // Weak 5m bounce after severe 6h dump — dead cat confirmation
+  if (pc6h < -25 && pc5m !== null && pc5m < 2)
+    return fail(`Dead cat: -${Math.abs(pc6h).toFixed(0)}% in 6h, 5m bounce only ${pc5m?.toFixed(1)}% — not a real reversal`);
+
+  // Already pumped hard — if 1h > 3x AND no fresh 5m momentum → late entry trap
+  if (pc1h > 200 && pc5m !== null && pc5m <= 0)
+    return fail(`Late entry trap: +${pc1h.toFixed(0)}% in 1h and 5m now ${pc5m?.toFixed(1)}% — early buyers distributing`);
 
   // ═══════════════════════════════════════════════════════════════════════════
   // LAYER 4 — MOMENTUM FRESHNESS
@@ -352,6 +395,18 @@ class AutoTraderService {
   private history: CycleRecord[] = [];
   private config: AutoTraderConfig = { ...DEFAULT_CONFIG };
   private wasAtMaxTrades = false;
+  private consecutiveLossPausedUntil = 0;
+
+  private getConsecutiveLossStreak(): number {
+    const trades = paperTradingService.getClosedTrades()
+      .sort((a, b) => new Date(b.closedAt!).getTime() - new Date(a.closedAt!).getTime());
+    let streak = 0;
+    for (const t of trades) {
+      if ((t.pnlSol ?? 0) < 0) streak++;
+      else break;
+    }
+    return streak;
+  }
 
   getConfig(): AutoTraderConfig { return { ...this.config }; }
 
@@ -465,6 +520,26 @@ class AutoTraderService {
         `📉 Today's losses: <b>${dailyLoss.toFixed(4)} SOL</b>\n` +
         `⏸️ Bot auto-paused for 24 hours to protect capital.\n` +
         `🔔 Resumes at ${toIST(new Date(this.dailyLossPausedUntil))}`,
+      );
+      return;
+    }
+
+    // Consecutive loss circuit breaker: 3 losses in a row → 2h cooldown
+    if (this.consecutiveLossPausedUntil > Date.now()) {
+      const resumeInMin = Math.ceil((this.consecutiveLossPausedUntil - Date.now()) / 60_000);
+      logger.info({ resumeInMin }, "Auto-trader: skipping cycle — consecutive loss cooldown active");
+      return;
+    }
+    const lossStreak = this.getConsecutiveLossStreak();
+    if (lossStreak >= 3) {
+      this.consecutiveLossPausedUntil = Date.now() + 2 * 3_600_000;
+      logger.warn({ lossStreak }, "Auto-trader: 3 consecutive losses — pausing 2h to protect capital");
+      void sendTelegram(
+        `⛔ <b>CIRCUIT BREAKER TRIGGERED</b>\n` +
+        `──────────────────────\n` +
+        `📉 <b>${lossStreak} consecutive losses</b> detected\n` +
+        `⏸️ Trading paused 2 hours to reset conditions.\n` +
+        `🔔 Resumes at ${toIST(new Date(this.consecutiveLossPausedUntil))}`,
       );
       return;
     }
@@ -723,12 +798,16 @@ class AutoTraderService {
             continue;
           }
 
+          // Apply entry-quality score boosts using real DexScreener data
+          const entryBoost = computeEntryBoosts(dexPair);
+          const boostedScore = Math.min(100, c.aiScore + entryBoost);
+
           logger.info(
-            { symbol: c.symbol, aiScore: c.aiScore, dexLiq, dexPrice, dexMcap, dexVol24h },
+            { symbol: c.symbol, aiScore: c.aiScore, entryBoost, boostedScore, dexLiq, dexPrice, dexMcap, dexVol24h },
             "Auto-trader: DexScreener verification PASSED — candidate confirmed"
           );
 
-          verifiedCandidates.push({ ...c, liquidityUsd: dexLiq, priceUsd: dexPrice, marketCapUsd: dexMcap, pair: dexPair });
+          verifiedCandidates.push({ ...c, aiScore: boostedScore, liquidityUsd: dexLiq, priceUsd: dexPrice, marketCapUsd: dexMcap, pair: dexPair });
           break; // We only need 1 verified candidate per cycle (1-trade-per-cycle cap)
         } catch (err) {
           decisions.push({ ...c, action: "filtered", reason: `DexScreener verify error: ${err instanceof Error ? err.message : "unknown"}` });

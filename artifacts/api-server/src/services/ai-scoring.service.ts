@@ -157,14 +157,68 @@ export function computeSignals(pair: DexScreenerPair): TokenSignals {
   };
 }
 
-export function computeAiScore(signals: TokenSignals): number {
+export function computeAiScore(signals: TokenSignals, boosts = 0): number {
   const raw =
     signals.momentumScore +
     signals.buyRatioScore +
     signals.liquidityScore +
     signals.volumeMcapScore +
-    signals.mcapScore;
+    signals.mcapScore +
+    boosts;
   return Math.round(clamp(raw, 0, 100));
+}
+
+/**
+ * Score boosts for high-conviction entry patterns (max +25 pts total).
+ *
+ * These reward healthy market structure: pullbacks, dip-buying, sustained
+ * accumulation, and organic growth — all the signals of a quality entry.
+ * They are applied AFTER DexScreener verification on the real pair data.
+ */
+export function computeEntryBoosts(pair: DexScreenerPair): number {
+  let boost = 0;
+
+  const pc1h = pair.priceChange?.h1 ?? 0;
+  const pc5m = pair.priceChange?.m5 ?? 0;
+  const pc6h = pair.priceChange?.h6 ?? 0;
+  const buys1h  = pair.txns?.h1?.buys  || 0;
+  const sells1h = pair.txns?.h1?.sells || 0;
+  const total1h = buys1h + sells1h;
+  const buys5m  = pair.txns?.m5?.buys  || 0;
+  const sells5m = pair.txns?.m5?.sells || 0;
+  const total5m = buys5m + sells5m;
+  const liq  = pair.liquidity?.usd || 0;
+  const vol1h = pair.volume?.h1 || 0;
+  const vol5m = pair.volume?.m5 || 0;
+  const buyRatio1h = total1h > 0 ? buys1h / total1h : 0;
+  const buyRatio5m = total5m > 0 ? buys5m / total5m : 0;
+
+  // +10: Deep pool AND strong buyer dominance — accumulation in progress
+  if (liq >= 40_000 && buyRatio1h >= 0.72 && total1h >= 30)
+    boost += 10;
+
+  // +8: Smart money buying a dip — 6h was down but 1h recovering strongly
+  if (pc6h < -5 && pc1h > 15 && buyRatio1h >= 0.68)
+    boost += 8;
+
+  // +7: Higher low forming — 5m positive and controlled after 1h gain (healthy pullback recovery)
+  if (pc1h > 5 && pc1h < 40 && pc5m >= 2 && pc5m <= 12)
+    boost += 7;
+
+  // +6: Buy pressure sustained — 5m still positive with strong buy ratio (momentum confirmed)
+  if (pc5m > 0 && pc1h > 8 && buyRatio5m >= 0.65 && total5m >= 6)
+    boost += 6;
+
+  // +5: Whales holding — 5m volume not elevated relative to 1h pace (not dumping)
+  const expected5mPace = vol1h > 0 ? vol1h / 12 : 0;
+  if (expected5mPace > 0 && vol5m > 0 && (vol5m / expected5mPace) < 1.5 && buyRatio1h >= 0.62)
+    boost += 5;
+
+  // +4: Consolidation before breakout — moderate 1h gain, 5m just turning up
+  if (pc1h >= 10 && pc1h <= 35 && pc5m >= 1 && pc5m <= 8 && buyRatio1h >= 0.60 && total1h >= 20)
+    boost += 4;
+
+  return Math.min(boost, 25);
 }
 
 export function computeConfidence(pair: DexScreenerPair): number {
