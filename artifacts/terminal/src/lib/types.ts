@@ -23,6 +23,8 @@ export interface Position {
   note?: string;
   // live fields (from getOpenPositionsWithLivePnl)
   livePnlSol?: number; livePnlPercent?: number; currentPrice?: number;
+  // RugCheck on-chain safety data captured at entry
+  rugScore?: number; rugLpLockedPct?: number; rugTopHolderPct?: number; rugWarnRisks?: string[];
 }
 
 export interface Portfolio {

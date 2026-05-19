@@ -1,0 +1,31 @@
+[
+  {
+    "positionId": "adbe4cd7-beef-431c-b9ab-53fad7bc0897",
+    "symbol": "ROT",
+    "contractAddress": "V3E7W2bzHYzdLGtx9S1ySx1wwcqd1yNPt8mVsWTpump",
+    "openedAt": "2026-05-19T14:37:38.826Z",
+    "closedAt": "2026-05-19T14:43:38.084Z",
+    "holdTimeMs": 359258,
+    "pnlSol": -0.10299622271964182,
+    "pnlPercent": -20.599244543928364,
+    "aiScore": 73,
+    "confidence": 100,
+    "entryMcapUsd": 71487,
+    "entryLiquidityUsd": 20805,
+    "slPercent": 8,
+    "tpPercent": 35,
+    "tags": [
+      "fast_rug",
+      "borderline_score",
+      "thin_liquidity",
+      "micro_cap"
+    ],
+    "warnings": [
+      "Closed in 6.0m — fast dump, likely late entry",
+      "AI score was 73 — only 1pts above the 72 minimum. Low-conviction entry.",
+      "Entry liquidity was $21K — thin pool makes exit expensive and rug risk higher",
+      "Entry mcap was $71K — micro-cap is higher risk for rug"
+    ],
+    "recordedAt": 1779201818085
+  }
+]

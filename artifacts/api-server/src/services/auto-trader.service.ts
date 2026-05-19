@@ -6,6 +6,7 @@ import { scannerService } from "./scanner.service.js";
 import { computeSignals, computeAiScore, computeConfidence, getDynamicRisk } from "./ai-scoring.service.js";
 import { mapPairToToken } from "./scanner.service.js";
 import { analyseTokenWithAi, buildAnalysisInput } from "./ai-analysis.service.js";
+import { checkTokenSafety } from "./rugcheck.service.js";
 import type { DexScreenerPair } from "../types/index.js";
 
 const DEXSCREENER_BASE = "https://api.dexscreener.com";
@@ -625,27 +626,13 @@ class AutoTraderService {
 
       for (const c of qualifiedCandidates.slice(0, MAX_VERIFY)) {
         try {
-          let dexPair = await scannerService.getPairFromDex(c.pairAddress);
-
-          // Fallback 1: pairAddress lookup can fail for very new or recently re-indexed tokens.
-          // Wait 1s and retry once — DexScreener indexing can lag a few seconds.
-          if (!dexPair) {
-            await new Promise(r => setTimeout(r, 1_000));
-            dexPair = await scannerService.getPairFromDex(c.pairAddress);
-          }
-
-          // Fallback 2: Try the token contract address endpoint instead.
-          if (!dexPair) {
-            const contractAddress = c.pair.baseToken.address;
-            if (contractAddress) {
-              logger.warn({ symbol: c.symbol, pairAddress: c.pairAddress }, "DexScreener pairAddress lookup returned null — retrying via contract address");
-              dexPair = await scannerService.getPairByContractAddress(contractAddress, c.pairAddress);
-            }
-          }
+          const contractAddress = c.pair.baseToken.address;
+          // 5-source cascade: search-by-CA → pair-addr → token-addr → symbol → GeckoTerminal
+          const dexPair = await scannerService.verifyPairForTrading(c.pairAddress, contractAddress, c.symbol);
 
           if (!dexPair) {
-            decisions.push({ ...c, action: "filtered", reason: "DexScreener: pair not verified (may be delisted or very new) — skipping to protect capital" });
-            logger.warn({ symbol: c.symbol, pairAddress: c.pairAddress }, "DexScreener verification failed after retry + contract fallback");
+            decisions.push({ ...c, action: "filtered", reason: "DexScreener: pair not verified across 5 sources (may be delisted or very new) — skipping to protect capital" });
+            logger.warn({ symbol: c.symbol, pairAddress: c.pairAddress }, "DexScreener verification failed across all 5 sources");
             continue;
           }
 
@@ -717,8 +704,35 @@ class AutoTraderService {
         token.aiScore = c.aiScore;
         token.confidence = c.confidence;
 
-        // ── Layer 6: LLM pre-trade analysis (Gemini → Groq fallback) ──────────
-        const analysisInput = buildAnalysisInput(c.pair, c.symbol, c.tokenName, c.aiScore, c.confidence);
+        // ── Layer 6: RugCheck on-chain safety gate ─────────────────────────────
+        // Runs BEFORE the LLM call (cheap API, saves LLM quota on obvious rugs).
+        const mintAddress = c.pair?.baseToken?.address ?? token.address;
+        const pairAgeMin  = c.pair?.pairCreatedAt
+          ? (Date.now() - c.pair.pairCreatedAt) / 60_000
+          : 999;
+
+        const rugResult = await checkTokenSafety(mintAddress, pairAgeMin);
+
+        if (!rugResult.pass) {
+          decisions.push({ ...c, action: "filtered", reason: rugResult.reason });
+          logger.warn(
+            { symbol: c.symbol, mintAddress: mintAddress.slice(0, 8) + "…", reason: rugResult.reason },
+            "Auto-trader: RugCheck BLOCKED — trade rejected",
+          );
+          continue;
+        }
+
+        const rugWarnSummary = rugResult.warnRisks.length > 0
+          ? ` | RugCheck warns: ${rugResult.warnRisks.join(", ")}`
+          : "";
+
+        logger.info(
+          { symbol: c.symbol, rugScore: rugResult.score, lpLockedPct: rugResult.lpLockedPct, topHolderPct: rugResult.topHolderPct },
+          "Auto-trader: RugCheck PASSED — proceeding to LLM analysis",
+        );
+
+        // ── Layer 7: LLM pre-trade analysis (Gemini → Groq fallback) ──────────
+        const analysisInput = buildAnalysisInput(c.pair, c.symbol, c.tokenName + rugWarnSummary, c.aiScore, c.confidence);
         const llm = await analyseTokenWithAi(analysisInput);
 
         const llmFields = {
