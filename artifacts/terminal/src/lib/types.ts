@@ -66,11 +66,23 @@ export interface Alert {
   positionId?: string; aiScore?: number; createdAt: number; read: boolean;
 }
 
+export interface CircuitBreakerStatus {
+  consecutiveLossActive: boolean;
+  consecutiveLossResumesAt: number | null;
+  consecutiveLossResumesInMin: number | null;
+  dailyLossActive: boolean;
+  dailyLossResumesAt: number | null;
+  dailyLossResumesInHours: number | null;
+  currentStreak: number;
+  dailyLossSol: number;
+}
+
 export interface AutoTraderStatus {
   paused: boolean; running: boolean; lastRunAt: number | null;
   lastRunTokensEvaluated: number; lastRunTradesOpened: number; totalTradesOpened: number;
   telegramEnabled: boolean; nextRunIn: number; scannerPoolSize: number;
   config: AutoTraderConfig;
+  circuitBreaker: CircuitBreakerStatus;
 }
 
 export interface AutoTraderConfig {
@@ -82,6 +94,8 @@ export interface AutoTraderConfig {
   minPairAgeMinutes: number; maxPairAgeHours: number;
   minLiquidityMcapRatio: number; maxFdvMcapRatio: number;
   maxPriceDropH6Pct: number; maxPriceDropH24Pct: number;
+  consecutiveLossLimit: number; consecutiveLossPauseHours: number;
+  dailyLossLimitSol: number; dailyLossPauseHours: number;
 }
 
 export interface CycleDecision {

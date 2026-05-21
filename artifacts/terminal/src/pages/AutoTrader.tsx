@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
-import { useAutoTraderStatus, useAutoTraderConfig, useUpdateAutoTraderConfig, usePauseAutoTrader, useResumeAutoTrader, useAutoTraderHistory } from "@/lib/api";
-import { Play, Pause, Settings, Zap, Shield, TrendingUp, Clock, ChevronDown, ChevronUp, CheckCircle2, XCircle, SkipForward, FlaskConical, Loader2 } from "lucide-react";
+import { useAutoTraderStatus, useAutoTraderConfig, useUpdateAutoTraderConfig, usePauseAutoTrader, useResumeAutoTrader, useAutoTraderHistory, useResetCircuitBreaker } from "@/lib/api";
+import { Play, Pause, Settings, Zap, Shield, TrendingUp, Clock, ChevronDown, ChevronUp, CheckCircle2, XCircle, SkipForward, FlaskConical, Loader2, AlertTriangle, RotateCcw } from "lucide-react";
 import type { CycleDecision } from "@/lib/types";
 
 function ConfigRow({ label, field, value, step, onChange, unit }: {
@@ -359,6 +359,7 @@ export default function AutoTrader() {
   const updateConfig = useUpdateAutoTraderConfig();
   const pause = usePauseAutoTrader();
   const resume = useResumeAutoTrader();
+  const resetCB = useResetCircuitBreaker();
 
   const [localConfig, setLocalConfig] = useState<AnyConfig | null>(null);
   const [saved, setSaved] = useState(false);
@@ -414,10 +415,58 @@ export default function AutoTrader() {
     ? [...traded, ...filtered, ...skipped]
     : [...traded, ...filtered.slice(0, 8), ...skipped.slice(0, 3)];
 
+  const cb = status.circuitBreaker;
+  const cbActive = cb?.consecutiveLossActive || cb?.dailyLossActive;
+
   return (
     <div className="px-4 py-4 space-y-4">
       {/* AI Debug Panel */}
       <AiDebugPanel />
+
+      {/* Circuit Breaker Alert */}
+      {cbActive && cb && (
+        <div className="bg-orange-900/30 border border-orange-500/40 rounded-xl p-4">
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex items-start gap-2.5">
+              <AlertTriangle className="w-4 h-4 text-orange-400 mt-0.5 shrink-0 animate-pulse" />
+              <div>
+                <p className="text-orange-300 text-sm font-bold">Circuit Breaker Active</p>
+                {cb.consecutiveLossActive && (
+                  <p className="text-orange-300/70 text-xs mt-0.5">
+                    {cb.currentStreak} consecutive losses detected — trading paused
+                    {cb.consecutiveLossResumesInMin !== null && ` for ${cb.consecutiveLossResumesInMin} more min`}
+                  </p>
+                )}
+                {cb.dailyLossActive && (
+                  <p className="text-orange-300/70 text-xs mt-0.5">
+                    Daily loss cap hit ({cb.dailyLossSol.toFixed(3)} SOL) — paused
+                    {cb.dailyLossResumesInHours !== null && ` for ${cb.dailyLossResumesInHours} more hrs`}
+                  </p>
+                )}
+                <p className="text-orange-400/50 text-[10px] mt-1">Scanner keeps running. Press reset to resume trading immediately.</p>
+              </div>
+            </div>
+            <button
+              onClick={() => resetCB.mutate()}
+              disabled={resetCB.isPending}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-orange-500/20 border border-orange-500/40 text-orange-300 text-xs font-bold active:scale-95 transition-all shrink-0 disabled:opacity-50"
+            >
+              <RotateCcw className={`w-3 h-3 ${resetCB.isPending ? "animate-spin" : ""}`} />
+              Reset
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Loss Streak Warning (not yet triggered) */}
+      {!cbActive && cb && cb.currentStreak >= 2 && (
+        <div className="bg-amber-900/20 border border-amber-500/20 rounded-xl px-4 py-2.5 flex items-center gap-2">
+          <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+          <p className="text-amber-300/80 text-xs">
+            <span className="font-bold">{cb.currentStreak} consecutive losses</span> — circuit breaker triggers at {localConfig?.consecutiveLossLimit ?? 3}
+          </p>
+        </div>
+      )}
 
       {/* Status Card */}
       <div className={`relative rounded-2xl overflow-hidden border p-5 ${isRunning ? "bg-emerald-900/20 border-emerald-500/25" : "bg-red-900/20 border-red-500/25"}`}>
@@ -521,12 +570,12 @@ export default function AutoTrader() {
 
       {/* SL/TP Info Banner */}
       <div className="bg-violet-500/8 border border-violet-500/20 rounded-xl p-3">
-        <p className="text-violet-400 text-xs font-bold mb-1">Dynamic SL/TP (AI Score Based)</p>
+        <p className="text-violet-400 text-xs font-bold mb-1">Dynamic SL/TP (AI Score Based) — Wide stops for meme volatility</p>
         <div className="grid grid-cols-2 gap-x-4 gap-y-0.5 text-[10px] text-white/50">
-          <span>Score 95+: SL -20% / TP +500%</span>
-          <span>Score 90-94: SL -18% / TP +200%</span>
-          <span>Score 80-89: SL -15% / TP +80%</span>
-          <span>Score 70-79: SL -12% / TP +50%</span>
+          <span>Score 90+: SL -22% / TP +400%</span>
+          <span>Score 85-89: SL -20% / TP +250%</span>
+          <span>Score 80-84: SL -18% / TP +180%</span>
+          <span>Score 75-79: SL -15% / TP +120%</span>
         </div>
       </div>
 
@@ -543,23 +592,36 @@ export default function AutoTrader() {
           <ConfigRow label="Min Liquidity" field="minLiquidityUsd" value={localConfig.minLiquidityUsd} step={1000} onChange={handleChange} unit="USD" />
           <ConfigRow label="Min Vol 24h" field="minVolume24hUsd" value={localConfig.minVolume24hUsd} step={1000} onChange={handleChange} unit="USD" />
           <ConfigRow label="Min Vol 1h" field="minVolume1hUsd" value={localConfig.minVolume1hUsd} step={500} onChange={handleChange} unit="USD" />
-          <ConfigRow label="Min Buy Ratio 1h" field="minBuyRatio1h" value={localConfig.minBuyRatio1h} step={0.01} onChange={handleChange} unit="0.0–1.0" />
-          <ConfigRow label="Min 1h Change" field="minPriceChange1h" value={localConfig.minPriceChange1h} step={0.5} onChange={handleChange} unit="%" />
+          <ConfigRow label="Min Buy Ratio 1h" field="minBuyRatio1h" value={localConfig.minBuyRatio1h} step={0.01} onChange={handleChange} unit="0.0–1.0 (e.g. 0.62 = 62% buys)" />
+          <ConfigRow label="Min 1h Price Change" field="minPriceChange1h" value={localConfig.minPriceChange1h} step={0.5} onChange={handleChange} unit="% momentum required" />
+          <ConfigRow label="Max 1h Price Change" field="maxPriceChange1h" value={localConfig.maxPriceChange1h} step={5} onChange={handleChange} unit="% reject parabolic pumps" />
           <ConfigRow label="Min Transactions 24h" field="minTransactions24h" value={localConfig.minTransactions24h} onChange={handleChange} unit="txns" />
         </Section>
 
         <Section title="Market Cap Range" icon={<Settings className="w-4 h-4 text-violet-400" />}>
           <ConfigRow label="Min Market Cap" field="minMcapUsd" value={localConfig.minMcapUsd} step={1000} onChange={handleChange} unit="USD" />
-          <ConfigRow label="Max Market Cap" field="maxMcapUsd" value={localConfig.maxMcapUsd} step={100000} onChange={handleChange} unit="USD" />
-          <ConfigRow label="Min Liq/MCap Ratio" field="minLiquidityMcapRatio" value={localConfig.minLiquidityMcapRatio} step={0.01} onChange={handleChange} unit="e.g. 0.03 = 3%" />
+          <ConfigRow label="Max Market Cap" field="maxMcapUsd" value={localConfig.maxMcapUsd} step={10000} onChange={handleChange} unit="USD" />
+          <ConfigRow label="Min Liq/MCap Ratio" field="minLiquidityMcapRatio" value={localConfig.minLiquidityMcapRatio} step={0.01} onChange={handleChange} unit="e.g. 0.12 = 12% (rug guard)" />
           <ConfigRow label="Max FDV/MCap Ratio" field="maxFdvMcapRatio" value={localConfig.maxFdvMcapRatio} step={0.5} onChange={handleChange} unit="dilution guard" />
         </Section>
 
         <Section title="Age & Safety" icon={<Clock className="w-4 h-4 text-white/40" />}>
-          <ConfigRow label="Min Pair Age" field="minPairAgeMinutes" value={localConfig.minPairAgeMinutes} onChange={handleChange} unit="minutes" />
-          <ConfigRow label="Max Pair Age" field="maxPairAgeHours" value={localConfig.maxPairAgeHours} onChange={handleChange} unit="hours" />
-          <ConfigRow label="Max 6h Drop" field="maxPriceDropH6Pct" value={localConfig.maxPriceDropH6Pct} step={5} onChange={handleChange} unit="e.g. -40 = 40% max drop" />
-          <ConfigRow label="Max 24h Drop" field="maxPriceDropH24Pct" value={localConfig.maxPriceDropH24Pct} step={5} onChange={handleChange} unit="e.g. -65 = 65% max drop" />
+          <ConfigRow label="Min Pair Age" field="minPairAgeMinutes" value={localConfig.minPairAgeMinutes} onChange={handleChange} unit="minutes (survive early window)" />
+          <ConfigRow label="Max Pair Age" field="maxPairAgeHours" value={localConfig.maxPairAgeHours} onChange={handleChange} unit="hours (fresh tokens only)" />
+          <ConfigRow label="Max 6h Drop" field="maxPriceDropH6Pct" value={localConfig.maxPriceDropH6Pct} step={5} onChange={handleChange} unit="e.g. -25 = reject 25%+ drops" />
+          <ConfigRow label="Max 24h Drop" field="maxPriceDropH24Pct" value={localConfig.maxPriceDropH24Pct} step={5} onChange={handleChange} unit="e.g. -40 = reject 40%+ drops" />
+        </Section>
+
+        <Section title="Circuit Breaker" icon={<Shield className="w-4 h-4 text-orange-400" />}>
+          <div className="py-2 pb-3 border-b border-white/5">
+            <p className="text-[10px] text-white/30 leading-relaxed">
+              Automatically pauses trading after too many losses. Scanner stays running. You can reset manually at any time from the alert above.
+            </p>
+          </div>
+          <ConfigRow label="Consecutive Loss Limit" field="consecutiveLossLimit" value={localConfig.consecutiveLossLimit} onChange={handleChange} unit="losses in a row before pause" />
+          <ConfigRow label="Consecutive Loss Pause" field="consecutiveLossPauseHours" value={localConfig.consecutiveLossPauseHours} step={0.5} onChange={handleChange} unit="hours to cool down" />
+          <ConfigRow label="Daily Loss Cap" field="dailyLossLimitSol" value={localConfig.dailyLossLimitSol} step={0.5} onChange={handleChange} unit="SOL lost today before pause" />
+          <ConfigRow label="Daily Loss Pause" field="dailyLossPauseHours" value={localConfig.dailyLossPauseHours} step={1} onChange={handleChange} unit="hours pause on daily cap hit" />
         </Section>
       </div>
 

@@ -243,22 +243,24 @@ export function computeConfidence(pair: DexScreenerPair): number {
  * Dynamic SL/TP percentages based on AI score tier.
  *
  * Philosophy: LET WINNERS RUN. Memecoins are early-pump plays — they either
- * rug fast (SL catches it at -8 to -12%) or they pump 2-10x. Exiting at 35-50%
- * means you always sell into the first leg and miss the real move.
+ * rug fast (SL catches it) or they pump 2-10x. Wide SL is critical because
+ * meme coins routinely dip 20-30% before their main pump. Tight SLs get
+ * stopped out by normal volatility and are the primary cause of losses.
  *
- * Risk/reward at 100% TP + 8% SL = 12.5:1 → break-even at only 7% win rate.
+ * Risk/reward at 150% TP + 20% SL = 7.5:1 → break-even at only 12% win rate.
  *
  * Score  | SL    | TP    | Rationale
  * ──────────────────────────────────────────────────────────
- * 90+    | -12%  | 250%  | Highest conviction early entry — target 3.5x
- * 80-89  | -10%  | 200%  | Strong early pump — target 3x
- * 75-79  | -9%   | 150%  | Good signal — target 2.5x
- * 72-74  | -8%   | 100%  | Minimum TP — always aim for at least 2x
- * <72    | -8%   | 100%  | Same floor — never set TP below 100%
+ * 90+    | -22%  | 400%  | Highest conviction — survive dips, ride to 5x
+ * 85-89  | -20%  | 250%  | Very strong — wide SL avoids shakeouts
+ * 80-84  | -18%  | 180%  | Strong signal — give room to breathe
+ * 75-79  | -15%  | 120%  | Good signal — wider than before
+ * <75    | -12%  | 80%   | Floor — never set too tight
  */
 export function getDynamicRisk(score: number): { slPercent: number; tpPercent: number } {
-  if (score >= 90) return { slPercent: 12, tpPercent: 250 };
-  if (score >= 80) return { slPercent: 10, tpPercent: 200 };
-  if (score >= 75) return { slPercent: 9,  tpPercent: 150 };
-  return { slPercent: 8, tpPercent: 100 };
+  if (score >= 90) return { slPercent: 22, tpPercent: 400 };
+  if (score >= 85) return { slPercent: 20, tpPercent: 250 };
+  if (score >= 80) return { slPercent: 18, tpPercent: 180 };
+  if (score >= 75) return { slPercent: 15, tpPercent: 120 };
+  return { slPercent: 12, tpPercent: 80 };
 }

@@ -40,6 +40,11 @@ export interface AutoTraderConfig {
   maxFdvMcapRatio: number;        // e.g. 8.0 = FDV must not exceed 8× mcap
   maxPriceDropH6Pct: number;      // reject if 6h drop exceeds this (negative number)
   maxPriceDropH24Pct: number;     // reject if 24h drop exceeds this (negative number)
+  // Circuit breaker controls
+  consecutiveLossLimit: number;      // how many losses in a row trigger the breaker (default 3)
+  consecutiveLossPauseHours: number; // how many hours to pause on consecutive loss trigger (default 2)
+  dailyLossLimitSol: number;         // daily SOL loss cap before 24h pause (default 2)
+  dailyLossPauseHours: number;       // how many hours to pause on daily loss cap (default 24)
 }
 
 export interface FilterResult {
@@ -95,6 +100,16 @@ export interface AutoTraderStatus {
   nextRunIn: number;
   scannerPoolSize: number;
   config: AutoTraderConfig;
+  circuitBreaker: {
+    consecutiveLossActive: boolean;
+    consecutiveLossResumesAt: number | null;
+    consecutiveLossResumesInMin: number | null;
+    dailyLossActive: boolean;
+    dailyLossResumesAt: number | null;
+    dailyLossResumesInHours: number | null;
+    currentStreak: number;
+    dailyLossSol: number;
+  };
 }
 
 // ─── Default config ────────────────────────────────────────────────────────────
@@ -103,34 +118,40 @@ const DEFAULT_CONFIG: AutoTraderConfig = {
   maxConcurrentTrades: 3,
 
   // ── AI quality ────────────────────────────────────────────────────────────
-  minAiScore:    78,            // high-conviction only
+  minAiScore:    80,            // high-conviction only
   minConfidence: 72,            // solid data quality required
 
   // ── Liquidity & volume ────────────────────────────────────────────────────
-  minLiquidityUsd:  28_000,     // deep pool for safe exit
-  minVolume24hUsd:  45_000,     // proven organic trading history
-  minVolume1hUsd:   12_000,     // strong activity RIGHT NOW
+  minLiquidityUsd:  25_000,     // deep pool for safe exit
+  minVolume24hUsd:  40_000,     // proven organic trading history
+  minVolume1hUsd:   10_000,     // strong activity RIGHT NOW
 
   // ── Momentum ─────────────────────────────────────────────────────────────
-  minBuyRatio1h:    0.68,       // 68% buy dominance — strong conviction
-  minPriceChange1h: 8,          // meaningful momentum, not flat
-  maxPriceChange1h: 55,         // reject vertical pumps — don't buy the top
-  minTransactions24h: 180,      // high activity = real organic market
-  minUniqueBuyers:  35,         // proxy: buy txns in 1h (no wallet-count API)
+  minBuyRatio1h:    0.62,       // 62% buy dominance — strong conviction
+  minPriceChange1h: 5,          // meaningful momentum, not flat
+  maxPriceChange1h: 70,         // reject vertical pumps — don't buy the top
+  minTransactions24h: 150,      // high activity = real organic market
+  minUniqueBuyers:  30,         // proxy: buy txns in 1h (no wallet-count API)
 
   // ── Market cap sweet spot ────────────────────────────────────────────────
-  minMcapUsd:   35_000,         // avoid dust/fake micro-caps
-  maxMcapUsd:  450_000,         // strong upside potential remains
+  minMcapUsd:   25_000,         // avoid dust/fake micro-caps
+  maxMcapUsd:  600_000,         // strong upside potential remains
 
   // ── Pair age ──────────────────────────────────────────────────────────────
-  minPairAgeMinutes: 12,        // survive first high-risk window
-  maxPairAgeHours:    4,        // fresh tokens — price discovery still active
+  minPairAgeMinutes: 10,        // survive first high-risk window
+  maxPairAgeHours:    6,        // fresh tokens — price discovery still active
 
   // ── Rug guards ────────────────────────────────────────────────────────────
-  minLiquidityMcapRatio: 0.16,  // strong pool backing required
-  maxFdvMcapRatio:       2.5,   // almost no unlocked supply overhang
-  maxPriceDropH6Pct:   -18,     // reject heavy 6h dumps
-  maxPriceDropH24Pct:  -28,     // reject severe declines
+  minLiquidityMcapRatio: 0.12,  // strong pool backing required
+  maxFdvMcapRatio:       3.0,   // almost no unlocked supply overhang
+  maxPriceDropH6Pct:   -25,     // reject heavy 6h dumps
+  maxPriceDropH24Pct:  -40,     // reject severe declines
+
+  // ── Circuit breaker ───────────────────────────────────────────────────────
+  consecutiveLossLimit:      3,  // 3 losses in a row triggers cooldown
+  consecutiveLossPauseHours: 1,  // 1 hour cooldown (was 2h)
+  dailyLossLimitSol:         3,  // -3 SOL/day cap (was -2)
+  dailyLossPauseHours:      12,  // 12h pause on daily cap (was 24h)
 };
 
 // ─── Anti-rug + quality filter ────────────────────────────────────────────────
@@ -421,6 +442,12 @@ class AutoTraderService {
   isPaused(): boolean { return this.paused; }
   getHistory(): CycleRecord[] { return [...this.history].reverse(); }
 
+  resetCircuitBreaker(): void {
+    this.consecutiveLossPausedUntil = 0;
+    this.dailyLossPausedUntil = 0;
+    logger.info("Auto-trader: circuit breaker manually reset by user");
+  }
+
   private dailyLossPausedUntil = 0;
 
   private getDailyLoss(): number {
@@ -433,6 +460,11 @@ class AutoTraderService {
   }
 
   getStatus(): AutoTraderStatus {
+    const now = Date.now();
+    const consecutiveLossActive = this.consecutiveLossPausedUntil > now;
+    const dailyLossActive = this.dailyLossPausedUntil > now;
+    const streak = this.getConsecutiveLossStreak();
+    const dailyLoss = this.getDailyLoss();
     return {
       paused: this.paused,
       running: this.running,
@@ -441,9 +473,19 @@ class AutoTraderService {
       lastRunTradesOpened: this.lastRunTradesOpened,
       totalTradesOpened: this.totalTradesOpened,
       telegramEnabled: isTelegramConfigured(),
-      nextRunIn: Math.max(0, this.nextRunAt - Date.now()),
+      nextRunIn: Math.max(0, this.nextRunAt - now),
       scannerPoolSize: scannerService.getTokenCount(),
       config: this.getConfig(),
+      circuitBreaker: {
+        consecutiveLossActive,
+        consecutiveLossResumesAt: consecutiveLossActive ? this.consecutiveLossPausedUntil : null,
+        consecutiveLossResumesInMin: consecutiveLossActive ? Math.ceil((this.consecutiveLossPausedUntil - now) / 60_000) : null,
+        dailyLossActive,
+        dailyLossResumesAt: dailyLossActive ? this.dailyLossPausedUntil : null,
+        dailyLossResumesInHours: dailyLossActive ? Math.ceil((this.dailyLossPausedUntil - now) / 3_600_000) : null,
+        currentStreak: streak,
+        dailyLossSol: dailyLoss,
+      },
     };
   }
 
@@ -504,41 +546,43 @@ class AutoTraderService {
   private async run(): Promise<void> {
     if (this.running || this.paused) return;
 
-    // Daily loss cap: if today's cumulative loss >= 2 SOL, pause for 24h
+    const { consecutiveLossLimit, consecutiveLossPauseHours, dailyLossLimitSol, dailyLossPauseHours } = this.config;
+
+    // Daily loss cap: configurable SOL/day limit
     if (this.dailyLossPausedUntil > Date.now()) {
       const resumeInHours = Math.ceil((this.dailyLossPausedUntil - Date.now()) / 3_600_000);
       logger.info({ resumeInHours }, "Auto-trader: skipping cycle — daily loss cap active");
       return;
     }
     const dailyLoss = this.getDailyLoss();
-    if (dailyLoss <= -2) {
-      this.dailyLossPausedUntil = Date.now() + 24 * 3_600_000;
-      logger.warn({ dailyLoss: dailyLoss.toFixed(4) }, "Auto-trader: daily loss cap hit (-2 SOL) — pausing 24h");
+    if (dailyLoss <= -Math.abs(dailyLossLimitSol)) {
+      this.dailyLossPausedUntil = Date.now() + dailyLossPauseHours * 3_600_000;
+      logger.warn({ dailyLoss: dailyLoss.toFixed(4) }, `Auto-trader: daily loss cap hit (-${dailyLossLimitSol} SOL) — pausing ${dailyLossPauseHours}h`);
       void sendTelegram(
         `🚨 <b>DAILY LOSS CAP HIT</b>\n` +
         `──────────────────────\n` +
-        `📉 Today's losses: <b>${dailyLoss.toFixed(4)} SOL</b>\n` +
-        `⏸️ Bot auto-paused for 24 hours to protect capital.\n` +
+        `📉 Today's losses: <b>${dailyLoss.toFixed(4)} SOL</b> (limit: -${dailyLossLimitSol} SOL)\n` +
+        `⏸️ Bot auto-paused for ${dailyLossPauseHours} hours to protect capital.\n` +
         `🔔 Resumes at ${toIST(new Date(this.dailyLossPausedUntil))}`,
       );
       return;
     }
 
-    // Consecutive loss circuit breaker: 3 losses in a row → 2h cooldown
+    // Consecutive loss circuit breaker: configurable losses in a row → configurable cooldown
     if (this.consecutiveLossPausedUntil > Date.now()) {
       const resumeInMin = Math.ceil((this.consecutiveLossPausedUntil - Date.now()) / 60_000);
       logger.info({ resumeInMin }, "Auto-trader: skipping cycle — consecutive loss cooldown active");
       return;
     }
     const lossStreak = this.getConsecutiveLossStreak();
-    if (lossStreak >= 3) {
-      this.consecutiveLossPausedUntil = Date.now() + 2 * 3_600_000;
-      logger.warn({ lossStreak }, "Auto-trader: 3 consecutive losses — pausing 2h to protect capital");
+    if (lossStreak >= consecutiveLossLimit) {
+      this.consecutiveLossPausedUntil = Date.now() + consecutiveLossPauseHours * 3_600_000;
+      logger.warn({ lossStreak }, `Auto-trader: ${consecutiveLossLimit} consecutive losses — pausing ${consecutiveLossPauseHours}h to protect capital`);
       void sendTelegram(
         `⛔ <b>CIRCUIT BREAKER TRIGGERED</b>\n` +
         `──────────────────────\n` +
         `📉 <b>${lossStreak} consecutive losses</b> detected\n` +
-        `⏸️ Trading paused 2 hours to reset conditions.\n` +
+        `⏸️ Trading paused ${consecutiveLossPauseHours} hour(s) to reset conditions.\n` +
         `🔔 Resumes at ${toIST(new Date(this.consecutiveLossPausedUntil))}`,
       );
       return;

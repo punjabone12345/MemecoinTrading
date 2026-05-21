@@ -398,6 +398,18 @@ export function useResumeAutoTrader() {
   });
 }
 
+export function useResetCircuitBreaker() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async () => {
+      await fetch(apiUrl("/api/auto-trader/reset-circuit-breaker"), { method: "POST" });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["auto-trader-status"] });
+    },
+  });
+}
+
 export function useLossJournal() {
   return useQuery<LossInsights>({
     queryKey: ["loss-journal"],

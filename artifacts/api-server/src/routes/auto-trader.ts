@@ -57,6 +57,11 @@ router.get("/auto-trader/config", (_req, res) => {
   res.json({ success: true, data: autoTraderService.getConfig() });
 });
 
+router.post("/auto-trader/reset-circuit-breaker", (_req, res) => {
+  autoTraderService.resetCircuitBreaker();
+  res.json({ success: true, message: "Circuit breaker reset — trading will resume on next cycle" });
+});
+
 router.patch("/auto-trader/config", (req, res) => {
   const patch = req.body as Partial<AutoTraderConfig>;
   const numericKeys: (keyof AutoTraderConfig)[] = [
@@ -78,6 +83,10 @@ router.patch("/auto-trader/config", (req, res) => {
     "maxFdvMcapRatio",
     "maxPriceDropH6Pct",
     "maxPriceDropH24Pct",
+    "consecutiveLossLimit",
+    "consecutiveLossPauseHours",
+    "dailyLossLimitSol",
+    "dailyLossPauseHours",
   ];
 
   const validated: Partial<AutoTraderConfig> = {};
