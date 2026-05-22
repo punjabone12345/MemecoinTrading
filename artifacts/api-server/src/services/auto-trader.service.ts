@@ -829,7 +829,7 @@ class AutoTraderService {
       // Scanner tokens already carry fresh DexScreener data — skip the re-fetch
       // and use their cached syntheticPair directly to avoid burning rate-limit budget.
       // Only freshTokens (supplementary, not from scanner) get the full 5-endpoint verify.
-      const MAX_VERIFY = 8;
+      const MAX_VERIFY = 20;
       const verifiedCandidates: typeof qualifiedCandidates = [];
 
       for (const c of qualifiedCandidates.slice(0, MAX_VERIFY)) {

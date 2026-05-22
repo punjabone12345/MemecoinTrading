@@ -226,26 +226,38 @@ function heuristicFallback(input: TokenAnalysisInput): Omit<LlmAnalysis, "provid
   const strengths: string[] = [];
   const risks: string[] = [];
 
-  if (input.liquidityUsd > 30_000) { score += 25; strengths.push(`Liq $${Math.round(input.liquidityUsd / 1_000)}K`); }
-  else risks.push(`Low liq $${Math.round(input.liquidityUsd / 1_000)}K`);
+  // Liquidity — thresholds aligned with Stage 1 filter minimum ($20K)
+  if (input.liquidityUsd > 60_000)      { score += 25; strengths.push(`Strong liq $${Math.round(input.liquidityUsd / 1_000)}K`); }
+  else if (input.liquidityUsd > 25_000) { score += 18; strengths.push(`Liq $${Math.round(input.liquidityUsd / 1_000)}K`); }
+  else                                   { score += 10; strengths.push(`Liq $${Math.round(input.liquidityUsd / 1_000)}K`); }
 
-  if (input.volume24hUsd > 500_000) { score += 25; strengths.push(`24h vol $${Math.round(input.volume24hUsd / 1_000)}K`); }
-  else if (input.volume24hUsd > 35_000) { score += 12; strengths.push(`24h vol $${Math.round(input.volume24hUsd / 1_000)}K`); }
-  else risks.push(`Low 24h vol $${Math.round(input.volume24hUsd / 1_000)}K`);
+  // Volume — thresholds aligned with Stage 1 filter minimum ($18K)
+  if (input.volume24hUsd > 300_000)     { score += 25; strengths.push(`High vol $${Math.round(input.volume24hUsd / 1_000)}K`); }
+  else if (input.volume24hUsd > 50_000) { score += 18; strengths.push(`24h vol $${Math.round(input.volume24hUsd / 1_000)}K`); }
+  else if (input.volume24hUsd > 18_000) { score += 10; strengths.push(`Vol $${Math.round(input.volume24hUsd / 1_000)}K`); }
+  else                                   { risks.push(`Low 24h vol $${Math.round(input.volume24hUsd / 1_000)}K`); }
 
-  if (input.pairAgeMinutes < 120) { score += 20; strengths.push(`Fresh ${Math.round(input.pairAgeMinutes)}m`); }
-  else if (input.pairAgeMinutes > 1440) risks.push("Pair >24h old");
+  // Age — fresh is good for meme coins
+  if (input.pairAgeMinutes < 30)        { score += 20; strengths.push(`Very fresh ${Math.round(input.pairAgeMinutes)}m`); }
+  else if (input.pairAgeMinutes < 120)  { score += 15; strengths.push(`Fresh ${Math.round(input.pairAgeMinutes)}m`); }
+  else if (input.pairAgeMinutes < 480)  { score += 8; }
+  else                                   { risks.push("Pair >8h old"); }
 
+  // Buy pressure — aligned with Stage 1 filter minimum (55%)
   const total1h  = input.buys1h + input.sells1h;
   const buyRatio = total1h > 0 ? input.buys1h / total1h : 0;
-  if (buyRatio >= 0.62) { score += 15; strengths.push(`Buy pressure ${(buyRatio * 100).toFixed(0)}%`); }
-  else risks.push(`Weak buy ratio ${(buyRatio * 100).toFixed(0)}%`);
+  if (buyRatio >= 0.70)      { score += 18; strengths.push(`Strong buys ${(buyRatio * 100).toFixed(0)}%`); }
+  else if (buyRatio >= 0.55) { score += 10; strengths.push(`Buy pressure ${(buyRatio * 100).toFixed(0)}%`); }
+  else                        { risks.push(`Weak buy ratio ${(buyRatio * 100).toFixed(0)}%`); }
 
-  if (input.txns24h >= 250) { score += 15; strengths.push(`${input.txns24h} txns 24h`); }
-  else risks.push(`Low activity ${input.txns24h} txns`);
+  // Activity
+  if (input.txns24h >= 500)  { score += 12; strengths.push(`Active ${input.txns24h} txns`); }
+  else if (input.txns24h >= 80) { score += 7; strengths.push(`${input.txns24h} txns 24h`); }
+  else                           { risks.push(`Low activity ${input.txns24h} txns`); }
 
   score = Math.min(100, score);
-  const verdict: LlmVerdict = score >= 65 ? "TRADE" : score >= 40 ? "RISKY" : "SKIP";
+  // Tokens here already passed Stage 1+2 quality filters and rug check — TRADE at 50+, RISKY at 30+
+  const verdict: LlmVerdict = score >= 50 ? "TRADE" : score >= 30 ? "RISKY" : "SKIP";
 
   return {
     verdict,
@@ -253,9 +265,9 @@ function heuristicFallback(input: TokenAnalysisInput): Omit<LlmAnalysis, "provid
     reasoning: `Heuristic (AI unavailable): score ${score}/100.`,
     risks: risks.slice(0, 3),
     strengths: strengths.slice(0, 3),
-    recommendedSizeSol: score >= 65 ? 0.5 : 0.25,
+    recommendedSizeSol: score >= 50 ? 0.5 : 0.25,
     llmScore: Math.round(score / 10),
-    llmRiskLevel: score >= 80 ? "Low" : score >= 65 ? "Medium" : "High",
+    llmRiskLevel: score >= 75 ? "Low" : score >= 50 ? "Medium" : "High",
   };
 }
 
