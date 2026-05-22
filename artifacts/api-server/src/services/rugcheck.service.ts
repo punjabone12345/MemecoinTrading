@@ -203,25 +203,30 @@ export async function checkTokenSafety(
     );
   }
 
-  // LP entirely unlocked on a fresh pair = classic rug setup
-  // (established tokens with 0% lock are less risky since LP has been around longer)
-  if (lpLockedPct === 0 && pairAgeMinutes < 60) {
+  // LP lock check — only applies to traditional AMM tokens, NOT pump.fun.
+  // Pump.fun tokens use a bonding curve mechanism and never lock LP — that is
+  // expected and safe. For non-pump tokens, 0% lock on a very new pair is risky.
+  const isPumpFun = mintAddress.toLowerCase().endsWith("pump");
+  if (!isPumpFun && lpLockedPct === 0 && pairAgeMinutes < 20) {
     return fail(
-      `RugCheck: 0% LP locked on a ${Math.round(pairAgeMinutes)}m old pair — easy LP pull rug`,
+      `RugCheck: 0% LP locked on a ${Math.round(pairAgeMinutes)}m old non-pump pair — easy LP pull rug`,
       partial,
     );
   }
 
-  // Single whale holding >30% of supply (excluding known DEX addresses)
-  if (topHolderPct > 30) {
+  // Single whale holding >40% of supply (excluding known DEX addresses)
+  // Raised from 30% → 40% since early meme launches often have concentrated supply
+  if (topHolderPct > 40) {
     return fail(
       `RugCheck: single holder owns ${topHolderPct.toFixed(1)}% of supply — extreme concentration risk`,
       partial,
     );
   }
 
-  // Coordinated insider network detected
-  if (insiderCount > 3) {
+  // Coordinated insider network detected — raised from 3→8→15 wallets.
+  // Early pump.fun launches often have 3-14 early buyers who naturally cluster
+  // (friends/community buying together); 15+ is a strong coordinated manipulation signal.
+  if (insiderCount > 15) {
     return fail(
       `RugCheck: insider trading network detected (${insiderCount} wallets) — coordinated dump risk`,
       partial,
@@ -229,7 +234,7 @@ export async function checkTokenSafety(
   }
 
   // Very high overall risk score
-  if (score > 700) {
+  if (score > 800) {
     return fail(
       `RugCheck: risk score ${score}/1000 is critically high — refusing entry`,
       partial,

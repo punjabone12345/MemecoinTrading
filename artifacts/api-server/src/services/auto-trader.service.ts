@@ -118,40 +118,40 @@ const DEFAULT_CONFIG: AutoTraderConfig = {
   maxConcurrentTrades: 3,
 
   // ── AI quality ────────────────────────────────────────────────────────────
-  minAiScore:    80,            // high-conviction only
-  minConfidence: 72,            // solid data quality required
+  minAiScore:    38,            // balanced — quantity + quality (heuristic calibrated to $20K liq floor)
+  minConfidence: 40,            // allow tokens with less complete data
 
   // ── Liquidity & volume ────────────────────────────────────────────────────
-  minLiquidityUsd:  25_000,     // deep pool for safe exit
-  minVolume24hUsd:  40_000,     // proven organic trading history
-  minVolume1hUsd:   10_000,     // strong activity RIGHT NOW
+  minLiquidityUsd:  20_000,     // absolute floor (also hardcoded in Layer 2)
+  minVolume24hUsd:  18_000,     // lower bar — early tokens often have low 24h vol
+  minVolume1hUsd:    4_000,     // needs some activity right now
 
   // ── Momentum ─────────────────────────────────────────────────────────────
-  minBuyRatio1h:    0.62,       // 62% buy dominance — strong conviction
-  minPriceChange1h: 5,          // meaningful momentum, not flat
-  maxPriceChange1h: 70,         // reject vertical pumps — don't buy the top
-  minTransactions24h: 150,      // high activity = real organic market
-  minUniqueBuyers:  30,         // proxy: buy txns in 1h (no wallet-count API)
+  minBuyRatio1h:    0.55,       // 55% buys — genuine buy pressure
+  minPriceChange1h: 3,          // light momentum signal
+  maxPriceChange1h: 90,         // allow strong early pumps (was 70, blocked good tokens)
+  minTransactions24h: 80,       // lower bar for newer tokens
+  minUniqueBuyers:  15,         // lower proxy threshold
 
   // ── Market cap sweet spot ────────────────────────────────────────────────
-  minMcapUsd:   25_000,         // avoid dust/fake micro-caps
-  maxMcapUsd:  600_000,         // strong upside potential remains
+  minMcapUsd:   12_000,         // micro-caps can 10x — don't exclude
+  maxMcapUsd:  800_000,         // wider ceiling for late-stage early gems
 
   // ── Pair age ──────────────────────────────────────────────────────────────
-  minPairAgeMinutes: 10,        // survive first high-risk window
-  maxPairAgeHours:    6,        // fresh tokens — price discovery still active
+  minPairAgeMinutes:  8,        // 8min survival is meaningful
+  maxPairAgeHours:    8,        // catch tokens up to 8h old
 
   // ── Rug guards ────────────────────────────────────────────────────────────
-  minLiquidityMcapRatio: 0.12,  // strong pool backing required
-  maxFdvMcapRatio:       3.0,   // almost no unlocked supply overhang
-  maxPriceDropH6Pct:   -25,     // reject heavy 6h dumps
-  maxPriceDropH24Pct:  -40,     // reject severe declines
+  minLiquidityMcapRatio: 0.08,  // 8% — less strict, Layer 2 still blocks thin pools
+  maxFdvMcapRatio:       4.0,   // wider — many legit tokens have some overhang
+  maxPriceDropH6Pct:   -35,     // allow moderate dips
+  maxPriceDropH24Pct:  -55,     // allow recovering tokens
 
   // ── Circuit breaker ───────────────────────────────────────────────────────
   consecutiveLossLimit:      3,  // 3 losses in a row triggers cooldown
-  consecutiveLossPauseHours: 1,  // 1 hour cooldown (was 2h)
-  dailyLossLimitSol:         3,  // -3 SOL/day cap (was -2)
-  dailyLossPauseHours:      12,  // 12h pause on daily cap (was 24h)
+  consecutiveLossPauseHours: 1,  // 1 hour cooldown
+  dailyLossLimitSol:         3,  // -3 SOL/day cap
+  dailyLossPauseHours:      12,  // 12h pause on daily cap
 };
 
 // ─── Anti-rug + quality filter ────────────────────────────────────────────────
@@ -295,25 +295,26 @@ export function qualityFilter(pair: DexScreenerPair, cfg: AutoTraderConfig): Fil
   // fake volume, ghost pools, and coins without genuine buyer interest.
 
   // Volume/Liquidity ratio: too low = ghost token, too high = wash/fake volume
+  // Lowered floor to 0.12 — large-pool tokens can have lower vol/liq naturally
   const volLiqRatio = liq > 0 && vol1h > 0 ? vol1h / liq : 0;
   if (vol1h > 0 && liq > 0) {
-    if (volLiqRatio < 0.3)
-      return fail(`Vol/Liq ${volLiqRatio.toFixed(2)}x < 0.3x — not enough real interest relative to pool size`);
-    if (volLiqRatio > 5)
-      return fail(`Vol/Liq ${volLiqRatio.toFixed(1)}x > 5x — likely wash/fake volume manipulation`);
+    if (volLiqRatio < 0.12)
+      return fail(`Vol/Liq ${volLiqRatio.toFixed(2)}x < 0.12x — ghost token, no real interest`);
+    if (volLiqRatio > 8)
+      return fail(`Vol/Liq ${volLiqRatio.toFixed(1)}x > 8x — likely wash/fake volume manipulation`);
   }
 
   // Minimum recent buy transactions in 5m (proxy for unique buyers in window)
-  // Only apply after 10m to avoid rejecting brand-new launches
-  if (ageMin > 10 && total5m > 0 && buys5m < 5)
-    return fail(`Only ${buys5m} buy txns in last 5m — insufficient buyer activity (need ≥5)`);
+  // Only apply after 15m to avoid rejecting newer launches. Lowered to 3 buys.
+  if (ageMin > 15 && total5m > 0 && buys5m < 3)
+    return fail(`Only ${buys5m} buy txns in last 5m — insufficient buyer activity (need ≥3)`);
 
   // Volume growth: 5m pace vs 1h baseline
-  // If 5m annualised is < 25% of 1h volume, momentum is clearly dying
-  if (vol5m > 0 && vol1h > 0 && ageMin > 20) {
+  // If 5m annualised is < 10% of 1h volume, momentum is clearly dying
+  if (vol5m > 0 && vol1h > 0 && ageMin > 30) {
     const pacedHourlyVol = vol5m * 12;
-    if (pacedHourlyVol < vol1h * 0.25)
-      return fail(`Volume fading: 5m pace ~$${Math.round(pacedHourlyVol).toLocaleString()}/hr vs $${Math.round(vol1h).toLocaleString()}/hr 1h avg — momentum declining`);
+    if (pacedHourlyVol < vol1h * 0.10)
+      return fail(`Volume fading: 5m pace ~$${Math.round(pacedHourlyVol).toLocaleString()}/hr vs $${Math.round(vol1h).toLocaleString()}/hr 1h avg — momentum dying`);
   }
 
   // ── Layer 3b — Extended config gates ──────────────────────────────────────
@@ -644,6 +645,7 @@ class AutoTraderService {
         return true;
       });
 
+      const scannerPairSet = new Set(scannerTokens.map((t) => t.pairAddress));
       const allCandidates = [...scannerTokens, ...uniqueFresh];
       tokensEvaluated = allCandidates.length;
 
@@ -666,6 +668,7 @@ class AutoTraderService {
         slPercent: number;
         tpPercent: number;
         pair: DexScreenerPair | null;
+        fromScanner: boolean; // true = data came from DexScreener scanner (no re-fetch needed)
       }
 
       const qualifiedCandidates: Candidate[] = [];
@@ -753,7 +756,7 @@ class AutoTraderService {
           continue;
         }
 
-        // Passed pre-filter — add to candidates for DexScreener verification
+        // Passed pre-filter — add to candidates for Stage 2 verification
         qualifiedCandidates.push({
           pairAddress: token.pairAddress,
           symbol: token.symbol,
@@ -771,6 +774,7 @@ class AutoTraderService {
           slPercent,
           tpPercent,
           pair: syntheticPair,
+          fromScanner: scannerPairSet.has(token.pairAddress), // scanner tokens already have DexScreener data
         });
       }
 
@@ -782,21 +786,32 @@ class AutoTraderService {
       // quality filter on the REAL data. GeckoTerminal frequently shows
       // inflated liquidity ($50K+) for pools that DexScreener shows at $1-$10.
       // A token MUST pass this step before any trade is opened.
-      // We check up to 5 candidates in score order and stop at the first winner.
-      const MAX_VERIFY = 5;
+      // Check up to MAX_VERIFY candidates in score order, stop at first winner.
+      // Scanner tokens already carry fresh DexScreener data — skip the re-fetch
+      // and use their cached syntheticPair directly to avoid burning rate-limit budget.
+      // Only freshTokens (supplementary, not from scanner) get the full 5-endpoint verify.
+      const MAX_VERIFY = 3;
       const verifiedCandidates: typeof qualifiedCandidates = [];
 
       for (const c of qualifiedCandidates.slice(0, MAX_VERIFY)) {
         try {
-          // 5-stage verification: search-by-CA → pair-address → token-address →
-          // symbol-search → GeckoTerminal. Prioritises Raydium, validates liq/vol.
-          // Only truly rejects a token if ALL 5 sources return nothing valid.
-          const contractAddress = c.pair.baseToken.address;
-          const dexPair = await scannerService.verifyPairForTrading(
-            c.pairAddress,
-            contractAddress,
-            c.symbol,
-          );
+          let dexPair: DexScreenerPair | null = null;
+
+          if (c.fromScanner && c.pair) {
+            // Fast path: scanner data is already from DexScreener (< ~3 min old).
+            // Trust it — no API call needed.
+            dexPair = c.pair;
+            logger.debug({ symbol: c.symbol, fromScanner: true }, "Auto-trader: using scanner cached data (skipping DexScreener re-fetch)");
+          } else {
+            // Slow path: freshToken or no cached pair — call DexScreener to verify.
+            // 5-stage: search-by-CA → pair-address → token-address → symbol → GeckoTerminal.
+            const contractAddress = c.pair?.baseToken.address ?? c.pairAddress;
+            dexPair = await scannerService.verifyPairForTrading(
+              c.pairAddress,
+              contractAddress,
+              c.symbol,
+            );
+          }
 
           if (!dexPair) {
             decisions.push({ ...c, action: "filtered", reason: "DexScreener: pair not found via any source (CA search / pair-address / token-address / symbol / GeckoTerminal) — skipping" });
@@ -819,42 +834,40 @@ class AutoTraderService {
             continue;
           }
 
-          // Extra intelligence: warn if scanner data was wildly off (rug signal)
-          const liqRatio = c.liquidityUsd > 0 ? dexLiq / c.liquidityUsd : 0;
-          if (c.liquidityUsd > 0 && dexLiq < c.liquidityUsd * 0.1) {
-            // DexScreener shows <10% of what scanner claimed → data fabrication
+          // For freshTokens only: check if liquidity was wildly inflated vs DexScreener
+          if (!c.fromScanner && c.liquidityUsd > 0 && dexLiq < c.liquidityUsd * 0.1) {
             decisions.push({
               ...c,
               action: "filtered",
-              reason: `DexScreener liquidity mismatch: scanner claimed $${Math.round(c.liquidityUsd).toLocaleString()} but DexScreener shows $${Math.round(dexLiq).toLocaleString()} — likely fake/inflated`,
+              reason: `DexScreener liquidity mismatch: claimed $${Math.round(c.liquidityUsd).toLocaleString()} but DexScreener shows $${Math.round(dexLiq).toLocaleString()} — likely fake/inflated`,
             });
             continue;
           }
 
-          // Run the full quality filter on the REAL DexScreener pair
+          // Re-run quality filter on the confirmed pair data
           const dexFilterResult = qualityFilter(dexPair, this.config);
           if (!dexFilterResult.pass) {
             decisions.push({
               ...c,
               action: "filtered",
-              reason: `DexScreener verify failed: ${dexFilterResult.reason} (dexLiq=$${Math.round(dexLiq).toLocaleString()}, dexVol24h=$${Math.round(dexVol24h).toLocaleString()})`,
+              reason: `Stage 2 quality check failed: ${dexFilterResult.reason} (liq=$${Math.round(dexLiq).toLocaleString()}, vol24h=$${Math.round(dexVol24h).toLocaleString()})`,
             });
             continue;
           }
 
-          // Apply entry-quality score boosts using real DexScreener data
+          // Apply entry-quality score boosts
           const entryBoost = computeEntryBoosts(dexPair);
           const boostedScore = Math.min(100, c.aiScore + entryBoost);
 
           logger.info(
-            { symbol: c.symbol, aiScore: c.aiScore, entryBoost, boostedScore, dexLiq, dexPrice, dexMcap, dexVol24h },
-            "Auto-trader: DexScreener verification PASSED — candidate confirmed"
+            { symbol: c.symbol, aiScore: c.aiScore, entryBoost, boostedScore, dexLiq, dexPrice, dexMcap, dexVol24h, fromScanner: c.fromScanner },
+            "Auto-trader: Stage 2 verification PASSED — candidate confirmed"
           );
 
           verifiedCandidates.push({ ...c, aiScore: boostedScore, liquidityUsd: dexLiq, priceUsd: dexPrice, marketCapUsd: dexMcap, pair: dexPair });
-          break; // We only need 1 verified candidate per cycle (1-trade-per-cycle cap)
+          break; // First verified candidate wins this cycle
         } catch (err) {
-          decisions.push({ ...c, action: "filtered", reason: `DexScreener verify error: ${err instanceof Error ? err.message : "unknown"}` });
+          decisions.push({ ...c, action: "filtered", reason: `Stage 2 verify error: ${err instanceof Error ? err.message : "unknown"}` });
         }
       }
 
@@ -863,7 +876,7 @@ class AutoTraderService {
         decisions.push({ ...c, action: "skipped_slots", reason: "No available trade slots (max concurrent reached)" });
       }
 
-      const slots = Math.min(1, maxConcurrentTrades - openPositions.length);
+      const slots = Math.min(2, maxConcurrentTrades - openPositions.length);
       const toTrade = verifiedCandidates.slice(0, slots);
 
       for (const c of toTrade) {
@@ -982,7 +995,23 @@ class AutoTraderService {
 
       const filtered = decisions.filter((d) => d.action === "filtered").length;
       const traded = decisions.filter((d) => d.action === "traded").length;
-      logger.info({ cycleId, tokensEvaluated, filtered, qualified: qualifiedCandidates.length, tradesOpened: traded }, "Auto-trader: cycle complete");
+
+      // Build filter-reason summary for diagnostics
+      const reasonCounts: Record<string, number> = {};
+      for (const d of decisions) {
+        if (d.action === "filtered" && d.reason) {
+          // Normalise to a short prefix (e.g. "AI score 45 < 55 min" → "AI score")
+          const key = d.reason.split(/[\d$]/)[0].trim().replace(/[:\s]+$/, "");
+          reasonCounts[key] = (reasonCounts[key] ?? 0) + 1;
+        }
+      }
+      const topReasons = Object.entries(reasonCounts)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 6)
+        .map(([k, v]) => `${k}×${v}`)
+        .join(", ");
+
+      logger.info({ cycleId, tokensEvaluated, filtered, qualified: qualifiedCandidates.length, tradesOpened: traded, topFilterReasons: topReasons || "none" }, "Auto-trader: cycle complete");
     } catch (err) {
       logger.error({ err }, "Auto-trader: cycle error");
     } finally {

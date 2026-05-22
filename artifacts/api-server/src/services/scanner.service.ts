@@ -8,13 +8,14 @@ const DEXSCREENER_BASE = "https://api.dexscreener.com";
 
 // ─── Timing & limits ─────────────────────────────────────────────────────────
 // Budget: DexScreener public limit ≈ 300 req/min (5 req/s).
-// Scanner uses at most CONCURRENCY requests at a time with 80 ms between
-// batches → ~6 req/s peak for DexScreener, leaving headroom for verification.
+// Scanner deliberately uses only ~1.2 req/s to leave the bulk of the rate
+// budget for auto-trader verification calls (which need real-time data).
+// 12 queries per 10s = 1.2 req/s → leaves ~180 req/min for verification.
 // GeckoTerminal free tier: 30 req/min → 3 pages every 10s = 18 req/min.
-const SCAN_INTERVAL_MS      = 5_000;  // 5 s between ticks
-const QUERIES_PER_SCAN      = 30;     // queries per tick — 30/5s = 6 req/s
-const SCAN_CONCURRENCY      = 8;      // max parallel DexScreener requests at once
-const SCAN_BATCH_DELAY_MS   = 80;     // ms pause between batches
+const SCAN_INTERVAL_MS      = 10_000; // 10 s between ticks (was 5s)
+const QUERIES_PER_SCAN      = 12;     // queries per tick — 12/10s = 1.2 req/s (was 30/5s=6)
+const SCAN_CONCURRENCY      = 4;      // max parallel DexScreener requests at once (was 8)
+const SCAN_BATCH_DELAY_MS   = 200;    // ms pause between batches (was 80ms)
 const MAX_RESULTS_PER_QUERY = 30;     // DexScreener returns up to 30 per search
 
 // Fast new-pairs watcher — DexScreener keyword scan every 8 s

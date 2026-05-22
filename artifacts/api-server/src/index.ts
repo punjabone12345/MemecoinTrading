@@ -266,17 +266,63 @@ if (process.env["DATABASE_URL"]) {
           contract_address TEXT, name TEXT, added_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), notes TEXT
         )
       `);
-      // Add RugCheck columns to positions table (idempotent)
-      const positionRugCols: [string, string][] = [
-        ["rug_score",          "NUMERIC"],
-        ["rug_lp_locked_pct",  "NUMERIC"],
-        ["rug_top_holder_pct", "NUMERIC"],
-        ["rug_warn_risks",     "TEXT"],
+      // Drop NOT NULL constraints on legacy columns that the new service doesn't populate
+      for (const col of ["current_price", "size_usd", "pnl_usd", "pnl_pct"]) {
+        await migClient.query(
+          `ALTER TABLE positions ALTER COLUMN ${col} DROP NOT NULL`
+        ).catch(() => {});
+      }
+      // Rename positions.id → position_id (idempotent)
+      await migClient.query(`
+        DO $$ BEGIN
+          IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='positions' AND column_name='id') THEN
+            ALTER TABLE positions RENAME COLUMN id TO position_id;
+          END IF;
+        END $$;
+      `).catch(() => {});
+      // Rename positions.name → token_name (idempotent)
+      await migClient.query(`
+        DO $$ BEGIN
+          IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='positions' AND column_name='name') THEN
+            ALTER TABLE positions RENAME COLUMN name TO token_name;
+          END IF;
+        END $$;
+      `).catch(() => {});
+      // Add all columns that paper-trading.service.ts upsertPosition needs
+      const positionsCols: [string, string][] = [
+        ["position_id",            "TEXT"],        // already primary key after rename, skip if exists
+        ["token_name",             "TEXT"],        // renamed from name
+        ["tp_price",               "DOUBLE PRECISION"],
+        ["sl_price",               "DOUBLE PRECISION"],
+        ["tp_percent",             "DOUBLE PRECISION"],
+        ["sl_percent",             "DOUBLE PRECISION"],
+        ["entry_market_cap",       "DOUBLE PRECISION"],
+        ["entry_liquidity_usd",    "DOUBLE PRECISION"],
+        ["tp_market_cap",          "DOUBLE PRECISION"],
+        ["sl_market_cap",          "DOUBLE PRECISION"],
+        ["exit_price",             "DOUBLE PRECISION"],
+        ["pnl_sol",                "DOUBLE PRECISION"],
+        ["pnl_percent",            "DOUBLE PRECISION"],
+        ["hold_time_ms",           "BIGINT"],
+        ["note",                   "TEXT"],
+        ["tp1_price",              "DOUBLE PRECISION"],
+        ["tp2_price",              "DOUBLE PRECISION"],
+        ["tp1_sell_pct",           "DOUBLE PRECISION"],
+        ["tp2_sell_pct",           "DOUBLE PRECISION"],
+        ["remaining_size_sol",     "DOUBLE PRECISION"],
+        ["partial_pnl_sol",        "DOUBLE PRECISION"],
+        ["llm_secondary_verdict",  "TEXT"],
+        ["llm_secondary_provider", "TEXT"],
+        ["rug_score",              "NUMERIC"],
+        ["rug_lp_locked_pct",      "NUMERIC"],
+        ["rug_top_holder_pct",     "NUMERIC"],
+        ["rug_warn_risks",         "TEXT"],
+        ["updated_at",             "TIMESTAMPTZ"],
       ];
-      for (const [col, type] of positionRugCols) {
+      for (const [col, type] of positionsCols) {
         await migClient.query(
           `ALTER TABLE positions ADD COLUMN IF NOT EXISTS ${col} ${type}`
-        );
+        ).catch(() => {});
       }
       logger.info("DB migration: all tables ready");
     } finally {

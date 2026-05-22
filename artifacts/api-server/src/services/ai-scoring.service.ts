@@ -107,17 +107,16 @@ export function computeSignals(pair: DexScreenerPair): TokenSignals {
   }
 
   // ── 3. Liquidity depth (max 15 pts) ───────────────────────────────────────
-  // Calibrated to the $30K minimum — reward pools with $30K+ which are
-  // deep enough for safe entry/exit and much harder to rug.
-  // Tokens below $30K get heavily penalized since they almost always rug.
+  // Calibrated to the $20K minimum (minLiquidityUsd config).
+  // Reward deeper pools — easier exit, harder to rug.
   let liquidityScore = 0;
   if (liq >= 200_000)      liquidityScore = 15;
   else if (liq >= 100_000) liquidityScore = 14;
   else if (liq >= 60_000)  liquidityScore = 12;
   else if (liq >= 40_000)  liquidityScore = 10;
-  else if (liq >= 30_000)  liquidityScore = 7;  // minimum viable entry
-  else if (liq >= 20_000)  liquidityScore = 3;  // below floor — heavily penalized
-  else                     liquidityScore = 0;  // dangerous — never trade
+  else if (liq >= 30_000)  liquidityScore = 8;  // solid entry
+  else if (liq >= 20_000)  liquidityScore = 6;  // meets minimum — valid entry
+  else                     liquidityScore = 0;  // below floor — never trade
 
   // ── 4. Volume intensity: hourly volume / market cap (max 20 pts) ──────────
   // High vol/mcap ratio means the token is trading its entire market cap in an
