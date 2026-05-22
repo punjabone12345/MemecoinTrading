@@ -116,7 +116,7 @@ export interface AutoTraderStatus {
 // ─── Default config ────────────────────────────────────────────────────────────
 const DEFAULT_CONFIG: AutoTraderConfig = {
   solPerTrade: 0.5,
-  maxConcurrentTrades: 3,
+  maxConcurrentTrades: 5,
 
   // ── AI quality ────────────────────────────────────────────────────────────
   minAiScore:    38,            // balanced — quantity + quality (heuristic calibrated to $20K liq floor)
@@ -915,7 +915,7 @@ class AutoTraderService {
         decisions.push({ ...c, action: "skipped_slots", reason: "No available trade slots (max concurrent reached)" });
       }
 
-      const slots = Math.min(2, maxConcurrentTrades - openPositions.length);
+      const slots = Math.min(3, maxConcurrentTrades - openPositions.length);
       const toTrade = verifiedCandidates.slice(0, slots);
 
       for (const c of toTrade) {
