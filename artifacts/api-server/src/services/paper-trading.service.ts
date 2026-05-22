@@ -118,7 +118,13 @@ class PaperTradingService {
     try {
       const rows = await query<DbRow>(
         "SELECT * FROM positions ORDER BY opened_at ASC"
-      );
+      ).catch((err: Error) => {
+        if (err.message?.includes("does not exist")) {
+          logger.info("Paper trading: positions table not yet created — starting fresh (will be created by migration)");
+          return [] as DbRow[];
+        }
+        throw err;
+      });
 
       const open: Position[] = [];
       const closed: Position[] = [];

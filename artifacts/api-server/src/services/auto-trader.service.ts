@@ -7,6 +7,7 @@ import { computeSignals, computeAiScore, computeConfidence, getDynamicRisk, comp
 import { mapPairToToken } from "./scanner.service.js";
 import { analyseTokenWithAi, buildAnalysisInput } from "./ai-analysis.service.js";
 import { checkTokenSafety } from "./rugcheck.service.js";
+import { query, execute } from "../lib/db.js";
 import type { DexScreenerPair } from "../types/index.js";
 
 const DEXSCREENER_BASE = "https://api.dexscreener.com";
@@ -432,9 +433,47 @@ class AutoTraderService {
 
   getConfig(): AutoTraderConfig { return { ...this.config }; }
 
+  async init(): Promise<void> {
+    await this.loadConfig();
+  }
+
+  private async loadConfig(): Promise<void> {
+    try {
+      const rows = await query<{ value: string }>(
+        "SELECT value FROM app_config WHERE key = 'auto_trader_config'"
+      ).catch((err: Error) => {
+        if (err.message?.includes("does not exist")) return [];
+        throw err;
+      });
+      if (rows.length > 0 && rows[0].value) {
+        const saved = JSON.parse(rows[0].value) as Partial<AutoTraderConfig>;
+        this.config = { ...DEFAULT_CONFIG, ...saved };
+        logger.info({ config: this.config }, "Auto-trader config loaded from DB");
+      } else {
+        logger.info("Auto-trader config: using defaults (no saved config found)");
+      }
+    } catch (err) {
+      logger.warn({ err }, "Auto-trader config: failed to load from DB — using defaults");
+    }
+  }
+
+  private async saveConfig(): Promise<void> {
+    try {
+      await execute(
+        `INSERT INTO app_config (key, value, updated_at)
+         VALUES ('auto_trader_config', $1, NOW())
+         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+        [JSON.stringify(this.config)]
+      );
+    } catch (err) {
+      logger.warn({ err }, "Auto-trader config: failed to persist to DB");
+    }
+  }
+
   updateConfig(patch: Partial<AutoTraderConfig>): AutoTraderConfig {
     this.config = { ...this.config, ...patch };
     logger.info({ config: this.config }, "Auto-trader config updated");
+    void this.saveConfig();
     return { ...this.config };
   }
 

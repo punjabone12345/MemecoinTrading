@@ -266,6 +266,13 @@ if (process.env["DATABASE_URL"]) {
           contract_address TEXT, name TEXT, added_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), notes TEXT
         )
       `);
+      await migClient.query(`
+        CREATE TABLE IF NOT EXISTS app_config (
+          key TEXT PRIMARY KEY,
+          value TEXT NOT NULL,
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `);
       // Drop NOT NULL constraints on legacy columns that the new service doesn't populate
       for (const col of ["current_price", "size_usd", "pnl_usd", "pnl_pct"]) {
         await migClient.query(
@@ -336,6 +343,7 @@ if (process.env["DATABASE_URL"]) {
 // Initialise DB-backed services before accepting traffic
 await lossJournalService.init();
 await paperTradingService.init();
+await autoTraderService.init();
 
 server.listen(port, () => {
   logger.info({ port }, "Apex Meme Trader AI — server listening");
