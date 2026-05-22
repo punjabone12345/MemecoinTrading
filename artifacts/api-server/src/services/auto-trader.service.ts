@@ -825,11 +825,11 @@ class AutoTraderService {
       // quality filter on the REAL data. GeckoTerminal frequently shows
       // inflated liquidity ($50K+) for pools that DexScreener shows at $1-$10.
       // A token MUST pass this step before any trade is opened.
-      // Check up to MAX_VERIFY candidates in score order, stop at first winner.
+      // Verify up to MAX_VERIFY candidates in score order.
       // Scanner tokens already carry fresh DexScreener data — skip the re-fetch
       // and use their cached syntheticPair directly to avoid burning rate-limit budget.
       // Only freshTokens (supplementary, not from scanner) get the full 5-endpoint verify.
-      const MAX_VERIFY = 3;
+      const MAX_VERIFY = 8;
       const verifiedCandidates: typeof qualifiedCandidates = [];
 
       for (const c of qualifiedCandidates.slice(0, MAX_VERIFY)) {
@@ -904,15 +904,14 @@ class AutoTraderService {
           );
 
           verifiedCandidates.push({ ...c, aiScore: boostedScore, liquidityUsd: dexLiq, priceUsd: dexPrice, marketCapUsd: dexMcap, pair: dexPair });
-          break; // First verified candidate wins this cycle
         } catch (err) {
           decisions.push({ ...c, action: "filtered", reason: `Stage 2 verify error: ${err instanceof Error ? err.message : "unknown"}` });
         }
       }
 
-      // Remaining pre-filter qualifiers that we didn't verify (no slots or beyond MAX_VERIFY)
-      for (const c of qualifiedCandidates.slice(verifiedCandidates.length + (qualifiedCandidates.length > MAX_VERIFY ? MAX_VERIFY : qualifiedCandidates.length))) {
-        decisions.push({ ...c, action: "skipped_slots", reason: "No available trade slots (max concurrent reached)" });
+      // Candidates beyond MAX_VERIFY — not enough time to verify all; will retry next cycle
+      for (const c of qualifiedCandidates.slice(MAX_VERIFY)) {
+        decisions.push({ ...c, action: "skipped_slots", reason: "Candidate queue — top signals verified this cycle; will evaluate next cycle" });
       }
 
       const slots = Math.min(3, maxConcurrentTrades - openPositions.length);
