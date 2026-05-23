@@ -46,6 +46,8 @@ export interface AutoTraderConfig {
   consecutiveLossPauseHours: number; // how many hours to pause on consecutive loss trigger (default 2)
   dailyLossLimitSol: number;         // daily SOL loss cap before 24h pause (default 2)
   dailyLossPauseHours: number;       // how many hours to pause on daily loss cap (default 24)
+  // Internal: used to detect when code defaults changed and migrate saved config
+  schemaVersion?: number;
 }
 
 export interface FilterResult {
@@ -153,6 +155,9 @@ const DEFAULT_CONFIG: AutoTraderConfig = {
   consecutiveLossPauseHours: 1,  // 1 hour cooldown
   dailyLossLimitSol:         3,  // -3 SOL/day cap
   dailyLossPauseHours:      12,  // 12h pause on daily cap
+
+  // Bump this number whenever filter defaults change — forces all saved configs to migrate
+  schemaVersion: 3,
 };
 
 // ─── Anti-rug + quality filter ────────────────────────────────────────────────
@@ -446,9 +451,31 @@ class AutoTraderService {
         throw err;
       });
       if (rows.length > 0 && rows[0].value) {
-        const saved = JSON.parse(rows[0].value) as Partial<AutoTraderConfig>;
-        this.config = { ...DEFAULT_CONFIG, ...saved };
-        logger.info({ config: this.config }, "Auto-trader config loaded from DB");
+        const saved = JSON.parse(rows[0].value) as Partial<AutoTraderConfig> & { schemaVersion?: number };
+
+        if (saved.schemaVersion !== DEFAULT_CONFIG.schemaVersion) {
+          // Schema version mismatch — code defaults changed.
+          // Reset all filter/strategy fields to new defaults.
+          // Preserve only user-facing trade settings they may have customised.
+          const preserved = {
+            solPerTrade:            saved.solPerTrade            ?? DEFAULT_CONFIG.solPerTrade,
+            maxConcurrentTrades:    saved.maxConcurrentTrades    ?? DEFAULT_CONFIG.maxConcurrentTrades,
+            consecutiveLossLimit:   saved.consecutiveLossLimit   ?? DEFAULT_CONFIG.consecutiveLossLimit,
+            consecutiveLossPauseHours: saved.consecutiveLossPauseHours ?? DEFAULT_CONFIG.consecutiveLossPauseHours,
+            dailyLossLimitSol:      saved.dailyLossLimitSol      ?? DEFAULT_CONFIG.dailyLossLimitSol,
+            dailyLossPauseHours:    saved.dailyLossPauseHours    ?? DEFAULT_CONFIG.dailyLossPauseHours,
+          };
+          this.config = { ...DEFAULT_CONFIG, ...preserved };
+          logger.info(
+            { oldVersion: saved.schemaVersion ?? "none", newVersion: DEFAULT_CONFIG.schemaVersion, config: this.config },
+            "Auto-trader config: schema migrated to new defaults"
+          );
+          // Persist the migrated config immediately so next restart is clean
+          void this.saveConfig();
+        } else {
+          this.config = { ...DEFAULT_CONFIG, ...saved };
+          logger.info({ config: this.config }, "Auto-trader config loaded from DB");
+        }
       } else {
         logger.info("Auto-trader config: using defaults (no saved config found)");
       }
