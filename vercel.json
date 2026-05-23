@@ -1,0 +1,8 @@
+{
+  "rewrites": [
+    {
+      "source": "/api/:path*",
+      "destination": "https://memecointrading-8en3.onrender.com/api/:path*"
+    }
+  ]
+}
