@@ -119,18 +119,18 @@ const DEFAULT_CONFIG: AutoTraderConfig = {
   maxConcurrentTrades: 5,
 
   // ── AI quality ────────────────────────────────────────────────────────────
-  minAiScore:    38,            // balanced — quantity + quality (heuristic calibrated to $20K liq floor)
+  minAiScore:    55,            // raised: only high-conviction entries (pump.fun grads get +20 bonus so they still qualify)
   minConfidence: 40,            // allow tokens with less complete data
 
   // ── Liquidity & volume ────────────────────────────────────────────────────
   minLiquidityUsd:  20_000,     // absolute floor (also hardcoded in Layer 2)
   minVolume24hUsd:  18_000,     // lower bar — early tokens often have low 24h vol
-  minVolume1hUsd:    4_000,     // needs some activity right now
+  minVolume1hUsd:    8_000,     // raised: needs real 1h momentum, not ghost trading
 
   // ── Momentum ─────────────────────────────────────────────────────────────
-  minBuyRatio1h:    0.55,       // 55% buys — genuine buy pressure
+  minBuyRatio1h:    0.58,       // raised: 58% buys — stronger buy dominance required
   minPriceChange1h: 3,          // light momentum signal
-  maxPriceChange1h: 90,         // allow strong early pumps (was 70, blocked good tokens)
+  maxPriceChange1h: 300,        // raised: pump.fun grads regularly hit +150-400% in hour 1 — don't miss them
   minTransactions24h: 80,       // lower bar for newer tokens
   minUniqueBuyers:  15,         // lower proxy threshold
 
@@ -140,7 +140,7 @@ const DEFAULT_CONFIG: AutoTraderConfig = {
 
   // ── Pair age ──────────────────────────────────────────────────────────────
   minPairAgeMinutes:  8,        // 8min survival is meaningful
-  maxPairAgeHours:    8,        // catch tokens up to 8h old
+  maxPairAgeHours:    3,        // tightened: only trade FRESH tokens — by hour 4+, the pump is over
 
   // ── Rug guards ────────────────────────────────────────────────────────────
   minLiquidityMcapRatio: 0.08,  // 8% — less strict, Layer 2 still blocks thin pools

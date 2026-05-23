@@ -168,11 +168,16 @@ export function computeAiScore(signals: TokenSignals, boosts = 0): number {
 }
 
 /**
- * Score boosts for high-conviction entry patterns (max +25 pts total).
+ * Score boosts for high-conviction entry patterns (max +40 pts total).
  *
  * These reward healthy market structure: pullbacks, dip-buying, sustained
  * accumulation, and organic growth — all the signals of a quality entry.
  * They are applied AFTER DexScreener verification on the real pair data.
+ *
+ * Pump.fun graduation bonus: when pump.fun's bonding curve fills (~85 SOL),
+ * it creates a Raydium pool and graduates the token. This is the EXACT event
+ * where 15-20 people buy simultaneously causing slippage, then the token often
+ * 10x-100x. Detection: mint address ends in "pump" + pair is very fresh.
  */
 export function computeEntryBoosts(pair: DexScreenerPair): number {
   let boost = 0;
@@ -191,6 +196,22 @@ export function computeEntryBoosts(pair: DexScreenerPair): number {
   const vol5m = pair.volume?.m5 || 0;
   const buyRatio1h = total1h > 0 ? buys1h / total1h : 0;
   const buyRatio5m = total5m > 0 ? buys5m / total5m : 0;
+  const pairAgeMinutes = pair.pairCreatedAt
+    ? (Date.now() - pair.pairCreatedAt) / 60_000
+    : 999;
+
+  // ── Pump.fun graduation bonus (highest priority) ─────────────────────────
+  // Pump.fun graduates when bonding curve fills → Raydium pool created.
+  // These tokens can go 10-100x from graduation price. Best window: first 90 min.
+  const mintAddress = pair.baseToken?.address ?? "";
+  const isPumpFunToken = mintAddress.toLowerCase().endsWith("pump");
+  if (isPumpFunToken && pairAgeMinutes < 90 && buyRatio1h >= 0.58) {
+    // Very fresh graduate with buy pressure — highest conviction signal
+    boost += 20;
+  } else if (isPumpFunToken && pairAgeMinutes < 180) {
+    // Still fresh pump.fun token, second window
+    boost += 10;
+  }
 
   // +10: Deep pool AND strong buyer dominance — accumulation in progress
   if (liq >= 40_000 && buyRatio1h >= 0.72 && total1h >= 30)
@@ -217,7 +238,7 @@ export function computeEntryBoosts(pair: DexScreenerPair): number {
   if (pc1h >= 10 && pc1h <= 35 && pc5m >= 1 && pc5m <= 8 && buyRatio1h >= 0.60 && total1h >= 20)
     boost += 4;
 
-  return Math.min(boost, 25);
+  return Math.min(boost, 40);
 }
 
 export function computeConfidence(pair: DexScreenerPair): number {
@@ -257,9 +278,9 @@ export function computeConfidence(pair: DexScreenerPair): number {
  * <75    | -12%  | 80%   | Floor — never set too tight
  */
 export function getDynamicRisk(score: number): { slPercent: number; tpPercent: number } {
-  if (score >= 90) return { slPercent: 22, tpPercent: 400 };
-  if (score >= 85) return { slPercent: 20, tpPercent: 250 };
-  if (score >= 80) return { slPercent: 18, tpPercent: 180 };
-  if (score >= 75) return { slPercent: 15, tpPercent: 120 };
-  return { slPercent: 12, tpPercent: 80 };
+  if (score >= 90) return { slPercent: 22, tpPercent: 500 };
+  if (score >= 85) return { slPercent: 20, tpPercent: 350 };
+  if (score >= 80) return { slPercent: 18, tpPercent: 250 };
+  if (score >= 75) return { slPercent: 15, tpPercent: 180 };
+  return { slPercent: 15, tpPercent: 120 };
 }
