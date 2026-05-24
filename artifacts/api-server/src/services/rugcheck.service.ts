@@ -130,21 +130,10 @@ export async function checkTokenSafety(
   const report = await fetchReport(mintAddress);
 
   if (!report) {
-    // RugCheck unavailable — log but do NOT block the trade
-    // (network errors should not prevent all trading)
-    logger.warn({ mintAddress }, "RugCheck: API unavailable — skipping safety check");
-    return {
-      pass: true,
-      reason: "RugCheck unavailable — check skipped",
-      score: 0,
-      mintAuthority: null,
-      freezeAuthority: null,
-      lpLockedPct: 0,
-      topHolderPct: 0,
-      dangerRisks: [],
-      warnRisks: [],
-      rugged: false,
-    };
+    // RugCheck API down — fail CLOSED. Cannot verify on-chain safety without data.
+    // We'd rather miss a trade than enter an unverified token.
+    logger.warn({ mintAddress }, "RugCheck: API unavailable — blocking trade (fail-closed for safety)");
+    return fail("RugCheck API unavailable — cannot verify on-chain safety, trade blocked");
   }
 
   // ── Extract fields ─────────────────────────────────────────────────────────

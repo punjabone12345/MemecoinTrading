@@ -121,16 +121,16 @@ const DEFAULT_CONFIG: AutoTraderConfig = {
   maxConcurrentTrades: 5,
 
   // ── AI quality ────────────────────────────────────────────────────────────
-  minAiScore:    55,            // raised: only high-conviction entries (pump.fun grads get +20 bonus so they still qualify)
+  minAiScore:    60,            // raised: higher conviction bar — pump.fun grads get +20 bonus so they still qualify at 60+
   minConfidence: 40,            // allow tokens with less complete data
 
   // ── Liquidity & volume ────────────────────────────────────────────────────
-  minLiquidityUsd:  20_000,     // absolute floor (also hardcoded in Layer 2)
+  minLiquidityUsd:  30_000,     // raised: deeper pool = harder to drain, more real exit liquidity
   minVolume24hUsd:  18_000,     // lower bar — early tokens often have low 24h vol
-  minVolume1hUsd:    8_000,     // raised: needs real 1h momentum, not ghost trading
+  minVolume1hUsd:    8_000,     // needs real 1h momentum, not ghost trading
 
   // ── Momentum ─────────────────────────────────────────────────────────────
-  minBuyRatio1h:    0.58,       // raised: 58% buys — stronger buy dominance required
+  minBuyRatio1h:    0.62,       // raised: 62% buys — strong buy dominance, less likely to be distribution
   minPriceChange1h: 3,          // light momentum signal
   maxPriceChange1h: 300,        // raised: pump.fun grads regularly hit +150-400% in hour 1 — don't miss them
   minTransactions24h: 80,       // lower bar for newer tokens
@@ -157,7 +157,7 @@ const DEFAULT_CONFIG: AutoTraderConfig = {
   dailyLossPauseHours:      12,  // 12h pause on daily cap
 
   // Bump this number whenever filter defaults change — forces all saved configs to migrate
-  schemaVersion: 3,
+  schemaVersion: 4,
 };
 
 // ─── Anti-rug + quality filter ────────────────────────────────────────────────
@@ -1027,6 +1027,25 @@ class AutoTraderService {
             { symbol: c.symbol, provider: llm.provider, tradeSizeSol, secondaryVerdict: llm.secondaryVerdict, reasoning: llm.reasoning },
             "Auto-trader: LLM RISKY — reduced trade size (dual AI disagreement)",
           );
+        }
+
+        // ── Layer 8: Live liquidity pre-check (anti-stale-cache protection) ──────
+        // Scanner cache can be 30-60s stale. Re-fetch live DexScreener data right
+        // before committing capital to verify liquidity hasn't drained since scan.
+        try {
+          const liveResp = await axios.get<{ pair: { liquidity?: { usd?: number } } | null }>(
+            `${DEXSCREENER_BASE}/latest/dex/pairs/solana/${c.pairAddress}`,
+            { timeout: 5_000 }
+          );
+          const liveLiq = liveResp.data?.pair?.liquidity?.usd ?? 0;
+          if (liveLiq < 15_000) {
+            decisions.push({ ...c, ...llmFields, action: "filtered", reason: `Live liquidity check: $${Math.round(liveLiq).toLocaleString()} — drained since scan (was $${Math.round(c.liquidityUsd).toLocaleString()}), aborting` });
+            logger.warn({ symbol: c.symbol, cachedLiq: c.liquidityUsd, liveLiq }, "Auto-trader: live liquidity check FAILED — liquidity drained, trade aborted");
+            continue;
+          }
+          logger.info({ symbol: c.symbol, cachedLiq: Math.round(c.liquidityUsd), liveLiq: Math.round(liveLiq) }, "Auto-trader: live liquidity check PASSED");
+        } catch {
+          logger.warn({ symbol: c.symbol }, "Auto-trader: live liquidity check timed out — proceeding with cached data");
         }
 
         try {

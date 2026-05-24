@@ -1001,6 +1001,7 @@ class PaperTradingService {
     patch: {
       pnlSol?: number;
       pnlPercent?: number;
+      entryPrice?: number;
       exitPrice?: number;
       closeReason?: "manual" | "stop_loss" | "take_profit";
       note?: string;
@@ -1012,6 +1013,7 @@ class PaperTradingService {
     const old = this.closedTrades[idx];
     const updated: Position = {
       ...old,
+      ...(patch.entryPrice !== undefined ? { entryPrice: patch.entryPrice } : {}),
       ...(patch.exitPrice !== undefined  ? { exitPrice: patch.exitPrice }   : {}),
       ...(patch.pnlSol !== undefined     ? { pnlSol: patch.pnlSol }         : {}),
       ...(patch.pnlPercent !== undefined ? { pnlPercent: patch.pnlPercent } : {}),

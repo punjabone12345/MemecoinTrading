@@ -148,11 +148,23 @@ interface MarkTpState {
   currentPnlSol: number;
 }
 
+interface EditPricesState {
+  positionId: string;
+  symbol: string;
+  sizeSol: number;
+  entryPrice: number;
+  exitPrice: number;
+  currentPnlSol: number;
+}
+
 export default function Positions() {
   const [tab, setTab] = useState<"Open" | "Closed">("Open");
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [editLoss, setEditLoss] = useState<EditLossState | null>(null);
   const [markTp, setMarkTp] = useState<MarkTpState | null>(null);
+  const [editPrices, setEditPrices] = useState<EditPricesState | null>(null);
+  const [editPricesEntry, setEditPricesEntry] = useState("");
+  const [editPricesExit, setEditPricesExit] = useState("");
   const [editNote, setEditNote] = useState("");
   const [expandedAi, setExpandedAi] = useState<Set<string>>(new Set());
 
@@ -196,6 +208,42 @@ export default function Positions() {
       tpPrice: p.tpPrice,
       entryPrice: p.entryPrice,
       currentPnlSol: p.pnlSol ?? 0,
+    });
+  }
+
+  function openEditPricesModal(p: typeof closedPositions[0]) {
+    setEditNote(p.note ?? "");
+    setEditPricesEntry(String(p.entryPrice ?? ""));
+    setEditPricesExit(String(p.exitPrice ?? ""));
+    setEditPrices({
+      positionId: p.positionId,
+      symbol: p.symbol,
+      sizeSol: p.sizeSol,
+      entryPrice: p.entryPrice,
+      exitPrice: p.exitPrice ?? p.entryPrice,
+      currentPnlSol: p.pnlSol ?? 0,
+    });
+  }
+
+  function submitEditPrices() {
+    if (!editPrices) return;
+    const newEntry = parseFloat(editPricesEntry);
+    const newExit = parseFloat(editPricesExit);
+    if (!newEntry || newEntry <= 0 || !newExit || newExit <= 0) return;
+    const grossReturn = editPrices.sizeSol * (newExit / newEntry);
+    const fees = (grossReturn + editPrices.sizeSol) * 0.003 + editPrices.sizeSol * 0.005;
+    const newPnlSol = grossReturn - editPrices.sizeSol - fees;
+    const newPnlPercent = ((newExit - newEntry) / newEntry) * 100;
+    editClosedTrade.mutate({
+      positionId: editPrices.positionId,
+      pnlSol: newPnlSol,
+      pnlPercent: newPnlPercent,
+      entryPrice: newEntry,
+      exitPrice: newExit,
+      closeReason: "manual",
+      note: editNote || "Prices manually corrected",
+    }, {
+      onSuccess: () => setEditPrices(null),
     });
   }
 
@@ -568,6 +616,14 @@ export default function Positions() {
                           <Pencil className="w-3 h-3" />
                           Mark Loss
                         </button>
+                        <button
+                          onClick={() => openEditPricesModal(p)}
+                          className="flex items-center gap-1 text-[10px] text-blue-400/60 hover:text-blue-400 transition-colors py-1 px-1.5 rounded"
+                          title="Manually set entry and exit price"
+                        >
+                          <Pencil className="w-3 h-3" />
+                          Edit Prices
+                        </button>
                       </div>
                     )}
 
@@ -666,6 +722,106 @@ export default function Positions() {
                 className="flex-1 py-2.5 rounded-xl bg-red-500/20 border border-red-500/30 text-red-400 text-sm font-bold active:scale-95 transition-all disabled:opacity-50"
               >
                 {editClosedTrade.isPending ? "Saving…" : "Confirm Loss"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Edit Prices modal */}
+      {editPrices && (
+        <div className="fixed inset-0 z-50 flex items-end justify-center sm:items-center p-4 bg-black/60 backdrop-blur-sm" onClick={() => setEditPrices(null)}>
+          <div
+            className="bg-[#0d0d18] border border-blue-500/30 rounded-2xl p-5 w-full max-w-sm space-y-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center gap-2">
+              <Pencil className="w-5 h-5 text-blue-400" />
+              <h2 className="text-white font-bold text-base">Edit Entry / Exit Prices</h2>
+            </div>
+
+            <div className="bg-blue-500/10 border border-blue-500/20 rounded-lg p-3 text-xs text-blue-300 space-y-1">
+              <p className="font-semibold">${editPrices.symbol} — Manual price correction</p>
+              <p className="text-blue-300/70">
+                Recalculates P&L from the prices you enter. Fees (0.3% + 0.5%) are automatically deducted.
+              </p>
+            </div>
+
+            <div className="space-y-3">
+              <div>
+                <label className="text-xs text-white/40 mb-1.5 block">Entry Price ($)</label>
+                <input
+                  type="number"
+                  step="any"
+                  value={editPricesEntry}
+                  onChange={(e) => setEditPricesEntry(e.target.value)}
+                  placeholder="e.g. 0.00000123"
+                  className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-xs text-white placeholder:text-white/25 focus:outline-none focus:border-blue-500/40"
+                />
+              </div>
+              <div>
+                <label className="text-xs text-white/40 mb-1.5 block">Exit Price ($)</label>
+                <input
+                  type="number"
+                  step="any"
+                  value={editPricesExit}
+                  onChange={(e) => setEditPricesExit(e.target.value)}
+                  placeholder="e.g. 0.00000089"
+                  className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-xs text-white placeholder:text-white/25 focus:outline-none focus:border-blue-500/40"
+                />
+              </div>
+            </div>
+
+            {(() => {
+              const entry = parseFloat(editPricesEntry);
+              const exit = parseFloat(editPricesExit);
+              if (!entry || !exit || entry <= 0 || exit <= 0) return null;
+              const gross = editPrices.sizeSol * (exit / entry);
+              const fees = (gross + editPrices.sizeSol) * 0.003 + editPrices.sizeSol * 0.005;
+              const pnl = gross - editPrices.sizeSol - fees;
+              const pct = ((exit - entry) / entry) * 100;
+              return (
+                <div className="grid grid-cols-2 gap-3 text-xs">
+                  <div className="bg-white/4 rounded-lg p-2.5">
+                    <p className="text-white/40 mb-1">New P&L</p>
+                    <p className={`font-bold ${pnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                      {pnl >= 0 ? "+" : ""}{pnl.toFixed(4)} SOL
+                    </p>
+                  </div>
+                  <div className="bg-white/4 rounded-lg p-2.5">
+                    <p className="text-white/40 mb-1">Return</p>
+                    <p className={`font-bold ${pct >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                      {pct >= 0 ? "+" : ""}{pct.toFixed(1)}%
+                    </p>
+                  </div>
+                </div>
+              );
+            })()}
+
+            <div>
+              <label className="text-xs text-white/40 mb-1.5 block">Note (optional)</label>
+              <input
+                type="text"
+                value={editNote}
+                onChange={(e) => setEditNote(e.target.value)}
+                placeholder="e.g. Price on DexScreener was incorrect"
+                className="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-xs text-white placeholder:text-white/25 focus:outline-none focus:border-blue-500/40"
+              />
+            </div>
+
+            <div className="flex gap-2">
+              <button
+                onClick={() => setEditPrices(null)}
+                className="flex-1 py-2.5 rounded-xl bg-white/8 text-white/50 text-sm font-semibold active:scale-95 transition-all"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={submitEditPrices}
+                disabled={editClosedTrade.isPending || !parseFloat(editPricesEntry) || !parseFloat(editPricesExit)}
+                className="flex-1 py-2.5 rounded-xl bg-blue-500/20 border border-blue-500/30 text-blue-400 text-sm font-bold active:scale-95 transition-all disabled:opacity-50"
+              >
+                {editClosedTrade.isPending ? "Saving…" : "Save Prices"}
               </button>
             </div>
           </div>

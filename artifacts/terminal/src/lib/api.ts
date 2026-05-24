@@ -266,6 +266,7 @@ export function useEditClosedTrade() {
       positionId: string;
       pnlSol?: number;
       pnlPercent?: number;
+      entryPrice?: number;
       exitPrice?: number;
       closeReason?: "manual" | "stop_loss" | "take_profit";
       note?: string;

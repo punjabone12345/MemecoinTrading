@@ -49,9 +49,10 @@ router.delete("/positions/history/:id", (req, res) => {
 
 router.patch("/positions/history/:id", (req, res) => {
   try {
-    const { pnlSol, pnlPercent, exitPrice, closeReason, note } = req.body as {
+    const { pnlSol, pnlPercent, entryPrice, exitPrice, closeReason, note } = req.body as {
       pnlSol?: number;
       pnlPercent?: number;
+      entryPrice?: number;
       exitPrice?: number;
       closeReason?: "manual" | "stop_loss" | "take_profit";
       note?: string;
@@ -59,6 +60,7 @@ router.patch("/positions/history/:id", (req, res) => {
     const updated = paperTradingService.editClosedTrade(req.params.id, {
       pnlSol,
       pnlPercent,
+      entryPrice,
       exitPrice,
       closeReason,
       note,
