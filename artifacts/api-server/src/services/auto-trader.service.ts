@@ -121,7 +121,7 @@ const DEFAULT_CONFIG: AutoTraderConfig = {
   maxConcurrentTrades: 8,       // raised: more slots = more trades while candle gate ensures quality
 
   // ── AI quality ────────────────────────────────────────────────────────────
-  minAiScore:    55,            // lowered slightly: pump.fun grads get +20 bonus so still ≥75 effective
+  minAiScore:    72,            // set to 72 — primary quality gate, pump.fun grads get +20 bonus
   minConfidence: 40,            // allow tokens with less complete data
 
   // ── Liquidity & volume ────────────────────────────────────────────────────
@@ -212,16 +212,13 @@ export function qualityFilter(pair: DexScreenerPair, cfg: AutoTraderConfig): Fil
   // LAYER 2 — RUG DETECTION (hardcoded — cannot be overridden by config)
   // ═══════════════════════════════════════════════════════════════════════════
 
-  // 2a. Pool drain — extreme volume spike in 5m relative to liquidity.
-  //     Lowered threshold: even 1.5× is dangerous (was 2×).
+  // 2a. Pool drain — only flag when BOTH conditions are true:
+  //     a) 5m vol > 400% of liquidity (4×) — extreme volume spike
+  //     b) Price is DROPPING while that volume hits — confirmed sell-side drain
+  //     High volume + rising price = momentum/buying, NOT a drain. Allow it.
   const drainRatio = liq > 0 ? vol5m / liq : 0;
-  if (vol5m > 0 && liq > 0) {
-    if (drainRatio >= 1.5)
-      return fail(`Pool drain: 5m vol $${Math.round(vol5m).toLocaleString()} is ${(drainRatio * 100).toFixed(0)}% of liquidity — LP being drained`);
-    // Any drain WITH falling price = selling into LP
-    if (drainRatio >= 0.5 && (pc5m !== null && pc5m < -3))
-      return fail(`Pool drain + dump: 5m vol ${(drainRatio * 100).toFixed(0)}% of LP and price down ${pc5m?.toFixed(1)}% — LP being drained`);
-  }
+  if (vol5m > 0 && liq > 0 && drainRatio >= 4.0 && pc5m !== null && pc5m < 0)
+    return fail(`Pool drain: 5m vol ${(drainRatio * 100).toFixed(0)}% of liquidity AND price down ${pc5m.toFixed(1)}% — LP being drained while selling`);
 
   // 2b. Bot accumulation (5m)
   if (total5m >= 8 && buyRatio5m >= 0.93)
