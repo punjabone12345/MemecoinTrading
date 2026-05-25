@@ -409,6 +409,148 @@ export function qualityFilter(pair: DexScreenerPair, cfg: AutoTraderConfig): Fil
   return { pass: true, reason: "All filters passed" };
 }
 
+// ─── Candle entry timing ──────────────────────────────────────────────────────
+//
+// Before every trade entry, fetch the last 6 × 5-minute OHLCV candles from
+// DexScreener and reject entries that show classic "bought the top" patterns:
+//
+//  1. Latest candle is the biggest green candle  → entering at the peak
+//  2. Price up ≥40% across last 3 candles        → parabolic, late entry
+//  3. Volume on latest candle < previous         → fading momentum
+//  4. Latest candle closes in lower 40% of range → sell pressure dominating
+//  5. Only 1 consecutive green candle (trend start) → wait for confirmation
+//  6. ≥5 consecutive green candles               → candle 5+, overextended
+//
+// If candle data is unavailable for any reason the trade is SKIPPED entirely
+// (fail-closed) — better to miss a trade than buy an unknown top.
+
+interface OhlcvCandle {
+  t: number;
+  o: number;
+  h: number;
+  l: number;
+  c: number;
+  v: number;
+}
+
+async function checkCandleEntryTiming(pairAddress: string): Promise<FilterResult> {
+  const skip = (reason: string): FilterResult => ({ pass: false, reason });
+
+  let candles: OhlcvCandle[];
+  try {
+    const resp = await axios.get<{ bars?: unknown[]; ohlcv?: unknown[] }>(
+      `https://io.dexscreener.com/dex/chart/v3/solana/${pairAddress}?type=5m`,
+      { timeout: 6_000 },
+    );
+    const raw: unknown[] = (resp.data?.bars ?? resp.data?.ohlcv ?? []) as unknown[];
+    if (!Array.isArray(raw) || raw.length < 2) {
+      return skip("Candle data unavailable (insufficient candles returned) — skipping to avoid buying unknown top");
+    }
+    candles = (raw as Record<string, unknown>[]).slice(-6).map((c) => ({
+      t: Number(c["t"] ?? c["time"] ?? 0),
+      o: Number(c["o"] ?? c["open"]  ?? 0),
+      h: Number(c["h"] ?? c["high"]  ?? 0),
+      l: Number(c["l"] ?? c["low"]   ?? 0),
+      c: Number(c["c"] ?? c["close"] ?? 0),
+      v: Number(c["v"] ?? c["volume"] ?? 0),
+    }));
+    if (candles.some((c) => c.o <= 0 || c.c <= 0)) {
+      return skip("Candle data malformed (zero open/close prices) — skipping to avoid buying unknown top");
+    }
+  } catch {
+    return skip("Candle data unavailable (API error) — skipping to avoid buying unknown top");
+  }
+
+  if (candles.length < 2) {
+    return skip("Candle data unavailable (< 2 candles) — skipping to avoid buying unknown top");
+  }
+
+  const latest = candles[candles.length - 1]!;
+  const prev   = candles[candles.length - 2]!;
+  const last3  = candles.slice(-3);
+
+  // ── Check 1: Latest candle is the BIGGEST green candle ─────────────────────
+  // Bot has been entering right after the peak pump candle. Biggest green = top.
+  if (latest.c > latest.o) {
+    const latestBodyPct = latest.o > 0 ? ((latest.c - latest.o) / latest.o) * 100 : 0;
+    const isLargestGreen = candles.every((candle) => {
+      if (candle === latest) return true;
+      const bodyPct = candle.o > 0 ? ((candle.c - candle.o) / candle.o) * 100 : 0;
+      return bodyPct <= latestBodyPct;
+    });
+    if (isLargestGreen && latestBodyPct > 1) {
+      return skip(
+        `Candle timing: latest is the biggest green candle (+${latestBodyPct.toFixed(1)}% body) — entering at the peak of the pump, skipping`,
+      );
+    }
+  }
+
+  // ── Check 2: Price up ≥40% across last 3 candles ───────────────────────────
+  // Three consecutive strong candles = parabolic move, late entry trap.
+  if (last3.length === 3) {
+    const oldestOpen = last3[0]!.o;
+    if (oldestOpen > 0) {
+      const gain3 = ((latest.c - oldestOpen) / oldestOpen) * 100;
+      if (gain3 >= 40) {
+        return skip(
+          `Candle timing: +${gain3.toFixed(1)}% across last 3 candles ≥ 40% — parabolic, skipping late entry`,
+        );
+      }
+    }
+  }
+
+  // ── Check 3: Volume on latest candle < previous ─────────────────────────────
+  // Declining volume into a rally = distribution, not continuation.
+  if (prev.v > 0 && latest.v < prev.v) {
+    return skip(
+      `Candle timing: volume fading — latest $${Math.round(latest.v).toLocaleString()} < prev $${Math.round(prev.v).toLocaleString()} — momentum declining, skipping`,
+    );
+  }
+
+  // ── Check 4: Buy ratio proxy — close in lower 40% of candle range ──────────
+  // If price closes near the bottom of its range, sellers took control on this
+  // candle regardless of the absolute direction (classic bearish reversal signal).
+  const range = latest.h - latest.l;
+  if (range > 0) {
+    const closePosition = (latest.c - latest.l) / range; // 0 = close at low, 1 = close at high
+    if (closePosition < 0.40) {
+      return skip(
+        `Candle timing: latest candle closes in lower ${(closePosition * 100).toFixed(0)}% of range — sell pressure dominating (buy ratio declining), skipping`,
+      );
+    }
+  }
+
+  // ── Check 5 & 6: Trend position ────────────────────────────────────────────
+  // Count consecutive green candles from the most recent backward.
+  // Only enter at candle 2, 3, or 4 of a new trend. Never candle 1 or 5+.
+  let trendLength = 0;
+  for (let i = candles.length - 1; i >= 0; i--) {
+    const candle = candles[i]!;
+    if (candle.c > candle.o) trendLength++;
+    else break;
+  }
+
+  if (trendLength === 0) {
+    return skip("Candle timing: latest candle is red — no uptrend established, skipping");
+  }
+  if (trendLength === 1) {
+    return skip(
+      "Candle timing: candle 1 of new trend — too early (just started), wait for candle 2 confirmation before entry",
+    );
+  }
+  if (trendLength >= 5) {
+    return skip(
+      `Candle timing: candle ${trendLength} of uptrend (≥5) — overextended, early buyers distributing, never enter after candle 4`,
+    );
+  }
+
+  // trendLength is 2, 3, or 4 — valid entry window
+  return {
+    pass: true,
+    reason: `Candle timing OK: candle ${trendLength} of uptrend, volume growing, close in upper range — entry window valid`,
+  };
+}
+
 // ─── Service ──────────────────────────────────────────────────────────────────
 class AutoTraderService {
   private intervalId: ReturnType<typeof setInterval> | null = null;
@@ -1047,6 +1189,30 @@ class AutoTraderService {
         } catch {
           logger.warn({ symbol: c.symbol }, "Auto-trader: live liquidity check timed out — proceeding with cached data");
         }
+
+        // ── Layer 8.5: Candle entry timing gate ──────────────────────────────
+        // Pull last 6 × 5-min candles and reject entries that show "bought the
+        // top" patterns: entering on the biggest green candle, parabolic 3-candle
+        // moves, fading volume, sell-side candle close, or being at candle 5+.
+        // Fail-closed: if candle data is unavailable, skip the trade.
+        const candleCheck = await checkCandleEntryTiming(c.pairAddress);
+        if (!candleCheck.pass) {
+          decisions.push({
+            ...c,
+            ...llmFields,
+            action: "filtered",
+            reason: candleCheck.reason,
+          });
+          logger.info(
+            { symbol: c.symbol, pairAddress: c.pairAddress, reason: candleCheck.reason },
+            "Auto-trader: candle timing BLOCKED — trade rejected",
+          );
+          continue;
+        }
+        logger.info(
+          { symbol: c.symbol, reason: candleCheck.reason },
+          "Auto-trader: candle timing PASSED",
+        );
 
         try {
           const position = await paperTradingService.buyDirect(token, tradeSizeSol, undefined, llm, rugResult);
