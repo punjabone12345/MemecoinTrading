@@ -118,16 +118,16 @@ export interface AutoTraderStatus {
 // ─── Default config ────────────────────────────────────────────────────────────
 const DEFAULT_CONFIG: AutoTraderConfig = {
   solPerTrade: 0.5,
-  maxConcurrentTrades: 5,
+  maxConcurrentTrades: 8,       // raised: more slots = more trades while candle gate ensures quality
 
   // ── AI quality ────────────────────────────────────────────────────────────
-  minAiScore:    60,            // raised: higher conviction bar — pump.fun grads get +20 bonus so they still qualify at 60+
+  minAiScore:    55,            // lowered slightly: pump.fun grads get +20 bonus so still ≥75 effective
   minConfidence: 40,            // allow tokens with less complete data
 
   // ── Liquidity & volume ────────────────────────────────────────────────────
-  minLiquidityUsd:  30_000,     // raised: deeper pool = harder to drain, more real exit liquidity
+  minLiquidityUsd:  25_000,     // lowered: $20K absolute floor + liq/mcap ratio still guards thin pools
   minVolume24hUsd:  18_000,     // lower bar — early tokens often have low 24h vol
-  minVolume1hUsd:    8_000,     // needs real 1h momentum, not ghost trading
+  minVolume1hUsd:    5_000,     // lowered: catches earlier-stage tokens still building 1h volume
 
   // ── Momentum ─────────────────────────────────────────────────────────────
   minBuyRatio1h:    0.62,       // raised: 62% buys — strong buy dominance, less likely to be distribution
@@ -157,7 +157,7 @@ const DEFAULT_CONFIG: AutoTraderConfig = {
   dailyLossPauseHours:      12,  // 12h pause on daily cap
 
   // Bump this number whenever filter defaults change — forces all saved configs to migrate
-  schemaVersion: 4,
+  schemaVersion: 5,
 };
 
 // ─── Anti-rug + quality filter ────────────────────────────────────────────────
@@ -499,11 +499,14 @@ async function checkCandleEntryTiming(pairAddress: string): Promise<FilterResult
     }
   }
 
-  // ── Check 3: Volume on latest candle < previous ─────────────────────────────
-  // Declining volume into a rally = distribution, not continuation.
-  if (prev.v > 0 && latest.v < prev.v) {
+  // ── Check 3: Volume on latest candle sharply below previous ────────────────
+  // A small decrease is normal on continuation candles — the initial pump candle
+  // is often the highest-volume one and healthy candle 2-4 entries will be
+  // somewhat lower. We only block if volume has collapsed to < 65% of the
+  // previous candle, which signals the move is genuinely running out of fuel.
+  if (prev.v > 0 && latest.v < prev.v * 0.65) {
     return skip(
-      `Candle timing: volume fading — latest $${Math.round(latest.v).toLocaleString()} < prev $${Math.round(prev.v).toLocaleString()} — momentum declining, skipping`,
+      `Candle timing: volume collapsed — latest $${Math.round(latest.v).toLocaleString()} is ${((latest.v / prev.v) * 100).toFixed(0)}% of prev $${Math.round(prev.v).toLocaleString()} (< 65%) — momentum fading, skipping`,
     );
   }
 
