@@ -141,7 +141,7 @@ const DEFAULT_CONFIG: AutoTraderConfig = {
   maxMcapUsd:  800_000,         // wider ceiling for late-stage early gems
 
   // ── Pair age ──────────────────────────────────────────────────────────────
-  minPairAgeMinutes:  8,        // 8min survival is meaningful
+  minPairAgeMinutes:  5,        // 5min survival — enough to confirm LP is real and pair isn't instantly rugged
   maxPairAgeHours:    5,        // extended: catch quality tokens still active in hours 3-5
 
   // ── Rug guards ────────────────────────────────────────────────────────────
@@ -157,7 +157,7 @@ const DEFAULT_CONFIG: AutoTraderConfig = {
   dailyLossPauseHours:      12,  // 12h pause on daily cap
 
   // Bump this number whenever filter defaults change — forces all saved configs to migrate
-  schemaVersion: 7,
+  schemaVersion: 8,
 };
 
 // ─── Anti-rug + quality filter ────────────────────────────────────────────────
@@ -243,10 +243,10 @@ export function qualityFilter(pair: DexScreenerPair, cfg: AutoTraderConfig): Fil
   if (fdv > 0 && mcap > 0 && fdv / mcap > cfg.maxFdvMcapRatio)
     return fail(`FDV ${(fdv / mcap).toFixed(1)}× mcap > ${cfg.maxFdvMcapRatio}× max — supply dump risk`);
 
-  // 2g. Absolute liquidity floor — pools under $20K are trivially drained
-  //     even if they technically pass the liq/mcap ratio check.
-  if (liq < 20_000)
-    return fail(`Absolute liquidity $${Math.round(liq).toLocaleString()} < $20K — too thin to exit safely`);
+  // 2g. Absolute liquidity floor — hard minimum below which no pool is safe regardless of config.
+  //     Set to $8K so the configurable minLiquidityUsd ($15K default) is the effective gate.
+  if (liq < 8_000)
+    return fail(`Absolute liquidity $${Math.round(liq).toLocaleString()} < $8K — too thin to exit safely`);
 
   // ═══════════════════════════════════════════════════════════════════════════
   // LAYER 3 — CONFIG-DRIVEN QUALITY GATES
@@ -297,14 +297,17 @@ export function qualityFilter(pair: DexScreenerPair, cfg: AutoTraderConfig): Fil
   // These use derived ratios from existing DexScreener data to filter out
   // fake volume, ghost pools, and coins without genuine buyer interest.
 
-  // Volume/Liquidity ratio: too low = ghost token, too high = wash/fake volume
-  // Lowered floor to 0.12 — large-pool tokens can have lower vol/liq naturally
+  // Volume/Liquidity ratio: too low = ghost token, too high = synthetic/wash volume.
+  // Floor 0.12x: large-pool tokens can have lower vol/liq naturally.
+  // Ceiling 20x: real early pumps churn liquidity 10-15x in the first few hours — 8x was
+  //   blocking legitimate momentum plays (e.g. 3h-old token with $1.3M vol / $32K liq = 10.9x).
+  //   Wash-trade protection is already handled by Layer 2b/2c/2d (buy-ratio and zero-sells checks).
   const volLiqRatio = liq > 0 && vol1h > 0 ? vol1h / liq : 0;
   if (vol1h > 0 && liq > 0) {
     if (volLiqRatio < 0.12)
       return fail(`Vol/Liq ${volLiqRatio.toFixed(2)}x < 0.12x — ghost token, no real interest`);
-    if (volLiqRatio > 8)
-      return fail(`Vol/Liq ${volLiqRatio.toFixed(1)}x > 8x — likely wash/fake volume manipulation`);
+    if (volLiqRatio > 20)
+      return fail(`Vol/Liq ${volLiqRatio.toFixed(1)}x > 20x — extreme vol/liq ratio, likely synthetic volume`);
   }
 
   // Minimum recent buy transactions in 5m (proxy for unique buyers in window)
@@ -590,9 +593,9 @@ function genuineCoinCheck(rugResult: RugCheckResult, pairAgeMin: number): Filter
   }
 
   // 2. Top holder concentration
-  if (rugResult.topHolderPct > 20) {
+  if (rugResult.topHolderPct > 25) {
     return fail(
-      `Genuine-coin check: top holder ${rugResult.topHolderPct.toFixed(1)}% > 20% — single-wallet concentration too high`,
+      `Genuine-coin check: top holder ${rugResult.topHolderPct.toFixed(1)}% > 25% — single-wallet concentration too high`,
     );
   }
 
