@@ -351,7 +351,8 @@ server.listen(port, () => {
   scannerService.start();
   paperTradingService.startStopChecker();
   autoTraderService.start();
-  autoTraderService.startHeartbeat();
+  // Heartbeat disabled — user preference: no hourly Telegram updates
+  // autoTraderService.startHeartbeat();
   startCommandPolling();
 
   logger.info("All services started");

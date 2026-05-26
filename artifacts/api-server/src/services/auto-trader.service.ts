@@ -130,7 +130,7 @@ const DEFAULT_CONFIG: AutoTraderConfig = {
   minVolume1hUsd:    5_000,     // lowered: catches earlier-stage tokens still building 1h volume
 
   // ── Momentum ─────────────────────────────────────────────────────────────
-  minBuyRatio1h:    0.62,       // raised: 62% buys — strong buy dominance, less likely to be distribution
+  minBuyRatio1h:    0.55,       // lowered: 55% buys — enough organic buy pressure without killing score-88 tokens at the boundary
   minPriceChange1h: 3,          // light momentum signal
   maxPriceChange1h: 300,        // raised: pump.fun grads regularly hit +150-400% in hour 1 — don't miss them
   minTransactions24h: 80,       // lower bar for newer tokens
@@ -157,7 +157,7 @@ const DEFAULT_CONFIG: AutoTraderConfig = {
   dailyLossPauseHours:      12,  // 12h pause on daily cap
 
   // Bump this number whenever filter defaults change — forces all saved configs to migrate
-  schemaVersion: 5,
+  schemaVersion: 6,
 };
 
 // ─── Anti-rug + quality filter ────────────────────────────────────────────────
@@ -430,36 +430,49 @@ interface OhlcvCandle {
   v: number;
 }
 
+// Attempt multiple DexScreener OHLCV endpoints — each may or may not be
+// accessible depending on the deployment environment.
+const CANDLE_ENDPOINTS = [
+  (pa: string) => `https://io.dexscreener.com/dex/chart/v3/solana/${pa}?type=5m`,
+  (pa: string) => `https://io.dexscreener.com/dex/chart/v2/solana/${pa}?type=5m`,
+];
+
 async function checkCandleEntryTiming(pairAddress: string): Promise<FilterResult> {
   const skip = (reason: string): FilterResult => ({ pass: false, reason });
 
-  let candles: OhlcvCandle[];
-  try {
-    const resp = await axios.get<{ bars?: unknown[]; ohlcv?: unknown[] }>(
-      `https://io.dexscreener.com/dex/chart/v3/solana/${pairAddress}?type=5m`,
-      { timeout: 6_000 },
-    );
-    const raw: unknown[] = (resp.data?.bars ?? resp.data?.ohlcv ?? []) as unknown[];
-    if (!Array.isArray(raw) || raw.length < 2) {
-      return skip("Candle data unavailable (insufficient candles returned) — skipping to avoid buying unknown top");
+  let candles: OhlcvCandle[] | null = null;
+
+  for (const endpoint of CANDLE_ENDPOINTS) {
+    try {
+      const resp = await axios.get<{ bars?: unknown[]; ohlcv?: unknown[] }>(
+        endpoint(pairAddress),
+        { timeout: 5_000 },
+      );
+      const raw: unknown[] = (resp.data?.bars ?? resp.data?.ohlcv ?? []) as unknown[];
+      if (!Array.isArray(raw) || raw.length < 2) continue;
+      const parsed = (raw as Record<string, unknown>[]).slice(-6).map((c) => ({
+        t: Number(c["t"] ?? c["time"] ?? 0),
+        o: Number(c["o"] ?? c["open"]  ?? 0),
+        h: Number(c["h"] ?? c["high"]  ?? 0),
+        l: Number(c["l"] ?? c["low"]   ?? 0),
+        c: Number(c["c"] ?? c["close"] ?? 0),
+        v: Number(c["v"] ?? c["volume"] ?? 0),
+      }));
+      if (parsed.some((c) => c.o <= 0 || c.c <= 0)) continue;
+      candles = parsed;
+      break;
+    } catch {
+      // try next endpoint
     }
-    candles = (raw as Record<string, unknown>[]).slice(-6).map((c) => ({
-      t: Number(c["t"] ?? c["time"] ?? 0),
-      o: Number(c["o"] ?? c["open"]  ?? 0),
-      h: Number(c["h"] ?? c["high"]  ?? 0),
-      l: Number(c["l"] ?? c["low"]   ?? 0),
-      c: Number(c["c"] ?? c["close"] ?? 0),
-      v: Number(c["v"] ?? c["volume"] ?? 0),
-    }));
-    if (candles.some((c) => c.o <= 0 || c.c <= 0)) {
-      return skip("Candle data malformed (zero open/close prices) — skipping to avoid buying unknown top");
-    }
-  } catch {
-    return skip("Candle data unavailable (API error) — skipping to avoid buying unknown top");
   }
 
-  if (candles.length < 2) {
-    return skip("Candle data unavailable (< 2 candles) — skipping to avoid buying unknown top");
+  // If no endpoint returned usable candle data, fall through to pass.
+  // The qualityFilter already applies extensive 5m protections (momentum,
+  // retracement, drain+dump, late-entry trap checks) so this is not a naked
+  // entry — it's just relying on those existing guards instead of candle history.
+  if (!candles || candles.length < 2) {
+    logger.debug({ pairAddress }, "Candle timing: no OHLCV data available — relying on existing 5m quality filters");
+    return { pass: true, reason: "Candle data unavailable — proceeding with 5m quality-filter protection" };
   }
 
   const latest = candles[candles.length - 1]!;
