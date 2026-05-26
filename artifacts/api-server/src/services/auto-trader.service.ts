@@ -6,7 +6,7 @@ import { scannerService } from "./scanner.service.js";
 import { computeSignals, computeAiScore, computeConfidence, getDynamicRisk, computeEntryBoosts } from "./ai-scoring.service.js";
 import { mapPairToToken } from "./scanner.service.js";
 import { analyseTokenWithAi, buildAnalysisInput } from "./ai-analysis.service.js";
-import { checkTokenSafety } from "./rugcheck.service.js";
+import { checkTokenSafety, type RugCheckResult } from "./rugcheck.service.js";
 import { query, execute } from "../lib/db.js";
 import type { DexScreenerPair } from "../types/index.js";
 
@@ -118,34 +118,34 @@ export interface AutoTraderStatus {
 // ─── Default config ────────────────────────────────────────────────────────────
 const DEFAULT_CONFIG: AutoTraderConfig = {
   solPerTrade: 0.5,
-  maxConcurrentTrades: 8,       // raised: more slots = more trades while candle gate ensures quality
+  maxConcurrentTrades: 8,       // 8 slots — Layer 9 genuine-coin check keeps quality high
 
   // ── AI quality ────────────────────────────────────────────────────────────
-  minAiScore:    72,            // set to 72 — primary quality gate, pump.fun grads get +20 bonus
+  minAiScore:    62,            // lowered: 62 lets more candidates reach Layer 9; genuine-coin check is final gate
   minConfidence: 40,            // allow tokens with less complete data
 
   // ── Liquidity & volume ────────────────────────────────────────────────────
-  minLiquidityUsd:  25_000,     // lowered: $20K absolute floor + liq/mcap ratio still guards thin pools
-  minVolume24hUsd:  18_000,     // lower bar — early tokens often have low 24h vol
-  minVolume1hUsd:    5_000,     // lowered: catches earlier-stage tokens still building 1h volume
+  minLiquidityUsd:  15_000,     // $15K floor — LP lock ≥ 50% check in Layer 9 prevents thin-pool rugs
+  minVolume24hUsd:   8_000,     // lower bar — catches early-stage tokens with real momentum
+  minVolume1hUsd:    2_000,     // catches tokens just starting to gain traction
 
   // ── Momentum ─────────────────────────────────────────────────────────────
-  minBuyRatio1h:    0.55,       // lowered: 55% buys — enough organic buy pressure without killing score-88 tokens at the boundary
-  minPriceChange1h: 3,          // light momentum signal
-  maxPriceChange1h: 300,        // raised: pump.fun grads regularly hit +150-400% in hour 1 — don't miss them
-  minTransactions24h: 80,       // lower bar for newer tokens
-  minUniqueBuyers:  15,         // lower proxy threshold
+  minBuyRatio1h:    0.52,       // 52% buys — slight organic buy pressure required
+  minPriceChange1h: 0,          // no forced positive 1h momentum — consolidations are valid entries
+  maxPriceChange1h: 300,        // pump.fun grads regularly hit +150-400% in hour 1 — don't miss them
+  minTransactions24h: 40,       // lower bar for newer/smaller tokens
+  minUniqueBuyers:   8,         // lower proxy threshold for very fresh tokens
 
   // ── Market cap sweet spot ────────────────────────────────────────────────
-  minMcapUsd:   12_000,         // micro-caps can 10x — don't exclude
+  minMcapUsd:   10_000,         // micro-caps can 10x — don't exclude
   maxMcapUsd:  800_000,         // wider ceiling for late-stage early gems
 
   // ── Pair age ──────────────────────────────────────────────────────────────
   minPairAgeMinutes:  8,        // 8min survival is meaningful
-  maxPairAgeHours:    3,        // tightened: only trade FRESH tokens — by hour 4+, the pump is over
+  maxPairAgeHours:    5,        // extended: catch quality tokens still active in hours 3-5
 
   // ── Rug guards ────────────────────────────────────────────────────────────
-  minLiquidityMcapRatio: 0.08,  // 8% — less strict, Layer 2 still blocks thin pools
+  minLiquidityMcapRatio: 0.05,  // 5% — Layer 9 LP-lock check and Layer 2 drain detection protect us
   maxFdvMcapRatio:       4.0,   // wider — many legit tokens have some overhang
   maxPriceDropH6Pct:   -35,     // allow moderate dips
   maxPriceDropH24Pct:  -55,     // allow recovering tokens
@@ -157,7 +157,7 @@ const DEFAULT_CONFIG: AutoTraderConfig = {
   dailyLossPauseHours:      12,  // 12h pause on daily cap
 
   // Bump this number whenever filter defaults change — forces all saved configs to migrate
-  schemaVersion: 6,
+  schemaVersion: 7,
 };
 
 // ─── Anti-rug + quality filter ────────────────────────────────────────────────
@@ -561,6 +561,58 @@ async function checkCandleEntryTiming(pairAddress: string): Promise<FilterResult
   return {
     pass: true,
     reason: `Candle timing OK: candle ${trendLength} of uptrend, volume growing, close in upper range — entry window valid`,
+  };
+}
+
+// ─── Layer 9: Genuine Coin Check ──────────────────────────────────────────────
+//
+// Final gate before capital is committed. Filters out tokens that technically
+// pass all earlier layers (no DANGER risks, decent score) but show patterns
+// associated with insider/coordinated pumps or low-effort disposable tokens:
+//   1. RugCheck score ≤ 700   — total risk-flag accumulation below threshold
+//   2. Top holder ≤ 20%       — no single wallet controlling a dangerous slice
+//   3. LP locked ≥ 50%        — meaningful lockup commitment (dev has skin in the game)
+//      Exception: pairs < 20 min old (LP lock tools take time to record)
+//   4. Warning risk count ≤ 3 — many yellow flags combined signal coordinated setup
+//
+// NOTE: DANGER risks are already blocked in Layer 6 (RugCheck). This layer
+// focuses on cumulative quality signals that individually are warnings but
+// together indicate a low-quality token.
+//
+function genuineCoinCheck(rugResult: RugCheckResult, pairAgeMin: number): FilterResult {
+  const fail = (reason: string): FilterResult => ({ pass: false, reason });
+
+  // 1. Cumulative risk score (RugCheck scores all detected issues; lower = safer)
+  if (rugResult.score > 700) {
+    return fail(
+      `Genuine-coin check: RugCheck risk score ${rugResult.score} > 700 — too many risk flags combined, skipping`,
+    );
+  }
+
+  // 2. Top holder concentration
+  if (rugResult.topHolderPct > 20) {
+    return fail(
+      `Genuine-coin check: top holder ${rugResult.topHolderPct.toFixed(1)}% > 20% — single-wallet concentration too high`,
+    );
+  }
+
+  // 3. LP locked check (skip for brand-new pairs < 20 min — LP tools haven't indexed yet)
+  if (pairAgeMin >= 20 && rugResult.lpLockedPct < 50) {
+    return fail(
+      `Genuine-coin check: LP locked ${rugResult.lpLockedPct.toFixed(0)}% < 50% — insufficient liquidity commitment`,
+    );
+  }
+
+  // 4. Too many warning-level flags (individually minor but together = yellow-flag soup)
+  if (rugResult.warnRisks.length > 3) {
+    return fail(
+      `Genuine-coin check: ${rugResult.warnRisks.length} warning risks (${rugResult.warnRisks.slice(0, 3).join(", ")}…) — excessive combined warnings`,
+    );
+  }
+
+  return {
+    pass: true,
+    reason: `Genuine-coin check PASSED — score ${rugResult.score}, top holder ${rugResult.topHolderPct.toFixed(1)}%, LP ${rugResult.lpLockedPct.toFixed(0)}% locked, ${rugResult.warnRisks.length} warns`,
   };
 }
 
@@ -1225,6 +1277,29 @@ class AutoTraderService {
         logger.info(
           { symbol: c.symbol, reason: candleCheck.reason },
           "Auto-trader: candle timing PASSED",
+        );
+
+        // ── Layer 9: Genuine Coin Check ──────────────────────────────────────
+        // Final gate using RugCheck data already in hand. Blocks tokens that
+        // passed all earlier layers but show cumulative quality red-flags:
+        // high risk score, whale concentration, unlocked LP, or too many warns.
+        const genuineCheck = genuineCoinCheck(rugResult, pairAgeMin);
+        if (!genuineCheck.pass) {
+          decisions.push({
+            ...c,
+            ...llmFields,
+            action: "filtered",
+            reason: genuineCheck.reason,
+          });
+          logger.info(
+            { symbol: c.symbol, reason: genuineCheck.reason },
+            "Auto-trader: genuine-coin check BLOCKED — trade rejected",
+          );
+          continue;
+        }
+        logger.info(
+          { symbol: c.symbol, reason: genuineCheck.reason },
+          "Auto-trader: genuine-coin check PASSED",
         );
 
         try {
