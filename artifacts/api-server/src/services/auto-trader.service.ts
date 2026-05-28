@@ -121,7 +121,7 @@ const DEFAULT_CONFIG: AutoTraderConfig = {
   maxConcurrentTrades: 8,       // 8 slots — Layer 9 genuine-coin check keeps quality high
 
   // ── AI quality ────────────────────────────────────────────────────────────
-  minAiScore:    62,            // lowered: 62 lets more candidates reach Layer 9; genuine-coin check is final gate
+  minAiScore:    55,            // lowered: 55 opens more candidates; Layer 9 genuine-coin check is the quality gate
   minConfidence: 40,            // allow tokens with less complete data
 
   // ── Liquidity & volume ────────────────────────────────────────────────────
@@ -157,7 +157,7 @@ const DEFAULT_CONFIG: AutoTraderConfig = {
   dailyLossPauseHours:      12,  // 12h pause on daily cap
 
   // Bump this number whenever filter defaults change — forces all saved configs to migrate
-  schemaVersion: 8,
+  schemaVersion: 9,
 };
 
 // ─── Anti-rug + quality filter ────────────────────────────────────────────────

@@ -463,7 +463,11 @@ class PaperTradingService {
 
     const sellPct       = isTP1 ? (pos.tp1SellPct ?? 40) : (pos.tp2SellPct ?? 40);
     const remainingSize = pos.remainingSizeSol ?? pos.sizeSol;
-    const soldSizeSol   = remainingSize * (sellPct / 100);
+    // Sell `sellPct`% of the ORIGINAL position at each TP, capped at what remains.
+    // e.g. TP1=40% and TP2=40% means 0.4×original sold at TP1, another 0.4×original sold at TP2.
+    // Using `remainingSize * sellPct` would make TP2 sell only 40% of the leftover 60%
+    // (= 24% of original), leaving a much larger runner than intended.
+    const soldSizeSol   = Math.min(pos.sizeSol * (sellPct / 100), remainingSize);
     const grossReturn   = soldSizeSol * (currentPrice / pos.entryPrice);
     const exitFee       = grossReturn * FEE_RATE;
     const slippage      = soldSizeSol * SLIPPAGE_RATE;
@@ -958,15 +962,23 @@ class PaperTradingService {
         currentPrice = pos.entryPrice;
       }
 
-      const { pnlSol, pnlPercent } = this.computePnl(pos, currentPrice);
-      return { ...pos, livePnlSol: pnlSol, livePnlPercent: pnlPercent, currentPrice };
+      // Use remaining size (after partial exits) for unrealized portion,
+      // then add already-banked partial profits so the live display reflects
+      // the true composite return on the full original position.
+      const remainingSize = pos.remainingSizeSol ?? pos.sizeSol;
+      const { pnlSol: unrealizedPnl } = this.computePnl(pos, currentPrice, remainingSize);
+      const totalLivePnl    = unrealizedPnl + (pos.partialPnlSol ?? 0);
+      const livePnlPercent  = pos.sizeSol > 0 ? (totalLivePnl / pos.sizeSol) * 100 : 0;
+      return { ...pos, livePnlSol: totalLivePnl, livePnlPercent, currentPrice };
     });
   }
 
   getPortfolio(): Portfolio {
     const openWithPnl = this.getOpenPositionsWithLivePnl();
     const closedPnl = this.closedTrades.reduce((s, t) => s + (t.pnlSol ?? 0), 0);
-    const openValue = openWithPnl.reduce((s, p) => s + p.sizeSol + p.livePnlSol, 0);
+    // Use remainingSizeSol for portfolio valuation — the sold tranches have already
+    // been credited to solBalance, so counting original sizeSol would double-count them.
+    const openValue = openWithPnl.reduce((s, p) => s + (p.remainingSizeSol ?? p.sizeSol) + p.livePnlSol, 0);
 
     return {
       solBalance: this.solBalance,
