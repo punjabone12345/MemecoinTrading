@@ -486,9 +486,10 @@ class PaperTradingService {
       tp2Hit: !isTP1 ? true : pos.tp2Hit,
       remainingSizeSol: newRemaining,
       partialPnlSol: newPartialPnl,
-      // After TP2: move SL to break-even; set tpPrice unreachably high so the
-      // trailing-SL mechanism (not the TP check) handles the runner exit.
-      ...(!isTP1 ? { slPrice: pos.entryPrice, tpPrice: pos.entryPrice * 51 } : {}),
+      // After TP2: move SL to break-even (but NEVER lower it — trailing SL may
+      // already have locked it higher). Set tpPrice unreachably high so the
+      // trailing-SL mechanism handles the runner exit, not the TP check.
+      ...(!isTP1 ? { slPrice: Math.max(pos.entryPrice, pos.slPrice), tpPrice: pos.entryPrice * 51 } : {}),
     };
 
     this.openPositions.set(positionId, updatedPos);
@@ -752,23 +753,33 @@ class PaperTradingService {
         //  ≥ +100%                │  entry × 1.40  (lock +40%)
         //  ≥ +150%                │  entry × 1.80  (lock +80%)
         //  ≥ +200%                │  entry × 2.20  (lock +120%)
+        //
+        // Skip trailing SL when TP1 or TP2 is about to trigger THIS cycle —
+        // the partial-close handler sets slPrice itself, and running both in
+        // the same tick produces duplicate Telegram messages and a brief SL
+        // downgrade (trail sets +120%, then partialClose resets to break-even).
         {
+          const tp1Imminent = !pos.tp1Hit && pos.tp1Price != null && price >= pos.tp1Price;
+          const tp2Imminent = pos.tp1Hit && !pos.tp2Hit && pos.tp2Price != null && price >= pos.tp2Price;
+
           const pnlPctRaw = pos.entryPrice > 0 ? (price - pos.entryPrice) / pos.entryPrice * 100 : 0;
           let newSlPrice: number | null = null;
           let trailLabel = "";
 
-          if (pnlPctRaw >= 200 && pos.slPrice < pos.entryPrice * 2.20) {
-            newSlPrice = pos.entryPrice * 2.20;
-            trailLabel = "lock +120% (price ≥ +200%)";
-          } else if (pnlPctRaw >= 150 && pos.slPrice < pos.entryPrice * 1.80) {
-            newSlPrice = pos.entryPrice * 1.80;
-            trailLabel = "lock +80% (price ≥ +150%)";
-          } else if (pnlPctRaw >= 100 && pos.slPrice < pos.entryPrice * 1.40) {
-            newSlPrice = pos.entryPrice * 1.40;
-            trailLabel = "lock +40% (price ≥ +100%)";
-          } else if (pnlPctRaw >= 50 && pos.slPrice < pos.entryPrice) {
-            newSlPrice = pos.entryPrice;
-            trailLabel = "break-even (price ≥ +50%)";
+          if (!tp1Imminent && !tp2Imminent) {
+            if (pnlPctRaw >= 200 && pos.slPrice < pos.entryPrice * 2.20) {
+              newSlPrice = pos.entryPrice * 2.20;
+              trailLabel = "lock +120% (price ≥ +200%)";
+            } else if (pnlPctRaw >= 150 && pos.slPrice < pos.entryPrice * 1.80) {
+              newSlPrice = pos.entryPrice * 1.80;
+              trailLabel = "lock +80% (price ≥ +150%)";
+            } else if (pnlPctRaw >= 100 && pos.slPrice < pos.entryPrice * 1.40) {
+              newSlPrice = pos.entryPrice * 1.40;
+              trailLabel = "lock +40% (price ≥ +100%)";
+            } else if (pnlPctRaw >= 50 && pos.slPrice < pos.entryPrice) {
+              newSlPrice = pos.entryPrice;
+              trailLabel = "break-even (price ≥ +50%)";
+            }
           }
 
           if (newSlPrice !== null) {
@@ -780,12 +791,16 @@ class PaperTradingService {
               { symbol: pos.symbol, pnlPct: pnlPctRaw.toFixed(0), newSlPrice: formatPrice(newSlPrice), was: formatPrice(pos.slPrice), tier: trailLabel },
               "Trailing SL ratcheted up — profit locked",
             );
+            // After TP2 both TPs are done — show runner status, not a stale TP price.
+            const tpDisplay = pos.tp2Hit
+              ? "Runner active — trailing SL protecting gains"
+              : `$${formatPrice(pos.tpPrice)} (+${pos.tpPercent}%)`;
             void sendTelegram(
               `🔒 <b>TRAILING SL LOCKED — $${pos.symbol}</b>\n` +
               `──────────────────────\n` +
               `📈 Current gain: <b>+${pnlPctRaw.toFixed(0)}%</b>\n` +
               `🛡️ New SL: <b>$${formatPrice(newSlPrice)}</b> (${trailLabel})\n` +
-              `🎯 TP still at: $${formatPrice(pos.tpPrice)} (+${pos.tpPercent}%)\n` +
+              `🎯 ${tpDisplay}\n` +
               `🕐 ${toIST(new Date())}`,
             );
             // Use updated pos for subsequent SL/TP checks this cycle
