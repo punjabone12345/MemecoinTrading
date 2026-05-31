@@ -247,7 +247,13 @@ if (process.env["DATABASE_URL"]) {
         ["recorded_at", "BIGINT"],
         ["note", "TEXT"],
         ["is_win", "BOOLEAN"],
+        ["pair_address", "TEXT"],
       ];
+      // Drop NOT NULL on pair_address — old production DBs had this column as NOT NULL
+      // but the service never inserts it, causing constraint violations on every trade close.
+      await migClient.query(
+        `ALTER TABLE loss_journal ALTER COLUMN pair_address DROP NOT NULL`
+      ).catch(() => {});
       for (const [col, type] of lossJournalCols) {
         await migClient.query(
           `ALTER TABLE loss_journal ADD COLUMN IF NOT EXISTS ${col} ${type}`
