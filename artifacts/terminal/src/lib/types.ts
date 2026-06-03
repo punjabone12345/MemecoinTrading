@@ -57,6 +57,10 @@ export interface AnalyticsSnapshot {
   dailyPnl: number; weeklyPnl: number; monthlyPnl: number;
   bestTradePnl: number; worstTradePnl: number;
   avgRR: number; avgWinSol: number; avgLossSol: number; avgHoldTimeMinutes: number;
+  profitFactor: number;
+  currentStreak: number;
+  currentStreakType: "win" | "loss" | "none";
+  winRateLast10: number;
   calendarPnl: Record<string, number>;
 }
 
@@ -77,12 +81,28 @@ export interface CircuitBreakerStatus {
   dailyLossSol: number;
 }
 
+export interface MarketHealthStatus {
+  state: "ACTIVE" | "NEUTRAL" | "DEAD";
+  passCount: number;
+  checkedAt: number;
+  poolSize: number;
+  conditions: {
+    positiveTokensPassed: boolean;
+    positiveTokensCount: number;
+    avgBuyRatioPassed: boolean;
+    avgBuyRatio: number;
+    recentPairsPassed: boolean;
+    recentPairsCount: number;
+  };
+}
+
 export interface AutoTraderStatus {
   paused: boolean; running: boolean; lastRunAt: number | null;
   lastRunTokensEvaluated: number; lastRunTradesOpened: number; totalTradesOpened: number;
   telegramEnabled: boolean; nextRunIn: number; scannerPoolSize: number;
   config: AutoTraderConfig;
   circuitBreaker: CircuitBreakerStatus;
+  marketHealth: MarketHealthStatus | null;
 }
 
 export interface AutoTraderConfig {
@@ -168,6 +188,8 @@ export interface LossInsights {
   avgLossHoldMinutes: number;
   tagFrequency: Record<string, number>;
   tagPercentage: Record<string, number>;
+  winTagPercentage: Record<string, number>;
+  lossTagPercentage: Record<string, number>;
   avgAiScore: number;
   avgConfidence: number;
   borderlineScoreCount: number;

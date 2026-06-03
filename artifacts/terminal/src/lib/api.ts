@@ -415,7 +415,7 @@ export function useLossJournal() {
   return useQuery<LossInsights>({
     queryKey: ["loss-journal"],
     queryFn: async () => {
-      const res = await fetch("/api/loss-journal");
+      const res = await fetch(apiUrl("/api/loss-journal"));
       const json = await res.json();
       return json.data as LossInsights;
     },

@@ -180,6 +180,10 @@ export interface AnalyticsSnapshot {
   avgWinSol: number;
   avgLossSol: number;
   avgHoldTimeMinutes: number;
+  profitFactor: number;
+  currentStreak: number;
+  currentStreakType: "win" | "loss" | "none";
+  winRateLast10: number;
   calendarPnl: Record<string, number>;
 }
 

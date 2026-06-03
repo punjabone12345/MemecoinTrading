@@ -114,6 +114,20 @@ export interface AutoTraderStatus {
     currentStreak: number;
     dailyLossSol: number;
   };
+  marketHealth: {
+    state: "ACTIVE" | "NEUTRAL" | "DEAD";
+    passCount: number;
+    checkedAt: number;
+    poolSize: number;
+    conditions: {
+      positiveTokensPassed: boolean;
+      positiveTokensCount: number;
+      avgBuyRatioPassed: boolean;
+      avgBuyRatio: number;
+      recentPairsPassed: boolean;
+      recentPairsCount: number;
+    };
+  } | null;
 }
 
 // ─── Default config ────────────────────────────────────────────────────────────

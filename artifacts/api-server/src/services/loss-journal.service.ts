@@ -67,6 +67,8 @@ export interface LossInsights {
   avgLossHoldMinutes: number;
   tagFrequency: Record<string, number>;
   tagPercentage: Record<string, number>;
+  winTagPercentage: Record<string, number>;
+  lossTagPercentage: Record<string, number>;
   avgAiScore: number;
   avgConfidence: number;
   borderlineScoreCount: number;
@@ -90,6 +92,7 @@ function deriveTags(pos: Position, holdMs: number, isWin: boolean): { tags: Loss
 
   if (isWin) {
     if (holdMin < 30) { tags.push("quick_tp"); warnings.push(`Fast TP hit in ${holdMin.toFixed(1)}m — strong early momentum`); }
+    else if (holdMin < 120 && (pos.pnlPercent ?? 0) >= 5) { tags.push("momentum_win"); warnings.push(`Momentum built steadily over ${holdMin.toFixed(0)}m — clean trend hold`); }
     if ((pos.pnlPercent ?? 0) >= 15) { tags.push("strong_win"); warnings.push(`Strong gain of +${(pos.pnlPercent ?? 0).toFixed(1)}% — excellent risk/reward`); }
     if (pos.aiScore >= 80) { tags.push("high_score_win"); warnings.push(`AI score was ${pos.aiScore} — high-conviction entry paid off`); }
     if (pos.entryLiquidityUsd > 50_000) { tags.push("good_liquidity_win"); warnings.push(`Entry liquidity was $${Math.round(pos.entryLiquidityUsd / 1000)}K — deep pool allowed clean exit`); }
@@ -297,7 +300,7 @@ class LossJournalService {
         totalLosses: 0, totalWins: 0, totalTrades: 0,
         totalLossSol: 0, totalWinSol: 0, avgLossSol: 0, avgWinSol: 0,
         avgHoldMinutes: 0, avgWinHoldMinutes: 0, avgLossHoldMinutes: 0,
-        tagFrequency: {}, tagPercentage: {},
+        tagFrequency: {}, tagPercentage: {}, winTagPercentage: {}, lossTagPercentage: {},
         avgAiScore: 0, avgConfidence: 0, borderlineScoreCount: 0, borderlineConfCount: 0,
         instantRugs: 0, fastRugs: 0, slowDumps: 0, longLosses: 0,
         suggestions: [], recentLosses: [], recentWins: [], allEntries: [],
@@ -315,13 +318,24 @@ class LossJournalService {
     const tagPercentage: Record<string, number> = {};
     for (const [tag, count] of Object.entries(tagFrequency)) tagPercentage[tag] = Math.round((count / nAll) * 100);
 
+    // Per-type tag percentages (win tags as % of wins; loss tags as % of losses)
+    const winTagFreq: Record<string, number> = {};
+    for (const e of wins) for (const tag of e.tags) winTagFreq[tag] = (winTagFreq[tag] ?? 0) + 1;
+    const winTagPercentage: Record<string, number> = {};
+    for (const [tag, count] of Object.entries(winTagFreq)) winTagPercentage[tag] = Math.round((count / Math.max(nWin, 1)) * 100);
+
+    const lossTagFreq: Record<string, number> = {};
+    for (const e of losses) for (const tag of e.tags) lossTagFreq[tag] = (lossTagFreq[tag] ?? 0) + 1;
+    const lossTagPercentage: Record<string, number> = {};
+    for (const [tag, count] of Object.entries(lossTagFreq)) lossTagPercentage[tag] = Math.round((count / Math.max(nLoss, 1)) * 100);
+
     return {
       totalLosses: nLoss, totalWins: nWin, totalTrades: nAll,
       totalLossSol, totalWinSol,
       avgLossSol: nLoss > 0 ? totalLossSol / nLoss : 0,
       avgWinSol: nWin > 0 ? totalWinSol / nWin : 0,
       avgHoldMinutes, avgWinHoldMinutes, avgLossHoldMinutes,
-      tagFrequency, tagPercentage,
+      tagFrequency, tagPercentage, winTagPercentage, lossTagPercentage,
       avgAiScore: all.reduce((s, e) => s + e.aiScore, 0) / nAll,
       avgConfidence: all.reduce((s, e) => s + e.confidence, 0) / nAll,
       borderlineScoreCount: losses.filter(e => e.tags.includes("borderline_score")).length,
