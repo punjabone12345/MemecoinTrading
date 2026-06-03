@@ -7,6 +7,7 @@ import { computeSignals, computeAiScore, computeConfidence, getDynamicRisk, comp
 import { mapPairToToken } from "./scanner.service.js";
 import { analyseTokenWithAi, buildAnalysisInput } from "./ai-analysis.service.js";
 import { checkTokenSafety, type RugCheckResult } from "./rugcheck.service.js";
+import { marketHealthService } from "./market-health.service.js";
 import { query, execute } from "../lib/db.js";
 import type { DexScreenerPair } from "../types/index.js";
 
@@ -634,12 +635,23 @@ class AutoTraderService {
   private config: AutoTraderConfig = { ...DEFAULT_CONFIG };
   private wasAtMaxTrades = false;
   private consecutiveLossPausedUntil = 0;
+  /**
+   * Only count losses that closed AFTER this timestamp.
+   * Set to `consecutiveLossPausedUntil` when circuit breaker fires so that
+   * the old losses that triggered the pause are excluded after the pause expires,
+   * preventing the breaker from immediately re-triggering.
+   */
+  private consecutiveLossWindowStart = 0;
 
   private getConsecutiveLossStreak(): number {
     const trades = paperTradingService.getClosedTrades()
       .sort((a, b) => new Date(b.closedAt!).getTime() - new Date(a.closedAt!).getTime());
     let streak = 0;
     for (const t of trades) {
+      const closedMs = t.closedAt ? new Date(t.closedAt).getTime() : 0;
+      // Stop counting once we reach losses that are before the current window.
+      // This prevents re-triggering after a cooldown expires.
+      if (this.consecutiveLossWindowStart > 0 && closedMs < this.consecutiveLossWindowStart) break;
       if ((t.pnlSol ?? 0) < 0) streak++;
       else break;
     }
@@ -721,6 +733,7 @@ class AutoTraderService {
 
   resetCircuitBreaker(): void {
     this.consecutiveLossPausedUntil = 0;
+    this.consecutiveLossWindowStart = Date.now(); // new window — old losses ignored
     this.dailyLossPausedUntil = 0;
     logger.info("Auto-trader: circuit breaker manually reset by user");
   }
@@ -742,6 +755,7 @@ class AutoTraderService {
     const dailyLossActive = this.dailyLossPausedUntil > now;
     const streak = this.getConsecutiveLossStreak();
     const dailyLoss = this.getDailyLoss();
+    const mh = marketHealthService.getLastResult();
     return {
       paused: this.paused,
       running: this.running,
@@ -753,6 +767,15 @@ class AutoTraderService {
       nextRunIn: Math.max(0, this.nextRunAt - now),
       scannerPoolSize: scannerService.getTokenCount(),
       config: this.getConfig(),
+      marketHealth: mh
+        ? {
+            state:         mh.state,
+            passCount:     mh.passCount,
+            checkedAt:     mh.checkedAt,
+            poolSize:      mh.poolSize,
+            conditions:    mh.conditions,
+          }
+        : null,
       circuitBreaker: {
         consecutiveLossActive,
         consecutiveLossResumesAt: consecutiveLossActive ? this.consecutiveLossPausedUntil : null,
@@ -854,6 +877,9 @@ class AutoTraderService {
     const lossStreak = this.getConsecutiveLossStreak();
     if (lossStreak >= consecutiveLossLimit) {
       this.consecutiveLossPausedUntil = Date.now() + consecutiveLossPauseHours * 3_600_000;
+      // After the pause, only count losses that happen AFTER the pause expires.
+      // This prevents the old losses (that triggered the breaker) from immediately re-firing it.
+      this.consecutiveLossWindowStart = this.consecutiveLossPausedUntil;
       logger.warn({ lossStreak }, `Auto-trader: ${consecutiveLossLimit} consecutive losses — pausing ${consecutiveLossPauseHours}h to protect capital`);
       void sendTelegram(
         `⛔ <b>CIRCUIT BREAKER TRIGGERED</b>\n` +
@@ -864,6 +890,15 @@ class AutoTraderService {
       );
       return;
     }
+
+    // ── Market Health Score ──────────────────────────────────────────────────
+    // Checked every 30 min (45 min when DEAD). Adjusts trade quality gates
+    // based on the overall condition of the scanner pool.
+    if (marketHealthService.isCheckDue()) {
+      marketHealthService.runCheck();
+    }
+    const marketHealth = marketHealthService.getLastResult();
+    const marketState  = marketHealth?.state ?? "NEUTRAL"; // default cautious when no data yet
 
     this.running = true;
     this.nextRunAt = Date.now() + AUTO_TRADE_INTERVAL_MS;
@@ -876,7 +911,20 @@ class AutoTraderService {
     logger.info({ cycleId }, "Auto-trader: cycle started");
 
     try {
-      const { minAiScore, minConfidence, solPerTrade, maxConcurrentTrades } = this.config;
+      // Apply market health state adjustments
+      const effectiveMinAiScore    = marketState === "NEUTRAL" ? this.config.minAiScore + 5 : this.config.minAiScore;
+      const effectiveMinVol1h      = marketState === "NEUTRAL" ? this.config.minVolume1hUsd * 1.5 : this.config.minVolume1hUsd;
+      const effectiveMaxTrades     = marketState === "NEUTRAL" ? Math.min(2, this.config.maxConcurrentTrades) : this.config.maxConcurrentTrades;
+      const effectiveConfig = {
+        ...this.config,
+        minAiScore:    effectiveMinAiScore,
+        minVolume1hUsd: effectiveMinVol1h,
+        maxConcurrentTrades: effectiveMaxTrades,
+      };
+      const { minAiScore, minConfidence, solPerTrade, maxConcurrentTrades } = effectiveConfig;
+      if (marketState !== "ACTIVE") {
+        logger.info({ marketState, effectiveMinAiScore, effectiveMinVol1h, effectiveMaxTrades }, "Auto-trader: market health state applied to filters");
+      }
       const openPositions = paperTradingService.getOpenPositions();
 
       if (openPositions.length >= maxConcurrentTrades) {
@@ -1026,7 +1074,7 @@ class AutoTraderService {
           info: { imageUrl: token.imageUrl },
         };
 
-        const preFilterResult = qualityFilter(syntheticPair, this.config);
+        const preFilterResult = qualityFilter(syntheticPair, effectiveConfig);
         if (!preFilterResult.pass) {
           decisions.push({ ...base, action: "filtered", reason: preFilterResult.reason });
           continue;
@@ -1121,7 +1169,7 @@ class AutoTraderService {
           }
 
           // Re-run quality filter on the confirmed pair data
-          const dexFilterResult = qualityFilter(dexPair, this.config);
+          const dexFilterResult = qualityFilter(dexPair, effectiveConfig);
           if (!dexFilterResult.pass) {
             decisions.push({
               ...c,
@@ -1151,7 +1199,13 @@ class AutoTraderService {
         decisions.push({ ...c, action: "skipped_slots", reason: "Candidate queue — top signals verified this cycle; will evaluate next cycle" });
       }
 
-      const slots = Math.min(3, maxConcurrentTrades - openPositions.length);
+      // DEAD market → block all new entries; existing positions still close via SL/TP
+      const slots = marketState === "DEAD"
+        ? 0
+        : Math.min(3, maxConcurrentTrades - openPositions.length);
+      if (marketState === "DEAD") {
+        logger.info("Auto-trader: market DEAD — new entries blocked this cycle");
+      }
       const toTrade = verifiedCandidates.slice(0, slots);
 
       for (const c of toTrade) {

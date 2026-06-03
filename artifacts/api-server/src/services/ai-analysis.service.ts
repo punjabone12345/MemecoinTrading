@@ -60,10 +60,13 @@ function buildPrompt(t: TokenAnalysisInput): string {
   const total1h    = t.buys1h + t.sells1h;
   const buyRatio1h = total1h > 0 ? `${(t.buys1h / total1h * 100).toFixed(0)}%` : "N/A";
 
+  const total5m    = t.buys5m + t.sells5m;
+  const buyRatio5m = total5m > 0 ? `${(t.buys5m / total5m * 100).toFixed(0)}%` : "N/A";
+
   const fmt = (usd: number) =>
     usd >= 1_000_000 ? `$${(usd / 1_000_000).toFixed(2)}M` : `$${Math.round(usd / 1_000)}K`;
 
-  return `You are an experienced Solana memecoin trader with 3 years of experience. This token has already passed all basic filters. Your job is NOT to recheck numbers — your job is to think like a trader and judge if this has real moonshot potential right now.
+  return `You are an experienced Solana memecoin trader. This token passed all filters AND market health check is ACTIVE. Judge if this is genuine early momentum or a fading pump.
 
 Token: ${t.name} ($${t.symbol})
 MCap: ${fmt(t.marketCapUsd)}
@@ -71,53 +74,63 @@ Liquidity: ${fmt(t.liquidityUsd)}
 Vol 1h: ${fmt(t.volume1hUsd)}
 Vol 24h: ${fmt(t.volume24hUsd)}
 Buy Ratio 1h: ${buyRatio1h}
+Buy Ratio 5m: ${buyRatio5m}
 1h Price Change: ${t.priceChange1h >= 0 ? "+" : ""}${t.priceChange1h.toFixed(1)}%
-6h Price Change: ${t.priceChange6h >= 0 ? "+" : ""}${t.priceChange6h.toFixed(1)}%
+5m Price Change: ${t.priceChange5m >= 0 ? "+" : ""}${t.priceChange5m.toFixed(1)}%
 Pair Age: ${ageLabel}
 Txns 24h: ${t.txns24h}
-Top 10 Holders: N/A
-LP Status: Unverified
 
-Think about these questions in your head:
+Answer these internally:
 
-1. MOMENTUM QUALITY
-Is the volume accelerating or just a one-time spike?
-Is buy ratio genuinely dominant or barely above 50%?
-Is the 1h move organic or does it look like a pump?
+1. Is 5m change smaller than 1h change?
+   Yes = still building = GOOD
+   No = already peaked = BAD
 
-2. ENTRY TIMING
-Is this early stage (still room to grow) or has it already peaked?
-MCap vs liquidity — is there realistic 3x–10x left?
+2. Is buy ratio 5m higher than 1h?
+   Yes = accelerating = GOOD
+   No = decelerating = BAD
 
-3. RISK PATTERN
-Does the holder % suggest one whale controlling price?
-Does the age vs volume pattern look organic or manipulated?
+3. Is Vol 1h annualized (x24) more than 2x of Vol 24h?
+   Yes = momentum fresh = GOOD
+   No = momentum fading = BAD
 
-4. CONVICTION
-If you were trading your own money right now, would you enter this trade with confidence?
+4. Is MCap under $500K?
+   Yes = room to grow = GOOD
+   No = already pumped = BAD
 
-Based on your trader instinct and the above thinking, return EXACTLY this format, nothing else:
+5. Is pair age under 2 hours?
+   Yes = early entry = GOOD
+   No = late entry = BAD
+
+Score 1 point per GOOD.
+
+5/5 = PASS Low Risk
+4/5 = PASS Medium Risk
+3/5 = PASS High Risk
+Below 3 = FAIL
+
+Output EXACTLY this format, nothing else:
 
 RESULT: PASS or FAIL
-CONFIDENCE: 1-10
-STAGE: Early or Mid or Late
-POTENTIAL: 2x or 5x or 10x+ or Dump incoming
-CONCERN: one line if any red flag
-VERDICT: one line trader opinion`;
+SCORE: X/5
+RISK: Low or Medium or High
+SIZE: 0.5 SOL or 0.25 SOL
+ENTRY: Early or Mid or Late
+REASON: one line`;
 }
 
 // ─── Response parser ──────────────────────────────────────────────────────────
 
-interface ParsedTraderVerdict {
+interface ParsedInstinctVerdict {
   passFailResult: "PASS" | "FAIL";
-  confidence: number;
-  stage: string;
-  potential: string;
-  concern: string;
-  verdictLine: string;
+  score: number;
+  riskLevel: string;
+  sizeSol: number;
+  entry: string;
+  reason: string;
 }
 
-function parseTraderVerdict(raw: string, label: string): ParsedTraderVerdict | null {
+function parseInstinctVerdict(raw: string, label: string): ParsedInstinctVerdict | null {
   try {
     const lines = raw.trim().split("\n").map(l => l.trim()).filter(Boolean);
 
@@ -128,27 +141,32 @@ function parseTraderVerdict(raw: string, label: string): ParsedTraderVerdict | n
 
     const resultRaw = get("RESULT");
     if (!resultRaw) {
-      logger.warn({ label, rawPreview: raw.slice(0, 200) }, "AI: no RESULT line found in response");
+      logger.warn({ label, rawPreview: raw.slice(0, 200) }, "AI: no RESULT line found");
       return null;
     }
 
     const passFailResult: "PASS" | "FAIL" = resultRaw.toUpperCase().includes("PASS") ? "PASS" : "FAIL";
 
-    const confMatch = get("CONFIDENCE").match(/(\d+)/);
-    const confidence = confMatch ? Math.min(10, Math.max(1, parseInt(confMatch[1], 10))) : 5;
+    const scoreRaw = get("SCORE");
+    const scoreMatch = scoreRaw.match(/(\d+)/);
+    const score = scoreMatch ? Math.min(5, Math.max(0, parseInt(scoreMatch[1], 10))) : 0;
 
-    const stageRaw = get("STAGE");
-    const stage = ["Early", "Mid", "Late"].find(s =>
-      stageRaw.toLowerCase().includes(s.toLowerCase()),
-    ) ?? (stageRaw || "Unknown");
+    const riskRaw = get("RISK").toLowerCase();
+    const riskLevel = riskRaw.includes("low") ? "Low" : riskRaw.includes("medium") ? "Medium" : "High";
 
-    const potential = get("POTENTIAL") || "Unknown";
-    const concern   = get("CONCERN")   || "None";
-    const verdictLine = get("VERDICT") || resultRaw;
+    const sizeRaw = get("SIZE");
+    const sizeSol = sizeRaw.includes("0.5") ? 0.5 : 0.25;
 
-    return { passFailResult, confidence, stage, potential, concern, verdictLine };
+    const entryRaw = get("ENTRY");
+    const entry = ["Early", "Mid", "Late"].find(e =>
+      entryRaw.toLowerCase().includes(e.toLowerCase()),
+    ) ?? "Unknown";
+
+    const reason = get("REASON") || resultRaw;
+
+    return { passFailResult, score, riskLevel, sizeSol, entry, reason };
   } catch (e) {
-    logger.warn({ label, rawPreview: raw.slice(0, 300), err: (e as Error).message }, "AI: parseTraderVerdict failed");
+    logger.warn({ label, rawPreview: raw.slice(0, 300), err: (e as Error).message }, "AI: parseInstinctVerdict failed");
     return null;
   }
 }
@@ -201,7 +219,7 @@ async function callGroqModel(prompt: string, model: string, label: string): Prom
             { role: "user", content: prompt },
           ],
           temperature: 0.3,
-          max_tokens: 300,
+          max_tokens: 200,
         },
         {
           timeout: AI_TIMEOUT_MS,
@@ -219,55 +237,74 @@ async function callGroqModel(prompt: string, model: string, label: string): Prom
 }
 
 // ─── Heuristic fallback ───────────────────────────────────────────────────────
-// Runs when ALL LLM providers fail. Never blocks a trade just because AI is down.
+// Implements the same 5-question scoring as the Groq prompt.
+// Runs when GROQ_API_KEY is not set or both models fail.
 
 function heuristicFallback(input: TokenAnalysisInput): Omit<LlmAnalysis, "provider" | "durationMs"> {
   let score = 0;
-  const strengths: string[] = [];
-  const risks: string[] = [];
+  const goods: string[] = [];
+  const bads: string[] = [];
 
-  // Liquidity — thresholds aligned with Stage 1 filter minimum ($20K)
-  if (input.liquidityUsd > 60_000)      { score += 25; strengths.push(`Strong liq $${Math.round(input.liquidityUsd / 1_000)}K`); }
-  else if (input.liquidityUsd > 25_000) { score += 18; strengths.push(`Liq $${Math.round(input.liquidityUsd / 1_000)}K`); }
-  else                                   { score += 10; strengths.push(`Liq $${Math.round(input.liquidityUsd / 1_000)}K`); }
+  // Q1: 5m change smaller than 1h change → still building
+  if (Math.abs(input.priceChange5m) < Math.abs(input.priceChange1h) && input.priceChange1h > 0) {
+    score++; goods.push("Still building (5m < 1h)");
+  } else {
+    bads.push("May have peaked (5m ≥ 1h)");
+  }
 
-  // Volume — thresholds aligned with Stage 1 filter minimum ($18K)
-  if (input.volume24hUsd > 300_000)     { score += 25; strengths.push(`High vol $${Math.round(input.volume24hUsd / 1_000)}K`); }
-  else if (input.volume24hUsd > 50_000) { score += 18; strengths.push(`24h vol $${Math.round(input.volume24hUsd / 1_000)}K`); }
-  else if (input.volume24hUsd > 18_000) { score += 10; strengths.push(`Vol $${Math.round(input.volume24hUsd / 1_000)}K`); }
-  else                                   { risks.push(`Low 24h vol $${Math.round(input.volume24hUsd / 1_000)}K`); }
+  // Q2: buy ratio 5m > buy ratio 1h → accelerating
+  const total1h    = input.buys1h + input.sells1h;
+  const buyRatio1h = total1h > 0 ? input.buys1h / total1h : 0;
+  const total5m    = input.buys5m + input.sells5m;
+  const buyRatio5m = total5m > 0 ? input.buys5m / total5m : 0;
+  if (buyRatio5m > buyRatio1h) {
+    score++; goods.push(`Accelerating buy ratio (5m ${(buyRatio5m * 100).toFixed(0)}% > 1h ${(buyRatio1h * 100).toFixed(0)}%)`);
+  } else {
+    bads.push(`Decelerating buys (5m ${(buyRatio5m * 100).toFixed(0)}% ≤ 1h ${(buyRatio1h * 100).toFixed(0)}%)`);
+  }
 
-  // Age — fresh is good for meme coins
-  if (input.pairAgeMinutes < 30)        { score += 20; strengths.push(`Very fresh ${Math.round(input.pairAgeMinutes)}m`); }
-  else if (input.pairAgeMinutes < 120)  { score += 15; strengths.push(`Fresh ${Math.round(input.pairAgeMinutes)}m`); }
-  else if (input.pairAgeMinutes < 480)  { score += 8; }
-  else                                   { risks.push("Pair >8h old"); }
+  // Q3: vol1h × 24 > 2 × vol24h → fresh momentum
+  if (input.volume1hUsd * 24 > 2 * input.volume24hUsd) {
+    score++; goods.push("Fresh momentum (annualized 1h vol > 2× 24h)");
+  } else {
+    bads.push("Momentum fading (1h pace < 24h avg)");
+  }
 
-  // Buy pressure — aligned with Stage 1 filter minimum (55%)
-  const total1h  = input.buys1h + input.sells1h;
-  const buyRatio = total1h > 0 ? input.buys1h / total1h : 0;
-  if (buyRatio >= 0.70)      { score += 18; strengths.push(`Strong buys ${(buyRatio * 100).toFixed(0)}%`); }
-  else if (buyRatio >= 0.55) { score += 10; strengths.push(`Buy pressure ${(buyRatio * 100).toFixed(0)}%`); }
-  else                        { risks.push(`Weak buy ratio ${(buyRatio * 100).toFixed(0)}%`); }
+  // Q4: mcap < 500K
+  if (input.marketCapUsd < 500_000) {
+    score++; goods.push(`Room to grow (MCap $${Math.round(input.marketCapUsd / 1_000)}K)`);
+  } else {
+    bads.push(`Already pumped (MCap $${(input.marketCapUsd / 1_000_000).toFixed(1)}M)`);
+  }
 
-  // Activity
-  if (input.txns24h >= 500)  { score += 12; strengths.push(`Active ${input.txns24h} txns`); }
-  else if (input.txns24h >= 80) { score += 7; strengths.push(`${input.txns24h} txns 24h`); }
-  else                           { risks.push(`Low activity ${input.txns24h} txns`); }
+  // Q5: pair age < 2h
+  if (input.pairAgeMinutes < 120) {
+    score++; goods.push(`Early entry (${Math.round(input.pairAgeMinutes)}m old)`);
+  } else {
+    bads.push(`Late entry (${(input.pairAgeMinutes / 60).toFixed(1)}h old)`);
+  }
 
-  score = Math.min(100, score);
-  // Tokens here already passed Stage 1+2 quality filters and rug check — TRADE at 50+, RISKY at 30+
-  const verdict: LlmVerdict = score >= 50 ? "TRADE" : score >= 30 ? "RISKY" : "SKIP";
+  const passFailResult = score >= 3 ? "PASS" : "FAIL";
+  const riskLevel = score === 5 ? "Low" : score === 4 ? "Medium" : "High";
+  const sizeSol   = score >= 4 ? 0.5 : score === 3 ? 0.25 : 0;
+  const entry     = input.pairAgeMinutes < 60 ? "Early" : input.pairAgeMinutes < 120 ? "Mid" : "Late";
+
+  const verdict: LlmVerdict = passFailResult === "PASS"
+    ? (score <= 3 ? "RISKY" : "TRADE")
+    : "SKIP";
 
   return {
     verdict,
-    confidence: score,
-    reasoning: `Heuristic (AI unavailable): score ${score}/100.`,
-    risks: risks.slice(0, 3),
-    strengths: strengths.slice(0, 3),
-    recommendedSizeSol: score >= 50 ? 0.5 : 0.25,
-    llmScore: Math.round(score / 10),
-    llmRiskLevel: score >= 75 ? "Low" : score >= 50 ? "Medium" : "High",
+    confidence: score * 20,
+    reasoning: `Heuristic ${score}/5: ${goods[0] ?? bads[0] ?? "no signal"}`,
+    risks:     bads.slice(0, 2),
+    strengths: goods.slice(0, 2),
+    recommendedSizeSol: sizeSol,
+    llmScore:     score,
+    llmRiskLevel: riskLevel,
+    stage:  entry,
+    potential: score >= 4 ? "5x–10x" : score === 3 ? "2x–5x" : "Dump incoming",
+    concern: bads[0] ?? "None",
   };
 }
 
@@ -282,13 +319,13 @@ logger.info(
 // Dual-Groq validation: llama-3.3-70b-versatile + mixtral-8x7b-32768 in PARALLEL.
 //
 // Combined verdict:
-//   Both PASS          → TRADE at 0.5 SOL
+//   Both PASS          → TRADE at recommended size
 //   One PASS one FAIL  → RISKY at 0.25 SOL (split decision)
-//   Both FAIL          → SKIP
+//   Both FAIL          → SKIP (hard skip)
 //   Both unavailable   → heuristic fallback
 
 export async function analyseTokenWithAi(input: TokenAnalysisInput): Promise<LlmAnalysis> {
-  const start     = Date.now();
+  const start      = Date.now();
   const hasGroqKey = Boolean(process.env["GROQ_API_KEY"]);
 
   logger.info({ symbol: input.symbol, hasGroqKey }, "AI analysis: starting evaluation");
@@ -314,16 +351,16 @@ export async function analyseTokenWithAi(input: TokenAnalysisInput): Promise<Llm
     callGroqModel(prompt, "mixtral-8x7b-32768",       "mixtral"),
   ]);
 
-  const llamaParsed   = llamaSettled.status   === "fulfilled" ? parseTraderVerdict(llamaSettled.value,   "llama")   : null;
-  const mixtralParsed = mixtralSettled.status === "fulfilled" ? parseTraderVerdict(mixtralSettled.value, "mixtral") : null;
+  const llamaParsed   = llamaSettled.status   === "fulfilled" ? parseInstinctVerdict(llamaSettled.value,   "llama")   : null;
+  const mixtralParsed = mixtralSettled.status === "fulfilled" ? parseInstinctVerdict(mixtralSettled.value, "mixtral") : null;
 
   const durationMs = Date.now() - start;
 
   const llamaLog   = llamaParsed
-    ? `${llamaParsed.passFailResult} ${llamaParsed.confidence}/10`
+    ? `${llamaParsed.passFailResult} ${llamaParsed.score}/5 risk:${llamaParsed.riskLevel}`
     : `ERR: ${((llamaSettled as PromiseRejectedResult).reason as Error)?.message?.slice(0, 60) ?? "parse_fail"}`;
   const mixtralLog = mixtralParsed
-    ? `${mixtralParsed.passFailResult} ${mixtralParsed.confidence}/10`
+    ? `${mixtralParsed.passFailResult} ${mixtralParsed.score}/5 risk:${mixtralParsed.riskLevel}`
     : `ERR: ${((mixtralSettled as PromiseRejectedResult).reason as Error)?.message?.slice(0, 60) ?? "parse_fail"}`;
 
   logger.info({ symbol: input.symbol, llama: llamaLog, mixtral: mixtralLog, durationMs }, "AI analysis: dual verdict");
@@ -335,7 +372,7 @@ export async function analyseTokenWithAi(input: TokenAnalysisInput): Promise<Llm
     return { ...h, provider: "heuristic", durationMs };
   }
 
-  // ── Pick primary (llama preferred), secondary whichever else responded ─────
+  // ── Combine verdicts ───────────────────────────────────────────────────────
   const primary       = llamaParsed ?? mixtralParsed!;
   const secondary     = llamaParsed && mixtralParsed ? mixtralParsed : null;
   const primaryLabel  = llamaParsed ? "llama-3.3-70b" : "mixtral-8x7b";
@@ -349,18 +386,22 @@ export async function analyseTokenWithAi(input: TokenAnalysisInput): Promise<Llm
   let llmRiskLevel: string;
 
   if (!secondary) {
-    verdict            = primaryPass ? "TRADE" : "SKIP";
-    recommendedSizeSol = primaryPass ? 0.5 : 0;
-    llmRiskLevel       = primary.confidence >= 8 ? "Low" : primary.confidence >= 6 ? "Medium" : "High";
+    // Only one model responded
+    verdict            = primaryPass ? (primary.score <= 3 ? "RISKY" : "TRADE") : "SKIP";
+    recommendedSizeSol = primaryPass ? primary.sizeSol : 0;
+    llmRiskLevel       = primary.riskLevel;
   } else if (primaryPass && secondaryPass) {
+    // Both PASS — use higher-confidence size (primary = llama preferred)
     verdict            = "TRADE";
-    recommendedSizeSol = 0.5;
-    llmRiskLevel       = primary.confidence >= 8 ? "Low" : "Medium";
+    recommendedSizeSol = primary.sizeSol;
+    llmRiskLevel       = primary.riskLevel;
   } else if (primaryPass !== secondaryPass) {
+    // Split decision → RISKY at 0.25 SOL regardless of model recommendation
     verdict            = "RISKY";
     recommendedSizeSol = 0.25;
     llmRiskLevel       = "High";
   } else {
+    // Both FAIL → hard skip
     verdict            = "SKIP";
     recommendedSizeSol = 0;
     llmRiskLevel       = "High";
@@ -372,6 +413,8 @@ export async function analyseTokenWithAi(input: TokenAnalysisInput): Promise<Llm
       verdict,
       llama:   llamaParsed?.passFailResult   ?? "N/A",
       mixtral: mixtralParsed?.passFailResult ?? "N/A",
+      llamaScore:   llamaParsed?.score   ?? "N/A",
+      mixtralScore: mixtralParsed?.score ?? "N/A",
       recommendedSizeSol,
       durationMs,
     },
@@ -380,20 +423,20 @@ export async function analyseTokenWithAi(input: TokenAnalysisInput): Promise<Llm
 
   return {
     verdict,
-    confidence: primary.confidence * 10,
-    reasoning:  primary.verdictLine,
-    risks:      primary.concern && primary.concern !== "None" ? [primary.concern] : [],
+    confidence: primary.score * 20,
+    reasoning:  primary.reason,
+    risks:      [],
     strengths:  [],
     provider:   "groq",
     durationMs,
     recommendedSizeSol,
-    llmScore:         primary.confidence,
+    llmScore:         primary.score,
     llmRiskLevel,
     secondaryVerdict: secondary ? secondary.passFailResult : "N/A",
     secondaryProvider: secondaryLabel,
-    stage:     primary.stage,
-    potential: primary.potential,
-    concern:   primary.concern,
+    stage:     primary.entry,
+    potential: primary.score >= 4 ? "5x–10x" : "2x–5x",
+    concern:   primary.reason,
   };
 }
 
