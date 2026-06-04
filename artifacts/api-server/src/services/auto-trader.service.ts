@@ -5,7 +5,7 @@ import { paperTradingService } from "./paper-trading.service.js";
 import { scannerService } from "./scanner.service.js";
 import { computeSignals, computeAiScore, computeConfidence, getDynamicRisk, computeEntryBoosts } from "./ai-scoring.service.js";
 import { mapPairToToken } from "./scanner.service.js";
-import { analyseTokenWithAi, buildAnalysisInput } from "./ai-analysis.service.js";
+import { analyseTokenWithAi, buildAnalysisInput, type LlmAnalysis } from "./ai-analysis.service.js";
 import { checkTokenSafety, type RugCheckResult } from "./rugcheck.service.js";
 import { marketHealthService } from "./market-health.service.js";
 import { query, execute } from "../lib/db.js";
@@ -14,6 +14,17 @@ import type { DexScreenerPair } from "../types/index.js";
 const DEXSCREENER_BASE = "https://api.dexscreener.com";
 const AUTO_TRADE_INTERVAL_MS = 60_000;
 const MAX_HISTORY_CYCLES = 50;
+
+// ── Score Paradox + High-Score Pump Guard ────────────────────────────────────
+// A perfect/near-perfect score on a memecoin = coordinated pump setup red flag.
+// High scores (90+) need a brief price-confirmation window before entry.
+const SCORE_PARADOX_THRESHOLD = 96;          // ≥96: paradox rule kicks in
+const SCORE_PARADOX_SIZE_SOL  = 0.25;        // reduced position size (not full solPerTrade)
+const SCORE_PARADOX_DELAY_MS  = 5 * 60_000;  // 5-min delay for paradox scores
+const HIGH_SCORE_THRESHOLD    = 90;          // 90-95: needs price confirmation
+const HIGH_SCORE_DELAY_MS     = 3 * 60_000;  // 3-min delay for high scores
+const DELAYED_MAX_PUMP_PCT    = 10;          // skip if price already up ≥10%
+const DELAYED_MAX_DROP_PCT    = -2;          // skip if price dropped ≥2%
 
 export interface AutoTraderConfig {
   solPerTrade: number;
@@ -648,6 +659,7 @@ class AutoTraderService {
   private history: CycleRecord[] = [];
   private config: AutoTraderConfig = { ...DEFAULT_CONFIG };
   private wasAtMaxTrades = false;
+  private pendingDelayedPairs = new Set<string>(); // pairAddresses with an in-flight delayed entry
   private consecutiveLossPausedUntil = 0;
   /**
    * Only count losses that closed AFTER this timestamp.
@@ -1373,6 +1385,42 @@ class AutoTraderService {
           "Auto-trader: genuine-coin check PASSED",
         );
 
+        // ── Layer 10: Score Paradox + Pump Guard ──────────────────────────────
+        // A perfect score (96-100) is a red flag on memecoins — coordinated pumps
+        // look "too perfect" on-chain. Reduce size and delay 5 min.
+        // Scores 90-95 need a 3-min price confirmation window before committing.
+        if (c.aiScore >= HIGH_SCORE_THRESHOLD) {
+          const isParadox = c.aiScore >= SCORE_PARADOX_THRESHOLD;
+          const delayMs   = isParadox ? SCORE_PARADOX_DELAY_MS : HIGH_SCORE_DELAY_MS;
+          const guardSize = isParadox
+            ? Math.min(SCORE_PARADOX_SIZE_SOL, tradeSizeSol)
+            : tradeSizeSol;
+
+          if (this.pendingDelayedPairs.has(c.pairAddress)) {
+            decisions.push({ ...c, ...llmFields, action: "filtered", reason: `Score ${c.aiScore}: delayed entry already pending — skipping duplicate` });
+            logger.info({ symbol: c.symbol, aiScore: c.aiScore }, "Auto-trader: delayed entry duplicate skipped");
+            continue;
+          }
+
+          this.pendingDelayedPairs.add(c.pairAddress);
+          void this.executeDelayedEntry({ c, token, llm, rugResult, tradeSizeSol: guardSize, priceAtSignal: c.priceUsd, delayMs });
+
+          decisions.push({
+            ...c, ...llmFields,
+            action: "traded",
+            reason: `Score paradox guard: ${c.aiScore}/100 — ${isParadox ? "PARADOX (≥96)" : "HIGH (≥90)"} → ${delayMs / 60_000}m delay, ${guardSize} SOL${isParadox ? " (reduced — too-perfect score)" : ""}`,
+          });
+          tradesOpened++;
+          this.totalTradesOpened++;
+          logger.info(
+            { symbol: c.symbol, aiScore: c.aiScore, delayMin: delayMs / 60_000, guardSize, isParadox },
+            isParadox
+              ? "Auto-trader: SCORE PARADOX — 96-100 is a pump-setup red flag, 5-min guarded entry at 0.25 SOL"
+              : "Auto-trader: HIGH SCORE GUARD — scheduling 3-min price confirmation delay"
+          );
+          continue;
+        }
+
         try {
           const position = await paperTradingService.buyDirect(token, tradeSizeSol, undefined, llm, rugResult);
           const llmTag = llm.provider !== "none"
@@ -1427,6 +1475,92 @@ class AutoTraderService {
       this.history.push({ cycleId, startedAt, finishedAt: Date.now(), tokensEvaluated, tradesOpened, decisions });
       if (this.history.length > MAX_HISTORY_CYCLES) this.history.shift();
       this.running = false;
+    }
+  }
+
+  // ── Delayed entry executor (Score Paradox + High-Score Pump Guard) ───────────
+  // Fires asynchronously after a delay. Re-fetches the live price and skips
+  // the trade if the token already pumped ≥10% or dropped ≥2% (likely P&D).
+  private async executeDelayedEntry(params: {
+    c: { pairAddress: string; symbol: string; aiScore: number; confidence: number; priceUsd: number };
+    token: { aiScore: number; confidence: number; [key: string]: unknown };
+    llm: LlmAnalysis;
+    rugResult: RugCheckResult;
+    tradeSizeSol: number;
+    priceAtSignal: number;
+    delayMs: number;
+  }): Promise<void> {
+    const { c, token, llm, rugResult, tradeSizeSol, priceAtSignal, delayMs } = params;
+    try {
+      logger.info(
+        { symbol: c.symbol, delayMin: (delayMs / 60_000).toFixed(0), aiScore: c.aiScore },
+        "Auto-trader: delayed entry sleeping…"
+      );
+
+      await new Promise<void>(resolve => setTimeout(resolve, delayMs));
+
+      if (this.paused) {
+        logger.info({ symbol: c.symbol }, "Auto-trader: delayed entry cancelled — bot paused during wait");
+        return;
+      }
+
+      // Re-fetch live price to detect pump-and-dump movement during the delay
+      let livePrice = 0;
+      try {
+        const resp = await axios.get<{ pair: { priceUsd?: string } | null }>(
+          `${DEXSCREENER_BASE}/latest/dex/pairs/solana/${c.pairAddress}`,
+          { timeout: 5_000 }
+        );
+        livePrice = parseFloat(resp.data?.pair?.priceUsd ?? "0") || 0;
+      } catch {
+        logger.warn({ symbol: c.symbol }, "Auto-trader: delayed entry — price re-fetch failed, skipping to protect capital");
+        return;
+      }
+
+      if (livePrice <= 0) {
+        logger.warn({ symbol: c.symbol }, "Auto-trader: delayed entry — no live price, token likely dead or rugged");
+        return;
+      }
+
+      const priceMovePct = priceAtSignal > 0
+        ? ((livePrice - priceAtSignal) / priceAtSignal) * 100
+        : 0;
+
+      if (priceMovePct >= DELAYED_MAX_PUMP_PCT) {
+        logger.info(
+          { symbol: c.symbol, priceMovePct: priceMovePct.toFixed(1), priceAtSignal, livePrice },
+          "Auto-trader: delayed entry SKIPPED — already pumped 10%+ (missed the move, likely P&D peak)"
+        );
+        return;
+      }
+
+      if (priceMovePct <= DELAYED_MAX_DROP_PCT) {
+        logger.info(
+          { symbol: c.symbol, priceMovePct: priceMovePct.toFixed(1) },
+          "Auto-trader: delayed entry SKIPPED — price dropped 2%+, likely distribution started"
+        );
+        return;
+      }
+
+      // Price stable (within -2% to +10%) — safe to enter
+      token.aiScore    = c.aiScore;
+      token.confidence = c.confidence;
+
+      logger.info(
+        { symbol: c.symbol, priceMovePct: priceMovePct.toFixed(1), livePrice, tradeSizeSol },
+        "Auto-trader: delayed entry EXECUTING — price stable, confirmed non-pump"
+      );
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const position = await paperTradingService.buyDirect(token as any, tradeSizeSol, undefined, llm, rugResult);
+      logger.info(
+        { positionId: position.positionId, symbol: c.symbol, aiScore: c.aiScore, tradeSizeSol, priceMovePct: priceMovePct.toFixed(1) },
+        "Auto-trader: delayed entry trade OPENED successfully"
+      );
+    } catch (err) {
+      logger.error({ err, symbol: c.symbol }, "Auto-trader: delayed entry execution failed");
+    } finally {
+      this.pendingDelayedPairs.delete(c.pairAddress);
     }
   }
 
