@@ -254,7 +254,11 @@ export function qualityFilter(pair: DexScreenerPair, cfg: AutoTraderConfig): Fil
   if (total1h >= 30 && total1h < 200 && buyRatio1h >= 0.90)
     return fail(`Insider buying: ${(buyRatio1h * 100).toFixed(0)}% buys in 1h (${total1h} txns) — no organic sellers`);
 
-  // 2d. Wash trading — zero or near-zero sells = fake volume
+  // 2d. Wash trading — zero or near-zero sells = fake volume (applies at ALL volume levels)
+  // High-volume zero-sell: ≥200 txns but nobody selling = coordinated one-sided
+  // accumulation. Real organic momentum always has some sells mixed in.
+  if (total1h >= 200 && sells1h === 0)
+    return fail(`High-volume wash trade: ${buys1h} buys / 0 sells in 1h (${total1h} txns) — one-sided accumulation, pre-rug signal`);
   if (sells1h === 0 && buys1h >= 20)
     return fail(`Wash trade: ${buys1h} buys / 0 sells in 1h — artificial volume`);
   if (sells1h <= 2 && buys1h >= 40)
