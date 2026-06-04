@@ -239,6 +239,23 @@ export function computeEntryBoosts(pair: DexScreenerPair): number {
   if (pc1h >= 10 && pc1h <= 35 && pc5m >= 1 && pc5m <= 8 && buyRatio1h >= 0.60 && total1h >= 20)
     boost += 4;
 
+  // Momentum quality boost — rewards genuine two-sided organic activity.
+  // Only kicks in with enough transactions to be statistically meaningful (≥20).
+  // 5-15% sell ratio = ideal: strong buyer dominance + healthy sell side proves
+  // real organic trading rather than coordinated one-sided accumulation.
+  // 16-30% sell ratio = still buyer dominant but more balanced — smaller boost.
+  // <5% sell ratio (too one-sided, possible manipulation) = no boost.
+  // >30% sell ratio (too much selling pressure) = no boost.
+  // Hard cap: this boost alone never exceeds +5 regardless of other boosts.
+  if (total1h >= 20) {
+    const sellRatio1h = sells1h / total1h;
+    if (sellRatio1h >= 0.05 && sellRatio1h <= 0.15) {
+      boost += 5;
+    } else if (sellRatio1h > 0.15 && sellRatio1h <= 0.30) {
+      boost += 2;
+    }
+  }
+
   return Math.min(boost, 40);
 }
 
