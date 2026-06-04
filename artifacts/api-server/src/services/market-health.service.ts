@@ -35,6 +35,11 @@ class MarketHealthService {
 
   isCheckDue(): boolean {
     if (!this.lastResult) return true;
+    // If the last check fired when the pool was too small (startup/deploy scenario),
+    // re-run as soon as the pool has grown enough — don't wait the full 30 min.
+    if (this.lastResult.poolSize < MIN_POOL_SIZE) {
+      return scannerService.getAll().length >= MIN_POOL_SIZE;
+    }
     const interval = this.lastResult.state === "DEAD" ? DEAD_RECHECK_MS : CHECK_INTERVAL_MS;
     return Date.now() - this.lastCheckedAt >= interval;
   }
