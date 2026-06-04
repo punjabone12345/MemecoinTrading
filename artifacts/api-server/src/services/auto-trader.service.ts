@@ -192,7 +192,7 @@ const DEFAULT_CONFIG: AutoTraderConfig = {
 // Layer 2 — RUG DETECTION (never configurable — always enforced)
 //    2a. Pool drain:     vol5m > 75% of liquidity → LP being drained right now
 //    2b. Bot buy 5m:     ≥95% buys in last 5 min with ≥10 txns → pre-rug accumulation
-//    2c. Bot buy 1h:     ≥92% buys in last 1h with ≥40 txns → insider-dominated
+//    2c. Bot buy 1h:     ≥90% buys in last 1h with 30-199 txns → insider-dominated; ≥200 txns = organic momentum, allow through
 //    2d. Wash trade:     zero sells but many buys → fake volume
 //    2e. Liquidity thin: liq/mcap < threshold → easy to drain
 //    2f. FDV inflation:  FDV >> mcap → massive unlocked supply overhang
@@ -251,7 +251,7 @@ export function qualityFilter(pair: DexScreenerPair, cfg: AutoTraderConfig): Fil
     return fail(`Bot buying: ${(buyRatio5m * 100).toFixed(0)}% buys in last 5m (${total5m} txns) — pre-rug accumulation`);
 
   // 2c. Insider-dominated 1h
-  if (total1h >= 30 && buyRatio1h >= 0.90)
+  if (total1h >= 30 && total1h < 200 && buyRatio1h >= 0.90)
     return fail(`Insider buying: ${(buyRatio1h * 100).toFixed(0)}% buys in 1h (${total1h} txns) — no organic sellers`);
 
   // 2d. Wash trading — zero or near-zero sells = fake volume
