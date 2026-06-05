@@ -1486,7 +1486,7 @@ class AutoTraderService {
   // Fires asynchronously after a delay. Re-fetches the live price and skips
   // the trade if the token already pumped ≥10% or dropped ≥2% (likely P&D).
   private async executeDelayedEntry(params: {
-    c: { pairAddress: string; symbol: string; aiScore: number; confidence: number; priceUsd: number };
+    c: { pairAddress: string; symbol: string; tokenName: string; aiScore: number; confidence: number; priceUsd: number };
     token: { aiScore: number; confidence: number; [key: string]: unknown };
     llm: LlmAnalysis;
     rugResult: RugCheckResult;
@@ -1497,11 +1497,23 @@ class AutoTraderService {
     const { c, token, llm, rugResult, tradeSizeSol, priceAtSignal, delayMs } = params;
     try {
       logger.info(
-        { symbol: c.symbol, delayMin: (delayMs / 60_000).toFixed(0), aiScore: c.aiScore },
-        "Auto-trader: delayed entry sleeping…"
+        {
+          symbol: c.symbol,
+          tokenName: c.tokenName,
+          aiScore: c.aiScore,
+          isParadox: c.aiScore >= SCORE_PARADOX_THRESHOLD,
+          delayMin: (delayMs / 60_000).toFixed(1),
+          priceAtSignal,
+        },
+        "Auto-trader: DELAY QUEUED — high score token entering wait period"
       );
 
       await new Promise<void>(resolve => setTimeout(resolve, delayMs));
+
+      logger.info(
+        { symbol: c.symbol, tokenName: c.tokenName, aiScore: c.aiScore, delayMin: (delayMs / 60_000).toFixed(1) },
+        "Auto-trader: DELAY ELAPSED — re-fetching live price for confirmation"
+      );
 
       if (this.paused) {
         logger.info({ symbol: c.symbol }, "Auto-trader: delayed entry cancelled — bot paused during wait");
@@ -1530,18 +1542,57 @@ class AutoTraderService {
         ? ((livePrice - priceAtSignal) / priceAtSignal) * 100
         : 0;
 
+      const priceCheckResult =
+        priceMovePct >= DELAYED_MAX_PUMP_PCT ? "pumped" :
+        priceMovePct <= DELAYED_MAX_DROP_PCT ? "dropped" : "stable";
+
+      logger.info(
+        {
+          symbol: c.symbol,
+          tokenName: c.tokenName,
+          aiScore: c.aiScore,
+          priceAtSignal,
+          livePrice,
+          priceMovePct: priceMovePct.toFixed(2),
+          priceCheckResult,
+          maxPumpPct: DELAYED_MAX_PUMP_PCT,
+          maxDropPct: DELAYED_MAX_DROP_PCT,
+        },
+        "Auto-trader: DELAY PRICE CHECK — comparing entry vs current price"
+      );
+
       if (priceMovePct >= DELAYED_MAX_PUMP_PCT) {
-        logger.info(
-          { symbol: c.symbol, priceMovePct: priceMovePct.toFixed(1), priceAtSignal, livePrice },
-          "Auto-trader: delayed entry SKIPPED — already pumped 10%+ (missed the move, likely P&D peak)"
+        logger.warn(
+          {
+            symbol: c.symbol,
+            tokenName: c.tokenName,
+            aiScore: c.aiScore,
+            priceAtSignal,
+            livePrice,
+            priceMovePct: priceMovePct.toFixed(2),
+            priceCheckResult: "pumped",
+            finalDecision: "SKIPPED",
+            reason: `Already pumped ${priceMovePct.toFixed(1)}% — missed the move or P&D peak`,
+          },
+          "Auto-trader: DELAY DECISION — SKIPPED (pumped)"
         );
         return;
       }
 
       if (priceMovePct <= DELAYED_MAX_DROP_PCT) {
-        logger.info(
-          { symbol: c.symbol, priceMovePct: priceMovePct.toFixed(1) },
-          "Auto-trader: delayed entry SKIPPED — price dropped 2%+, likely distribution started"
+        logger.warn(
+          {
+            symbol: c.symbol,
+            tokenName: c.tokenName,
+            aiScore: c.aiScore,
+            priceAtSignal,
+            livePrice,
+            priceMovePct: priceMovePct.toFixed(2),
+            priceCheckResult: "dropped",
+            finalDecision: "SKIPPED",
+            reason: `Price dropped ${Math.abs(priceMovePct).toFixed(1)}% — distribution likely started`,
+          },
+          "Auto-trader: DELAY DECISION — SKIPPED (dropped)"
         );
         return;
       }
@@ -1551,15 +1602,35 @@ class AutoTraderService {
       token.confidence = c.confidence;
 
       logger.info(
-        { symbol: c.symbol, priceMovePct: priceMovePct.toFixed(1), livePrice, tradeSizeSol },
-        "Auto-trader: delayed entry EXECUTING — price stable, confirmed non-pump"
+        {
+          symbol: c.symbol,
+          tokenName: c.tokenName,
+          aiScore: c.aiScore,
+          priceAtSignal,
+          livePrice,
+          priceMovePct: priceMovePct.toFixed(2),
+          priceCheckResult: "stable",
+          finalDecision: "EXECUTING",
+          tradeSizeSol,
+        },
+        "Auto-trader: DELAY DECISION — EXECUTING (price stable, confirmed non-pump)"
       );
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const position = await paperTradingService.buyDirect(token as any, tradeSizeSol, undefined, llm, rugResult);
       logger.info(
-        { positionId: position.positionId, symbol: c.symbol, aiScore: c.aiScore, tradeSizeSol, priceMovePct: priceMovePct.toFixed(1) },
-        "Auto-trader: delayed entry trade OPENED successfully"
+        {
+          positionId: position.positionId,
+          symbol: c.symbol,
+          tokenName: c.tokenName,
+          aiScore: c.aiScore,
+          priceAtSignal,
+          livePrice,
+          priceMovePct: priceMovePct.toFixed(2),
+          tradeSizeSol,
+          finalDecision: "EXECUTED",
+        },
+        "Auto-trader: DELAY TRADE OPENED — delayed entry successful"
       );
     } catch (err) {
       logger.error({ err, symbol: c.symbol }, "Auto-trader: delayed entry execution failed");
