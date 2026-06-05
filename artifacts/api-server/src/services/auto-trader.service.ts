@@ -17,14 +17,16 @@ const MAX_HISTORY_CYCLES = 50;
 
 // ── Score Paradox + High-Score Pump Guard ────────────────────────────────────
 // A perfect/near-perfect score on a memecoin = coordinated pump setup red flag.
-// High scores (90+) need a brief price-confirmation window before entry.
+// High scores need a brief price-confirmation window before entry.
 const SCORE_PARADOX_THRESHOLD = 96;          // ≥96: paradox rule kicks in
 const SCORE_PARADOX_SIZE_SOL  = 0.25;        // reduced position size (not full solPerTrade)
-const SCORE_PARADOX_DELAY_MS  = 5 * 60_000;  // 5-min delay for paradox scores
-const HIGH_SCORE_THRESHOLD    = 90;          // 90-95: needs price confirmation
+const SCORE_PARADOX_DELAY_MS  = 5 * 60_000;  // 5-min delay for paradox scores (96-100)
+const HIGH_SCORE_THRESHOLD    = 86;          // 86-95: needs price confirmation (3 min)
 const HIGH_SCORE_DELAY_MS     = 3 * 60_000;  // 3-min delay for high scores
-const DELAYED_MAX_PUMP_PCT    = 10;          // skip if price already up ≥10%
-const DELAYED_MAX_DROP_PCT    = -2;          // skip if price dropped ≥2%
+const MEDIUM_SCORE_THRESHOLD  = 70;          // 70-85: shorter delay to catch momentum (2 min)
+const MEDIUM_SCORE_DELAY_MS   = 2 * 60_000;  // 2-min delay for medium-high scores
+const DELAYED_MAX_PUMP_PCT    = 15;          // skip if price already up ≥15% (widened from 10%)
+const DELAYED_MAX_DROP_PCT    = -5;          // skip if price dropped ≥5% (widened from -2%)
 
 export interface AutoTraderConfig {
   solPerTrade: number;
@@ -141,22 +143,38 @@ export interface AutoTraderStatus {
   } | null;
 }
 
+// ─── Delayed Entry Queue ───────────────────────────────────────────────────────
+export interface DelayedQueueEntry {
+  pairAddress: string;
+  symbol: string;
+  tokenName: string;
+  aiScore: number;
+  priceAtSignal: number;
+  currentPrice: number | null;
+  pctChange: number | null;
+  status: "waiting" | "executing" | "skipped" | "entered";
+  queuedAt: number;
+  executeAt: number;
+  skipReason?: string;
+  finalDecision?: string;
+}
+
 // ─── Default config ────────────────────────────────────────────────────────────
 const DEFAULT_CONFIG: AutoTraderConfig = {
   solPerTrade: 0.5,
   maxConcurrentTrades: 8,       // 8 slots — Layer 9 genuine-coin check keeps quality high
 
   // ── AI quality ────────────────────────────────────────────────────────────
-  minAiScore:    55,            // lowered: 55 opens more candidates; Layer 9 genuine-coin check is the quality gate
-  minConfidence: 40,            // allow tokens with less complete data
+  minAiScore:    38,            // lowered to 38 for more trade opportunities
+  minConfidence: 30,            // lowered to 30 for more candidates
 
   // ── Liquidity & volume ────────────────────────────────────────────────────
-  minLiquidityUsd:  15_000,     // $15K floor — LP lock ≥ 50% check in Layer 9 prevents thin-pool rugs
-  minVolume24hUsd:   8_000,     // lower bar — catches early-stage tokens with real momentum
-  minVolume1hUsd:    2_000,     // catches tokens just starting to gain traction
+  minLiquidityUsd:  12_000,     // $12K floor — widened to catch more tokens
+  minVolume24hUsd:  10_000,     // lowered for early-stage tokens with real momentum
+  minVolume1hUsd:    3_000,     // lowered to catch tokens just gaining traction
 
   // ── Momentum ─────────────────────────────────────────────────────────────
-  minBuyRatio1h:    0.52,       // 52% buys — slight organic buy pressure required
+  minBuyRatio1h:    0.58,       // 58% buys — organic buy pressure required
   minPriceChange1h: 0,          // no forced positive 1h momentum — consolidations are valid entries
   maxPriceChange1h: 300,        // pump.fun grads regularly hit +150-400% in hour 1 — don't miss them
   minTransactions24h: 40,       // lower bar for newer/smaller tokens
@@ -168,7 +186,7 @@ const DEFAULT_CONFIG: AutoTraderConfig = {
 
   // ── Pair age ──────────────────────────────────────────────────────────────
   minPairAgeMinutes:  5,        // 5min survival — enough to confirm LP is real and pair isn't instantly rugged
-  maxPairAgeHours:    5,        // extended: catch quality tokens still active in hours 3-5
+  maxPairAgeHours:   18,        // extended to 18h to catch quality tokens active longer
 
   // ── Rug guards ────────────────────────────────────────────────────────────
   minLiquidityMcapRatio: 0.05,  // 5% — Layer 9 LP-lock check and Layer 2 drain detection protect us
@@ -183,7 +201,7 @@ const DEFAULT_CONFIG: AutoTraderConfig = {
   dailyLossPauseHours:      12,  // 12h pause on daily cap
 
   // Bump this number whenever filter defaults change — forces all saved configs to migrate
-  schemaVersion: 9,
+  schemaVersion: 10,
 };
 
 // ─── Anti-rug + quality filter ────────────────────────────────────────────────
@@ -664,6 +682,7 @@ class AutoTraderService {
   private config: AutoTraderConfig = { ...DEFAULT_CONFIG };
   private wasAtMaxTrades = false;
   private pendingDelayedPairs = new Set<string>(); // pairAddresses with an in-flight delayed entry
+  private delayedQueue = new Map<string, DelayedQueueEntry>(); // live queue state for display
   private consecutiveLossPausedUntil = 0;
   /**
    * Only count losses that closed AFTER this timestamp.
@@ -760,6 +779,21 @@ class AutoTraderService {
   resume(): void { this.paused = false; logger.info("Auto-trader resumed"); void this.run(); }
   isPaused(): boolean { return this.paused; }
   getHistory(): CycleRecord[] { return [...this.history].reverse(); }
+
+  getDelayedQueue(): DelayedQueueEntry[] {
+    const now = Date.now();
+    return Array.from(this.delayedQueue.values())
+      .map(e => ({
+        ...e,
+        // Completed entries older than 10 min — purge them
+      }))
+      .filter(e => {
+        // Keep waiting/executing entries always; keep completed entries for 10 min
+        if (e.status === "waiting" || e.status === "executing") return true;
+        return (now - e.queuedAt) < 10 * 60_000;
+      })
+      .sort((a, b) => b.queuedAt - a.queuedAt);
+  }
 
   resetCircuitBreaker(): void {
     this.consecutiveLossPausedUntil = 0;
@@ -1392,13 +1426,19 @@ class AutoTraderService {
         // ── Layer 10: Score Paradox + Pump Guard ──────────────────────────────
         // A perfect score (96-100) is a red flag on memecoins — coordinated pumps
         // look "too perfect" on-chain. Reduce size and delay 5 min.
-        // Scores 90-95 need a 3-min price confirmation window before committing.
-        if (c.aiScore >= HIGH_SCORE_THRESHOLD) {
+        // Scores 86-95 need a 3-min price confirmation window before committing.
+        // Scores 70-85 use a 2-min delay to catch momentum before it fades.
+        if (c.aiScore >= MEDIUM_SCORE_THRESHOLD) {
           const isParadox = c.aiScore >= SCORE_PARADOX_THRESHOLD;
-          const delayMs   = isParadox ? SCORE_PARADOX_DELAY_MS : HIGH_SCORE_DELAY_MS;
+          const isHigh    = c.aiScore >= HIGH_SCORE_THRESHOLD;
+          const delayMs   = isParadox ? SCORE_PARADOX_DELAY_MS
+                          : isHigh    ? HIGH_SCORE_DELAY_MS
+                          :             MEDIUM_SCORE_DELAY_MS;
           const guardSize = isParadox
             ? Math.min(SCORE_PARADOX_SIZE_SOL, tradeSizeSol)
             : tradeSizeSol;
+
+          const tier = isParadox ? "PARADOX (96-100)" : isHigh ? "HIGH (86-95)" : "MEDIUM (70-85)";
 
           if (this.pendingDelayedPairs.has(c.pairAddress)) {
             decisions.push({ ...c, ...llmFields, action: "filtered", reason: `Score ${c.aiScore}: delayed entry already pending — skipping duplicate` });
@@ -1407,20 +1447,35 @@ class AutoTraderService {
           }
 
           this.pendingDelayedPairs.add(c.pairAddress);
+          const entry: DelayedQueueEntry = {
+            pairAddress: c.pairAddress,
+            symbol: c.symbol,
+            tokenName: c.tokenName,
+            aiScore: c.aiScore,
+            priceAtSignal: c.priceUsd,
+            currentPrice: null,
+            pctChange: null,
+            status: "waiting",
+            queuedAt: Date.now(),
+            executeAt: Date.now() + delayMs,
+          };
+          this.delayedQueue.set(c.pairAddress, entry);
           void this.executeDelayedEntry({ c, token, llm, rugResult, tradeSizeSol: guardSize, priceAtSignal: c.priceUsd, delayMs });
 
           decisions.push({
             ...c, ...llmFields,
             action: "traded",
-            reason: `Score paradox guard: ${c.aiScore}/100 — ${isParadox ? "PARADOX (≥96)" : "HIGH (≥90)"} → ${delayMs / 60_000}m delay, ${guardSize} SOL${isParadox ? " (reduced — too-perfect score)" : ""}`,
+            reason: `Score guard [${tier}]: ${c.aiScore}/100 → ${delayMs / 60_000}m delay, ${guardSize} SOL${isParadox ? " (reduced — too-perfect score)" : ""}`,
           });
           tradesOpened++;
           this.totalTradesOpened++;
           logger.info(
-            { symbol: c.symbol, aiScore: c.aiScore, delayMin: delayMs / 60_000, guardSize, isParadox },
+            { symbol: c.symbol, aiScore: c.aiScore, delayMin: delayMs / 60_000, guardSize, tier },
             isParadox
               ? "Auto-trader: SCORE PARADOX — 96-100 is a pump-setup red flag, 5-min guarded entry at 0.25 SOL"
-              : "Auto-trader: HIGH SCORE GUARD — scheduling 3-min price confirmation delay"
+              : isHigh
+              ? "Auto-trader: HIGH SCORE GUARD — scheduling 3-min price confirmation delay"
+              : "Auto-trader: MEDIUM SCORE GUARD — scheduling 2-min momentum confirmation delay"
           );
           continue;
         }
@@ -1484,7 +1539,7 @@ class AutoTraderService {
 
   // ── Delayed entry executor (Score Paradox + High-Score Pump Guard) ───────────
   // Fires asynchronously after a delay. Re-fetches the live price and skips
-  // the trade if the token already pumped ≥10% or dropped ≥2% (likely P&D).
+  // the trade if the token already pumped ≥15% or dropped ≥5% (likely P&D).
   private async executeDelayedEntry(params: {
     c: { pairAddress: string; symbol: string; tokenName: string; aiScore: number; confidence: number; priceUsd: number };
     token: { aiScore: number; confidence: number; [key: string]: unknown };
@@ -1495,27 +1550,37 @@ class AutoTraderService {
     delayMs: number;
   }): Promise<void> {
     const { c, token, llm, rugResult, tradeSizeSol, priceAtSignal, delayMs } = params;
+    const updateQueue = (patch: Partial<DelayedQueueEntry>) => {
+      const existing = this.delayedQueue.get(c.pairAddress);
+      if (existing) this.delayedQueue.set(c.pairAddress, { ...existing, ...patch });
+    };
+
     try {
+      const tier = c.aiScore >= SCORE_PARADOX_THRESHOLD ? "PARADOX" : c.aiScore >= HIGH_SCORE_THRESHOLD ? "HIGH" : "MEDIUM";
       logger.info(
         {
           symbol: c.symbol,
           tokenName: c.tokenName,
           aiScore: c.aiScore,
-          isParadox: c.aiScore >= SCORE_PARADOX_THRESHOLD,
+          tier,
           delayMin: (delayMs / 60_000).toFixed(1),
           priceAtSignal,
+          executeAt: new Date(Date.now() + delayMs).toISOString(),
         },
-        "Auto-trader: DELAY QUEUED — high score token entering wait period"
+        "Auto-trader: DELAY QUEUED — token entering wait period"
       );
 
       await new Promise<void>(resolve => setTimeout(resolve, delayMs));
 
+      updateQueue({ status: "executing" });
+
       logger.info(
-        { symbol: c.symbol, tokenName: c.tokenName, aiScore: c.aiScore, delayMin: (delayMs / 60_000).toFixed(1) },
+        { symbol: c.symbol, tokenName: c.tokenName, aiScore: c.aiScore, tier, delayMin: (delayMs / 60_000).toFixed(1) },
         "Auto-trader: DELAY ELAPSED — re-fetching live price for confirmation"
       );
 
       if (this.paused) {
+        updateQueue({ status: "skipped", skipReason: "Bot paused during wait", finalDecision: "SKIPPED" });
         logger.info({ symbol: c.symbol }, "Auto-trader: delayed entry cancelled — bot paused during wait");
         return;
       }
@@ -1529,11 +1594,13 @@ class AutoTraderService {
         );
         livePrice = parseFloat(resp.data?.pair?.priceUsd ?? "0") || 0;
       } catch {
+        updateQueue({ status: "skipped", skipReason: "Price re-fetch failed", finalDecision: "SKIPPED" });
         logger.warn({ symbol: c.symbol }, "Auto-trader: delayed entry — price re-fetch failed, skipping to protect capital");
         return;
       }
 
       if (livePrice <= 0) {
+        updateQueue({ status: "skipped", skipReason: "No live price — token may be rugged", finalDecision: "SKIPPED" });
         logger.warn({ symbol: c.symbol }, "Auto-trader: delayed entry — no live price, token likely dead or rugged");
         return;
       }
@@ -1541,6 +1608,8 @@ class AutoTraderService {
       const priceMovePct = priceAtSignal > 0
         ? ((livePrice - priceAtSignal) / priceAtSignal) * 100
         : 0;
+
+      updateQueue({ currentPrice: livePrice, pctChange: priceMovePct });
 
       const priceCheckResult =
         priceMovePct >= DELAYED_MAX_PUMP_PCT ? "pumped" :
@@ -1551,6 +1620,7 @@ class AutoTraderService {
           symbol: c.symbol,
           tokenName: c.tokenName,
           aiScore: c.aiScore,
+          tier,
           priceAtSignal,
           livePrice,
           priceMovePct: priceMovePct.toFixed(2),
@@ -1562,17 +1632,19 @@ class AutoTraderService {
       );
 
       if (priceMovePct >= DELAYED_MAX_PUMP_PCT) {
+        const reason = `Already pumped ${priceMovePct.toFixed(1)}% (max ${DELAYED_MAX_PUMP_PCT}%) — missed the move or P&D peak`;
+        updateQueue({ status: "skipped", skipReason: reason, finalDecision: "SKIPPED" });
         logger.warn(
           {
             symbol: c.symbol,
             tokenName: c.tokenName,
             aiScore: c.aiScore,
+            tier,
             priceAtSignal,
             livePrice,
             priceMovePct: priceMovePct.toFixed(2),
-            priceCheckResult: "pumped",
             finalDecision: "SKIPPED",
-            reason: `Already pumped ${priceMovePct.toFixed(1)}% — missed the move or P&D peak`,
+            reason,
           },
           "Auto-trader: DELAY DECISION — SKIPPED (pumped)"
         );
@@ -1580,24 +1652,26 @@ class AutoTraderService {
       }
 
       if (priceMovePct <= DELAYED_MAX_DROP_PCT) {
+        const reason = `Price dropped ${Math.abs(priceMovePct).toFixed(1)}% (max ${Math.abs(DELAYED_MAX_DROP_PCT)}%) — distribution likely started`;
+        updateQueue({ status: "skipped", skipReason: reason, finalDecision: "SKIPPED" });
         logger.warn(
           {
             symbol: c.symbol,
             tokenName: c.tokenName,
             aiScore: c.aiScore,
+            tier,
             priceAtSignal,
             livePrice,
             priceMovePct: priceMovePct.toFixed(2),
-            priceCheckResult: "dropped",
             finalDecision: "SKIPPED",
-            reason: `Price dropped ${Math.abs(priceMovePct).toFixed(1)}% — distribution likely started`,
+            reason,
           },
           "Auto-trader: DELAY DECISION — SKIPPED (dropped)"
         );
         return;
       }
 
-      // Price stable (within -2% to +10%) — safe to enter
+      // Price stable — safe to enter
       token.aiScore    = c.aiScore;
       token.confidence = c.confidence;
 
@@ -1606,10 +1680,10 @@ class AutoTraderService {
           symbol: c.symbol,
           tokenName: c.tokenName,
           aiScore: c.aiScore,
+          tier,
           priceAtSignal,
           livePrice,
           priceMovePct: priceMovePct.toFixed(2),
-          priceCheckResult: "stable",
           finalDecision: "EXECUTING",
           tradeSizeSol,
         },
@@ -1618,12 +1692,14 @@ class AutoTraderService {
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const position = await paperTradingService.buyDirect(token as any, tradeSizeSol, undefined, llm, rugResult);
+      updateQueue({ status: "entered", finalDecision: `ENTERED at $${livePrice.toFixed(8)} (${priceMovePct >= 0 ? "+" : ""}${priceMovePct.toFixed(2)}% from signal)` });
       logger.info(
         {
           positionId: position.positionId,
           symbol: c.symbol,
           tokenName: c.tokenName,
           aiScore: c.aiScore,
+          tier,
           priceAtSignal,
           livePrice,
           priceMovePct: priceMovePct.toFixed(2),
@@ -1633,6 +1709,7 @@ class AutoTraderService {
         "Auto-trader: DELAY TRADE OPENED — delayed entry successful"
       );
     } catch (err) {
+      updateQueue({ status: "skipped", skipReason: `Execution error: ${err instanceof Error ? err.message : "unknown"}`, finalDecision: "SKIPPED" });
       logger.error({ err, symbol: c.symbol }, "Auto-trader: delayed entry execution failed");
     } finally {
       this.pendingDelayedPairs.delete(c.pairAddress);

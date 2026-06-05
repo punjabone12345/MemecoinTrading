@@ -3,6 +3,7 @@ import { autoTraderService } from "../services/auto-trader.service.js";
 import { sendTelegram, isTelegramConfigured } from "../lib/telegram.js";
 import type { AutoTraderConfig } from "../services/auto-trader.service.js";
 
+
 const router: IRouter = Router();
 
 router.get("/auto-trader/status", (_req, res) => {
@@ -51,6 +52,11 @@ router.post("/auto-trader/resume", async (_req, res) => {
 router.get("/auto-trader/history", (_req, res) => {
   const history = autoTraderService.getHistory();
   res.json({ success: true, count: history.length, data: history });
+});
+
+router.get("/auto-trader/delayed-queue", (_req, res) => {
+  const queue = autoTraderService.getDelayedQueue();
+  res.json({ success: true, count: queue.length, data: queue });
 });
 
 router.get("/auto-trader/config", (_req, res) => {
