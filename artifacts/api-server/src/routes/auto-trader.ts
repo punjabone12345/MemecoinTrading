@@ -54,11 +54,6 @@ router.get("/auto-trader/history", (_req, res) => {
   res.json({ success: true, count: history.length, data: history });
 });
 
-router.get("/auto-trader/delayed-queue", (_req, res) => {
-  const queue = autoTraderService.getDelayedQueue();
-  res.json({ success: true, count: queue.length, data: queue });
-});
-
 router.get("/auto-trader/config", (_req, res) => {
   res.json({ success: true, data: autoTraderService.getConfig() });
 });

@@ -213,17 +213,3 @@ export interface CycleRecord {
   decisions: CycleDecision[];
 }
 
-export interface DelayedQueueEntry {
-  pairAddress: string;
-  symbol: string;
-  tokenName: string;
-  aiScore: number;
-  priceAtSignal: number;
-  currentPrice: number | null;
-  pctChange: number | null;
-  status: "waiting" | "executing" | "skipped" | "entered";
-  queuedAt: number;
-  executeAt: number;
-  skipReason?: string;
-  finalDecision?: string;
-}

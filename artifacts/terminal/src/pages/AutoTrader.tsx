@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
-import { useAutoTraderStatus, useAutoTraderConfig, useUpdateAutoTraderConfig, usePauseAutoTrader, useResumeAutoTrader, useAutoTraderHistory, useResetCircuitBreaker, useDelayedQueue } from "@/lib/api";
-import { Play, Pause, Settings, Zap, Shield, TrendingUp, Clock, ChevronDown, ChevronUp, CheckCircle2, XCircle, SkipForward, FlaskConical, Loader2, AlertTriangle, RotateCcw, Timer } from "lucide-react";
-import type { CycleDecision, DelayedQueueEntry } from "@/lib/types";
+import { useAutoTraderStatus, useAutoTraderConfig, useUpdateAutoTraderConfig, usePauseAutoTrader, useResumeAutoTrader, useAutoTraderHistory, useResetCircuitBreaker } from "@/lib/api";
+import { Play, Pause, Settings, Zap, Shield, TrendingUp, Clock, ChevronDown, ChevronUp, CheckCircle2, XCircle, SkipForward, FlaskConical, Loader2, AlertTriangle, RotateCcw } from "lucide-react";
+import type { CycleDecision } from "@/lib/types";
 
 function ConfigRow({ label, field, value, step, onChange, unit }: {
   label: string; field: string; value: number; step?: number;
@@ -119,111 +119,6 @@ function AiAnalysisCard({ d }: { d: CycleDecision }) {
               ))}
             </div>
           )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function DelayedEntryQueue({ entries }: { entries: DelayedQueueEntry[] }) {
-  const now = Date.now();
-
-  const statusColor = (status: DelayedQueueEntry["status"]) => {
-    if (status === "waiting")   return "text-amber-400 bg-amber-500/10 border-amber-500/25";
-    if (status === "executing") return "text-blue-400 bg-blue-500/10 border-blue-500/25";
-    if (status === "entered")   return "text-emerald-400 bg-emerald-500/10 border-emerald-500/25";
-    return "text-red-400 bg-red-500/10 border-red-500/25";
-  };
-
-  const statusLabel = (status: DelayedQueueEntry["status"]) => {
-    if (status === "waiting")   return "Waiting";
-    if (status === "executing") return "Checking";
-    if (status === "entered")   return "Entered";
-    return "Skipped";
-  };
-
-  const statusDot = (status: DelayedQueueEntry["status"]) => {
-    if (status === "waiting")   return "bg-amber-400 animate-pulse";
-    if (status === "executing") return "bg-blue-400 animate-pulse";
-    if (status === "entered")   return "bg-emerald-400";
-    return "bg-red-400";
-  };
-
-  const tierLabel = (score: number) => {
-    if (score >= 96) return { label: "PARADOX 5m", color: "text-red-400" };
-    if (score >= 86) return { label: "HIGH 3m", color: "text-amber-400" };
-    return { label: "MEDIUM 2m", color: "text-blue-400" };
-  };
-
-  return (
-    <div className="bg-[#0d0d18] border border-white/8 rounded-xl overflow-hidden">
-      <div className="flex items-center gap-2 px-4 py-3 border-b border-white/5">
-        <Timer className="w-4 h-4 text-amber-400" />
-        <p className="text-sm font-bold text-white/70">Delayed Entry Queue</p>
-        <span className="text-[10px] text-white/30 bg-white/5 px-1.5 py-0.5 rounded">{entries.length} entries · auto-refresh 10s</span>
-      </div>
-
-      {entries.length === 0 ? (
-        <div className="px-4 py-5 text-center">
-          <p className="text-white/30 text-xs">No delayed entries currently queued</p>
-          <p className="text-white/20 text-[10px] mt-1">Tokens scoring 70+ will appear here with their delay timer</p>
-        </div>
-      ) : (
-        <div className="divide-y divide-white/5">
-          {entries.map((e) => {
-            const timeRemainingMs = Math.max(0, e.executeAt - now);
-            const timeRemainingSec = Math.ceil(timeRemainingMs / 1000);
-            const tierInfo = tierLabel(e.aiScore);
-            const pctChange = e.pctChange;
-            const pctColor = pctChange === null ? "text-white/30"
-              : pctChange > 0 ? "text-emerald-400"
-              : "text-red-400";
-
-            return (
-              <div key={e.pairAddress} className="px-4 py-3 flex items-start gap-3">
-                <div className={`w-1.5 h-1.5 rounded-full mt-1.5 shrink-0 ${statusDot(e.status)}`} />
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <span className="font-bold text-white text-xs">${e.symbol}</span>
-                    <span className="text-white/40 text-[10px]">{e.tokenName}</span>
-                    <span className={`text-[9px] font-bold ${tierInfo.color}`}>{tierInfo.label}</span>
-                    <span className="text-white/30 text-[10px]">Score {e.aiScore}</span>
-                    <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded border text-[9px] font-semibold ${statusColor(e.status)}`}>
-                      {statusLabel(e.status)}
-                    </span>
-                  </div>
-                  <div className="flex items-center gap-3 mt-1 flex-wrap text-[10px]">
-                    <span className="text-white/40">Entry: <span className="text-white/60 font-mono">${e.priceAtSignal.toFixed(8)}</span></span>
-                    {e.currentPrice !== null && (
-                      <span className="text-white/40">
-                        Now: <span className="text-white/60 font-mono">${e.currentPrice.toFixed(8)}</span>
-                        {pctChange !== null && (
-                          <span className={`ml-1 font-semibold ${pctColor}`}>
-                            ({pctChange >= 0 ? "+" : ""}{pctChange.toFixed(2)}%)
-                          </span>
-                        )}
-                      </span>
-                    )}
-                    {e.status === "waiting" && timeRemainingMs > 0 && (
-                      <span className="text-amber-400/70">
-                        ⏱ {timeRemainingSec}s remaining
-                      </span>
-                    )}
-                    {e.status === "executing" && (
-                      <span className="text-blue-400/70 flex items-center gap-1">
-                        <Loader2 className="w-2.5 h-2.5 animate-spin" /> Checking price...
-                      </span>
-                    )}
-                  </div>
-                  {(e.finalDecision || e.skipReason) && (
-                    <p className={`text-[10px] mt-0.5 ${e.status === "entered" ? "text-emerald-400/70" : "text-red-400/70"}`}>
-                      {e.finalDecision || e.skipReason}
-                    </p>
-                  )}
-                </div>
-              </div>
-            );
-          })}
         </div>
       )}
     </div>
@@ -461,7 +356,6 @@ export default function AutoTrader() {
   const { data: status } = useAutoTraderStatus();
   const { data: config } = useAutoTraderConfig();
   const { data: history = [] } = useAutoTraderHistory();
-  const { data: delayedQueue = [] } = useDelayedQueue();
   const updateConfig = useUpdateAutoTraderConfig();
   const pause = usePauseAutoTrader();
   const resume = useResumeAutoTrader();
@@ -605,9 +499,6 @@ export default function AutoTrader() {
           </button>
         </div>
       </div>
-
-      {/* Delayed Entry Queue */}
-      <DelayedEntryQueue entries={delayedQueue} />
 
       {/* Last Cycle Panel */}
       {latestCycle && (

@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { ScannedToken, Position, Portfolio, AnalyticsSnapshot, Alert, AutoTraderStatus, AutoTraderConfig, CycleRecord, LossInsights, DelayedQueueEntry } from "./types";
+import { ScannedToken, Position, Portfolio, AnalyticsSnapshot, Alert, AutoTraderStatus, AutoTraderConfig, CycleRecord, LossInsights } from "./types";
 import { useToast } from "@/hooks/use-toast";
 
 // When the frontend is deployed separately from the backend (e.g. Vercel + Render),
@@ -187,18 +187,6 @@ export function useAutoTraderHistory() {
       const res = await fetch(apiUrl("/api/auto-trader/history"));
       const json = await res.json();
       return (json.data ?? json) as CycleRecord[];
-    },
-    refetchInterval: 10_000,
-  });
-}
-
-export function useDelayedQueue() {
-  return useQuery({
-    queryKey: ["auto-trader-delayed-queue"],
-    queryFn: async () => {
-      const res = await fetch(apiUrl("/api/auto-trader/delayed-queue"));
-      const json = await res.json();
-      return (json.data ?? json) as DelayedQueueEntry[];
     },
     refetchInterval: 10_000,
   });

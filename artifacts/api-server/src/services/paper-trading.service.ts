@@ -322,19 +322,10 @@ class PaperTradingService {
     let tp2Pct: number;
     let tp2SellPct: number;
 
-    if (pairAgeMinutes < 60) {
-      // < 1h — aggressive targets, high volatility window
-      slPercent = 25;  tp1Pct = 100; tp1SellPct = 40;
-      tp2Pct = 300;    tp2SellPct = 40;  tpPercent = 300;
-    } else if (pairAgeMinutes < 360) {
-      // 1–6h — momentum established, moderate risk
-      slPercent = 20;  tp1Pct = 80;  tp1SellPct = 50;
-      tp2Pct = 200;    tp2SellPct = 40;  tpPercent = 200;
-    } else {
-      // 6–24h — conservative, price more predictable
-      slPercent = 15;  tp1Pct = 60;  tp1SellPct = 60;
-      tp2Pct = 150;    tp2SellPct = 30;  tpPercent = 150;
-    }
+    // Speed trading: flat SL/TP — enter fast, exit fast
+    // SL -15% | TP1 +50% sell 60% | TP2 +100% sell 30% | Runner: 10% at breakeven SL
+    slPercent = 15;  tp1Pct = 50; tp1SellPct = 60;
+    tp2Pct = 100;   tp2SellPct = 30;  tpPercent = 100;
 
     if (slOverridePct !== undefined) slPercent = slOverridePct;
 
