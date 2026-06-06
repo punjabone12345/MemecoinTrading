@@ -19,6 +19,7 @@ const DEDUP_SIZE       = 50;
 const DEXSCREENER_BASE = "https://api.dexscreener.com";
 
 const RSS_SIZE_SOL      = 0.35;
+const RSS_HALF_SIZE_SOL = 0.25;   // reduced entry when MCap drifted 30–60% since signal
 const RSS_SL_PCT        = 28;
 const RSS_TP1_PCT       = 80;
 const RSS_TP1_SELL_PCT  = 50;
@@ -27,6 +28,11 @@ const RSS_TP2_SELL_PCT  = 30;
 const RSS_TP3_PCT       = 300;
 const RSS_TP3_SELL_PCT  = 15;
 const RSS_TP_PERCENT    = 300;
+
+// ── Signal freshness & MCap drift thresholds ──────────────────────────────────
+const SIGNAL_MAX_AGE_MS   = 15 * 60 * 1_000; // 15 min — stale signals are exit liquidity traps
+const MCAP_HALF_THRESHOLD = 0.30;             // 30–60% above signal MCap → half size entry
+const MCAP_SKIP_THRESHOLD = 0.60;             // >60% above signal MCap → skip entirely
 
 const MIN_BUY_RATIO          = 0.58;
 const MIN_LIQUIDITY_USD      = 15_000;
@@ -127,6 +133,46 @@ function extractSolanaCA(text: string): string | null {
   // Fallback: 40-44 chars
   const b58S = text.match(/\b([1-9A-HJ-NP-Za-km-z]{40,44})\b/);
   if (b58S) return b58S[1];
+  return null;
+}
+
+/**
+ * Extracts the market cap mentioned in a Telegram signal message.
+ * Handles patterns like "50k mcap", "60k→120k", "from 50K", "$1.2M", "50,000".
+ * Returns the MCap in USD, or null if none found.
+ */
+function extractSignalMcap(text: string): number | null {
+  const parse = (num: string, suffix: string): number => {
+    const n = parseFloat(num);
+    const s = suffix.toLowerCase();
+    if (s === "k") return n * 1_000;
+    if (s === "m") return n * 1_000_000;
+    if (s === "b") return n * 1_000_000_000;
+    return n;
+  };
+
+  // 1. Explicitly labelled: "50k mcap" / "mcap: $50k" / "50k market cap"
+  let m = text.match(/\$?(\d+(?:\.\d+)?)\s*([kmb])\s*(?:mc(?:ap)?|market\s*cap)/i);
+  if (m) return parse(m[1], m[2]);
+  m = text.match(/(?:mc(?:ap)?|market\s*cap)\s*[:\-]?\s*\$?(\d+(?:\.\d+)?)\s*([kmb])/i);
+  if (m) return parse(m[1], m[2]);
+
+  // 2. Arrow pattern — first number is the signal MCap: "60k→120k"
+  m = text.match(/\$?(\d+(?:\.\d+)?)\s*([kmb])\s*(?:→|->)/i);
+  if (m) return parse(m[1], m[2]);
+
+  // 3. Contextual: "from 50k" / "at 50k" / "@ 50k"
+  m = text.match(/(?:from|at|@)\s*\$?(\d+(?:\.\d+)?)\s*([kmb])/i);
+  if (m) return parse(m[1], m[2]);
+
+  // 4. Comma-formatted full number: "50,000"
+  m = text.match(/\$?(\d{1,3}(?:,\d{3})+)/);
+  if (m) return parseFloat(m[1].replace(/,/g, ""));
+
+  // 5. First bare "Nk" / "N.Nk" in text as last resort
+  m = text.match(/\$?(\d+(?:\.\d+)?)\s*([kmb])\b/i);
+  if (m) return parse(m[1], m[2]);
+
   return null;
 }
 
@@ -234,9 +280,49 @@ class RssMonitorService {
         this.skip(signal.id, "No Solana CA found in message"); return;
       }
 
+      // ── Signal age check ─────────────────────────────────────────────────────
+      // Skip signals older than 15 minutes — momentum window has closed and
+      // late entries are exit liquidity for those who got in early.
+      const signalAgeMs = Date.now() - signal.receivedAt;
+      if (signalAgeMs > SIGNAL_MAX_AGE_MS) {
+        const ageMin = Math.round(signalAgeMs / 60_000);
+        this.skip(signal.id, `Signal ${ageMin} minutes old — momentum window passed`); return;
+      }
+
       const pair = await this.fetchPairByCa(signal.contractAddress);
       if (!pair) {
         this.skip(signal.id, "Token not found on DexScreener (Solana)"); return;
+      }
+
+      // ── MCap drift check ──────────────────────────────────────────────────────
+      // Compare current MCap vs the MCap mentioned in the signal message.
+      // If the token has already run too far, reduce size or skip entirely.
+      const signalMcap  = extractSignalMcap(signal.rawText);
+      const currentMcap = pair.marketCap || pair.fdv || 0;
+      let entrySizeSol  = RSS_SIZE_SOL;
+
+      if (signalMcap && signalMcap > 0 && currentMcap > 0) {
+        const drift    = (currentMcap - signalMcap) / signalMcap;
+        const driftPct = Math.round(drift * 100);
+        const fmtK     = (v: number) => v >= 1_000_000 ? `$${(v / 1_000_000).toFixed(2)}M` : `$${(v / 1_000).toFixed(1)}K`;
+
+        if (drift > MCAP_SKIP_THRESHOLD) {
+          this.skip(signal.id, `Skipped: MCap moved ${driftPct}% since signal (signal ${fmtK(signalMcap)}, now ${fmtK(currentMcap)}) — entry too late`); return;
+        }
+        if (drift > MCAP_HALF_THRESHOLD) {
+          entrySizeSol = RSS_HALF_SIZE_SOL;
+          logger.info(
+            { signalMcap: fmtK(signalMcap), currentMcap: fmtK(currentMcap), driftPct, entrySizeSol },
+            "RSS monitor: MCap drifted 30–60% — entering at half size"
+          );
+        } else {
+          logger.info(
+            { signalMcap: fmtK(signalMcap), currentMcap: fmtK(currentMcap), driftPct, entrySizeSol },
+            "RSS monitor: MCap within 30% of signal — entering at full size"
+          );
+        }
+      } else {
+        logger.info({ signalMcap, currentMcap }, "RSS monitor: no signal MCap found in text — entering at full size");
       }
 
       // ── Validation ────────────────────────────────────────────────────────────
@@ -301,7 +387,7 @@ class RssMonitorService {
       const token = mapPairToToken(pair);
       const position = await paperTradingService.buyDirect(
         token,
-        RSS_SIZE_SOL,
+        entrySizeSol,
         RSS_SL_PCT,
         undefined,
         rug,
@@ -320,7 +406,7 @@ class RssMonitorService {
         positionStatus: "open",
       });
       logger.info(
-        { symbol: pair.baseToken.symbol, positionId: position.positionId, entryPrice: position.entryPrice, sizeSol: RSS_SIZE_SOL },
+        { symbol: pair.baseToken.symbol, positionId: position.positionId, entryPrice: position.entryPrice, sizeSol: entrySizeSol },
         "RSS monitor: trade entered"
       );
 
