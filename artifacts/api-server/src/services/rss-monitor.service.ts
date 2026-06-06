@@ -5,7 +5,13 @@ import { checkTokenSafety } from "./rugcheck.service.js";
 import { paperTradingService } from "./paper-trading.service.js";
 import type { DexScreenerPair } from "../types/index.js";
 
-const RSS_FEED_URL    = "https://rsshub.app/telegram/channel/shitcoingemsalert";
+// Multiple public rsshub mirrors — tried in order until one returns 200
+const RSS_FEED_URLS: string[] = [
+  "https://rsshub.rssforever.com/telegram/channel/shitcoingemsalert",
+  "https://rss.shab.fun/telegram/channel/shitcoingemsalert",
+  "https://hub.slarker.me/telegram/channel/shitcoingemsalert",
+  "https://rsshub.app/telegram/channel/shitcoingemsalert",
+];
 const POLL_INTERVAL_MS = 60_000;
 const MAX_SIGNALS      = 20;
 const DEDUP_SIZE       = 50;
@@ -127,7 +133,7 @@ class RssMonitorService {
 
   start(): void {
     if (this.intervalId) return;
-    logger.info({ feedUrl: RSS_FEED_URL, intervalMs: POLL_INTERVAL_MS }, "RSS monitor: started");
+    logger.info({ mirrors: RSS_FEED_URLS.length, intervalMs: POLL_INTERVAL_MS }, "RSS monitor: started");
     void this.poll();
     this.intervalId = setInterval(() => void this.poll(), POLL_INTERVAL_MS);
   }
@@ -153,24 +159,41 @@ class RssMonitorService {
   // ── Polling ──────────────────────────────────────────────────────────────────
 
   private async poll(): Promise<void> {
-    try {
-      const resp = await axios.get<string>(RSS_FEED_URL, {
-        timeout: 10_000,
-        headers: { Accept: "application/rss+xml, application/xml, text/xml, */*" },
-        responseType: "text",
-      });
-      const items = parseRssItems(String(resp.data));
-      logger.info({ count: items.length }, "RSS monitor: feed fetched");
+    let xml: string | null = null;
+    let usedUrl = "";
 
-      for (const item of items) {
-        if (this.seenIds.includes(item.guid)) continue;
-        // Mark seen
-        this.seenIds.push(item.guid);
-        if (this.seenIds.length > DEDUP_SIZE) this.seenIds.shift();
-        void this.processItem(item);
+    for (const url of RSS_FEED_URLS) {
+      try {
+        const resp = await axios.get<string>(url, {
+          timeout: 10_000,
+          headers: {
+            "Accept":     "application/rss+xml, application/xml, text/xml, */*",
+            "User-Agent": "Mozilla/5.0 (compatible; FeedFetcher/1.0; +https://github.com/DIYgod/RSSHub)",
+          },
+          responseType: "text",
+        });
+        xml    = String(resp.data);
+        usedUrl = url;
+        break;
+      } catch (err: unknown) {
+        const status = (err as { response?: { status?: number } })?.response?.status;
+        logger.warn({ url, status }, "RSS monitor: mirror failed, trying next");
       }
-    } catch (err) {
-      logger.warn({ err }, "RSS monitor: poll error");
+    }
+
+    if (!xml) {
+      logger.warn("RSS monitor: all mirrors failed this poll");
+      return;
+    }
+
+    const items = parseRssItems(xml);
+    logger.info({ count: items.length, url: usedUrl }, "RSS monitor: feed fetched");
+
+    for (const item of items) {
+      if (this.seenIds.includes(item.guid)) continue;
+      this.seenIds.push(item.guid);
+      if (this.seenIds.length > DEDUP_SIZE) this.seenIds.shift();
+      void this.processItem(item);
     }
   }
 
