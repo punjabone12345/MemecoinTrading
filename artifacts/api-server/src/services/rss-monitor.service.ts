@@ -1,5 +1,6 @@
 import axios from "axios";
 import { logger } from "../lib/logger.js";
+import { isInTradingHours } from "../lib/telegram.js";
 import { mapPairToToken } from "./scanner.service.js";
 import { checkTokenSafety } from "./rugcheck.service.js";
 import { paperTradingService } from "./paper-trading.service.js";
@@ -224,6 +225,12 @@ class RssMonitorService {
     );
 
     try {
+      // ── Trading hours gate (IST) ────────────────────────────────────────────
+      // Active: 12:00 AM – 11:59 AM IST.  Pause: 12:00 PM – 11:59 PM IST.
+      if (!isInTradingHours()) {
+        this.skip(signal.id, "Outside trading hours (12pm–12am IST) — no new entries"); return;
+      }
+
       if (!signal.pumpMultiple) {
         this.skip(signal.id, "No pump multiple found in message"); return;
       }

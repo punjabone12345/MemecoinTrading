@@ -13,6 +13,22 @@ export function isTelegramConfigured(): boolean {
   return Boolean(BOT_TOKEN && CHAT_ID);
 }
 
+/**
+ * Returns true when new trade entries are allowed.
+ * Active window: 12:00 AM – 11:59 AM IST (midnight to noon).
+ * Pause window:  12:00 PM – 11:59 PM IST (noon to midnight).
+ * Exits of open positions are always allowed regardless of this flag.
+ */
+export function isInTradingHours(): boolean {
+  const istHour = new Date().toLocaleString("en-IN", {
+    timeZone: "Asia/Kolkata",
+    hour: "numeric",
+    hour12: false,
+  });
+  const hour = parseInt(istHour, 10);
+  return hour >= 0 && hour < 12;
+}
+
 /** Format a Date as IST string (UTC+5:30) */
 export function toIST(date: Date | number | string): string {
   const d = new Date(date);

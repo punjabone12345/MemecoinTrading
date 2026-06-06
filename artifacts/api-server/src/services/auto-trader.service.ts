@@ -1,6 +1,6 @@
 import axios from "axios";
 import { logger } from "../lib/logger.js";
-import { sendTelegram, isTelegramConfigured, toIST, startHeartbeat } from "../lib/telegram.js";
+import { sendTelegram, isTelegramConfigured, toIST, startHeartbeat, isInTradingHours } from "../lib/telegram.js";
 import { paperTradingService } from "./paper-trading.service.js";
 import { blacklistService } from "./blacklist.service.js";
 import { scannerService } from "./scanner.service.js";
@@ -876,6 +876,15 @@ class AutoTraderService {
 
   private async run(): Promise<void> {
     if (this.running || this.paused) return;
+
+    // ── Trading hours gate (IST) ──────────────────────────────────────────────
+    // Active: 12:00 AM – 11:59 AM IST.  Pause: 12:00 PM – 11:59 PM IST.
+    // Exits of open positions are managed by paper-trading service and
+    // are unaffected — only new entries are blocked here.
+    if (!isInTradingHours()) {
+      logger.info("Auto-trader: outside trading hours (12pm–12am IST) — skipping new entries");
+      return;
+    }
 
     const { consecutiveLossLimit, consecutiveLossPauseHours, dailyLossLimitSol, dailyLossPauseHours } = this.config;
 
