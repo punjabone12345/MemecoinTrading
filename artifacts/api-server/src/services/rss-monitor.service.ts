@@ -3,6 +3,7 @@ import { logger } from "../lib/logger.js";
 import { mapPairToToken } from "./scanner.service.js";
 import { checkTokenSafety } from "./rugcheck.service.js";
 import { paperTradingService } from "./paper-trading.service.js";
+import { blacklistService } from "./blacklist.service.js";
 import type { DexScreenerPair } from "../types/index.js";
 
 // Multiple public rsshub mirrors — tried in order until one returns 200
@@ -269,6 +270,11 @@ class RssMonitorService {
       const rug = await checkTokenSafety(pair.baseToken.address);
       if (!rug.pass) {
         this.skip(signal.id, `RugCheck failed: ${rug.reason}`); return;
+      }
+
+      // ── Permanent blacklist check ─────────────────────────────────────────────
+      if (blacklistService.isBlacklisted(pair.baseToken.address)) {
+        this.skip(signal.id, `Permanently blacklisted CA ${pair.baseToken.address.slice(0, 8)}… — already traded once, no re-entry ever`); return;
       }
 
       // ── Duplicate check ────────────────────────────────────────────────────────

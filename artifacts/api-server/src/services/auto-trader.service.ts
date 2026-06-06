@@ -2,6 +2,7 @@ import axios from "axios";
 import { logger } from "../lib/logger.js";
 import { sendTelegram, isTelegramConfigured, toIST, startHeartbeat } from "../lib/telegram.js";
 import { paperTradingService } from "./paper-trading.service.js";
+import { blacklistService } from "./blacklist.service.js";
 import { scannerService } from "./scanner.service.js";
 import { computeSignals, computeAiScore, computeConfidence, getDynamicRisk, computeEntryBoosts } from "./ai-scoring.service.js";
 import { mapPairToToken } from "./scanner.service.js";
@@ -1050,6 +1051,13 @@ class AutoTraderService {
           slPercent,
           tpPercent,
         };
+
+        // Permanent blacklist: contracts that were ever traded are blacklisted
+        // forever in a persistent file — one token = one trade, no exceptions.
+        if (blacklistService.isBlacklisted(token.address)) {
+          decisions.push({ ...base, action: "skipped_duplicate", reason: `Permanently blacklisted (${token.address.slice(0, 8)}…) — already traded once, no re-entry ever` });
+          continue;
+        }
 
         // One-trade-per-coin rule: block re-entry for any contract that has
         // ever been traded (open OR closed). Prevents the AI from re-buying

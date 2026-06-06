@@ -5,6 +5,7 @@ import { query, execute } from "../lib/db.js";
 import { scannerService } from "./scanner.service.js";
 import { alertsService } from "./alerts.service.js";
 import { lossJournalService } from "./loss-journal.service.js";
+import { blacklistService } from "./blacklist.service.js";
 import { sendTelegram, toIST } from "../lib/telegram.js";
 import type { Position, Portfolio, CloseReason, ScannedToken } from "../types/index.js";
 import type { LlmAnalysis } from "./ai-analysis.service.js";
@@ -579,6 +580,8 @@ class PaperTradingService {
     };
     this.closedTrades.unshift(closed);
     void this.upsertPosition(closed);
+
+    blacklistService.add(pos.contractAddress);
 
     lossJournalService.record(closed);
 
