@@ -1,6 +1,6 @@
 import axios from "axios";
 import { logger } from "../lib/logger.js";
-import { sendTelegram, isTelegramConfigured, toIST, startHeartbeat, isInTradingHours } from "../lib/telegram.js";
+import { sendTelegram, isTelegramConfigured, toIST, startHeartbeat, isBotScannerTradingHours } from "../lib/telegram.js";
 import { paperTradingService } from "./paper-trading.service.js";
 import { blacklistService } from "./blacklist.service.js";
 import { scannerService } from "./scanner.service.js";
@@ -877,12 +877,13 @@ class AutoTraderService {
   private async run(): Promise<void> {
     if (this.running || this.paused) return;
 
-    // ── Trading hours gate (IST) ──────────────────────────────────────────────
-    // Active: 12:00 AM – 11:59 AM IST.  Pause: 12:00 PM – 11:59 PM IST.
-    // Exits of open positions are managed by paper-trading service and
-    // are unaffected — only new entries are blocked here.
-    if (!isInTradingHours()) {
-      logger.info("Auto-trader: outside trading hours (12pm–12am IST) — skipping new entries");
+    // ── Bot scanner trading hours gate (IST) ─────────────────────────────────
+    // Window 1: 12:00 AM – 09:59 AM IST
+    // Window 2: 02:00 PM – 04:59 PM IST
+    // Pause outside those windows — exits still run via paper-trading service.
+    // RSS/Telegram signals are unrestricted (handled in rss-monitor.service).
+    if (!isBotScannerTradingHours()) {
+      logger.info("Auto-trader: outside scanner trading windows — skipping new entries");
       return;
     }
 
