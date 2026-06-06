@@ -336,19 +336,53 @@ class RssMonitorService {
   }
 
   // ── DexScreener lookup ────────────────────────────────────────────────────────
+  // Tries /tokens/{ca} first, then /search?q={ca} as fallback.
+  // Both are retried up to 3× on 429 with exponential backoff.
 
   private async fetchPairByCa(ca: string): Promise<DexScreenerPair | null> {
-    try {
-      const resp = await axios.get<{ pairs?: DexScreenerPair[] }>(
-        `${DEXSCREENER_BASE}/latest/dex/tokens/${ca}`,
-        { timeout: 6_000 }
-      );
-      const pairs = (resp.data?.pairs ?? []).filter(p => p.chainId === "solana");
-      if (pairs.length === 0) return null;
-      return pairs.sort((a, b) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0))[0];
-    } catch {
+    const bestSolana = (pairs: DexScreenerPair[]): DexScreenerPair | null => {
+      const sol = pairs.filter(p => p.chainId === "solana");
+      if (sol.length === 0) return null;
+      return sol.sort((a, b) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0))[0];
+    };
+
+    const getWithRetry = async (url: string): Promise<DexScreenerPair[] | null> => {
+      const delays = [500, 1500, 3000];
+      for (let attempt = 0; attempt <= delays.length; attempt++) {
+        try {
+          const resp = await axios.get<{ pairs?: DexScreenerPair[] }>(url, { timeout: 8_000 });
+          return resp.data?.pairs ?? [];
+        } catch (err: unknown) {
+          const status = (err as { response?: { status?: number } })?.response?.status;
+          if (status === 429 && attempt < delays.length) {
+            logger.warn({ url, attempt, delay: delays[attempt] }, "RSS DexScreener: rate limited, retrying");
+            await new Promise(r => setTimeout(r, delays[attempt]));
+            continue;
+          }
+          logger.warn({ url, status, attempt }, "RSS DexScreener: lookup failed");
+          return null;
+        }
+      }
       return null;
+    };
+
+    // 1️⃣ Primary: tokens endpoint (indexed pairs)
+    const tokenPairs = await getWithRetry(`${DEXSCREENER_BASE}/latest/dex/tokens/${ca}`);
+    if (tokenPairs !== null && tokenPairs.length > 0) {
+      const best = bestSolana(tokenPairs);
+      if (best) return best;
     }
+
+    // 2️⃣ Fallback: search endpoint (catches very new tokens not yet in tokens index)
+    logger.info({ ca }, "RSS DexScreener: tokens endpoint empty — trying search fallback");
+    const searchPairs = await getWithRetry(`${DEXSCREENER_BASE}/latest/dex/search?q=${ca}`);
+    if (searchPairs !== null && searchPairs.length > 0) {
+      const best = bestSolana(searchPairs);
+      if (best) return best;
+    }
+
+    logger.warn({ ca }, "RSS DexScreener: token not found via tokens or search");
+    return null;
   }
 
   // ── Helpers ───────────────────────────────────────────────────────────────────
