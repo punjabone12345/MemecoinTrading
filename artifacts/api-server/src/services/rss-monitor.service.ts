@@ -106,12 +106,18 @@ function extractPumpMultiple(text: string): string | null {
 }
 
 function extractSolanaCA(text: string): string | null {
-  // pump.fun/CA
-  const pumpM = text.match(/pump\.fun\/([1-9A-HJ-NP-Za-km-z]{32,44})/);
+  // pump.fun/coin/CA  or  pump.fun/CA
+  const pumpM = text.match(/pump\.fun\/(?:coin\/)?([1-9A-HJ-NP-Za-km-z]{32,44})/);
   if (pumpM) return pumpM[1];
   // dexscreener.com/solana/…/CA
   const dexM = text.match(/dexscreener\.com\/solana\/[^\s/]*\/([1-9A-HJ-NP-Za-km-z]{32,44})/);
   if (dexM) return dexM[1];
+  // bullx.io/terminal?chainId=solana&address=CA
+  const bullxM = text.match(/bullx\.io\/[^\s]*address=([1-9A-HJ-NP-Za-km-z]{32,44})/);
+  if (bullxM) return bullxM[1];
+  // photon-sol.tinyastro.io/…/CA
+  const photonM = text.match(/photon-sol\.tinyastro\.io\/[^\s/]*\/([1-9A-HJ-NP-Za-km-z]{32,44})/);
+  if (photonM) return photonM[1];
   // /sol/ path segments
   const solM = text.match(/\/sol\/([1-9A-HJ-NP-Za-km-z]{32,44})/);
   if (solM) return solM[1];
@@ -274,12 +280,21 @@ class RssMonitorService {
         this.skip(signal.id, `Permanently blacklisted CA ${pair.baseToken.address.slice(0, 8)}… — already traded once, no re-entry ever`); return;
       }
 
-      // ── Duplicate check ────────────────────────────────────────────────────────
-      const already = paperTradingService.getOpenPositions().some(
-        p => p.contractAddress === pair.baseToken.address || p.pairAddress === pair.pairAddress
-      );
-      if (already) {
-        this.skip(signal.id, "Already holding this token"); return;
+      // ── Duplicate / history check ──────────────────────────────────────────────
+      // Covers both open positions AND closed trade history — no re-entry ever
+      if (paperTradingService.hasEverTradedContract(pair.baseToken.address)) {
+        const closed = paperTradingService.getClosedTrades().find(t => t.contractAddress === pair.baseToken.address);
+        const open   = paperTradingService.getOpenPositions().find(
+          p => p.contractAddress === pair.baseToken.address || p.pairAddress === pair.pairAddress
+        );
+        const detail = closed
+          ? `previously closed on ${new Date(closed.closedAt!).toLocaleString("en-IN", { timeZone: "Asia/Kolkata", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: true })} IST (PnL: ${(closed.pnlSol ?? 0) >= 0 ? "+" : ""}${(closed.pnlSol ?? 0).toFixed(4)} SOL)`
+          : open ? "currently in open position" : "found in trade history";
+        logger.info(
+          { symbol: pair.baseToken.symbol, ca: pair.baseToken.address.slice(0, 8) + "…", detail },
+          "RSS monitor: skipping — already traded this token"
+        );
+        this.skip(signal.id, `Already traded ${pair.baseToken.symbol} (${pair.baseToken.address.slice(0, 8)}…) — ${detail}`); return;
       }
 
       // ── Open trade ────────────────────────────────────────────────────────────
@@ -331,10 +346,11 @@ class RssMonitorService {
       const delays = [500, 1500, 3000];
       for (let attempt = 0; attempt <= delays.length; attempt++) {
         try {
-          const resp = await axios.get<{ pairs?: DexScreenerPair[] }>(url, { timeout: 8_000 });
+          const resp = await axios.get<{ pairs?: DexScreenerPair[] | null }>(url, { timeout: 10_000 });
           return resp.data?.pairs ?? [];
         } catch (err: unknown) {
           const status = (err as { response?: { status?: number } })?.response?.status;
+          if (status === 404) return [];   // not found — fall through to next endpoint
           if (status === 429 && attempt < delays.length) {
             logger.warn({ url, attempt, delay: delays[attempt] }, "RSS DexScreener: rate limited, retrying");
             await new Promise(r => setTimeout(r, delays[attempt]));
@@ -347,22 +363,32 @@ class RssMonitorService {
       return null;
     };
 
-    // 1️⃣ Primary: tokens endpoint (indexed pairs)
+    logger.info({ ca: ca.slice(0, 12) + "…" }, "RSS DexScreener: looking up token");
+
+    // 1️⃣ Primary: tokens endpoint (indexed by mint address)
     const tokenPairs = await getWithRetry(`${DEXSCREENER_BASE}/latest/dex/tokens/${ca}`);
-    if (tokenPairs !== null && tokenPairs.length > 0) {
+    if (tokenPairs && tokenPairs.length > 0) {
       const best = bestSolana(tokenPairs);
-      if (best) return best;
+      if (best) { logger.info({ ca: ca.slice(0, 8) + "…", source: "tokens" }, "RSS DexScreener: found via tokens endpoint"); return best; }
     }
 
-    // 2️⃣ Fallback: search endpoint (catches very new tokens not yet in tokens index)
-    logger.info({ ca }, "RSS DexScreener: tokens endpoint empty — trying search fallback");
+    // 2️⃣ Fallback: pairs endpoint (CA might be the pair/pool address, not the token mint)
+    logger.info({ ca: ca.slice(0, 8) + "…" }, "RSS DexScreener: trying pairs endpoint");
+    const pairPairs = await getWithRetry(`${DEXSCREENER_BASE}/latest/dex/pairs/solana/${ca}`);
+    if (pairPairs && pairPairs.length > 0) {
+      const best = bestSolana(pairPairs);
+      if (best) { logger.info({ ca: ca.slice(0, 8) + "…", source: "pairs" }, "RSS DexScreener: found via pairs endpoint"); return best; }
+    }
+
+    // 3️⃣ Fallback: search endpoint (catches very new tokens, different address formats)
+    logger.info({ ca: ca.slice(0, 8) + "…" }, "RSS DexScreener: trying search endpoint");
     const searchPairs = await getWithRetry(`${DEXSCREENER_BASE}/latest/dex/search?q=${ca}`);
-    if (searchPairs !== null && searchPairs.length > 0) {
+    if (searchPairs && searchPairs.length > 0) {
       const best = bestSolana(searchPairs);
-      if (best) return best;
+      if (best) { logger.info({ ca: ca.slice(0, 8) + "…", source: "search" }, "RSS DexScreener: found via search endpoint"); return best; }
     }
 
-    logger.warn({ ca }, "RSS DexScreener: token not found via tokens or search");
+    logger.warn({ ca }, "RSS DexScreener: token not found via tokens, pairs, or search endpoints");
     return null;
   }
 
