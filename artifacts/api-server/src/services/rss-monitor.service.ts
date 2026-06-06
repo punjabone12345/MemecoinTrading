@@ -157,12 +157,16 @@ function extractSignalMcap(text: string): number | null {
   m = text.match(/(?:mc(?:ap)?|market\s*cap)\s*[:\-]?\s*\$?(\d+(?:\.\d+)?)\s*([kmb])/i);
   if (m) return parse(m[1], m[2]);
 
-  // 2. Arrow pattern — first number is the signal MCap: "60k→120k"
-  m = text.match(/\$?(\d+(?:\.\d+)?)\s*([kmb])\s*(?:→|->)/i);
+  // 2. Arrow/to pattern: extract the SECOND (destination) value as signal MCap.
+  // The signal is sent when the token has already reached that level.
+  // e.g. "reached 30k to 60k = 2x"  →  signal MCap = 60k
+  // e.g. "30k→60k"                  →  signal MCap = 60k
+  m = text.match(/\$?\d+(?:\.\d+)?\s*[kmb]\s*(?:→|->|to\b)\s*\$?(\d+(?:\.\d+)?)\s*([kmb])/i);
   if (m) return parse(m[1], m[2]);
 
-  // 3. Contextual: "from 50k" / "at 50k" / "@ 50k"
-  m = text.match(/(?:from|at|@)\s*\$?(\d+(?:\.\d+)?)\s*([kmb])/i);
+  // 3. Contextual: "at 50k" / "@ 50k"
+  // NOTE: "from Nk" is intentionally excluded — that is the origin price, not signal MCap.
+  m = text.match(/(?:at|@)\s*\$?(\d+(?:\.\d+)?)\s*([kmb])/i);
   if (m) return parse(m[1], m[2]);
 
   // 4. Comma-formatted full number: "50,000"
