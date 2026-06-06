@@ -17,10 +17,15 @@ const MAX_HISTORY_CYCLES = 50;
 
 // ── Score-based position sizing ──────────────────────────────────────────────
 // Speed is the edge — enter immediately, compensate with smaller size on risky scores.
-const SCORE_PARADOX_THRESHOLD = 96;   // ≥96: too-perfect score — enter at 0.25 SOL
-const SCORE_PARADOX_SIZE_SOL  = 0.25; // reduced size for paradox scores
-const MEDIUM_SCORE_THRESHOLD  = 70;   // 70-95: slightly reduced entry at 0.35 SOL
-const MEDIUM_SCORE_SIZE_SOL   = 0.35; // reduced size for medium-high scores
+// INVERTED SCORE PARADOX: high scores (96+) indicate coordinated manipulation —
+// perfectly-optimised tokens that pass all filters then dump immediately.
+// Organic tokens score 40-84. Real signal = imperfect score.
+const SCORE_SKIP_THRESHOLD    = 96;   // ≥96: manipulation signal — SKIP entirely
+const SCORE_HIGH_RISK_MIN     = 85;   // 85-95: high manipulation risk — 0.25 SOL only
+const SCORE_HIGH_RISK_SOL     = 0.25;
+const SCORE_MED_RISK_MIN      = 70;   // 70-84: moderate risk — 0.35 SOL
+const SCORE_MED_RISK_SOL      = 0.35;
+// Below 70 (floor 40): most organic — full configured size
 
 export interface AutoTraderConfig {
   solPerTrade: number;
@@ -143,7 +148,7 @@ const DEFAULT_CONFIG: AutoTraderConfig = {
   maxConcurrentTrades: 5,       // 5 slots — speed trading, faster turnover
 
   // ── AI quality ────────────────────────────────────────────────────────────
-  minAiScore:    35,            // relaxed to catch more early-momentum opportunities
+  minAiScore:    40,            // floor: organic tokens score 40-84; below 40 = noise
   minConfidence: 28,            // relaxed for speed entry strategy
 
   // ── Liquidity & volume ────────────────────────────────────────────────────
@@ -179,7 +184,7 @@ const DEFAULT_CONFIG: AutoTraderConfig = {
   dailyLossPauseHours:      12,  // 12h pause on daily cap
 
   // Bump this number whenever filter defaults change — forces all saved configs to migrate
-  schemaVersion: 11,
+  schemaVersion: 12,
 };
 
 // ─── Anti-rug + quality filter ────────────────────────────────────────────────
@@ -1310,11 +1315,22 @@ class AutoTraderService {
 
         // Score-based sizing: enter immediately, size down on risky/paradox scores
         const baseTradeSizeSol = llm.recommendedSizeSol ?? solPerTrade;
-        const tradeSizeSol = c.aiScore >= SCORE_PARADOX_THRESHOLD
-          ? Math.min(SCORE_PARADOX_SIZE_SOL, baseTradeSizeSol)
-          : c.aiScore >= MEDIUM_SCORE_THRESHOLD
-          ? Math.min(MEDIUM_SCORE_SIZE_SOL, baseTradeSizeSol)
-          : baseTradeSizeSol;
+
+        // Inverted score paradox — skip perfect scores, size down high scores
+        if (c.aiScore >= SCORE_SKIP_THRESHOLD) {
+          logger.info(
+            { symbol: c.symbol, aiScore: c.aiScore, threshold: SCORE_SKIP_THRESHOLD },
+            "Auto-trader: SCORE PARADOX — ≥96 score signals manipulation, skipping"
+          );
+          this.recordDecision(cycleId, c, "skipped", `Score paradox skip — AI score ${c.aiScore} ≥ ${SCORE_SKIP_THRESHOLD} (manipulation signal)`);
+          continue;
+        }
+
+        const tradeSizeSol = c.aiScore >= SCORE_HIGH_RISK_MIN
+          ? Math.min(SCORE_HIGH_RISK_SOL, baseTradeSizeSol)   // 85-95: 0.25 SOL
+          : c.aiScore >= SCORE_MED_RISK_MIN
+          ? Math.min(SCORE_MED_RISK_SOL, baseTradeSizeSol)    // 70-84: 0.35 SOL
+          : baseTradeSizeSol;                                   // 40-69: full size
         if (llm.verdict === "RISKY") {
           logger.info(
             { symbol: c.symbol, provider: llm.provider, tradeSizeSol, secondaryVerdict: llm.secondaryVerdict, reasoning: llm.reasoning },
