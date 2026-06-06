@@ -331,6 +331,9 @@ if (process.env["DATABASE_URL"]) {
         ["rug_lp_locked_pct",      "NUMERIC"],
         ["rug_top_holder_pct",     "NUMERIC"],
         ["rug_warn_risks",         "TEXT"],
+        ["tp3_price",              "DOUBLE PRECISION"],
+        ["tp3_sell_pct",           "DOUBLE PRECISION"],
+        ["tp3_hit",                "BOOLEAN"],
         ["updated_at",             "TIMESTAMPTZ"],
       ];
       for (const [col, type] of positionsCols) {

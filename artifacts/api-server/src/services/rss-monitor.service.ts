@@ -16,16 +16,17 @@ const RSS_FEED_URLS: string[] = [
 const POLL_INTERVAL_MS = 60_000;
 const MAX_SIGNALS      = 20;
 const DEDUP_SIZE       = 50;
-const MAX_HOLD_MS      = 45 * 60_000;
 const DEXSCREENER_BASE = "https://api.dexscreener.com";
 
 const RSS_SIZE_SOL      = 0.35;
-const RSS_SL_PCT        = 18;
+const RSS_SL_PCT        = 28;
 const RSS_TP1_PCT       = 80;
 const RSS_TP1_SELL_PCT  = 50;
 const RSS_TP2_PCT       = 150;
 const RSS_TP2_SELL_PCT  = 30;
-const RSS_TP_PERCENT    = 150;
+const RSS_TP3_PCT       = 300;
+const RSS_TP3_SELL_PCT  = 15;
+const RSS_TP_PERCENT    = 300;
 
 const MIN_BUY_RATIO          = 0.58;
 const MIN_LIQUIDITY_USD      = 15_000;
@@ -46,7 +47,6 @@ export interface RssSignal {
   symbol?: string;
   entryPrice?: number;
   entryAt?: number;
-  maxHoldUntil?: number;
   livePnlPct?: number | null;
   livePnlSol?: number | null;
   positionStatus?: "open" | "closed" | "expired";
@@ -130,7 +130,6 @@ class RssMonitorService {
   private signals: RssSignal[]        = [];
   private seenIds: string[]           = [];   // FIFO queue for dedup
   private intervalId: ReturnType<typeof setInterval> | null = null;
-  private holdTimers                  = new Map<string, ReturnType<typeof setTimeout>>();
 
   start(): void {
     if (this.intervalId) return;
@@ -141,8 +140,6 @@ class RssMonitorService {
 
   stop(): void {
     if (this.intervalId) { clearInterval(this.intervalId); this.intervalId = null; }
-    for (const t of this.holdTimers.values()) clearTimeout(t);
-    this.holdTimers.clear();
   }
 
   getRssSignals(): RssSignal[] {
@@ -293,7 +290,7 @@ class RssMonitorService {
         RSS_SL_PCT,
         undefined,
         rug,
-        { tp1Pct: RSS_TP1_PCT, tp1SellPct: RSS_TP1_SELL_PCT, tp2Pct: RSS_TP2_PCT, tp2SellPct: RSS_TP2_SELL_PCT, tpPercent: RSS_TP_PERCENT },
+        { tp1Pct: RSS_TP1_PCT, tp1SellPct: RSS_TP1_SELL_PCT, tp2Pct: RSS_TP2_PCT, tp2SellPct: RSS_TP2_SELL_PCT, tp3Pct: RSS_TP3_PCT, tp3SellPct: RSS_TP3_SELL_PCT, tpPercent: RSS_TP_PERCENT },
       );
 
       const now = Date.now();
@@ -304,41 +301,18 @@ class RssMonitorService {
         symbol:        pair.baseToken.symbol,
         entryPrice:    position.entryPrice,
         entryAt:       now,
-        maxHoldUntil:  now + MAX_HOLD_MS,
         positionStatus: "open",
       });
       logger.info(
         { symbol: pair.baseToken.symbol, positionId: position.positionId, entryPrice: position.entryPrice, sizeSol: RSS_SIZE_SOL },
         "RSS monitor: trade entered"
       );
-      this.scheduleMaxHold(position.positionId, signal.id);
 
     } catch (err) {
       const msg = err instanceof Error ? err.message : "unknown error";
       logger.error({ err, signalId: signal.id }, "RSS monitor: processItem error");
       this.update(signal.id, { decision: "error", skipReason: `Error: ${msg}` });
     }
-  }
-
-  // ── Max hold timer ────────────────────────────────────────────────────────────
-
-  private scheduleMaxHold(positionId: string, signalId: string): void {
-    const t = setTimeout(async () => {
-      this.holdTimers.delete(positionId);
-      const stillOpen = paperTradingService.getOpenPositions().some(p => p.positionId === positionId);
-      if (!stillOpen) {
-        this.update(signalId, { positionStatus: "closed" });
-        return;
-      }
-      try {
-        await paperTradingService.close(positionId, "manual");
-        this.update(signalId, { positionStatus: "expired" });
-        logger.info({ positionId }, "RSS monitor: 45-min max hold elapsed — closed at market");
-      } catch (err) {
-        logger.warn({ err, positionId }, "RSS monitor: max hold close failed");
-      }
-    }, MAX_HOLD_MS);
-    this.holdTimers.set(positionId, t);
   }
 
   // ── DexScreener lookup ────────────────────────────────────────────────────────

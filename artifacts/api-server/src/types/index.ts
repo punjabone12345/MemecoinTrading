@@ -136,10 +136,13 @@ export interface Position {
   // Tiered partial-close tracking
   tp1Price?: number;
   tp2Price?: number;
+  tp3Price?: number;
   tp1SellPct?: number;
   tp2SellPct?: number;
+  tp3SellPct?: number;
   tp1Hit?: boolean;
   tp2Hit?: boolean;
+  tp3Hit?: boolean;
   remainingSizeSol?: number;
   partialPnlSol?: number;
   pairAgeMinutes?: number;

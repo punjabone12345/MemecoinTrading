@@ -14,7 +14,6 @@ const INITIAL_BALANCE_SOL = 100;
 const FEE_RATE = 0.003;
 const SLIPPAGE_RATE = 0.005;
 
-const MAX_HOLD_MS = 24 * 60 * 60 * 1_000;
 
 function formatHoldTime(ms: number): string {
   const totalMins = Math.floor(ms / 60_000);
@@ -86,6 +85,9 @@ function rowToPosition(r: DbRow): Position {
     tp2SellPct: r.tp2_sell_pct != null ? Number(r.tp2_sell_pct) : undefined,
     tp1Hit: Boolean(r.tp1_hit),
     tp2Hit: Boolean(r.tp2_hit),
+    tp3Price: r.tp3_price != null ? Number(r.tp3_price) : undefined,
+    tp3SellPct: r.tp3_sell_pct != null ? Number(r.tp3_sell_pct) : undefined,
+    tp3Hit: Boolean(r.tp3_hit),
     remainingSizeSol: r.remaining_size_sol != null ? Number(r.remaining_size_sol) : undefined,
     partialPnlSol: r.partial_pnl_sol != null ? Number(r.partial_pnl_sol) : undefined,
     pairAgeMinutes: r.pair_age_minutes != null ? Number(r.pair_age_minutes) : undefined,
@@ -109,6 +111,8 @@ class PaperTradingService {
   private openContracts: Set<string> = new Set();
   private positionBroadcaster: (() => void) | null = null;
   private latestPrices: Map<string, { price: number; ts: number }> = new Map();
+  // Dead momentum tracker: records the reference price and when flatness began for each position
+  private flatMomentum: Map<string, { refPrice: number; flatSinceMs: number }> = new Map();
 
   // Must be called and awaited before starting the server
   async init(): Promise<void> {
@@ -183,12 +187,13 @@ class PaperTradingService {
           pair_age_minutes, llm_score, llm_risk_level,
           llm_secondary_verdict, llm_secondary_provider,
           rug_score, rug_lp_locked_pct, rug_top_holder_pct, rug_warn_risks,
+          tp3_price, tp3_sell_pct, tp3_hit,
           updated_at
         ) VALUES (
           $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,
           $16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,
           $29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,
-          $42,$43,$44,$45,$46,$47,$48,$49,$50,NOW()
+          $42,$43,$44,$45,$46,$47,$48,$49,$50,$51,$52,$53,NOW()
         )
         ON CONFLICT (position_id) DO UPDATE SET
           symbol = EXCLUDED.symbol,
@@ -220,6 +225,9 @@ class PaperTradingService {
           rug_lp_locked_pct = EXCLUDED.rug_lp_locked_pct,
           rug_top_holder_pct = EXCLUDED.rug_top_holder_pct,
           rug_warn_risks = EXCLUDED.rug_warn_risks,
+          tp3_price = EXCLUDED.tp3_price,
+          tp3_sell_pct = EXCLUDED.tp3_sell_pct,
+          tp3_hit = EXCLUDED.tp3_hit,
           updated_at = NOW()`,
         [
           pos.positionId, pos.symbol, pos.tokenName ?? null, pos.pairAddress,
@@ -244,6 +252,7 @@ class PaperTradingService {
           pos.rugScore ?? null, pos.rugLpLockedPct ?? null,
           pos.rugTopHolderPct ?? null,
           pos.rugWarnRisks ? JSON.stringify(pos.rugWarnRisks) : null,
+          pos.tp3Price ?? null, pos.tp3SellPct ?? null, pos.tp3Hit ?? false,
         ],
       );
     } catch (err) {
@@ -280,7 +289,7 @@ class PaperTradingService {
     return this.closedTrades.some((t) => t.contractAddress === contractAddress);
   }
 
-  async buyDirect(token: ScannedToken, sizeSol: number, slOverridePct?: number, llmAnalysis?: LlmAnalysis, rugCheck?: RugCheckResult, tpOverrides?: { tp1Pct: number; tp1SellPct: number; tp2Pct: number; tp2SellPct: number; tpPercent: number }): Promise<Position> {
+  async buyDirect(token: ScannedToken, sizeSol: number, slOverridePct?: number, llmAnalysis?: LlmAnalysis, rugCheck?: RugCheckResult, tpOverrides?: { tp1Pct: number; tp1SellPct: number; tp2Pct: number; tp2SellPct: number; tp3Pct: number; tp3SellPct: number; tpPercent: number }): Promise<Position> {
     if (sizeSol <= 0) throw new Error("sizeSol must be positive");
     if (sizeSol > this.solBalance) {
       throw new Error(`Insufficient balance. Available: ${this.solBalance.toFixed(4)} SOL`);
@@ -314,19 +323,19 @@ class PaperTradingService {
       logger.warn({ err, symbol: token.symbol }, "DexScreener price verification failed at entry — using scanner price");
     }
 
-    // Age-based SL/TP tiers — fresher pairs get wider TP targets (more room to run)
-    // and wider SL (more volatile). Each tier has TP1 + TP2 partial-close levels.
+    // SL/TP structure: SL -28% | TP1 +80% sell 50% (SL→breakeven) | TP2 +150% sell 30% | TP3 +300% sell 15% | Runner 5%
     let slPercent: number;
     let tpPercent: number;
     let tp1Pct: number;
     let tp1SellPct: number;
     let tp2Pct: number;
     let tp2SellPct: number;
+    let tp3Pct: number;
+    let tp3SellPct: number;
 
-    // Speed trading: flat SL/TP — enter fast, exit fast
-    // SL -15% | TP1 +50% sell 60% | TP2 +100% sell 30% | Runner: 10% at breakeven SL
-    slPercent = 15;  tp1Pct = 50; tp1SellPct = 60;
-    tp2Pct = 100;   tp2SellPct = 30;  tpPercent = 100;
+    slPercent = 28;  tp1Pct = 80;  tp1SellPct = 50;
+    tp2Pct = 150;    tp2SellPct = 30;
+    tp3Pct = 300;    tp3SellPct = 15;  tpPercent = 300;
 
     // Allow caller to override TP levels (e.g. RSS signal trades)
     if (tpOverrides) {
@@ -334,6 +343,8 @@ class PaperTradingService {
       tp1SellPct  = tpOverrides.tp1SellPct;
       tp2Pct      = tpOverrides.tp2Pct;
       tp2SellPct  = tpOverrides.tp2SellPct;
+      tp3Pct      = tpOverrides.tp3Pct;
+      tp3SellPct  = tpOverrides.tp3SellPct;
       tpPercent   = tpOverrides.tpPercent;
     }
     if (slOverridePct !== undefined) slPercent = slOverridePct;
@@ -341,7 +352,8 @@ class PaperTradingService {
     const slPrice  = verifiedPriceUsd * (1 - slPercent / 100);
     const tp1Price = verifiedPriceUsd * (1 + tp1Pct / 100);
     const tp2Price = verifiedPriceUsd * (1 + tp2Pct / 100);
-    const tpPrice  = tp2Price; // TP2 = main recorded TP; runner after TP2 uses trailing SL
+    const tp3Price = verifiedPriceUsd * (1 + tp3Pct / 100);
+    const tpPrice  = tp3Price; // TP3 = main recorded TP; runner after TP3 uses trailing SL
 
     const entryMarketCap = token.marketCap;
     const entryLiquidityUsd = token.liquidity;
@@ -373,10 +385,13 @@ class PaperTradingService {
       status: "open",
       tp1Price,
       tp2Price,
+      tp3Price,
       tp1SellPct,
       tp2SellPct,
+      tp3SellPct,
       tp1Hit: false,
       tp2Hit: false,
+      tp3Hit: false,
       remainingSizeSol: sizeSol,
       partialPnlSol: 0,
       pairAgeMinutes,
@@ -423,7 +438,7 @@ class PaperTradingService {
       `\n` +
       `📦 Size: ${sizeSol} SOL | Age: ${pairAgeMinutes < 60 ? `${Math.round(pairAgeMinutes)}m` : `${(pairAgeMinutes / 60).toFixed(1)}h`}\n` +
       `🤖 AI Score: ${token.aiScore} | Confidence: ${token.confidence}%\n` +
-      `🎯 <b>TP1:</b> $${formatPrice(tp1Price)} (+${tp1Pct}%, sell ${tp1SellPct}%) | <b>TP2:</b> $${formatPrice(tp2Price)} (+${tp2Pct}%, sell ${tp2SellPct}%)\n` +
+      `🎯 <b>TP1:</b> $${formatPrice(tp1Price)} (+${tp1Pct}%, sell ${tp1SellPct}%) | <b>TP2:</b> $${formatPrice(tp2Price)} (+${tp2Pct}%, sell ${tp2SellPct}%) | <b>TP3:</b> $${formatPrice(tp3Price)} (+${tp3Pct}%, sell ${tp3SellPct}%)\n` +
       `🕐 Time: ${toIST(new Date())}\n` +
       `🔗 <a href="https://dexscreener.com/solana/${token.address}">View on DexScreener</a>`,
     );
@@ -450,23 +465,21 @@ class PaperTradingService {
     return { pnlSol, pnlPercent, netReturn };
   }
 
-  // Sell a partial tranche at tp1/tp2. Fully synchronous except for fire-and-forget
-  // DB/Telegram side effects. Sets tp1Hit/tp2Hit immediately to prevent double-triggers
-  // on the 1s cache-check interval.
-  private partialClose(positionId: string, tpLabel: "tp1" | "tp2", currentPrice: number): void {
+  // Sell a partial tranche at tp1/tp2/tp3. Fully synchronous except for fire-and-forget
+  // DB/Telegram side effects. Sets tp1Hit/tp2Hit/tp3Hit immediately to prevent double-triggers.
+  private partialClose(positionId: string, tpLabel: "tp1" | "tp2" | "tp3", currentPrice: number): void {
     const pos = this.openPositions.get(positionId);
     if (!pos) return;
 
-    const isTP1 = tpLabel === "tp1";
-    if (isTP1 && pos.tp1Hit) return;
-    if (!isTP1 && pos.tp2Hit) return;
+    if (tpLabel === "tp1" && pos.tp1Hit) return;
+    if (tpLabel === "tp2" && pos.tp2Hit) return;
+    if (tpLabel === "tp3" && pos.tp3Hit) return;
 
-    const sellPct       = isTP1 ? (pos.tp1SellPct ?? 40) : (pos.tp2SellPct ?? 40);
+    const sellPct = tpLabel === "tp1" ? (pos.tp1SellPct ?? 50)
+                  : tpLabel === "tp2" ? (pos.tp2SellPct ?? 30)
+                  :                     (pos.tp3SellPct ?? 15);
     const remainingSize = pos.remainingSizeSol ?? pos.sizeSol;
     // Sell `sellPct`% of the ORIGINAL position at each TP, capped at what remains.
-    // e.g. TP1=40% and TP2=40% means 0.4×original sold at TP1, another 0.4×original sold at TP2.
-    // Using `remainingSize * sellPct` would make TP2 sell only 40% of the leftover 60%
-    // (= 24% of original), leaving a much larger runner than intended.
     const soldSizeSol   = Math.min(pos.sizeSol * (sellPct / 100), remainingSize);
     const grossReturn   = soldSizeSol * (currentPrice / pos.entryPrice);
     const exitFee       = grossReturn * FEE_RATE;
@@ -482,14 +495,15 @@ class PaperTradingService {
 
     const updatedPos: Position = {
       ...pos,
-      tp1Hit: isTP1 ? true : pos.tp1Hit,
-      tp2Hit: !isTP1 ? true : pos.tp2Hit,
+      tp1Hit: tpLabel === "tp1" ? true : pos.tp1Hit,
+      tp2Hit: tpLabel === "tp2" ? true : pos.tp2Hit,
+      tp3Hit: tpLabel === "tp3" ? true : pos.tp3Hit,
       remainingSizeSol: newRemaining,
       partialPnlSol: newPartialPnl,
-      // After TP2: move SL to break-even (but NEVER lower it — trailing SL may
-      // already have locked it higher). Set tpPrice unreachably high so the
-      // trailing-SL mechanism handles the runner exit, not the TP check.
-      ...(!isTP1 ? { slPrice: Math.max(pos.entryPrice, pos.slPrice), tpPrice: pos.entryPrice * 51 } : {}),
+      // After TP1: move SL to break-even — zero-risk trade from here (NEVER lower existing SL)
+      ...(tpLabel === "tp1" ? { slPrice: Math.max(pos.entryPrice, pos.slPrice) } : {}),
+      // After TP3: set tpPrice unreachably high so trailing SL manages the 5% runner
+      ...(tpLabel === "tp3" ? { tpPrice: pos.entryPrice * 51 } : {}),
     };
 
     this.openPositions.set(positionId, updatedPos);
@@ -511,7 +525,8 @@ class PaperTradingService {
       `💰 Sold ${sellPct}% at $${formatPrice(currentPrice)}\n` +
       `📈 Chunk P&L: <b>${sign}${pnlSol.toFixed(4)} SOL</b>\n` +
       `📦 Remaining: ${newRemaining.toFixed(4)} SOL\n` +
-      `${!isTP1 ? "🛡️ SL moved to break-even — runner protected\n" : ""}` +
+      `${tpLabel === "tp1" ? "🛡️ SL moved to break-even — zero-risk trade now\n" : ""}` +
+      `${tpLabel === "tp3" ? "🏃 Runner active — trailing SL protecting gains\n" : ""}` +
       `🕐 ${toIST(new Date())}`,
     );
   }
@@ -525,6 +540,7 @@ class PaperTradingService {
     // here and throws safely, preventing double-PnL accounting.
     this.openPositions.delete(positionId);
     this.openContracts.delete(pos.contractAddress);
+    this.flatMomentum.delete(positionId);
 
     // Stop-loss in paper trading always fills at the stated SL price.
     // Rug detected = LP fully drained → exit at ~2% of entry (98% loss).
@@ -763,12 +779,13 @@ class PaperTradingService {
         {
           const tp1Imminent = !pos.tp1Hit && pos.tp1Price != null && price >= pos.tp1Price;
           const tp2Imminent = pos.tp1Hit && !pos.tp2Hit && pos.tp2Price != null && price >= pos.tp2Price;
+          const tp3Imminent = pos.tp2Hit && !pos.tp3Hit && pos.tp3Price != null && price >= pos.tp3Price;
 
           const pnlPctRaw = pos.entryPrice > 0 ? (price - pos.entryPrice) / pos.entryPrice * 100 : 0;
           let newSlPrice: number | null = null;
           let trailLabel = "";
 
-          if (!tp1Imminent && !tp2Imminent) {
+          if (!tp1Imminent && !tp2Imminent && !tp3Imminent) {
             if (pnlPctRaw >= 200 && pos.slPrice < pos.entryPrice * 2.20) {
               newSlPrice = pos.entryPrice * 2.20;
               trailLabel = "lock +120% (price ≥ +200%)";
@@ -793,8 +810,7 @@ class PaperTradingService {
               { symbol: pos.symbol, pnlPct: pnlPctRaw.toFixed(0), newSlPrice: formatPrice(newSlPrice), was: formatPrice(pos.slPrice), tier: trailLabel },
               "Trailing SL ratcheted up — profit locked",
             );
-            // After TP2 both TPs are done — show runner status, not a stale TP price.
-            const tpDisplay = pos.tp2Hit
+            const tpDisplay = pos.tp3Hit
               ? "Runner active — trailing SL protecting gains"
               : `$${formatPrice(pos.tpPrice)} (+${pos.tpPercent}%)`;
             void sendTelegram(
@@ -824,13 +840,19 @@ class PaperTradingService {
           continue;
         }
 
-        // TP2 partial close — sell second tranche, move SL to break-even
+        // TP2 partial close — sell second tranche
         if (pos.tp1Hit && !pos.tp2Hit && pos.tp2Price && price >= pos.tp2Price) {
           this.partialClose(pos.positionId, "tp2", price);
           continue;
         }
 
-        // Final TP: close remaining runner (tpPrice is set very high after TP2;
+        // TP3 partial close — sell third tranche, activate runner
+        if (pos.tp2Hit && !pos.tp3Hit && pos.tp3Price && price >= pos.tp3Price) {
+          this.partialClose(pos.positionId, "tp3", price);
+          continue;
+        }
+
+        // Final TP: close remaining runner (tpPrice is set very high after TP3;
         // this also handles legacy positions without tiered TP fields)
         if (price >= pos.tpPrice) {
           const currentLiq = dexPair?.liquidity?.usd ?? 0;
@@ -883,11 +905,24 @@ class PaperTradingService {
           continue;
         }
 
-        // 24h max hold — close stale positions to free capital
-        const holdMs = Date.now() - new Date(pos.openedAt).getTime();
-        if (holdMs > MAX_HOLD_MS) {
-          logger.warn({ symbol: pos.symbol, holdHours: (holdMs / 3_600_000).toFixed(1) }, "Auto-closing stale position (>24h)");
-          await this.close(pos.positionId, "manual");
+        // Dead momentum exit: close if price has been flat (<3% movement) for 90+ consecutive minutes
+        if (price > 0) {
+          const flatEntry = this.flatMomentum.get(pos.positionId);
+          if (!flatEntry) {
+            this.flatMomentum.set(pos.positionId, { refPrice: price, flatSinceMs: Date.now() });
+          } else {
+            const movePct = Math.abs(price - flatEntry.refPrice) / flatEntry.refPrice * 100;
+            if (movePct >= 3) {
+              // Significant movement — reset the flat timer
+              this.flatMomentum.set(pos.positionId, { refPrice: price, flatSinceMs: Date.now() });
+            } else if (Date.now() - flatEntry.flatSinceMs >= 90 * 60_000) {
+              logger.warn(
+                { symbol: pos.symbol, flatMinutes: Math.round((Date.now() - flatEntry.flatSinceMs) / 60_000), movePct: movePct.toFixed(2) },
+                "Dead momentum: <3% price movement for 90+ consecutive minutes — closing position"
+              );
+              await this.close(pos.positionId, "manual");
+            }
+          }
         }
       } catch (err) {
         logger.error({ err, symbol: pos.symbol }, "Stop checker error for position");
@@ -924,6 +959,12 @@ class PaperTradingService {
         // TP2 partial close (fast path)
         if (pos.tp1Hit && !pos.tp2Hit && pos.tp2Price && price >= pos.tp2Price) {
           this.partialClose(pos.positionId, "tp2", price);
+          continue;
+        }
+
+        // TP3 partial close (fast path)
+        if (pos.tp2Hit && !pos.tp3Hit && pos.tp3Price && price >= pos.tp3Price) {
+          this.partialClose(pos.positionId, "tp3", price);
           continue;
         }
 
