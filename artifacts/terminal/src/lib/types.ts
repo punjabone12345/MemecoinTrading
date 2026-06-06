@@ -213,3 +213,23 @@ export interface CycleRecord {
   decisions: CycleDecision[];
 }
 
+export interface RssSignal {
+  id: string;
+  receivedAt: number;
+  rawText: string;
+  tokenName: string | null;
+  pumpMultiple: string | null;
+  contractAddress: string | null;
+  decision: "pending" | "entered" | "skipped" | "error";
+  skipReason?: string;
+  positionId?: string;
+  pairAddress?: string;
+  symbol?: string;
+  entryPrice?: number;
+  entryAt?: number;
+  maxHoldUntil?: number;
+  livePnlPct?: number | null;
+  livePnlSol?: number | null;
+  positionStatus?: "open" | "closed" | "expired";
+}
+

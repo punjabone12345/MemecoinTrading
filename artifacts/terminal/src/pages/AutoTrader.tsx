@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
-import { useAutoTraderStatus, useAutoTraderConfig, useUpdateAutoTraderConfig, usePauseAutoTrader, useResumeAutoTrader, useAutoTraderHistory, useResetCircuitBreaker } from "@/lib/api";
-import { Play, Pause, Settings, Zap, Shield, TrendingUp, Clock, ChevronDown, ChevronUp, CheckCircle2, XCircle, SkipForward, FlaskConical, Loader2, AlertTriangle, RotateCcw } from "lucide-react";
-import type { CycleDecision } from "@/lib/types";
+import { useAutoTraderStatus, useAutoTraderConfig, useUpdateAutoTraderConfig, usePauseAutoTrader, useResumeAutoTrader, useAutoTraderHistory, useResetCircuitBreaker, useRssSignals } from "@/lib/api";
+import { Play, Pause, Settings, Zap, Shield, TrendingUp, Clock, ChevronDown, ChevronUp, CheckCircle2, XCircle, SkipForward, FlaskConical, Loader2, AlertTriangle, RotateCcw, Radio } from "lucide-react";
+import type { CycleDecision, RssSignal } from "@/lib/types";
 
 function ConfigRow({ label, field, value, step, onChange, unit }: {
   label: string; field: string; value: number; step?: number;
@@ -171,6 +171,149 @@ function DecisionRow({ d }: { d: CycleDecision }) {
         </div>
       </div>
       {showAi && hasLlm && <AiAnalysisCard d={d} />}
+    </div>
+  );
+}
+
+// ── Channel Signals ────────────────────────────────────────────────────────────
+
+function timeAgo(ts: number): string {
+  const sec = Math.floor((Date.now() - ts) / 1000);
+  if (sec < 60) return `${sec}s ago`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m ago`;
+  return `${Math.floor(min / 60)}h ago`;
+}
+
+function SignalRow({ s }: { s: RssSignal }) {
+  const isEntered  = s.decision === "entered";
+  const isSkipped  = s.decision === "skipped";
+  const isError    = s.decision === "error";
+  const hasPnl     = isEntered && s.positionStatus === "open" && s.livePnlPct != null;
+  const pnlPos     = hasPnl && (s.livePnlPct ?? 0) >= 0;
+  const pnlPct     = s.livePnlPct ?? 0;
+  const pnlSol     = s.livePnlSol ?? 0;
+
+  const decisionBadge = isEntered
+    ? "bg-emerald-500/20 text-emerald-300 border-emerald-500/30"
+    : isSkipped
+    ? "bg-red-500/10 text-red-400/70 border-red-500/20"
+    : isError
+    ? "bg-orange-500/15 text-orange-400 border-orange-500/25"
+    : "bg-white/5 text-white/30 border-white/10";
+
+  const decisionLabel = isEntered
+    ? (s.positionStatus === "expired" ? "EXPIRED" : s.positionStatus === "closed" ? "CLOSED" : "ENTERED")
+    : isSkipped ? "SKIPPED" : isError ? "ERROR" : "PENDING";
+
+  const pumpColor = s.pumpMultiple === "2x"
+    ? "bg-emerald-500/15 text-emerald-400 border-emerald-500/25"
+    : "bg-red-500/10 text-red-400/70 border-red-500/20";
+
+  return (
+    <div className="px-4 py-2.5 border-b border-white/5 last:border-0">
+      <div className="flex items-start gap-2 flex-wrap">
+        <span className="text-white/25 text-[10px] shrink-0 mt-0.5 w-12">{timeAgo(s.receivedAt)}</span>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-1.5 flex-wrap">
+            {s.tokenName
+              ? <span className="font-bold text-white text-xs">${s.tokenName}</span>
+              : <span className="text-white/30 text-[10px] italic">no token</span>}
+            {s.symbol && s.symbol !== s.tokenName && (
+              <span className="text-white/40 text-[10px]">${s.symbol}</span>
+            )}
+            {s.pumpMultiple && (
+              <span className={`text-[9px] px-1.5 py-0.5 rounded border font-bold ${pumpColor}`}>
+                {s.pumpMultiple.toUpperCase()}
+              </span>
+            )}
+            {s.contractAddress && (
+              <a
+                href={`https://dexscreener.com/solana/${s.contractAddress}`}
+                target="_blank" rel="noopener noreferrer"
+                className="text-white/20 text-[9px] font-mono hover:text-blue-400 transition-colors"
+              >
+                {s.contractAddress.slice(0, 8)}…
+              </a>
+            )}
+            <span className={`text-[9px] px-1.5 py-0.5 rounded border font-bold ${decisionBadge}`}>
+              {decisionLabel}
+            </span>
+            {hasPnl && (
+              <span className={`text-[10px] font-bold ${pnlPos ? "text-emerald-400" : "text-red-400"}`}>
+                {pnlPos ? "+" : ""}{pnlPct.toFixed(1)}%
+                <span className="text-[9px] opacity-60 ml-0.5">
+                  ({pnlPos ? "+" : ""}{pnlSol.toFixed(4)} SOL)
+                </span>
+              </span>
+            )}
+            {isEntered && s.positionStatus === "open" && !hasPnl && (
+              <span className="text-white/25 text-[9px]">loading P&L…</span>
+            )}
+            {isEntered && s.maxHoldUntil && s.positionStatus === "open" && (
+              <span className="text-white/20 text-[9px]">
+                · expires {timeAgo(s.maxHoldUntil).replace(" ago", "").replace(/\d+/, n => String(45 - parseInt(n)))}
+              </span>
+            )}
+          </div>
+          {(isSkipped || isError) && s.skipReason && (
+            <p className="text-[10px] text-white/30 mt-0.5 leading-snug">{s.skipReason}</p>
+          )}
+          {isEntered && s.entryPrice && (
+            <p className="text-[10px] text-white/30 mt-0.5">
+              Entry ${s.entryPrice < 0.0001 ? s.entryPrice.toFixed(10) : s.entryPrice.toFixed(6)}
+              {" "}· 0.35 SOL · SL −18% · TP1 +80% · TP2 +150%
+            </p>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ChannelSignals() {
+  const { data: signals = [], isLoading, dataUpdatedAt } = useRssSignals();
+
+  const entered = signals.filter(s => s.decision === "entered").length;
+  const skipped = signals.filter(s => s.decision === "skipped").length;
+  const openNow = signals.filter(s => s.decision === "entered" && s.positionStatus === "open").length;
+
+  return (
+    <div className="bg-[#0d0d18] border border-white/8 rounded-xl overflow-hidden">
+      {/* Header */}
+      <div className="flex items-center justify-between px-4 py-3 border-b border-white/5">
+        <div className="flex items-center gap-2 flex-wrap">
+          <Radio className="w-4 h-4 text-blue-400" />
+          <p className="text-sm font-bold text-white/70">Channel Signals</p>
+          <span className="text-[9px] text-white/30 bg-white/5 px-1.5 py-0.5 rounded">
+            shitcoingemsalert · 60s poll
+          </span>
+          {signals.length > 0 && (
+            <span className="text-[9px] text-white/25">
+              {entered} entered · {skipped} skipped{openNow > 0 ? ` · ${openNow} open` : ""}
+            </span>
+          )}
+        </div>
+        <div className="flex items-center gap-2">
+          {dataUpdatedAt > 0 && (
+            <span className="text-[9px] text-white/20">{timeAgo(dataUpdatedAt)}</span>
+          )}
+          {isLoading && <Loader2 className="w-3 h-3 text-white/30 animate-spin" />}
+        </div>
+      </div>
+
+      {/* Signal list */}
+      {signals.length === 0 ? (
+        <div className="px-4 py-6 text-center">
+          <Radio className="w-5 h-5 text-white/10 mx-auto mb-2" />
+          <p className="text-white/30 text-xs">Polling for signals every 60s</p>
+          <p className="text-white/15 text-[10px] mt-1">Waiting for first message from channel…</p>
+        </div>
+      ) : (
+        <div>
+          {signals.map(s => <SignalRow key={s.id} s={s} />)}
+        </div>
+      )}
     </div>
   );
 }
@@ -420,6 +563,9 @@ export default function AutoTrader() {
 
   return (
     <div className="px-4 py-4 space-y-4">
+      {/* Channel Signals — Telegram RSS Monitor */}
+      <ChannelSignals />
+
       {/* AI Debug Panel */}
       <AiDebugPanel />
 

@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { ScannedToken, Position, Portfolio, AnalyticsSnapshot, Alert, AutoTraderStatus, AutoTraderConfig, CycleRecord, LossInsights } from "./types";
+import { ScannedToken, Position, Portfolio, AnalyticsSnapshot, Alert, AutoTraderStatus, AutoTraderConfig, CycleRecord, LossInsights, RssSignal } from "./types";
 import { useToast } from "@/hooks/use-toast";
 
 // When the frontend is deployed separately from the backend (e.g. Vercel + Render),
@@ -467,5 +467,18 @@ export function useUpdateAutoTraderConfig() {
       queryClient.invalidateQueries({ queryKey: ["auto-trader-config"] });
       queryClient.invalidateQueries({ queryKey: ["auto-trader-status"] });
     },
+  });
+}
+
+export function useRssSignals() {
+  return useQuery<RssSignal[]>({
+    queryKey: ["rss-signals"],
+    queryFn: async () => {
+      const res = await fetch(apiUrl("/api/rss-signals"));
+      const body = await res.json() as { success: boolean; data: RssSignal[] };
+      return body.data ?? [];
+    },
+    refetchInterval: 10_000,
+    staleTime: 8_000,
   });
 }

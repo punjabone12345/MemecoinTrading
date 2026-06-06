@@ -279,7 +279,7 @@ class PaperTradingService {
     return this.closedTrades.some((t) => t.contractAddress === contractAddress);
   }
 
-  async buyDirect(token: ScannedToken, sizeSol: number, slOverridePct?: number, llmAnalysis?: LlmAnalysis, rugCheck?: RugCheckResult): Promise<Position> {
+  async buyDirect(token: ScannedToken, sizeSol: number, slOverridePct?: number, llmAnalysis?: LlmAnalysis, rugCheck?: RugCheckResult, tpOverrides?: { tp1Pct: number; tp1SellPct: number; tp2Pct: number; tp2SellPct: number; tpPercent: number }): Promise<Position> {
     if (sizeSol <= 0) throw new Error("sizeSol must be positive");
     if (sizeSol > this.solBalance) {
       throw new Error(`Insufficient balance. Available: ${this.solBalance.toFixed(4)} SOL`);
@@ -327,6 +327,14 @@ class PaperTradingService {
     slPercent = 15;  tp1Pct = 50; tp1SellPct = 60;
     tp2Pct = 100;   tp2SellPct = 30;  tpPercent = 100;
 
+    // Allow caller to override TP levels (e.g. RSS signal trades)
+    if (tpOverrides) {
+      tp1Pct      = tpOverrides.tp1Pct;
+      tp1SellPct  = tpOverrides.tp1SellPct;
+      tp2Pct      = tpOverrides.tp2Pct;
+      tp2SellPct  = tpOverrides.tp2SellPct;
+      tpPercent   = tpOverrides.tpPercent;
+    }
     if (slOverridePct !== undefined) slPercent = slOverridePct;
 
     const slPrice  = verifiedPriceUsd * (1 - slPercent / 100);
