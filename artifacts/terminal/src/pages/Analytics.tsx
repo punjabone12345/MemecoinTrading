@@ -856,6 +856,9 @@ export default function Analytics() {
                               <ReasonIcon className="w-3 h-3" />
                               {reasonLabel}
                             </div>
+                            <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full border ${trade.tradeSource === "rss" ? "bg-cyan-500/15 text-cyan-400 border-cyan-500/20" : "bg-violet-500/15 text-violet-400 border-violet-500/20"}`}>
+                              {trade.tradeSource === "rss" ? "📡 Telegram" : "🤖 Bot"}
+                            </span>
                             <LlmBadge verdict={trade.llmVerdict} provider={trade.llmProvider} />
                           </div>
                           <div className="text-right shrink-0">
@@ -898,6 +901,7 @@ export default function Analytics() {
                           <span className="text-[10px] text-white/20">{trade.closedAt ? toIST(trade.closedAt) : ""}</span>
                           <div className="flex items-center gap-1.5">
                             {!isConfirming && (
+                              <>
                               <button
                                 onClick={() => setEditingTrade({
                                   positionId: trade.positionId,
@@ -910,6 +914,15 @@ export default function Analytics() {
                                 <Pencil className="w-3 h-3" />
                                 Note
                               </button>
+                              <button
+                                onClick={() => editClosedTrade.mutate({ positionId: trade.positionId, tradeSource: trade.tradeSource === "rss" ? "bot" : "rss" })}
+                                disabled={editClosedTrade.isPending}
+                                className="flex items-center gap-1 text-[10px] text-white/25 hover:text-white/60 transition-colors py-1 px-1.5 rounded"
+                                title={trade.tradeSource === "rss" ? "Switch to Bot trade" : "Switch to Telegram trade"}
+                              >
+                                {trade.tradeSource === "rss" ? "🤖" : "📡"}
+                              </button>
+                              </>
                             )}
                             {isConfirming ? (
                               <div className="flex items-center gap-1.5">

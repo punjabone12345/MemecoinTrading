@@ -519,6 +519,9 @@ export default function Positions() {
                   <div className="flex items-center gap-2 flex-wrap">
                     <span className="font-black text-white">${p.symbol}</span>
                     <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${reasonColor}`}>{reasonLabel}</span>
+                    <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${p.tradeSource === "rss" ? "bg-cyan-500/15 text-cyan-400 border-cyan-500/20" : "bg-violet-500/15 text-violet-400 border-violet-500/20"}`}>
+                      {p.tradeSource === "rss" ? "📡 Telegram" : "🤖 Bot"}
+                    </span>
                     {p.llmProvider && (
                       <ProviderBadge provider={p.llmProvider} verdict={p.llmVerdict} confidence={p.llmConfidence} />
                     )}
@@ -623,6 +626,14 @@ export default function Positions() {
                         >
                           <Pencil className="w-3 h-3" />
                           Edit Prices
+                        </button>
+                        <button
+                          onClick={() => editClosedTrade.mutate({ positionId: p.positionId, tradeSource: p.tradeSource === "rss" ? "bot" : "rss" })}
+                          disabled={editClosedTrade.isPending}
+                          className="flex items-center gap-1 text-[10px] text-white/30 hover:text-white/60 transition-colors py-1 px-1.5 rounded"
+                          title={p.tradeSource === "rss" ? "Switch to Bot trade" : "Switch to Telegram trade"}
+                        >
+                          {p.tradeSource === "rss" ? "🤖" : "📡"}
                         </button>
                       </div>
                     )}

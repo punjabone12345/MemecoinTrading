@@ -291,6 +291,7 @@ class RssMonitorService {
         undefined,
         rug,
         { tp1Pct: RSS_TP1_PCT, tp1SellPct: RSS_TP1_SELL_PCT, tp2Pct: RSS_TP2_PCT, tp2SellPct: RSS_TP2_SELL_PCT, tp3Pct: RSS_TP3_PCT, tp3SellPct: RSS_TP3_SELL_PCT, tpPercent: RSS_TP_PERCENT },
+        "rss",
       );
 
       const now = Date.now();

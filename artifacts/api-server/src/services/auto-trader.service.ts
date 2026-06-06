@@ -1413,7 +1413,7 @@ class AutoTraderService {
         );
 
         try {
-          const position = await paperTradingService.buyDirect(token, tradeSizeSol, undefined, llm, rugResult);
+          const position = await paperTradingService.buyDirect(token, tradeSizeSol, undefined, llm, rugResult, undefined, "bot");
           const llmTag = llm.provider !== "none"
             ? ` | LLM:${llm.verdict}(${llm.provider},${llm.llmScore ?? "-"}/10)`
             : " | LLM:unavailable";

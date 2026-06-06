@@ -334,6 +334,7 @@ if (process.env["DATABASE_URL"]) {
         ["tp3_price",              "DOUBLE PRECISION"],
         ["tp3_sell_pct",           "DOUBLE PRECISION"],
         ["tp3_hit",                "BOOLEAN"],
+        ["trade_source",           "TEXT"],
         ["updated_at",             "TIMESTAMPTZ"],
       ];
       for (const [col, type] of positionsCols) {

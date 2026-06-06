@@ -270,6 +270,7 @@ export function useEditClosedTrade() {
       exitPrice?: number;
       closeReason?: "manual" | "stop_loss" | "take_profit";
       note?: string;
+      tradeSource?: "bot" | "rss";
     }) => {
       const { positionId, ...body } = payload;
       const res = await fetch(apiUrl(`/api/positions/history/${positionId}`), {

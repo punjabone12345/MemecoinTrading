@@ -133,6 +133,7 @@ export interface Position {
   llmRiskLevel?: string;
   llmSecondaryVerdict?: string;
   llmSecondaryProvider?: string;
+  tradeSource?: "bot" | "rss";
   // Tiered partial-close tracking
   tp1Price?: number;
   tp2Price?: number;

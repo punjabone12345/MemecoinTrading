@@ -88,6 +88,7 @@ function rowToPosition(r: DbRow): Position {
     tp3Price: r.tp3_price != null ? Number(r.tp3_price) : undefined,
     tp3SellPct: r.tp3_sell_pct != null ? Number(r.tp3_sell_pct) : undefined,
     tp3Hit: Boolean(r.tp3_hit),
+    tradeSource: r.trade_source as "bot" | "rss" | undefined,
     remainingSizeSol: r.remaining_size_sol != null ? Number(r.remaining_size_sol) : undefined,
     partialPnlSol: r.partial_pnl_sol != null ? Number(r.partial_pnl_sol) : undefined,
     pairAgeMinutes: r.pair_age_minutes != null ? Number(r.pair_age_minutes) : undefined,
@@ -188,12 +189,13 @@ class PaperTradingService {
           llm_secondary_verdict, llm_secondary_provider,
           rug_score, rug_lp_locked_pct, rug_top_holder_pct, rug_warn_risks,
           tp3_price, tp3_sell_pct, tp3_hit,
+          trade_source,
           updated_at
         ) VALUES (
           $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,
           $16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,
           $29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,
-          $42,$43,$44,$45,$46,$47,$48,$49,$50,$51,$52,$53,NOW()
+          $42,$43,$44,$45,$46,$47,$48,$49,$50,$51,$52,$53,$54,NOW()
         )
         ON CONFLICT (position_id) DO UPDATE SET
           symbol = EXCLUDED.symbol,
@@ -228,6 +230,7 @@ class PaperTradingService {
           tp3_price = EXCLUDED.tp3_price,
           tp3_sell_pct = EXCLUDED.tp3_sell_pct,
           tp3_hit = EXCLUDED.tp3_hit,
+          trade_source = EXCLUDED.trade_source,
           updated_at = NOW()`,
         [
           pos.positionId, pos.symbol, pos.tokenName ?? null, pos.pairAddress,
@@ -253,6 +256,7 @@ class PaperTradingService {
           pos.rugTopHolderPct ?? null,
           pos.rugWarnRisks ? JSON.stringify(pos.rugWarnRisks) : null,
           pos.tp3Price ?? null, pos.tp3SellPct ?? null, pos.tp3Hit ?? false,
+          pos.tradeSource ?? null,
         ],
       );
     } catch (err) {
@@ -289,7 +293,7 @@ class PaperTradingService {
     return this.closedTrades.some((t) => t.contractAddress === contractAddress);
   }
 
-  async buyDirect(token: ScannedToken, sizeSol: number, slOverridePct?: number, llmAnalysis?: LlmAnalysis, rugCheck?: RugCheckResult, tpOverrides?: { tp1Pct: number; tp1SellPct: number; tp2Pct: number; tp2SellPct: number; tp3Pct: number; tp3SellPct: number; tpPercent: number }): Promise<Position> {
+  async buyDirect(token: ScannedToken, sizeSol: number, slOverridePct?: number, llmAnalysis?: LlmAnalysis, rugCheck?: RugCheckResult, tpOverrides?: { tp1Pct: number; tp1SellPct: number; tp2Pct: number; tp2SellPct: number; tp3Pct: number; tp3SellPct: number; tpPercent: number }, tradeSource: "bot" | "rss" = "bot"): Promise<Position> {
     if (sizeSol <= 0) throw new Error("sizeSol must be positive");
     if (sizeSol > this.solBalance) {
       throw new Error(`Insufficient balance. Available: ${this.solBalance.toFixed(4)} SOL`);
@@ -395,6 +399,7 @@ class PaperTradingService {
       remainingSizeSol: sizeSol,
       partialPnlSol: 0,
       pairAgeMinutes,
+      tradeSource,
       ...(llmAnalysis ? {
         llmVerdict: llmAnalysis.verdict,
         llmProvider: llmAnalysis.provider,
@@ -1075,6 +1080,7 @@ class PaperTradingService {
       exitPrice?: number;
       closeReason?: "manual" | "stop_loss" | "take_profit";
       note?: string;
+      tradeSource?: "bot" | "rss";
     },
   ): Position {
     const idx = this.closedTrades.findIndex((t) => t.positionId === positionId);
@@ -1089,6 +1095,7 @@ class PaperTradingService {
       ...(patch.pnlPercent !== undefined ? { pnlPercent: patch.pnlPercent } : {}),
       ...(patch.closeReason !== undefined ? { closeReason: patch.closeReason } : {}),
       ...(patch.note !== undefined ? { note: patch.note } : {}),
+      ...(patch.tradeSource !== undefined ? { tradeSource: patch.tradeSource } : {}),
     };
 
     this.closedTrades[idx] = updated;

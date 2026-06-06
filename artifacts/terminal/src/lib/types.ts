@@ -21,6 +21,7 @@ export interface Position {
   closeReason?: "manual" | "stop_loss" | "take_profit";
   pnlSol?: number; pnlPercent?: number; holdTimeMs?: number;
   note?: string;
+  tradeSource?: "bot" | "rss";
   llmVerdict?: "TRADE" | "SKIP" | "RISKY";
   llmProvider?: "gemini" | "groq" | "heuristic" | "none";
   llmConfidence?: number;
@@ -227,7 +228,6 @@ export interface RssSignal {
   symbol?: string;
   entryPrice?: number;
   entryAt?: number;
-  maxHoldUntil?: number;
   livePnlPct?: number | null;
   livePnlSol?: number | null;
   positionStatus?: "open" | "closed" | "expired";
