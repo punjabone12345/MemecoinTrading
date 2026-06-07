@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { ScannedToken, Position, Portfolio, AnalyticsSnapshot, Alert, AutoTraderStatus, AutoTraderConfig, CycleRecord, LossInsights } from "./types";
+import { ScannedToken, Position, Portfolio, AnalyticsSnapshot, Alert, AutoTraderStatus, AutoTraderConfig, CycleRecord, LossInsights, SniperStatus, SniperPosition, SniperEvent, SniperConfig } from "./types";
 import { useToast } from "@/hooks/use-toast";
 
 // When the frontend is deployed separately from the backend (e.g. Vercel + Render),
@@ -467,6 +467,91 @@ export function useUpdateAutoTraderConfig() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["auto-trader-config"] });
       queryClient.invalidateQueries({ queryKey: ["auto-trader-status"] });
+    },
+  });
+}
+
+// ── Graduation Sniper hooks ────────────────────────────────────────────────
+
+export function useSniperStatus() {
+  return useQuery<SniperStatus>({
+    queryKey: ["sniper-status"],
+    queryFn: async () => {
+      const res = await fetch(apiUrl("/api/sniper/status"));
+      const json = await res.json() as { data: SniperStatus };
+      return json.data;
+    },
+    refetchInterval: 5000,
+  });
+}
+
+export function useSniperPositions() {
+  return useQuery<SniperPosition[]>({
+    queryKey: ["sniper-positions"],
+    queryFn: async () => {
+      const res = await fetch(apiUrl("/api/sniper/positions"));
+      const json = await res.json() as { data: SniperPosition[] };
+      return json.data;
+    },
+    refetchInterval: 10000,
+  });
+}
+
+export function useSniperHistory() {
+  return useQuery<SniperPosition[]>({
+    queryKey: ["sniper-history"],
+    queryFn: async () => {
+      const res = await fetch(apiUrl("/api/sniper/history"));
+      const json = await res.json() as { data: SniperPosition[] };
+      return json.data;
+    },
+    refetchInterval: 30000,
+  });
+}
+
+export function useSniperEvents() {
+  return useQuery<SniperEvent[]>({
+    queryKey: ["sniper-events"],
+    queryFn: async () => {
+      const res = await fetch(apiUrl("/api/sniper/events"));
+      const json = await res.json() as { data: SniperEvent[] };
+      return json.data;
+    },
+    refetchInterval: 5000,
+  });
+}
+
+export function useSniperConfig() {
+  return useQuery<SniperConfig>({
+    queryKey: ["sniper-config"],
+    queryFn: async () => {
+      const res = await fetch(apiUrl("/api/sniper/config"));
+      const json = await res.json() as { data: SniperConfig };
+      return json.data;
+    },
+  });
+}
+
+export function useUpdateSniperConfig() {
+  const queryClient = useQueryClient();
+  const { toast } = useToast();
+  return useMutation({
+    mutationFn: async (config: Partial<SniperConfig>) => {
+      const res = await fetch(apiUrl("/api/sniper/config"), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(config),
+      });
+      const json = await res.json() as { data: SniperConfig };
+      return json.data;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["sniper-config"] });
+      queryClient.invalidateQueries({ queryKey: ["sniper-status"] });
+      toast({ title: "Sniper config saved", description: "Settings updated successfully." });
+    },
+    onError: () => {
+      toast({ title: "Save failed", description: "Could not update sniper config.", variant: "destructive" });
     },
   });
 }

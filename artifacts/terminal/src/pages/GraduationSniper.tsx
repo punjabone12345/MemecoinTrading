@@ -1,0 +1,449 @@
+import { useState } from "react";
+import { Target, Wifi, WifiOff, TrendingUp, TrendingDown, RefreshCw, Settings, X, CheckCircle2, XCircle, Clock, Zap } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { useSniperStatus, useSniperPositions, useSniperHistory, useSniperEvents, useUpdateSniperConfig } from "@/lib/api";
+import { SniperPosition, SniperEvent, SniperConfig } from "@/lib/types";
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+function fmt(n: number, d = 4): string {
+  return n.toFixed(d);
+}
+
+function fmtPct(n: number): string {
+  return (n >= 0 ? "+" : "") + n.toFixed(2) + "%";
+}
+
+function timeAgo(ts: number): string {
+  const s = Math.floor((Date.now() - ts) / 1000);
+  if (s < 60)  return `${s}s ago`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  return `${Math.floor(s / 3600)}h ago`;
+}
+
+function mintShort(mint: string): string {
+  return `${mint.slice(0, 4)}…${mint.slice(-4)}`;
+}
+
+function solscanUrl(mint: string): string {
+  return `https://solscan.io/token/${mint}`;
+}
+
+// ── Settings panel ────────────────────────────────────────────────────────────
+
+interface SettingsField {
+  key: keyof SniperConfig;
+  label: string;
+  description: string;
+  type: "number" | "boolean";
+  min?: number;
+  max?: number;
+  step?: number;
+}
+
+const SETTINGS_FIELDS: SettingsField[] = [
+  { key: "enabled",            label: "Enable Sniper",        description: "Master switch — starts/stops catching graduations", type: "boolean" },
+  { key: "positionSizeSol",    label: "Position Size (SOL)",  description: "Virtual SOL per paper trade",        type: "number", min: 0.01, max: 10,   step: 0.01 },
+  { key: "maxOpenPositions",   label: "Max Open Positions",   description: "Halt entries above this count",      type: "number", min: 1,    max: 20,   step: 1    },
+  { key: "slPct",              label: "Stop Loss %",          description: "Exit whole position at this loss",   type: "number", min: 5,    max: 90,   step: 1    },
+  { key: "tp1Pct",             label: "TP1 Target %",         description: "First take-profit trigger",          type: "number", min: 20,   max: 500,  step: 5    },
+  { key: "tp1ClosePct",        label: "TP1 Close %",          description: "% of position to sell at TP1",      type: "number", min: 10,   max: 90,   step: 5    },
+  { key: "tp2Pct",             label: "TP2 Target %",         description: "Second take-profit trigger",         type: "number", min: 50,   max: 2000, step: 10   },
+  { key: "tp2ClosePct",        label: "TP2 Close %",          description: "% of original position to sell at TP2", type: "number", min: 5, max: 80,   step: 5    },
+  { key: "trailingStopPct",    label: "Trailing Stop %",      description: "Runner trailing stop below peak",    type: "number", min: 5,    max: 80,   step: 5    },
+  { key: "waitBeforeEntryMs",  label: "Entry Delay (ms)",     description: "Wait after detection before buying", type: "number", min: 0,    max: 30000, step: 500 },
+  { key: "virtualBalanceSol",  label: "Virtual Balance (SOL)", description: "Starting virtual wallet size",      type: "number", min: 1,    max: 1000, step: 0.5  },
+];
+
+function SettingsPanel({ config, onClose }: { config: SniperConfig; onClose: () => void }) {
+  const [draft, setDraft] = useState<SniperConfig>({ ...config });
+  const update = useUpdateSniperConfig();
+
+  function handleSave() {
+    update.mutate(draft, { onSuccess: () => onClose() });
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/70 backdrop-blur-sm px-2">
+      <div className="w-full max-w-md bg-[#12121e] border border-white/10 rounded-2xl overflow-hidden shadow-2xl">
+        {/* Header */}
+        <div className="flex items-center justify-between px-5 py-4 border-b border-white/10">
+          <div className="flex items-center gap-2">
+            <Settings className="w-4 h-4 text-violet-400" />
+            <span className="text-sm font-bold text-white">Sniper Settings</span>
+          </div>
+          <button onClick={onClose} className="text-white/40 hover:text-white transition-colors">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        {/* Fields */}
+        <div className="px-5 py-4 space-y-4 max-h-[70vh] overflow-y-auto">
+          {SETTINGS_FIELDS.map((f) => (
+            <div key={f.key}>
+              <div className="flex items-center justify-between mb-1">
+                <label className="text-xs font-semibold text-white/80">{f.label}</label>
+                {f.type === "boolean" ? (
+                  <button
+                    onClick={() => setDraft((d) => ({ ...d, [f.key]: !d[f.key] }))}
+                    className={`relative w-10 h-5 rounded-full transition-colors ${
+                      draft[f.key] ? "bg-violet-500" : "bg-white/15"
+                    }`}
+                  >
+                    <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white transition-transform ${
+                      draft[f.key] ? "translate-x-5" : "translate-x-0"
+                    }`} />
+                  </button>
+                ) : (
+                  <input
+                    type="number"
+                    value={draft[f.key] as number}
+                    min={f.min}
+                    max={f.max}
+                    step={f.step}
+                    onChange={(e) => setDraft((d) => ({ ...d, [f.key]: parseFloat(e.target.value) || 0 }))}
+                    className="w-24 px-2 py-1 rounded-lg bg-white/5 border border-white/10 text-white text-xs text-right focus:outline-none focus:border-violet-500"
+                  />
+                )}
+              </div>
+              <p className="text-[10px] text-white/35">{f.description}</p>
+            </div>
+          ))}
+        </div>
+
+        {/* Footer */}
+        <div className="px-5 py-4 border-t border-white/10 flex gap-3">
+          <Button variant="ghost" size="sm" onClick={onClose} className="flex-1 text-white/50 hover:text-white">
+            Cancel
+          </Button>
+          <Button
+            size="sm"
+            onClick={handleSave}
+            disabled={update.isPending}
+            className="flex-1 bg-violet-500 hover:bg-violet-600 text-white font-bold"
+          >
+            {update.isPending ? "Saving…" : "Save Settings"}
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Position row ──────────────────────────────────────────────────────────────
+
+function PositionRow({ pos }: { pos: SniperPosition }) {
+  const pct  = pos.pnlPct;
+  const pos_ = pct >= 0;
+
+  const stage = pos.tp2Hit
+    ? <Badge className="bg-amber-500/20 text-amber-400 border-amber-500/30 text-[9px] px-1 py-0">Runner</Badge>
+    : pos.tp1Hit
+    ? <Badge className="bg-emerald-500/20 text-emerald-400 border-emerald-500/30 text-[9px] px-1 py-0">TP1✓ BE-SL</Badge>
+    : <Badge className="bg-blue-500/20 text-blue-400 border-blue-500/30 text-[9px] px-1 py-0">Live</Badge>;
+
+  return (
+    <div className="px-4 py-3 border-b border-white/5 last:border-0">
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 flex-wrap">
+            <a
+              href={solscanUrl(pos.mint)}
+              target="_blank"
+              rel="noreferrer"
+              className="text-sm font-bold text-violet-300 hover:text-violet-200 leading-none"
+            >
+              {pos.symbol}
+            </a>
+            {stage}
+          </div>
+          <div className="text-[10px] text-white/35 mt-0.5 font-mono">{mintShort(pos.mint)}</div>
+          <div className="text-[10px] text-white/40 mt-1">
+            Detected {timeAgo(pos.detectedAt)} · Entry ${pos.entryPrice < 0.0001 ? pos.entryPrice.toExponential(3) : fmt(pos.entryPrice, 6)}
+          </div>
+          <div className="text-[10px] text-white/40">
+            SL ${pos.effectiveSlPrice < 0.0001 ? pos.effectiveSlPrice.toExponential(3) : fmt(pos.effectiveSlPrice, 6)}
+            {pos.tp1Hit && " (breakeven)"}
+            {pos.tp2Hit && ` · Peak $${pos.trailingHigh < 0.0001 ? pos.trailingHigh.toExponential(3) : fmt(pos.trailingHigh, 6)}`}
+          </div>
+        </div>
+        <div className="text-right flex-shrink-0">
+          <div className={`text-base font-black ${pos_ ? "text-emerald-400" : "text-red-400"}`}>
+            {fmtPct(pct)}
+          </div>
+          <div className={`text-xs font-bold ${pos_ ? "text-emerald-400/80" : "text-red-400/80"}`}>
+            {pos_ ? "+" : ""}{fmt(pos.totalPnlSol, 4)} SOL
+          </div>
+          <div className="text-[10px] text-white/30 mt-0.5">
+            Cur ${pos.currentPrice < 0.0001 ? pos.currentPrice.toExponential(3) : fmt(pos.currentPrice, 6)}
+          </div>
+          <div className="text-[10px] text-white/25">{fmt(pos.remainingFraction * 100, 0)}% pos</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Event row ─────────────────────────────────────────────────────────────────
+
+function EventRow({ evt }: { evt: SniperEvent }) {
+  return (
+    <div className="flex items-center gap-3 px-4 py-2.5 border-b border-white/5 last:border-0">
+      <div className="flex-shrink-0">
+        {evt.action === "entered"
+          ? <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+          : <XCircle className="w-3.5 h-3.5 text-white/25" />
+        }
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-2">
+          <span className={`text-xs font-bold ${evt.action === "entered" ? "text-white/90" : "text-white/40"}`}>
+            {evt.symbol || mintShort(evt.mint)}
+          </span>
+          {evt.action === "entered"
+            ? <Badge className="bg-emerald-500/15 text-emerald-400 border-emerald-500/20 text-[9px] px-1 py-0">ENTERED</Badge>
+            : <Badge className="bg-white/5 text-white/30 border-white/10 text-[9px] px-1 py-0">SKIPPED</Badge>
+          }
+        </div>
+        {evt.skipReason && (
+          <div className="text-[10px] text-white/30 mt-0.5">{evt.skipReason}</div>
+        )}
+        <div className="text-[10px] text-white/20 font-mono">{mintShort(evt.mint)}</div>
+      </div>
+      <div className="text-[10px] text-white/30 flex-shrink-0">{timeAgo(evt.detectedAt)}</div>
+    </div>
+  );
+}
+
+// ── History row ───────────────────────────────────────────────────────────────
+
+function HistoryRow({ pos }: { pos: SniperPosition }) {
+  const win = pos.realizedPnlSol > 0;
+  return (
+    <div className="px-4 py-3 border-b border-white/5 last:border-0">
+      <div className="flex items-center justify-between gap-2">
+        <div className="min-w-0">
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <a
+              href={solscanUrl(pos.mint)}
+              target="_blank"
+              rel="noreferrer"
+              className="text-xs font-bold text-white/70 hover:text-white"
+            >
+              {pos.symbol}
+            </a>
+            <Badge className="bg-violet-500/15 text-violet-400 border-violet-500/20 text-[9px] px-1 py-0">🎯 SNIPER</Badge>
+          </div>
+          <div className="text-[10px] text-white/30 mt-0.5">
+            {pos.closeReason ?? "Closed"} · {pos.closedAt ? timeAgo(pos.closedAt) : "—"}
+          </div>
+          <div className="text-[10px] text-white/25">
+            Entry ${pos.entryPrice < 0.0001 ? pos.entryPrice.toExponential(3) : fmt(pos.entryPrice, 6)}
+            {pos.exitPrice ? ` → $${pos.exitPrice < 0.0001 ? pos.exitPrice.toExponential(3) : fmt(pos.exitPrice, 6)}` : ""}
+          </div>
+        </div>
+        <div className={`text-sm font-black ${win ? "text-emerald-400" : "text-red-400"}`}>
+          {win ? "+" : ""}{fmt(pos.realizedPnlSol, 4)} SOL
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Main page ─────────────────────────────────────────────────────────────────
+
+export default function GraduationSniper() {
+  const [showSettings, setShowSettings] = useState(false);
+  const { data: status, isLoading: statusLoading } = useSniperStatus();
+  const { data: positions = []  } = useSniperPositions();
+  const { data: history = []    } = useSniperHistory();
+  const { data: events = []     } = useSniperEvents();
+
+  const config = status?.config;
+  const heliusConfigured = !statusLoading; // if API responds, key is present or service started
+
+  const totalPnl      = status?.totalRealizedPnlSol ?? 0;
+  const pnlPos        = totalPnl >= 0;
+  const winRate       = status && (status.wins + status.losses) > 0
+    ? Math.round((status.wins / (status.wins + status.losses)) * 100)
+    : null;
+
+  return (
+    <div className="min-h-screen bg-[#0a0a0f]">
+      {/* ── Header ── */}
+      <div className="sticky top-0 z-10 bg-[#0d0d15]/95 backdrop-blur-md border-b border-white/8 px-4 py-3">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2.5">
+            <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-amber-500 to-orange-600 flex items-center justify-center">
+              <Target className="w-4 h-4 text-white" />
+            </div>
+            <div>
+              <h1 className="text-sm font-black text-white leading-none">Graduation Sniper</h1>
+              <p className="text-[9px] text-white/35 leading-none mt-0.5">Pump.fun → Raydium · Paper Mode</p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            {/* WS status */}
+            <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold ${
+              status?.wsConnected
+                ? "bg-emerald-500/15 text-emerald-400"
+                : "bg-red-500/15 text-red-400"
+            }`}>
+              {status?.wsConnected
+                ? <Wifi className="w-3 h-3" />
+                : <WifiOff className="w-3 h-3" />
+              }
+              {status?.wsConnected ? "LIVE" : "DISCONNECTED"}
+            </div>
+            {config && (
+              <button
+                onClick={() => setShowSettings(true)}
+                className="p-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-white/50 hover:text-white transition-colors"
+              >
+                <Settings className="w-4 h-4" />
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Sub-status */}
+        {status && (
+          <div className="flex items-center gap-3 mt-2 text-[10px] text-white/30">
+            <span>{status.wsReconnects > 0 ? `${status.wsReconnects} reconnect${status.wsReconnects > 1 ? "s" : ""}` : "Stable connection"}</span>
+            <span>·</span>
+            <span>{status.enabled ? "Sniping enabled" : "Sniping paused"}</span>
+            {!process.env["HELIUS_API_KEY"] && (
+              <>
+                <span>·</span>
+                <span className="text-amber-400/70">Set HELIUS_API_KEY to activate</span>
+              </>
+            )}
+          </div>
+        )}
+      </div>
+
+      <div className="px-3 py-4 space-y-4">
+
+        {/* ── Stats grid ── */}
+        <div className="grid grid-cols-3 gap-2">
+          <StatCard
+            label="Virtual Balance"
+            value={`${fmt(status?.virtualBalance ?? 0, 3)} SOL`}
+            sub="paper wallet"
+            icon={<Zap className="w-3.5 h-3.5 text-amber-400" />}
+            accent="amber"
+          />
+          <StatCard
+            label="Today's Grads"
+            value={String(status?.graduationsToday ?? 0)}
+            sub="detected"
+            icon={<RefreshCw className="w-3.5 h-3.5 text-blue-400" />}
+            accent="blue"
+          />
+          <StatCard
+            label="Open Positions"
+            value={String(status?.openCount ?? 0)}
+            sub={`of ${config?.maxOpenPositions ?? 5} max`}
+            icon={<Target className="w-3.5 h-3.5 text-violet-400" />}
+            accent="violet"
+          />
+          <StatCard
+            label="Realized PNL"
+            value={`${pnlPos ? "+" : ""}${fmt(totalPnl, 4)} SOL`}
+            sub="all closed trades"
+            icon={pnlPos
+              ? <TrendingUp className="w-3.5 h-3.5 text-emerald-400" />
+              : <TrendingDown className="w-3.5 h-3.5 text-red-400" />
+            }
+            accent={pnlPos ? "green" : "red"}
+            valueColor={pnlPos ? "text-emerald-400" : "text-red-400"}
+          />
+          <StatCard
+            label="Win Rate"
+            value={winRate !== null ? `${winRate}%` : "—"}
+            sub={`${status?.wins ?? 0}W / ${status?.losses ?? 0}L`}
+            icon={<CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />}
+            accent="green"
+          />
+          <StatCard
+            label="Total Trades"
+            value={String(status?.tradesTotal ?? 0)}
+            sub="all time"
+            icon={<Clock className="w-3.5 h-3.5 text-white/40" />}
+            accent="default"
+          />
+        </div>
+
+        {/* ── Active positions ── */}
+        <Section title="Active Positions" count={positions.length} emptyMsg="No open sniper positions">
+          {positions.map((p) => <PositionRow key={p.id} pos={p} />)}
+        </Section>
+
+        {/* ── Event feed ── */}
+        <Section title="Recent Graduations Detected" count={events.length} emptyMsg="Waiting for pump.fun graduations…">
+          {events.slice(0, 10).map((e) => <EventRow key={e.id} evt={e} />)}
+        </Section>
+
+        {/* ── Trade history ── */}
+        <Section title="Trade History" count={history.length} emptyMsg="No closed sniper trades yet">
+          {history.slice(0, 30).map((p) => <HistoryRow key={p.id} pos={p} />)}
+        </Section>
+
+      </div>
+
+      {/* ── Settings modal ── */}
+      {showSettings && config && (
+        <SettingsPanel config={config} onClose={() => setShowSettings(false)} />
+      )}
+    </div>
+  );
+}
+
+// ── Sub-components ────────────────────────────────────────────────────────────
+
+function StatCard({
+  label, value, sub, icon, accent, valueColor,
+}: {
+  label: string; value: string; sub: string; icon: React.ReactNode;
+  accent: "amber" | "blue" | "violet" | "green" | "red" | "default";
+  valueColor?: string;
+}) {
+  const bg: Record<string, string> = {
+    amber:   "from-amber-500/10 to-transparent",
+    blue:    "from-blue-500/10 to-transparent",
+    violet:  "from-violet-500/10 to-transparent",
+    green:   "from-emerald-500/10 to-transparent",
+    red:     "from-red-500/10 to-transparent",
+    default: "from-white/5 to-transparent",
+  };
+  return (
+    <div className={`rounded-xl bg-gradient-to-br ${bg[accent] ?? bg.default} border border-white/8 p-3`}>
+      <div className="flex items-center gap-1 mb-1.5">{icon}<span className="text-[9px] text-white/35 font-semibold uppercase tracking-wide">{label}</span></div>
+      <div className={`text-sm font-black leading-none ${valueColor ?? "text-white"}`}>{value}</div>
+      <div className="text-[9px] text-white/30 mt-0.5">{sub}</div>
+    </div>
+  );
+}
+
+function Section({
+  title, count, emptyMsg, children,
+}: {
+  title: string; count: number; emptyMsg: string; children: React.ReactNode;
+}) {
+  return (
+    <div className="rounded-xl border border-white/8 bg-[#0d0d18] overflow-hidden">
+      <div className="flex items-center justify-between px-4 py-2.5 border-b border-white/8 bg-white/2">
+        <span className="text-[11px] font-bold text-white/70 uppercase tracking-wider">{title}</span>
+        {count > 0 && (
+          <Badge className="bg-violet-500/20 text-violet-400 border-violet-500/30 text-[9px] px-1.5 py-0">
+            {count}
+          </Badge>
+        )}
+      </div>
+      {count === 0 ? (
+        <div className="px-4 py-6 text-center text-xs text-white/20">{emptyMsg}</div>
+      ) : children}
+    </div>
+  );
+}

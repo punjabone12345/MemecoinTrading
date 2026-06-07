@@ -11,6 +11,7 @@ import Analytics from "@/pages/Analytics";
 import Watchlist from "@/pages/Watchlist";
 import Alerts from "@/pages/Alerts";
 import AutoTrader from "@/pages/AutoTrader";
+import GraduationSniper from "@/pages/GraduationSniper";
 import NotFound from "@/pages/not-found";
 
 const queryClient = new QueryClient();
@@ -26,6 +27,7 @@ function Router() {
         <Route path="/watchlist" component={Watchlist} />
         <Route path="/alerts" component={Alerts} />
         <Route path="/auto-trader" component={AutoTrader} />
+        <Route path="/sniper" component={GraduationSniper} />
         <Route component={NotFound} />
       </Switch>
     </Shell>

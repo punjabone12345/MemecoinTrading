@@ -214,3 +214,69 @@ export interface CycleRecord {
   decisions: CycleDecision[];
 }
 
+// ── Graduation Sniper ────────────────────────────────────────────────────────
+
+export interface SniperConfig {
+  enabled: boolean;
+  positionSizeSol: number;
+  maxOpenPositions: number;
+  slPct: number;
+  tp1Pct: number;
+  tp1ClosePct: number;
+  tp2Pct: number;
+  tp2ClosePct: number;
+  trailingStopPct: number;
+  waitBeforeEntryMs: number;
+  virtualBalanceSol: number;
+}
+
+export interface SniperPosition {
+  id: string;
+  mint: string;
+  symbol: string;
+  name: string;
+  detectedAt: number;
+  entryAt: number;
+  entryPrice: number;
+  currentPrice: number;
+  sizeSol: number;
+  tp1Hit: boolean;
+  tp2Hit: boolean;
+  remainingFraction: number;
+  effectiveSlPrice: number;
+  trailingHigh: number;
+  status: "open" | "closed";
+  realizedPnlSol: number;
+  unrealizedPnlSol: number;
+  totalPnlSol: number;
+  pnlPct: number;
+  closeReason?: string;
+  closedAt?: number;
+  exitPrice?: number;
+  txSignature: string;
+}
+
+export interface SniperEvent {
+  id: string;
+  detectedAt: number;
+  mint: string;
+  symbol: string;
+  action: "entered" | "skipped";
+  skipReason?: string;
+  txSignature: string;
+}
+
+export interface SniperStatus {
+  wsConnected: boolean;
+  wsReconnects: number;
+  enabled: boolean;
+  graduationsToday: number;
+  tradesTotal: number;
+  wins: number;
+  losses: number;
+  totalRealizedPnlSol: number;
+  virtualBalance: number;
+  openCount: number;
+  config: SniperConfig;
+}
+

@@ -1,6 +1,6 @@
 import { ReactNode } from "react";
 import { Link, useLocation } from "wouter";
-import { LayoutDashboard, ListOrdered, BarChart3, Cpu, Activity } from "lucide-react";
+import { LayoutDashboard, ListOrdered, BarChart3, Cpu, Activity, Target } from "lucide-react";
 import { useWebSocket, useUnreadAlerts, useAutoTraderStatus } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 
@@ -10,6 +10,7 @@ const NAV_ITEMS = [
   { href: "/analytics", label: "Analytics", icon: BarChart3 },
   { href: "/scanner", label: "Scanner", icon: Activity },
   { href: "/auto-trader", label: "Bot", icon: Cpu },
+  { href: "/sniper", label: "Sniper", icon: Target },
 ];
 
 export function Shell({ children }: { children: ReactNode }) {

@@ -7,6 +7,7 @@ import { paperTradingService } from "./services/paper-trading.service.js";
 import { autoTraderService } from "./services/auto-trader.service.js";
 import { startCommandPolling, registerCommandHandler, toIST, sendTelegram, isTelegramConfigured } from "./lib/telegram.js";
 import { lossJournalService } from "./services/loss-journal.service.js";
+import { graduationSniperService } from "./services/graduation-sniper.service.js";
 
 const rawPort = process.env["PORT"] ?? "8080";
 const port = Number(rawPort);
@@ -341,6 +342,31 @@ if (process.env["DATABASE_URL"]) {
           `ALTER TABLE positions ADD COLUMN IF NOT EXISTS ${col} ${type}`
         ).catch(() => {});
       }
+      // Graduation Sniper tables
+      await migClient.query(`
+        CREATE TABLE IF NOT EXISTS sniper_positions (
+          id TEXT PRIMARY KEY,
+          mint TEXT NOT NULL,
+          symbol TEXT,
+          name TEXT,
+          detected_at BIGINT,
+          entry_at BIGINT,
+          entry_price DOUBLE PRECISION,
+          current_price DOUBLE PRECISION,
+          size_sol DOUBLE PRECISION,
+          tp1_hit BOOLEAN DEFAULT FALSE,
+          tp2_hit BOOLEAN DEFAULT FALSE,
+          remaining_fraction DOUBLE PRECISION DEFAULT 1.0,
+          effective_sl_price DOUBLE PRECISION,
+          trailing_high DOUBLE PRECISION,
+          status TEXT DEFAULT 'open',
+          realized_pnl_sol DOUBLE PRECISION DEFAULT 0,
+          close_reason TEXT,
+          closed_at BIGINT,
+          exit_price DOUBLE PRECISION,
+          tx_signature TEXT
+        )
+      `);
       logger.info("DB migration: all tables ready");
     } finally {
       migClient.release();
@@ -354,6 +380,8 @@ if (process.env["DATABASE_URL"]) {
 await lossJournalService.init();
 await paperTradingService.init();
 await autoTraderService.init();
+await graduationSniperService.init();
+graduationSniperService.start();
 
 server.listen(port, () => {
   logger.info({ port }, "Apex Meme Trader AI — server listening");
