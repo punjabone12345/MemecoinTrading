@@ -48,10 +48,10 @@ const DEFAULT_CONFIG: SniperConfig = {
   positionSizeSol:   0.1,
   maxOpenPositions:  5,
   slPct:             40,
-  tp1Pct:            100,
-  tp1ClosePct:       60,
-  tp2Pct:            300,
-  tp2ClosePct:       30,
+  tp1Pct:            150,
+  tp1ClosePct:       40,
+  tp2Pct:            400,
+  tp2ClosePct:       40,
   trailingStopPct:   30,
   waitBeforeEntryMs: 3000,
   virtualBalanceSol: 10.0,
@@ -769,6 +769,88 @@ class GraduationSniperService {
       logger.warn({ err: (err as Error).message }, "Graduation sniper: failed to save config");
     }
     return this.config;
+  }
+
+  // ── Mutation helpers (edit / delete / reset) ──────────────────────────────
+
+  async deletePosition(id: string): Promise<boolean> {
+    // Check open positions (keyed by mint)
+    const openEntry = Array.from(this.openPositions.entries()).find(([, p]) => p.id === id);
+    if (openEntry) {
+      const [mint, pos] = openEntry;
+      this.virtualBalance += pos.sizeSol * pos.remainingFraction;
+      this.openPositions.delete(mint);
+      this.seenMints.delete(mint);
+    } else {
+      const idx = this.closedPositions.findIndex((p) => p.id === id);
+      if (idx === -1) return false;
+      const pos = this.closedPositions[idx]!;
+      this.seenMints.delete(pos.mint);
+      this.closedPositions.splice(idx, 1);
+    }
+    try {
+      await execute(`DELETE FROM sniper_positions WHERE id = $1`, [id]);
+    } catch (err) {
+      logger.warn({ id, err: (err as Error).message }, "Graduation sniper: deletePosition DB error");
+    }
+    return true;
+  }
+
+  async editPosition(id: string, patch: {
+    entryPrice?: number;
+    exitPrice?: number;
+    currentPrice?: number;
+    closeReason?: string;
+    realizedPnlSol?: number;
+  }): Promise<SniperPosition | null> {
+    // Find in open or closed
+    const openEntry = Array.from(this.openPositions.entries()).find(([, p]) => p.id === id);
+    let pos: SniperPosition | undefined;
+    if (openEntry) {
+      pos = openEntry[1];
+    } else {
+      pos = this.closedPositions.find((p) => p.id === id);
+    }
+    if (!pos) return null;
+
+    if (patch.entryPrice !== undefined) {
+      pos.entryPrice = patch.entryPrice;
+      pos.effectiveSlPrice = patch.entryPrice * (1 - this.config.slPct / 100);
+    }
+    if (patch.currentPrice !== undefined) pos.currentPrice = patch.currentPrice;
+    if (patch.exitPrice !== undefined)    pos.exitPrice    = patch.exitPrice;
+    if (patch.closeReason !== undefined)  pos.closeReason  = patch.closeReason;
+    if (patch.realizedPnlSol !== undefined) pos.realizedPnlSol = patch.realizedPnlSol;
+
+    this.updateLivePnl(pos);
+    await this.persistPosition(pos);
+    return { ...pos };
+  }
+
+  async resetAccount(): Promise<void> {
+    // Close/remove all open positions (refund virtual balance)
+    for (const [mint] of this.openPositions) {
+      this.openPositions.delete(mint);
+    }
+    this.closedPositions = [];
+    this.events = [];
+    this.seenMints.clear();
+    this.graduationsToday = 0;
+    this.virtualBalance = this.config.virtualBalanceSol;
+
+    try {
+      await execute(`DELETE FROM sniper_positions`, []);
+    } catch (err) {
+      logger.warn({ err: (err as Error).message }, "Graduation sniper: resetAccount DB error");
+    }
+    logger.info({ virtualBalance: this.virtualBalance }, "Graduation sniper: account reset");
+  }
+
+  deleteEvent(id: string): boolean {
+    const idx = this.events.findIndex((e) => e.id === id);
+    if (idx === -1) return false;
+    this.events.splice(idx, 1);
+    return true;
   }
 
   // ── Getters ────────────────────────────────────────────────────────────────

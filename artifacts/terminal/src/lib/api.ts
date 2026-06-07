@@ -556,3 +556,84 @@ export function useUpdateSniperConfig() {
   });
 }
 
+export function useDeleteSniperPosition() {
+  const queryClient = useQueryClient();
+  const { toast } = useToast();
+  return useMutation({
+    mutationFn: async (id: string) => {
+      const res = await fetch(apiUrl(`/api/sniper/positions/${id}`), { method: "DELETE" });
+      if (!res.ok) { const j = await res.json(); throw new Error(j.error ?? "Delete failed"); }
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["sniper-positions"] });
+      queryClient.invalidateQueries({ queryKey: ["sniper-history"] });
+      queryClient.invalidateQueries({ queryKey: ["sniper-status"] });
+      toast({ title: "Position deleted" });
+    },
+    onError: (e: Error) => toast({ title: "Delete failed", description: e.message, variant: "destructive" }),
+  });
+}
+
+export function useEditSniperPosition() {
+  const queryClient = useQueryClient();
+  const { toast } = useToast();
+  return useMutation({
+    mutationFn: async (payload: {
+      id: string;
+      entryPrice?: number;
+      exitPrice?: number;
+      currentPrice?: number;
+      closeReason?: string;
+      realizedPnlSol?: number;
+    }) => {
+      const { id, ...body } = payload;
+      const res = await fetch(apiUrl(`/api/sniper/positions/${id}`), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) { const j = await res.json(); throw new Error(j.error ?? "Edit failed"); }
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["sniper-positions"] });
+      queryClient.invalidateQueries({ queryKey: ["sniper-history"] });
+      queryClient.invalidateQueries({ queryKey: ["sniper-status"] });
+      toast({ title: "Position updated" });
+    },
+    onError: (e: Error) => toast({ title: "Edit failed", description: e.message, variant: "destructive" }),
+  });
+}
+
+export function useDeleteSniperEvent() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (id: string) => {
+      const res = await fetch(apiUrl(`/api/sniper/events/${id}`), { method: "DELETE" });
+      if (!res.ok) { const j = await res.json(); throw new Error(j.error ?? "Delete failed"); }
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["sniper-events"] });
+    },
+  });
+}
+
+export function useResetSniperAccount() {
+  const queryClient = useQueryClient();
+  const { toast } = useToast();
+  return useMutation({
+    mutationFn: async () => {
+      const res = await fetch(apiUrl("/api/sniper/reset"), { method: "POST" });
+      if (!res.ok) throw new Error("Reset failed");
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["sniper-positions"] });
+      queryClient.invalidateQueries({ queryKey: ["sniper-history"] });
+      queryClient.invalidateQueries({ queryKey: ["sniper-events"] });
+      queryClient.invalidateQueries({ queryKey: ["sniper-status"] });
+      toast({ title: "Sniper account reset", description: "All positions cleared, balance restored." });
+    },
+    onError: () => toast({ title: "Reset failed", variant: "destructive" }),
+  });
+}
+
