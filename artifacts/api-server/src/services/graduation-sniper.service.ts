@@ -392,9 +392,9 @@ class GraduationSniperService {
 
     const SOL_MINT = "So11111111111111111111111111111111111111112";
 
-    // Helius needs a moment to index the transaction after the WS notification fires.
-    // Retry up to 4 times with increasing delays: 1s, 2s, 3s, 4s.
-    const delays = [1_000, 2_000, 3_000, 4_000];
+    // Helius REST indexer lags behind the WebSocket by several seconds.
+    // Retry up to 5 times with increasing delays: 2s, 4s, 6s, 8s, 10s (30s total).
+    const delays = [2_000, 4_000, 6_000, 8_000, 10_000];
 
     for (let attempt = 0; attempt < delays.length; attempt++) {
       await new Promise((r) => setTimeout(r, delays[attempt]!));
