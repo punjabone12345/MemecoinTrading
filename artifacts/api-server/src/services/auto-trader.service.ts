@@ -1331,7 +1331,7 @@ class AutoTraderService {
             { symbol: c.symbol, aiScore: c.aiScore, threshold: SCORE_SKIP_THRESHOLD },
             "Auto-trader: SCORE PARADOX — ≥96 score signals manipulation, skipping"
           );
-          this.recordDecision(cycleId, c, "skipped", `Score paradox skip — AI score ${c.aiScore} ≥ ${SCORE_SKIP_THRESHOLD} (manipulation signal)`);
+          decisions.push({ ...c, action: "skipped", reason: `Score paradox skip — AI score ${c.aiScore} ≥ ${SCORE_SKIP_THRESHOLD} (manipulation signal)` });
           continue;
         }
 
