@@ -313,10 +313,10 @@ export default function GraduationSniper() {
             <span>{status.wsReconnects > 0 ? `${status.wsReconnects} reconnect${status.wsReconnects > 1 ? "s" : ""}` : "Stable connection"}</span>
             <span>·</span>
             <span>{status.enabled ? "Sniping enabled" : "Sniping paused"}</span>
-            {!process.env["HELIUS_API_KEY"] && (
+            {!status?.wsConnected && !statusLoading && (
               <>
                 <span>·</span>
-                <span className="text-amber-400/70">Set HELIUS_API_KEY to activate</span>
+                <span className="text-amber-400/70">Check HELIUS_API_KEY on server</span>
               </>
             )}
           </div>

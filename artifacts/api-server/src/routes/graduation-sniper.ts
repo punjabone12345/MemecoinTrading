@@ -3,27 +3,27 @@ import { graduationSniperService } from "../services/graduation-sniper.service.j
 
 const router = Router();
 
-router.get("/api/sniper/status", (_req, res) => {
+router.get("/sniper/status", (_req, res) => {
   res.json({ success: true, data: graduationSniperService.getStatus() });
 });
 
-router.get("/api/sniper/positions", (_req, res) => {
+router.get("/sniper/positions", (_req, res) => {
   res.json({ success: true, data: graduationSniperService.getOpenPositions() });
 });
 
-router.get("/api/sniper/history", (_req, res) => {
+router.get("/sniper/history", (_req, res) => {
   res.json({ success: true, data: graduationSniperService.getClosedPositions() });
 });
 
-router.get("/api/sniper/events", (_req, res) => {
+router.get("/sniper/events", (_req, res) => {
   res.json({ success: true, data: graduationSniperService.getEvents() });
 });
 
-router.get("/api/sniper/config", (_req, res) => {
+router.get("/sniper/config", (_req, res) => {
   res.json({ success: true, data: graduationSniperService.getConfig() });
 });
 
-router.patch("/api/sniper/config", async (req, res) => {
+router.patch("/sniper/config", async (req, res) => {
   try {
     const body = req.body as Record<string, unknown>;
     const allowed = [
