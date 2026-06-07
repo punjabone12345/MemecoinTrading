@@ -3,6 +3,7 @@ import axios from "axios";
 import { logger } from "../lib/logger.js";
 import { query, execute } from "../lib/db.js";
 import { blacklistService } from "./blacklist.service.js";
+import { sendTelegram, isTelegramConfigured, toIST } from "../lib/telegram.js";
 
 // ── Constants ────────────────────────────────────────────────────────────────
 const MIGRATION_WALLET   = "39azUYFWPz3VHgKCf3VChUwbpURdCHRxjWVowf5jUJjg";
@@ -16,6 +17,14 @@ const CONFIG_KEY         = "sniper_config";
 
 function uid(): string {
   return `snp-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+}
+
+function fmtTgPrice(p: number): string {
+  if (p <= 0) return "0";
+  if (p < 0.000001) return p.toExponential(3);
+  if (p < 0.0001)   return p.toFixed(8);
+  if (p < 0.01)     return p.toFixed(6);
+  return p.toFixed(4);
 }
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -483,6 +492,21 @@ class GraduationSniperService {
       { mint, symbol, entryPrice: price, sizeSol: cfg.positionSizeSol, sl: pos.effectiveSlPrice },
       "Graduation sniper: paper position entered",
     );
+
+    if (isTelegramConfigured()) {
+      void sendTelegram(
+        `🎯 <b>SNIPER ENTRY (PAPER)</b>\n` +
+        `──────────────────────\n` +
+        `🪙 Token: <b>${symbol}</b> — ${name}\n` +
+        `📋 CA: <code>${mint}</code>\n` +
+        `💵 Entry: <b>$${fmtTgPrice(price)}</b>\n` +
+        `💰 Size: <b>${cfg.positionSizeSol} SOL</b> (paper)\n` +
+        `🛡️ SL: $${fmtTgPrice(pos.effectiveSlPrice)} (−${cfg.slPct}%)\n` +
+        `🎯 TP1: $${fmtTgPrice(price * (1 + cfg.tp1Pct / 100))} (+${cfg.tp1Pct}%)\n` +
+        `🎯 TP2: $${fmtTgPrice(price * (1 + cfg.tp2Pct / 100))} (+${cfg.tp2Pct}%)\n` +
+        `🕐 ${toIST(new Date())}`,
+      );
+    }
   }
 
   private closePosition(pos: SniperPosition, reason: string, exitPrice: number): void {
@@ -509,6 +533,29 @@ class GraduationSniperService {
       { mint: pos.mint, symbol: pos.symbol, reason, exitPrice, pnl: pos.realizedPnlSol },
       "Graduation sniper: position closed",
     );
+
+    if (isTelegramConfigured()) {
+      const isWin  = pos.realizedPnlSol > 0;
+      const emoji  = isWin ? "✅" : "❌";
+      const pnlStr = `${pos.realizedPnlSol >= 0 ? "+" : ""}${pos.realizedPnlSol.toFixed(4)} SOL`;
+      const holdMs = pos.closedAt! - pos.entryAt;
+      const holdStr = holdMs < 60_000
+        ? `${Math.floor(holdMs / 1000)}s`
+        : holdMs < 3_600_000
+        ? `${Math.floor(holdMs / 60_000)}m`
+        : `${(holdMs / 3_600_000).toFixed(1)}h`;
+      void sendTelegram(
+        `${emoji} <b>SNIPER CLOSED (PAPER)</b>\n` +
+        `──────────────────────\n` +
+        `🪙 Token: <b>${pos.symbol}</b>\n` +
+        `📋 CA: <code>${pos.mint}</code>\n` +
+        `📊 Reason: <b>${reason}</b>\n` +
+        `💵 Entry: $${fmtTgPrice(pos.entryPrice)} → Exit: $${fmtTgPrice(exitPrice)}\n` +
+        `💰 PNL: <b>${pnlStr}</b>\n` +
+        `⏱️ Held: ${holdStr}\n` +
+        `🕐 ${toIST(new Date())}`,
+      );
+    }
   }
 
   private partialClose(pos: SniperPosition, closeOriginalFraction: number, reason: string, currentPrice: number): void {
@@ -575,9 +622,22 @@ class GraduationSniperService {
     if (!pos.tp1Hit && price >= tp1Price) {
       pos.tp1Hit = true;
       this.partialClose(pos, tp1Frac, `TP1 +${cfg.tp1Pct}% — sell ${cfg.tp1ClosePct}%`, price);
-      // Move SL to breakeven
       pos.effectiveSlPrice = pos.entryPrice;
       logger.info({ mint, symbol: pos.symbol, price }, "Graduation sniper: TP1 hit — SL moved to breakeven");
+      if (isTelegramConfigured()) {
+        const partialPnl = (price / pos.entryPrice - 1) * pos.sizeSol * tp1Frac;
+        void sendTelegram(
+          `🟢 <b>SNIPER TP1 HIT (PAPER)</b>\n` +
+          `──────────────────────\n` +
+          `🪙 Token: <b>${pos.symbol}</b>\n` +
+          `📋 CA: <code>${pos.mint}</code>\n` +
+          `💵 Price: <b>$${fmtTgPrice(price)}</b> (+${cfg.tp1Pct}%)\n` +
+          `💰 Sold ${cfg.tp1ClosePct}% → ~<b>+${partialPnl.toFixed(4)} SOL</b>\n` +
+          `🛡️ SL moved to breakeven ($${fmtTgPrice(pos.entryPrice)})\n` +
+          `📦 Remaining: ${((pos.remainingFraction) * 100).toFixed(0)}% position\n` +
+          `🕐 ${toIST(new Date())}`,
+        );
+      }
     }
 
     // TP2
@@ -586,6 +646,20 @@ class GraduationSniperService {
       pos.trailingHigh  = price;
       this.partialClose(pos, tp2Frac, `TP2 +${cfg.tp2Pct}% — sell ${cfg.tp2ClosePct}%`, price);
       logger.info({ mint, symbol: pos.symbol, price }, "Graduation sniper: TP2 hit — runner active");
+      if (isTelegramConfigured()) {
+        const partialPnl = (price / pos.entryPrice - 1) * pos.sizeSol * tp2Frac;
+        void sendTelegram(
+          `🚀 <b>SNIPER TP2 HIT (PAPER)</b>\n` +
+          `──────────────────────\n` +
+          `🪙 Token: <b>${pos.symbol}</b>\n` +
+          `📋 CA: <code>${pos.mint}</code>\n` +
+          `💵 Price: <b>$${fmtTgPrice(price)}</b> (+${cfg.tp2Pct}%)\n` +
+          `💰 Sold ${cfg.tp2ClosePct}% → ~<b>+${partialPnl.toFixed(4)} SOL</b>\n` +
+          `🎯 Runner active — trailing stop ${cfg.trailingStopPct}% below peak\n` +
+          `📦 Remaining: ${((pos.remainingFraction) * 100).toFixed(0)}% position\n` +
+          `🕐 ${toIST(new Date())}`,
+        );
+      }
     }
 
     this.updateLivePnl(pos);
