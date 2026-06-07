@@ -324,19 +324,30 @@ class GraduationSniperService {
   // ── Graduation processing ─────────────────────────────────────────────────
 
   private async processGraduation(signature: string): Promise<void> {
+    const detectedAt = Date.now();
     try {
       const mint = await this.extractMintFromTx(signature);
       if (!mint) {
-        logger.debug({ signature }, "Graduation sniper: could not extract mint — skipping");
+        logger.warn({ signature }, "Graduation sniper: could not extract mint after all retries — skipping");
+        // Record a visible event so the UI shows the failed extraction
+        this.addEvent({
+          id: uid(),
+          detectedAt,
+          mint: "unknown",
+          symbol: "???",
+          action: "skipped",
+          skipReason: "Could not extract mint from TX (check logs)",
+          txSignature: signature,
+        });
         return;
       }
 
       const skipReason = this.checkSkipReason(mint);
-      const eventBase  = { id: uid(), detectedAt: Date.now(), mint, symbol: mint.slice(0, 8), txSignature: signature };
+      const eventBase  = { id: uid(), detectedAt, mint, symbol: mint.slice(0, 8), txSignature: signature };
 
       if (skipReason) {
         this.addEvent({ ...eventBase, action: "skipped", skipReason });
-        logger.debug({ mint, skipReason }, "Graduation sniper: skipped");
+        logger.info({ mint, skipReason }, "Graduation sniper: skipped");
         return;
       }
 
@@ -346,6 +357,7 @@ class GraduationSniperService {
       const priceData = await this.fetchPrice(mint);
       if (!priceData) {
         this.addEvent({ ...eventBase, action: "skipped", skipReason: "Price not yet on DexScreener" });
+        logger.info({ mint }, "Graduation sniper: skipped — price not on DexScreener");
         return;
       }
 
@@ -378,43 +390,88 @@ class GraduationSniperService {
     const apiKey = process.env["HELIUS_API_KEY"];
     if (!apiKey) return null;
 
-    try {
-      const res = await axios.post<{
-        result: {
-          transaction: {
-            message: {
-              accountKeys: Array<{ pubkey: string } | string>;
+    // Helius needs a moment to index the transaction after the WS notification fires.
+    // Retry up to 4 times with increasing delays: 1s, 2s, 3s, 4s.
+    const delays = [1_000, 2_000, 3_000, 4_000];
+
+    for (let attempt = 0; attempt < delays.length; attempt++) {
+      await new Promise((r) => setTimeout(r, delays[attempt]!));
+
+      try {
+        type AccountKey = { pubkey: string; signer?: boolean; writable?: boolean } | string;
+        type TxResult = {
+          result: {
+            transaction: {
+              message: {
+                accountKeys: AccountKey[];
+              };
+            };
+            meta?: {
+              loadedAddresses?: {
+                writable: string[];
+                readonly: string[];
+              };
             };
           } | null;
-        } | null;
-      }>(
-        `https://mainnet.helius-rpc.com/?api-key=${apiKey}`,
-        {
-          jsonrpc: "2.0",
-          id:      1,
-          method:  "getTransaction",
-          params:  [signature, { encoding: "jsonParsed", maxSupportedTransactionVersion: 0 }],
-        },
-        { timeout: 10_000 },
-      );
+        };
 
-      const tx = res.data?.result?.transaction;
-      if (!tx) return null;
+        const res = await axios.post<TxResult>(
+          `https://mainnet.helius-rpc.com/?api-key=${apiKey}`,
+          {
+            jsonrpc: "2.0",
+            id:      1,
+            method:  "getTransaction",
+            params:  [signature, { encoding: "jsonParsed", maxSupportedTransactionVersion: 0 }],
+          },
+          { timeout: 12_000 },
+        );
 
-      const accountKeys: string[] = (tx.message.accountKeys ?? []).map((k) =>
-        typeof k === "string" ? k : (k as { pubkey: string }).pubkey,
-      );
+        const txResult = res.data?.result;
+        if (!txResult?.transaction) {
+          logger.info(
+            { signature, attempt: attempt + 1 },
+            "Graduation sniper: getTransaction returned null — will retry if attempts remain",
+          );
+          continue; // retry
+        }
 
-      // Pump.fun token mints end with "pump" and are not the program ID itself
-      const mint = accountKeys.find(
-        (k) => k.endsWith("pump") && k !== PUMPFUN_PROGRAM_ID && k !== MIGRATION_WALLET && k.length >= 32,
-      );
+        // Collect all account keys including those from address lookup tables
+        const staticKeys: string[] = (txResult.transaction.message.accountKeys ?? []).map((k) =>
+          typeof k === "string" ? k : (k as { pubkey: string }).pubkey,
+        );
+        const loadedWritable: string[] = txResult.meta?.loadedAddresses?.writable ?? [];
+        const loadedReadonly: string[] = txResult.meta?.loadedAddresses?.readonly ?? [];
+        const allKeys = [...staticKeys, ...loadedWritable, ...loadedReadonly];
 
-      return mint ?? null;
-    } catch (err) {
-      logger.warn({ signature, err: (err as Error).message }, "Graduation sniper: getTransaction failed");
-      return null;
+        logger.info(
+          { signature, attempt: attempt + 1, totalKeys: allKeys.length, keys: allKeys.slice(0, 10) },
+          "Graduation sniper: inspecting transaction account keys",
+        );
+
+        // Pump.fun token mints end with "pump" and are not the program ID or migration wallet
+        const mint = allKeys.find(
+          (k) => k.endsWith("pump") && k !== PUMPFUN_PROGRAM_ID && k !== MIGRATION_WALLET && k.length >= 32,
+        );
+
+        if (mint) {
+          logger.info({ signature, mint, attempt: attempt + 1 }, "Graduation sniper: mint extracted");
+          return mint;
+        }
+
+        logger.info(
+          { signature, attempt: attempt + 1, allKeys },
+          "Graduation sniper: no pump mint found in account keys — will retry if attempts remain",
+        );
+      } catch (err) {
+        logger.warn(
+          { signature, attempt: attempt + 1, err: (err as Error).message },
+          "Graduation sniper: getTransaction request failed",
+        );
+      }
     }
+
+    logger.warn({ signature }, "Graduation sniper: exhausted all retries — could not extract mint");
+    return null;
   }
 
   private async fetchPrice(mint: string): Promise<{ price: number; symbol: string; name: string } | null> {
