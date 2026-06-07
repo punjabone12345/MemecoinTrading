@@ -390,6 +390,8 @@ class GraduationSniperService {
     const apiKey = process.env["HELIUS_API_KEY"];
     if (!apiKey) return null;
 
+    const SOL_MINT = "So11111111111111111111111111111111111111112";
+
     // Helius needs a moment to index the transaction after the WS notification fires.
     // Retry up to 4 times with increasing delays: 1s, 2s, 3s, 4s.
     const delays = [1_000, 2_000, 3_000, 4_000];
@@ -398,19 +400,12 @@ class GraduationSniperService {
       await new Promise((r) => setTimeout(r, delays[attempt]!));
 
       try {
-        type AccountKey = { pubkey: string; signer?: boolean; writable?: boolean } | string;
+        type TokenBalance = { mint: string; accountIndex: number };
         type TxResult = {
           result: {
-            transaction: {
-              message: {
-                accountKeys: AccountKey[];
-              };
-            };
             meta?: {
-              loadedAddresses?: {
-                writable: string[];
-                readonly: string[];
-              };
+              preTokenBalances?:  TokenBalance[];
+              postTokenBalances?: TokenBalance[];
             };
           } | null;
         };
@@ -427,40 +422,38 @@ class GraduationSniperService {
         );
 
         const txResult = res.data?.result;
-        if (!txResult?.transaction) {
+        if (!txResult) {
           logger.info(
             { signature, attempt: attempt + 1 },
             "Graduation sniper: getTransaction returned null — will retry if attempts remain",
           );
-          continue; // retry
+          continue;
         }
 
-        // Collect all account keys including those from address lookup tables
-        const staticKeys: string[] = (txResult.transaction.message.accountKeys ?? []).map((k) =>
-          typeof k === "string" ? k : (k as { pubkey: string }).pubkey,
-        );
-        const loadedWritable: string[] = txResult.meta?.loadedAddresses?.writable ?? [];
-        const loadedReadonly: string[] = txResult.meta?.loadedAddresses?.readonly ?? [];
-        const allKeys = [...staticKeys, ...loadedWritable, ...loadedReadonly];
+        // The graduated token mint appears in pre/post token balances.
+        // Filter out SOL (wrapped) and pick the non-SOL mint — that's the graduating token.
+        const allBalances = [
+          ...(txResult.meta?.preTokenBalances  ?? []),
+          ...(txResult.meta?.postTokenBalances ?? []),
+        ];
+
+        const mint = allBalances
+          .map((b) => b.mint)
+          .find((m) => m && m !== SOL_MINT);
 
         logger.info(
-          { signature, attempt: attempt + 1, totalKeys: allKeys.length, keys: allKeys.slice(0, 10) },
-          "Graduation sniper: inspecting transaction account keys",
-        );
-
-        // Pump.fun token mints end with "pump" and are not the program ID or migration wallet
-        const mint = allKeys.find(
-          (k) => k.endsWith("pump") && k !== PUMPFUN_PROGRAM_ID && k !== MIGRATION_WALLET && k.length >= 32,
+          { signature, attempt: attempt + 1, mint: mint ?? "none", balanceCount: allBalances.length },
+          "Graduation sniper: token balance scan",
         );
 
         if (mint) {
-          logger.info({ signature, mint, attempt: attempt + 1 }, "Graduation sniper: mint extracted");
+          logger.info({ signature, mint, attempt: attempt + 1 }, "Graduation sniper: mint extracted ✅");
           return mint;
         }
 
         logger.info(
-          { signature, attempt: attempt + 1, allKeys },
-          "Graduation sniper: no pump mint found in account keys — will retry if attempts remain",
+          { signature, attempt: attempt + 1 },
+          "Graduation sniper: no non-SOL mint in token balances — will retry if attempts remain",
         );
       } catch (err) {
         logger.warn(
