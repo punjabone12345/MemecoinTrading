@@ -7,7 +7,6 @@ import { paperTradingService } from "./services/paper-trading.service.js";
 import { autoTraderService } from "./services/auto-trader.service.js";
 import { startCommandPolling, registerCommandHandler, toIST, sendTelegram, isTelegramConfigured } from "./lib/telegram.js";
 import { lossJournalService } from "./services/loss-journal.service.js";
-import { rssMonitorService } from "./services/rss-monitor.service.js";
 
 const rawPort = process.env["PORT"] ?? "8080";
 const port = Number(rawPort);
@@ -362,7 +361,6 @@ server.listen(port, () => {
   scannerService.start();
   paperTradingService.startStopChecker();
   autoTraderService.start();
-  rssMonitorService.start();
   // Heartbeat disabled — user preference: no hourly Telegram updates
   // autoTraderService.startHeartbeat();
   startCommandPolling();

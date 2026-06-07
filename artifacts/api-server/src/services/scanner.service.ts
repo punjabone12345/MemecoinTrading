@@ -32,6 +32,12 @@ const TRENDING_QUERIES = [
   "giga", "sigma", "based", "degen", "wagmi", "send", "gg",
 ];
 
+// ─── Pump.fun graduated tokens source ─────────────────────────────────────────
+const PUMPFUN_API          = "https://frontend-api.pump.fun/coins";
+const PUMPFUN_INTERVAL_MS  = 3 * 60 * 1_000;  // 3 min — faster pool refresh
+const PUMPFUN_PAGES        = 5;               // 5 pages × 50 = 250 tokens per cycle
+const PUMPFUN_PAGE_SIZE    = 50;
+
 // ─── Pool lifecycle ───────────────────────────────────────────────────────────
 const CLEANUP_INTERVAL_MS  = 2 * 60 * 1_000;
 const TOKEN_TTL_MS         = 45 * 60 * 1_000;   // keep tokens for 45 min — larger pool at any time
@@ -183,12 +189,14 @@ class ScannerService {
   private intervalId: ReturnType<typeof setInterval> | null = null;
   private newPairsIntervalId: ReturnType<typeof setInterval> | null = null;
   private gtIntervalId: ReturnType<typeof setInterval> | null = null;
+  private pumpFunIntervalId: ReturnType<typeof setInterval> | null = null;
   private cleanupIntervalId: ReturnType<typeof setInterval> | null = null;
   private broadcaster: ((tokens: ScannedToken[]) => void) | null = null;
   private alreadyAlertedHighScore: Set<string> = new Set();
   private isScanning = false;
   private isTrendingScanning = false;
   private isGtScanning = false;
+  private isPumpFunScanning = false;
   private scanCount = 0;
   private totalExpired = 0;
   private totalSkippedStale = 0;
@@ -551,16 +559,19 @@ class ScannerService {
       const GT_BASE = "https://api.geckoterminal.com/api/v2";
       const GT_HEADERS = { Accept: "application/json;version=20230302" };
 
-      // Fetch new pools (pages 1-3) AND trending pools in parallel
-      const [p1, p2, p3, trend] = await Promise.allSettled([
+      // Fetch new pools (pages 1-5) AND trending pools (pages 1-2) in parallel
+      const [p1, p2, p3, p4, p5, trend1, trend2] = await Promise.allSettled([
         axios.get<GtResponse>(`${GT_BASE}/networks/solana/new_pools?page=1`, { timeout: 12_000, headers: GT_HEADERS }),
         axios.get<GtResponse>(`${GT_BASE}/networks/solana/new_pools?page=2`, { timeout: 12_000, headers: GT_HEADERS }),
         axios.get<GtResponse>(`${GT_BASE}/networks/solana/new_pools?page=3`, { timeout: 12_000, headers: GT_HEADERS }),
+        axios.get<GtResponse>(`${GT_BASE}/networks/solana/new_pools?page=4`, { timeout: 12_000, headers: GT_HEADERS }),
+        axios.get<GtResponse>(`${GT_BASE}/networks/solana/new_pools?page=5`, { timeout: 12_000, headers: GT_HEADERS }),
         axios.get<GtResponse>(`${GT_BASE}/networks/solana/trending_pools?page=1`, { timeout: 12_000, headers: GT_HEADERS }),
+        axios.get<GtResponse>(`${GT_BASE}/networks/solana/trending_pools?page=2`, { timeout: 12_000, headers: GT_HEADERS }),
       ]);
 
       const allGtPools: GtPool[] = [];
-      for (const r of [p1, p2, p3, trend]) {
+      for (const r of [p1, p2, p3, p4, p5, trend1, trend2]) {
         if (r.status === "fulfilled" && Array.isArray(r.value.data?.data)) {
           allGtPools.push(...r.value.data.data);
         }
@@ -594,6 +605,81 @@ class ScannerService {
     }
   }
 
+  // ── Source 7: Pump.fun graduated tokens ────────────────────────────────────
+  // Fetches the most recently traded pump.fun tokens (graduated = raydium_pool set),
+  // batch-resolves their contract addresses on DexScreener, and adds them to the pool.
+  // Runs every 3 min — 5 pages × 50 = up to 250 extra CAs per cycle.
+  private async scanPumpFun(): Promise<void> {
+    if (this.isPumpFunScanning) return;
+    this.isPumpFunScanning = true;
+    try {
+      type PumpCoin = {
+        mint: string;
+        raydium_pool?: string | null;
+        complete?: boolean;
+        last_trade_unix_time?: number;
+      };
+
+      // Fetch all pages in parallel
+      const pageRequests = Array.from({ length: PUMPFUN_PAGES }, (_, i) =>
+        axios.get<PumpCoin[]>(
+          `${PUMPFUN_API}?limit=${PUMPFUN_PAGE_SIZE}&offset=${i * PUMPFUN_PAGE_SIZE}&sort=last_trade_at&order=DESC&includeNsfw=true`,
+          { timeout: 10_000 },
+        ),
+      );
+      const pageResults = await Promise.allSettled(pageRequests);
+
+      // Collect graduated token CAs (have a Raydium pool = listed on DEX)
+      const graduatedMints = new Set<string>();
+      for (const r of pageResults) {
+        if (r.status !== "fulfilled" || !Array.isArray(r.value.data)) continue;
+        for (const coin of r.value.data) {
+          if (coin.mint && coin.raydium_pool) {
+            graduatedMints.add(coin.mint);
+          }
+        }
+      }
+
+      if (graduatedMints.size === 0) return;
+
+      // Batch-resolve on DexScreener (30 per chunk)
+      const mints = Array.from(graduatedMints);
+      const dexPairs = await this.fetchPairsForTokenAddresses(mints);
+
+      let newCount = 0;
+      for (const pair of dexPairs) {
+        const liq = pair.liquidity?.usd ?? 0;
+        if (liq < MIN_POOL_LIQUIDITY_USD) continue;
+        if (pair.pairCreatedAt && (Date.now() - pair.pairCreatedAt) > MAX_POOL_AGE_MS) continue;
+        const priceUsd = parseFloat(pair.priceUsd) || 0;
+        if (priceUsd <= 0) continue;
+
+        const token = mapPairToToken(pair);
+        const isNew = !this.tokens.has(token.pairAddress);
+        this.tokens.set(token.pairAddress, token);
+        if (isNew) newCount++;
+
+        if (token.aiScore >= HIGH_AI_SCORE_THRESHOLD && !this.alreadyAlertedHighScore.has(token.pairAddress)) {
+          this.alreadyAlertedHighScore.add(token.pairAddress);
+          alertsService.highAiScore(token.symbol, token.aiScore, token.pairAddress);
+          setTimeout(() => this.alreadyAlertedHighScore.delete(token.pairAddress), 300_000);
+        }
+      }
+
+      if (newCount > 0) {
+        logger.debug(
+          { graduated: graduatedMints.size, dexPairs: dexPairs.length, newCount, total: this.tokens.size },
+          "Scanner pump.fun: graduated tokens ingested",
+        );
+        this.broadcaster?.(this.getAll());
+      }
+    } catch (err) {
+      logger.warn({ err: (err as Error).message }, "Scanner pump.fun: error");
+    } finally {
+      this.isPumpFunScanning = false;
+    }
+  }
+
   // ── Lifecycle ──────────────────────────────────────────────────────────────
 
   start() {
@@ -601,24 +687,28 @@ class ScannerService {
     void this.scan();
     void this.scanTrending();
     void this.scanGeckoTerminal();
-    this.intervalId       = setInterval(() => void this.scan(),               SCAN_INTERVAL_MS);
-    this.newPairsIntervalId = setInterval(() => void this.scanTrending(),     NEW_PAIRS_INTERVAL_MS);
-    this.gtIntervalId     = setInterval(() => void this.scanGeckoTerminal(),  GT_SCAN_INTERVAL_MS);
-    this.cleanupIntervalId = setInterval(() => this.cleanup(),                CLEANUP_INTERVAL_MS);
+    void this.scanPumpFun();
+    this.intervalId         = setInterval(() => void this.scan(),              SCAN_INTERVAL_MS);
+    this.newPairsIntervalId = setInterval(() => void this.scanTrending(),      NEW_PAIRS_INTERVAL_MS);
+    this.gtIntervalId       = setInterval(() => void this.scanGeckoTerminal(), GT_SCAN_INTERVAL_MS);
+    this.pumpFunIntervalId  = setInterval(() => void this.scanPumpFun(),       PUMPFUN_INTERVAL_MS);
+    this.cleanupIntervalId  = setInterval(() => this.cleanup(),                CLEANUP_INTERVAL_MS);
     logger.info(
       {
         intervalMs: SCAN_INTERVAL_MS,
         trendingIntervalMs: NEW_PAIRS_INTERVAL_MS,
         gtIntervalMs: GT_SCAN_INTERVAL_MS,
+        pumpFunIntervalMs: PUMPFUN_INTERVAL_MS,
         queriesPerScan: QUERIES_PER_SCAN,
         totalQueryTerms: DISCOVERY_QUERIES.length,
         trendingQueryTerms: TRENDING_QUERIES.length,
+        pumpFunPages: PUMPFUN_PAGES,
         tokenTtlMin: TOKEN_TTL_MS / 60_000,
         maxPoolAgeHours: MAX_POOL_AGE_HOURS,
         minPoolLiquidityUsd: MIN_POOL_LIQUIDITY_USD,
-        strategy: "DexScreener(30q/5s) + curated + trending(10q/8s) + GeckoTerminal-new+trending(10s)",
+        strategy: "DexScreener(30q/5s) + curated + trending(10q/8s) + GeckoTerminal(5+2 pages/10s) + PumpFun(250/3min)",
       },
-      "Scanner started — MAXIMUM COVERAGE MODE (DexScreener + GeckoTerminal dual-source)",
+      "Scanner started — MAXIMUM COVERAGE MODE (DexScreener + GeckoTerminal + PumpFun)",
     );
   }
 
@@ -626,6 +716,7 @@ class ScannerService {
     if (this.intervalId)        { clearInterval(this.intervalId);        this.intervalId = null; }
     if (this.newPairsIntervalId){ clearInterval(this.newPairsIntervalId); this.newPairsIntervalId = null; }
     if (this.gtIntervalId)      { clearInterval(this.gtIntervalId);      this.gtIntervalId = null; }
+    if (this.pumpFunIntervalId) { clearInterval(this.pumpFunIntervalId); this.pumpFunIntervalId = null; }
     if (this.cleanupIntervalId) { clearInterval(this.cleanupIntervalId); this.cleanupIntervalId = null; }
   }
 

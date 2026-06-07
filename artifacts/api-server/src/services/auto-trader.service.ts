@@ -153,19 +153,19 @@ const DEFAULT_CONFIG: AutoTraderConfig = {
   minConfidence: 28,            // relaxed for speed entry strategy
 
   // ── Liquidity & volume ────────────────────────────────────────────────────
-  minLiquidityUsd:  10_000,     // $10K floor — speed trading, enter early
-  minVolume24hUsd:   8_000,     // lowered for early-stage tokens with real momentum
-  minVolume1hUsd:    2_000,     // lowered to catch tokens just gaining traction
+  minLiquidityUsd:  12_000,     // $12K floor
+  minVolume24hUsd:  12_000,     // 24h volume floor
+  minVolume1hUsd:    3_000,     // 1h volume floor
 
   // ── Momentum ─────────────────────────────────────────────────────────────
-  minBuyRatio1h:    0.55,       // 55% buys — organic buy pressure required
-  minPriceChange1h: 0,          // no forced positive 1h momentum — consolidations are valid entries
+  minBuyRatio1h:    0.57,       // 57% buys — organic buy pressure required
+  minPriceChange1h: 3,          // minimum 3% positive 1h momentum
   maxPriceChange1h: 300,        // pump.fun grads regularly hit +150-400% in hour 1 — don't miss them
-  minTransactions24h: 40,       // lower bar for newer/smaller tokens
+  minTransactions24h: 30,       // lower bar for newer/smaller tokens
   minUniqueBuyers:   8,         // lower proxy threshold for very fresh tokens
 
   // ── Market cap sweet spot ────────────────────────────────────────────────
-  minMcapUsd:   10_000,         // micro-caps can 10x — don't exclude
+  minMcapUsd:    8_000,         // micro-caps can 10x — don't exclude
   maxMcapUsd:  800_000,         // wider ceiling for late-stage early gems
 
   // ── Pair age ──────────────────────────────────────────────────────────────
@@ -185,7 +185,7 @@ const DEFAULT_CONFIG: AutoTraderConfig = {
   dailyLossPauseHours:      12,  // 12h pause on daily cap
 
   // Bump this number whenever filter defaults change — forces all saved configs to migrate
-  schemaVersion: 12,
+  schemaVersion: 13,
 };
 
 // ─── Anti-rug + quality filter ────────────────────────────────────────────────

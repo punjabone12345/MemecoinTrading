@@ -8,7 +8,6 @@ import watchlistRouter from "./watchlist.js";
 import alertsRouter from "./alerts.js";
 import autoTraderRouter from "./auto-trader.js";
 import lossJournalRouter from "./loss-journal.js";
-import rssMonitorRouter from "./rss-monitor.js";
 
 const router: IRouter = Router();
 
@@ -21,6 +20,5 @@ router.use(watchlistRouter);
 router.use(alertsRouter);
 router.use(autoTraderRouter);
 router.use(lossJournalRouter);
-router.use(rssMonitorRouter);
 
 export default router;
