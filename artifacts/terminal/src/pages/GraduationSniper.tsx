@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Target, Wifi, WifiOff, TrendingUp, TrendingDown, RefreshCw, Settings, X, CheckCircle2, XCircle, Clock, Zap, Trash2, Pencil, RotateCcw, AlertTriangle, Download, ExternalLink } from "lucide-react";
+import { Target, Wifi, WifiOff, TrendingUp, TrendingDown, RefreshCw, Settings, X, CheckCircle2, XCircle, Clock, Zap, Trash2, Pencil, RotateCcw, AlertTriangle, Download, ExternalLink, Activity } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -497,10 +497,13 @@ export default function GraduationSniper() {
   const { data: history = []   } = useSniperHistory();
   const { data: events = []    } = useSniperEvents();
 
-  const config   = status?.config;
-  const totalPnl = status?.totalRealizedPnlSol ?? 0;
-  const pnlPos   = totalPnl >= 0;
-  const winRate  = status && (status.wins + status.losses) > 0
+  const config        = status?.config;
+  const totalPnl      = status?.totalRealizedPnlSol ?? 0;
+  const unrealizedPnl = status?.totalUnrealizedPnlSol ?? 0;
+  const combinedPnl   = status?.totalCombinedPnlSol ?? 0;
+  const pnlPos        = totalPnl >= 0;
+  const combinedPos   = combinedPnl >= 0;
+  const winRate       = status && (status.wins + status.losses) > 0
     ? Math.round((status.wins / (status.wins + status.losses)) * 100)
     : null;
 
@@ -550,6 +553,48 @@ export default function GraduationSniper() {
       </div>
 
       <div className="px-3 py-4 space-y-4">
+
+        {/* ── Live Combined P&L Banner ── */}
+        <div className={`rounded-xl border p-4 ${combinedPos ? "border-emerald-500/25 bg-gradient-to-br from-emerald-500/8 to-transparent" : "border-red-500/25 bg-gradient-to-br from-red-500/8 to-transparent"}`}>
+          <div className="flex items-center gap-1.5 mb-3">
+            <Activity className={`w-3.5 h-3.5 ${combinedPos ? "text-emerald-400" : "text-red-400"}`} />
+            <span className="text-[9px] font-bold uppercase tracking-widest text-white/40">Live Portfolio P&amp;L</span>
+            <span className="text-[9px] text-white/20 ml-auto">updates every 10s</span>
+          </div>
+          <div className="grid grid-cols-3 gap-3">
+            {/* Realized */}
+            <div className="flex flex-col gap-0.5">
+              <span className="text-[9px] text-white/35 uppercase tracking-wide">Realized</span>
+              <span className={`text-sm font-black leading-none ${pnlPos ? "text-emerald-400" : "text-red-400"}`}>
+                {pnlPos ? "+" : ""}{fmt(totalPnl, 4)}
+              </span>
+              <span className="text-[9px] text-white/25">SOL · closed + TPs</span>
+            </div>
+            {/* Unrealized */}
+            <div className="flex flex-col gap-0.5">
+              <span className="text-[9px] text-white/35 uppercase tracking-wide">Unrealized</span>
+              <span className={`text-sm font-black leading-none ${unrealizedPnl >= 0 ? "text-sky-400" : "text-orange-400"}`}>
+                {unrealizedPnl >= 0 ? "+" : ""}{fmt(unrealizedPnl, 4)}
+              </span>
+              <span className="text-[9px] text-white/25">SOL · {status?.openCount ?? 0} open pos</span>
+            </div>
+            {/* Combined */}
+            <div className="flex flex-col gap-0.5">
+              <span className="text-[9px] text-white/35 uppercase tracking-wide">Combined</span>
+              <span className={`text-base font-black leading-none ${combinedPos ? "text-emerald-300" : "text-red-300"}`}>
+                {combinedPos ? "+" : ""}{fmt(combinedPnl, 4)}
+              </span>
+              <span className="text-[9px] text-white/25">SOL · total</span>
+            </div>
+          </div>
+          {/* Balance context */}
+          <div className="mt-3 pt-2.5 border-t border-white/6 flex items-center justify-between text-[9px] text-white/30">
+            <span>Starting balance: <span className="text-white/50 font-semibold">{fmt(config?.virtualBalanceSol ?? 10, 1)} SOL</span></span>
+            <span>Current wallet: <span className="text-amber-400/80 font-semibold">{fmt(status?.virtualBalance ?? 0, 3)} SOL</span></span>
+            <span>In positions: <span className="text-white/50 font-semibold">{fmt(Math.max(0, (config?.virtualBalanceSol ?? 10) + totalPnl - (status?.virtualBalance ?? 0)), 3)} SOL</span></span>
+          </div>
+        </div>
+
         {/* ── Stats grid ── */}
         <div className="grid grid-cols-3 gap-2">
           <StatCard label="Virtual Balance" value={`${fmt(status?.virtualBalance ?? 0, 3)} SOL`} sub="paper wallet"
@@ -558,7 +603,7 @@ export default function GraduationSniper() {
             icon={<RefreshCw className="w-3.5 h-3.5 text-blue-400" />} accent="blue" />
           <StatCard label="Open Positions" value={String(status?.openCount ?? 0)} sub={`of ${config?.maxOpenPositions ?? 5} max`}
             icon={<Target className="w-3.5 h-3.5 text-violet-400" />} accent="violet" />
-          <StatCard label="Realized PNL" value={`${pnlPos ? "+" : ""}${fmt(totalPnl, 4)} SOL`} sub="all closed trades"
+          <StatCard label="Realized PNL" value={`${pnlPos ? "+" : ""}${fmt(totalPnl, 4)} SOL`} sub="closed + partial TPs"
             icon={pnlPos ? <TrendingUp className="w-3.5 h-3.5 text-emerald-400" /> : <TrendingDown className="w-3.5 h-3.5 text-red-400" />}
             accent={pnlPos ? "green" : "red"} valueColor={pnlPos ? "text-emerald-400" : "text-red-400"} />
           <StatCard label="Win Rate" value={winRate !== null ? `${winRate}%` : "—"} sub={`${status?.wins ?? 0}W / ${status?.losses ?? 0}L`}

@@ -131,6 +131,8 @@ export interface SniperStatus {
   wins: number;
   losses: number;
   totalRealizedPnlSol: number;
+  totalUnrealizedPnlSol: number;
+  totalCombinedPnlSol: number;
   virtualBalance: number;
   openCount: number;
   config: SniperConfig;
@@ -1009,23 +1011,35 @@ class GraduationSniperService {
   // ── Getters ────────────────────────────────────────────────────────────────
 
   getStatus(): SniperStatus {
-    const closed   = this.closedPositions;
-    const wins     = closed.filter((p) => p.realizedPnlSol > 0).length;
-    const losses   = closed.filter((p) => p.realizedPnlSol <= 0).length;
-    const realized = closed.reduce((s, p) => s + p.realizedPnlSol, 0);
+    const closed     = this.closedPositions;
+    const wins       = closed.filter((p) => p.realizedPnlSol > 0).length;
+    const losses     = closed.filter((p) => p.realizedPnlSol <= 0).length;
+    const realized   = closed.reduce((s, p) => s + p.realizedPnlSol, 0);
+
+    // Live unrealized: sum of all open positions' current unrealized PNL
+    // (includes partial-close realized already credited to virtualBalance)
+    const unrealized = Array.from(this.openPositions.values()).reduce((s, p) => {
+      this.updateLivePnl(p);
+      return s + p.unrealizedPnlSol;
+    }, 0);
+
+    // Also include realized PNL from TP hits on still-open positions
+    const partialOpen = Array.from(this.openPositions.values()).reduce((s, p) => s + p.realizedPnlSol, 0);
 
     return {
-      wsConnected:          this.wsConnected,
-      wsReconnects:         this.wsReconnects,
-      enabled:              this.config.enabled,
-      graduationsToday:     this.graduationsToday,
-      tradesTotal:          this.seenMints.size,
+      wsConnected:            this.wsConnected,
+      wsReconnects:           this.wsReconnects,
+      enabled:                this.config.enabled,
+      graduationsToday:       this.graduationsToday,
+      tradesTotal:            this.seenMints.size,
       wins,
       losses,
-      totalRealizedPnlSol:  realized,
-      virtualBalance:       this.virtualBalance,
-      openCount:            this.openPositions.size,
-      config:               this.config,
+      totalRealizedPnlSol:    realized + partialOpen,
+      totalUnrealizedPnlSol:  unrealized,
+      totalCombinedPnlSol:    realized + partialOpen + unrealized,
+      virtualBalance:         this.virtualBalance,
+      openCount:              this.openPositions.size,
+      config:                 this.config,
     };
   }
 

@@ -275,6 +275,8 @@ export interface SniperStatus {
   wins: number;
   losses: number;
   totalRealizedPnlSol: number;
+  totalUnrealizedPnlSol: number;
+  totalCombinedPnlSol: number;
   virtualBalance: number;
   openCount: number;
   config: SniperConfig;
