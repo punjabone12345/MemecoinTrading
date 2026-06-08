@@ -47,7 +47,7 @@ function downloadSniperCsv(history: SniperPosition[]) {
   ];
   const rows = history.map((p) => {
     const holdMs = p.closedAt && p.entryAt ? p.closedAt - p.entryAt : 0;
-    const pnlPct = p.exitPrice && p.entryPrice ? ((p.exitPrice / p.entryPrice - 1) * 100).toFixed(2) : "";
+    const pnlPct = p.sizeSol > 0 ? (p.realizedPnlSol / p.sizeSol * 100).toFixed(2) : "";
     return [
       p.symbol,
       p.mint,
@@ -371,9 +371,8 @@ function HistoryRow({ pos }: { pos: SniperPosition }) {
 
   const win     = pos.realizedPnlSol > 0;
   const holdMs  = pos.closedAt && pos.entryAt ? pos.closedAt - pos.entryAt : 0;
-  const pnlPct  = pos.exitPrice && pos.entryPrice
-    ? ((pos.exitPrice / pos.entryPrice - 1) * 100)
-    : 0;
+  // Weighted-average return: accounts for TP1/TP2 partial closes at different prices
+  const pnlPct  = pos.sizeSol > 0 ? (pos.realizedPnlSol / pos.sizeSol) * 100 : 0;
 
   // Stage label
   const stageLabel = pos.tp2Hit

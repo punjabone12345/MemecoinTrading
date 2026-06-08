@@ -225,7 +225,9 @@ class GraduationSniperService {
     if (pos.currentPrice > 0 && pos.entryPrice > 0) {
       pos.unrealizedPnlSol = (pos.currentPrice / pos.entryPrice - 1) * pos.sizeSol * pos.remainingFraction;
       pos.totalPnlSol      = pos.realizedPnlSol + pos.unrealizedPnlSol;
-      pos.pnlPct           = pos.entryPrice > 0 ? (pos.currentPrice / pos.entryPrice - 1) * 100 : 0;
+      // Weighted-average return across all partial closes + current open slice.
+      // e.g. 40%@150% + 40%@400% + 20%@500% → 320%, NOT just 500%.
+      pos.pnlPct           = pos.sizeSol > 0 ? (pos.totalPnlSol / pos.sizeSol) * 100 : 0;
     }
   }
 
