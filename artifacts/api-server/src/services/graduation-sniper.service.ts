@@ -33,7 +33,7 @@ const RUG_DROP_ABORT_PCT    = 20;             // abort if price drops ≥ 20 % i
 
 // ── Type-A rug filters ────────────────────────────────────────────────────────
 const MIN_ENTRY_PRICE_USD   = 0.00001;        // FIX 1: skip tokens priced below $0.00001 (pre-rug micro-caps)
-const MIN_ENTRY_LIQUIDITY   = 5_000;          // FIX 2: skip tokens with < $5 000 liquidity at entry
+const MIN_POOL_SOL          = 10;             // FIX 2: skip if Raydium pool holds < 10 SOL on-chain (drained)
 
 // ── Night-session sizing (IST 23:00–04:00 = highest rug period) ───────────────
 const NIGHT_SESSION_SOL     = 0.05;           // half-size during night window
@@ -382,10 +382,9 @@ class GraduationSniperService {
   private async processGraduation(signature: string): Promise<void> {
     const detectedAt = Date.now();
     try {
-      const mint = await this.extractMintFromTx(signature);
-      if (!mint) {
+      const extracted = await this.extractMintFromTx(signature);
+      if (!extracted) {
         logger.warn({ signature }, "Graduation sniper: could not extract mint after all retries — skipping");
-        // Record a visible event so the UI shows the failed extraction
         this.addEvent({
           id: uid(),
           detectedAt,
@@ -398,6 +397,7 @@ class GraduationSniperService {
         return;
       }
 
+      const { mint, wsolVaultPubkey } = extracted;
       const skipReason = this.checkSkipReason(mint);
       const eventBase  = { id: uid(), detectedAt, mint, symbol: mint.slice(0, 8), txSignature: signature };
 
@@ -417,21 +417,13 @@ class GraduationSniperService {
         return;
       }
 
-      const { price: baselinePrice, symbol, name, liquidityUsd } = priceData;
+      const { price: baselinePrice, symbol, name } = priceData;
 
       // ── FIX 1: Minimum entry price — skip sub-$0.00001 micro-cap pre-rugs ──────
       if (baselinePrice < MIN_ENTRY_PRICE_USD) {
         const reason = `Price too low — $${baselinePrice.toExponential(3)} < $${MIN_ENTRY_PRICE_USD} (Type-A rug filter)`;
         this.addEvent({ ...eventBase, symbol, action: "skipped", skipReason: reason });
         logger.info({ mint, symbol, price: baselinePrice }, "Graduation sniper: skipped — price below minimum (FIX 1)");
-        return;
-      }
-
-      // ── FIX 2: Minimum liquidity at entry — skip thin pools ──────────────────
-      if (liquidityUsd < MIN_ENTRY_LIQUIDITY) {
-        const reason = `Liquidity too low — $${liquidityUsd.toFixed(0)} < $${MIN_ENTRY_LIQUIDITY} (Type-A rug filter)`;
-        this.addEvent({ ...eventBase, symbol, action: "skipped", skipReason: reason });
-        logger.info({ mint, symbol, liquidityUsd }, "Graduation sniper: skipped — liquidity below minimum (FIX 2)");
         return;
       }
 
@@ -442,9 +434,25 @@ class GraduationSniperService {
         return;
       }
 
-      // ── FIX 3 (tightened): monitor price for 8 s — abort if drop ≥ 20 % ──────
-      // Catches remaining Type-A rugs that slip past the price/liquidity filters.
+      // ── FIX 2 + FIX 3: wait 8 s, then check on-chain pool SOL + price drop ────
+      // Same window handles both checks — no extra delay.
       await new Promise((r) => setTimeout(r, RUG_CHECK_WAIT_MS));
+
+      // FIX 2: on-chain Raydium pool SOL balance — DexScreener has 2-5 min lag
+      // but the WSOL vault is readable immediately after graduation.
+      if (wsolVaultPubkey) {
+        const poolSol = await this.fetchOnChainPoolSol(wsolVaultPubkey);
+        if (poolSol !== null && poolSol < MIN_POOL_SOL) {
+          const reason = `Pool drained — ${poolSol.toFixed(2)} SOL < ${MIN_POOL_SOL} SOL on-chain (Type-A rug filter)`;
+          this.addEvent({ ...eventBase, symbol, action: "skipped", skipReason: reason });
+          logger.warn({ mint, symbol, poolSol, wsolVaultPubkey }, "Graduation sniper: skipped — pool already drained (FIX 2)");
+          return;
+        }
+        logger.info({ mint, symbol, poolSol, wsolVaultPubkey }, "Graduation sniper: on-chain pool SOL check passed ✅");
+      } else {
+        logger.info({ mint, symbol }, "Graduation sniper: no WSOL vault found in TX — skipping pool SOL check");
+      }
+
       const rugCheckData = await this.fetchPrice(mint);
       const entryPrice   = rugCheckData?.price ?? baselinePrice;
 
@@ -488,7 +496,7 @@ class GraduationSniperService {
     return null;
   }
 
-  private async extractMintFromTx(signature: string): Promise<string | null> {
+  private async extractMintFromTx(signature: string): Promise<{ mint: string; wsolVaultPubkey: string | null } | null> {
     const apiKey = process.env["HELIUS_API_KEY"];
     if (!apiKey) return null;
 
@@ -502,9 +510,15 @@ class GraduationSniperService {
       await new Promise((r) => setTimeout(r, delays[attempt]!));
 
       try {
-        type TokenBalance = { mint: string; accountIndex: number };
+        type TokenBalance = { mint: string; accountIndex: number; uiTokenAmount?: { uiAmount?: number | null } };
+        type AccountKey   = { pubkey: string };
         type TxResult = {
           result: {
+            transaction?: {
+              message?: {
+                accountKeys?: AccountKey[];
+              };
+            };
             meta?: {
               preTokenBalances?:  TokenBalance[];
               postTokenBalances?: TokenBalance[];
@@ -532,13 +546,15 @@ class GraduationSniperService {
           continue;
         }
 
-        // The graduated token mint appears in pre/post token balances.
-        // Filter out SOL (wrapped) and pick the non-SOL mint — that's the graduating token.
-        const allBalances = [
+        const accountKeys    = txResult.transaction?.message?.accountKeys ?? [];
+        const postBalances   = txResult.meta?.postTokenBalances ?? [];
+        const allBalances    = [
           ...(txResult.meta?.preTokenBalances  ?? []),
-          ...(txResult.meta?.postTokenBalances ?? []),
+          ...postBalances,
         ];
 
+        // The graduated token mint appears in pre/post token balances.
+        // Filter out SOL (wrapped) and pick the non-SOL mint — that's the graduating token.
         const mint = allBalances
           .map((b) => b.mint)
           .find((m) => m && m !== SOL_MINT);
@@ -549,8 +565,18 @@ class GraduationSniperService {
         );
 
         if (mint) {
-          logger.info({ signature, mint, attempt: attempt + 1 }, "Graduation sniper: mint extracted ✅");
-          return mint;
+          // Also extract the Raydium WSOL vault: the WSOL token account in postBalances with the
+          // highest balance is the pool's liquidity vault (pump.fun seeds it with ~85 SOL at graduation).
+          const wsolEntries = postBalances
+            .filter((b) => b.mint === SOL_MINT)
+            .sort((a, b) => (b.uiTokenAmount?.uiAmount ?? 0) - (a.uiTokenAmount?.uiAmount ?? 0));
+
+          const wsolVaultPubkey = wsolEntries.length > 0
+            ? (accountKeys[wsolEntries[0]!.accountIndex]?.pubkey ?? null)
+            : null;
+
+          logger.info({ signature, mint, wsolVaultPubkey, attempt: attempt + 1 }, "Graduation sniper: mint + vault extracted ✅");
+          return { mint, wsolVaultPubkey };
         }
 
         logger.info(
@@ -567,6 +593,42 @@ class GraduationSniperService {
 
     logger.warn({ signature }, "Graduation sniper: exhausted all retries — could not extract mint");
     return null;
+  }
+
+  // ── On-chain pool SOL check (FIX 2) ────────────────────────────────────────
+  // Reads the WSOL token account balance directly from Helius RPC.
+  // Returns the SOL amount held in the vault, or null if the call fails.
+  private async fetchOnChainPoolSol(wsolVaultPubkey: string): Promise<number | null> {
+    const apiKey = process.env["HELIUS_API_KEY"];
+    if (!apiKey) return null;
+
+    try {
+      type TokenAmountResult = {
+        result?: {
+          value?: {
+            uiAmount?: number | null;
+          };
+        };
+      };
+
+      const res = await axios.post<TokenAmountResult>(
+        `https://mainnet.helius-rpc.com/?api-key=${apiKey}`,
+        {
+          jsonrpc: "2.0",
+          id:      1,
+          method:  "getTokenAccountBalance",
+          params:  [wsolVaultPubkey],
+        },
+        { timeout: 6_000 },
+      );
+
+      const uiAmount = res.data?.result?.value?.uiAmount;
+      if (uiAmount == null) return null;
+      return uiAmount;
+    } catch (err) {
+      logger.warn({ wsolVaultPubkey, err: (err as Error).message }, "Graduation sniper: fetchOnChainPoolSol failed");
+      return null;
+    }
   }
 
   private async fetchPrice(mint: string): Promise<{ price: number; symbol: string; name: string; liquidityUsd: number } | null> {
