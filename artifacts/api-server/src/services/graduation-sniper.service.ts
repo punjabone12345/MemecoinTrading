@@ -29,7 +29,11 @@ const DEAD_MOVE_PCT         = 5;              // < 5 % move = "dead"
 
 // ── Instant-rug detection constants ──────────────────────────────────────────
 const RUG_CHECK_WAIT_MS     = 8_000;          // monitor for 8 s after baseline price
-const RUG_DROP_ABORT_PCT    = 25;             // abort if price drops ≥ 25 % in that window
+const RUG_DROP_ABORT_PCT    = 20;             // abort if price drops ≥ 20 % in that window (FIX 3 — tightened from 25)
+
+// ── Type-A rug filters ────────────────────────────────────────────────────────
+const MIN_ENTRY_PRICE_USD   = 0.00001;        // FIX 1: skip tokens priced below $0.00001 (pre-rug micro-caps)
+const MIN_ENTRY_LIQUIDITY   = 5_000;          // FIX 2: skip tokens with < $5 000 liquidity at entry
 
 // ── Night-session sizing (IST 23:00–04:00 = highest rug period) ───────────────
 const NIGHT_SESSION_SOL     = 0.05;           // half-size during night window
@@ -413,7 +417,23 @@ class GraduationSniperService {
         return;
       }
 
-      const { price: baselinePrice, symbol, name } = priceData;
+      const { price: baselinePrice, symbol, name, liquidityUsd } = priceData;
+
+      // ── FIX 1: Minimum entry price — skip sub-$0.00001 micro-cap pre-rugs ──────
+      if (baselinePrice < MIN_ENTRY_PRICE_USD) {
+        const reason = `Price too low — $${baselinePrice.toExponential(3)} < $${MIN_ENTRY_PRICE_USD} (Type-A rug filter)`;
+        this.addEvent({ ...eventBase, symbol, action: "skipped", skipReason: reason });
+        logger.info({ mint, symbol, price: baselinePrice }, "Graduation sniper: skipped — price below minimum (FIX 1)");
+        return;
+      }
+
+      // ── FIX 2: Minimum liquidity at entry — skip thin pools ──────────────────
+      if (liquidityUsd < MIN_ENTRY_LIQUIDITY) {
+        const reason = `Liquidity too low — $${liquidityUsd.toFixed(0)} < $${MIN_ENTRY_LIQUIDITY} (Type-A rug filter)`;
+        this.addEvent({ ...eventBase, symbol, action: "skipped", skipReason: reason });
+        logger.info({ mint, symbol, liquidityUsd }, "Graduation sniper: skipped — liquidity below minimum (FIX 2)");
+        return;
+      }
 
       // Double-check skip after price fetch (race condition guard)
       const skipAfterWait = this.checkSkipReason(mint);
@@ -422,9 +442,8 @@ class GraduationSniperService {
         return;
       }
 
-      // ── Instant-rug detection: monitor price for 8 s before committing ────────
-      // Tokens like ya (-99%), BUTTWORK (-86%), da (-81%) dump in seconds.
-      // Wait one more window then check — if drop ≥ 25 %, abort entirely.
+      // ── FIX 3 (tightened): monitor price for 8 s — abort if drop ≥ 20 % ──────
+      // Catches remaining Type-A rugs that slip past the price/liquidity filters.
       await new Promise((r) => setTimeout(r, RUG_CHECK_WAIT_MS));
       const rugCheckData = await this.fetchPrice(mint);
       const entryPrice   = rugCheckData?.price ?? baselinePrice;
@@ -550,7 +569,7 @@ class GraduationSniperService {
     return null;
   }
 
-  private async fetchPrice(mint: string): Promise<{ price: number; symbol: string; name: string } | null> {
+  private async fetchPrice(mint: string): Promise<{ price: number; symbol: string; name: string; liquidityUsd: number } | null> {
     try {
       type DexPair = {
         priceUsd: string;
@@ -573,12 +592,14 @@ class GraduationSniperService {
         return (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0);
       });
 
-      const best  = sorted[0]!;
-      const price = parseFloat(best.priceUsd) || 0;
+      const best         = sorted[0]!;
+      const price        = parseFloat(best.priceUsd) || 0;
+      const liquidityUsd = best.liquidity?.usd ?? 0;
       if (price <= 0) return null;
 
       return {
         price,
+        liquidityUsd,
         symbol: best.baseToken.symbol,
         name:   best.baseToken.name,
       };
