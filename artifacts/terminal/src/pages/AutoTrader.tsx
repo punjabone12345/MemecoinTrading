@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { useAutoTraderStatus, useAutoTraderConfig, useUpdateAutoTraderConfig, usePauseAutoTrader, useResumeAutoTrader, useAutoTraderHistory, useResetCircuitBreaker } from "@/lib/api";
+import { useAutoTraderStatus, useAutoTraderConfig, useUpdateAutoTraderConfig, usePauseAutoTrader, useResumeAutoTrader, useAutoTraderHistory, useResetCircuitBreaker, useEnableBotTrades, useDisableBotTrades } from "@/lib/api";
 import { Play, Pause, Settings, Zap, Shield, TrendingUp, Clock, ChevronDown, ChevronUp, CheckCircle2, XCircle, SkipForward, FlaskConical, Loader2, AlertTriangle, RotateCcw } from "lucide-react";
 import type { CycleDecision } from "@/lib/types";
 
@@ -371,6 +371,8 @@ export default function AutoTrader() {
   const pause = usePauseAutoTrader();
   const resume = useResumeAutoTrader();
   const resetCB = useResetCircuitBreaker();
+  const enableBot = useEnableBotTrades();
+  const disableBot = useDisableBotTrades();
 
   const [localConfig, setLocalConfig] = useState<AnyConfig | null>(null);
   const [saved, setSaved] = useState(false);
@@ -403,6 +405,7 @@ export default function AutoTrader() {
   };
 
   const isRunning = !status.paused;
+  const botEnabled = status.botTradesEnabled ?? false;
 
   // Latest cycle
   const latestCycle = history[0];
@@ -496,18 +499,33 @@ export default function AutoTrader() {
               <p>Last cycle evaluated: <span className="text-white/60">{status.lastRunTokensEvaluated} tokens</span></p>
             </div>
           </div>
-          <button
-            onClick={() => isRunning ? pause.mutate() : resume.mutate()}
-            disabled={pause.isPending || resume.isPending}
-            className={`flex items-center gap-2 px-4 py-2.5 rounded-xl font-bold text-sm active:scale-95 transition-all ${
-              isRunning
-                ? "bg-red-500/15 border border-red-500/30 text-red-400"
-                : "bg-emerald-500/15 border border-emerald-500/30 text-emerald-400"
-            }`}
-          >
-            {isRunning ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}
-            {isRunning ? "Pause" : "Resume"}
-          </button>
+          <div className="flex flex-col gap-2 items-end">
+            <button
+              onClick={() => isRunning ? pause.mutate() : resume.mutate()}
+              disabled={pause.isPending || resume.isPending}
+              className={`flex items-center gap-2 px-4 py-2.5 rounded-xl font-bold text-sm active:scale-95 transition-all ${
+                isRunning
+                  ? "bg-red-500/15 border border-red-500/30 text-red-400"
+                  : "bg-emerald-500/15 border border-emerald-500/30 text-emerald-400"
+              }`}
+            >
+              {isRunning ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}
+              {isRunning ? "Pause" : "Resume"}
+            </button>
+            {/* Bot scanner trades toggle */}
+            <button
+              onClick={() => botEnabled ? disableBot.mutate() : enableBot.mutate()}
+              disabled={enableBot.isPending || disableBot.isPending}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-bold active:scale-95 transition-all ${
+                botEnabled
+                  ? "bg-violet-500/15 border border-violet-500/30 text-violet-300"
+                  : "bg-white/5 border border-white/15 text-white/40"
+              }`}
+              title={botEnabled ? "Bot scanner trades ON — click to pause entries" : "Bot scanner trades OFF — scanner monitors only"}
+            >
+              {botEnabled ? "🤖 Bot ON" : "🤖 Bot OFF"}
+            </button>
+          </div>
         </div>
       </div>
 

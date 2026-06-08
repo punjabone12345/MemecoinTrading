@@ -27,6 +27,23 @@ const HARD_STOP_PCT         = 50;             // -50 % absolute floor (FIX 1)
 const DEAD_POSITION_MS      = 2 * 60 * 60_000;// 2 h open with no movement (FIX 2)
 const DEAD_MOVE_PCT         = 5;              // < 5 % move = "dead"
 
+// ── Instant-rug detection constants ──────────────────────────────────────────
+const RUG_CHECK_WAIT_MS     = 8_000;          // monitor for 8 s after baseline price
+const RUG_DROP_ABORT_PCT    = 25;             // abort if price drops ≥ 25 % in that window
+
+// ── Night-session sizing (IST 23:00–04:00 = highest rug period) ───────────────
+const NIGHT_SESSION_SOL     = 0.05;           // half-size during night window
+const NIGHT_START_IST_HOUR  = 23;             // 11 pm IST
+const NIGHT_END_IST_HOUR    = 4;              // 4 am IST (exclusive)
+
+/** Returns true when the current clock time falls inside the high-rug night window (IST). */
+function isNightSession(): boolean {
+  const nowUtc   = new Date();
+  const istMin   = (nowUtc.getUTCHours() * 60 + nowUtc.getUTCMinutes() + 330) % 1440; // UTC+5:30
+  const istHour  = Math.floor(istMin / 60);
+  return istHour >= NIGHT_START_IST_HOUR || istHour < NIGHT_END_IST_HOUR;
+}
+
 function uid(): string {
   return `snp-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
 }
@@ -380,7 +397,7 @@ class GraduationSniperService {
         return;
       }
 
-      const { price, symbol, name } = priceData;
+      const { price: baselinePrice, symbol, name } = priceData;
 
       // Double-check skip after price fetch (race condition guard)
       const skipAfterWait = this.checkSkipReason(mint);
@@ -389,7 +406,38 @@ class GraduationSniperService {
         return;
       }
 
-      this.enterPosition(mint, symbol, name, price, signature);
+      // ── Instant-rug detection: monitor price for 8 s before committing ────────
+      // Tokens like ya (-99%), BUTTWORK (-86%), da (-81%) dump in seconds.
+      // Wait one more window then check — if drop ≥ 25 %, abort entirely.
+      await new Promise((r) => setTimeout(r, RUG_CHECK_WAIT_MS));
+      const rugCheckData = await this.fetchPrice(mint);
+      const entryPrice   = rugCheckData?.price ?? baselinePrice;
+
+      if (rugCheckData) {
+        const dropPct = (1 - rugCheckData.price / baselinePrice) * 100;
+        if (dropPct >= RUG_DROP_ABORT_PCT) {
+          const skipReason = `Instant rug — dropped ${dropPct.toFixed(1)}% in ${RUG_CHECK_WAIT_MS / 1000}s`;
+          this.addEvent({ ...eventBase, symbol, action: "skipped", skipReason });
+          logger.warn(
+            { mint, symbol, baselinePrice, rugPrice: rugCheckData.price, dropPct: dropPct.toFixed(1) },
+            "Graduation sniper: instant rug detected — entry aborted",
+          );
+          if (isTelegramConfigured()) {
+            void sendTelegram(
+              `🚫 <b>SNIPER RUG ABORT</b>\n` +
+              `──────────────────────\n` +
+              `🪙 Token: <b>${symbol}</b>\n` +
+              `📋 CA: <code>${mint}</code>\n` +
+              `📉 Crashed: <b>-${dropPct.toFixed(1)}%</b> in ${RUG_CHECK_WAIT_MS / 1000}s\n` +
+              `✅ Entry aborted — capital protected\n` +
+              `🕐 ${toIST(new Date())}`,
+            );
+          }
+          return;
+        }
+      }
+
+      this.enterPosition(mint, symbol, name, entryPrice, signature);
       this.addEvent({ ...eventBase, symbol, action: "entered" });
     } catch (err) {
       logger.warn({ signature, err: (err as Error).message }, "Graduation sniper: error processing graduation");
@@ -528,6 +576,12 @@ class GraduationSniperService {
   private enterPosition(mint: string, symbol: string, name: string, price: number, txSignature: string): void {
     const cfg = this.config;
     const id  = uid();
+
+    // ── Night-session position sizing (Change 2) ──────────────────────────────
+    // 11 pm – 4 am IST is the highest-rug window; use half-size to limit exposure.
+    const night   = isNightSession();
+    const sizeSol = night ? Math.min(NIGHT_SESSION_SOL, cfg.positionSizeSol) : cfg.positionSizeSol;
+
     const pos: SniperPosition = {
       id,
       mint,
@@ -537,7 +591,7 @@ class GraduationSniperService {
       entryAt:          Date.now(),
       entryPrice:       price,
       currentPrice:     price,
-      sizeSol:          cfg.positionSizeSol,
+      sizeSol,
       tp1Hit:           false,
       tp2Hit:           false,
       remainingFraction: 1.0,
@@ -553,23 +607,24 @@ class GraduationSniperService {
 
     this.openPositions.set(mint, pos);
     this.seenMints.add(mint);
-    this.virtualBalance -= cfg.positionSizeSol;
+    this.virtualBalance -= sizeSol;
 
     void this.persistPosition(pos);
 
+    const nightTag = night ? " 🌙 (night session — reduced size)" : "";
     logger.info(
-      { mint, symbol, entryPrice: price, sizeSol: cfg.positionSizeSol, sl: pos.effectiveSlPrice },
+      { mint, symbol, entryPrice: price, sizeSol, sl: pos.effectiveSlPrice, night },
       "Graduation sniper: paper position entered",
     );
 
     if (isTelegramConfigured()) {
       void sendTelegram(
-        `🎯 <b>SNIPER ENTRY (PAPER)</b>\n` +
+        `🎯 <b>SNIPER ENTRY (PAPER)</b>${night ? " 🌙" : ""}\n` +
         `──────────────────────\n` +
         `🪙 Token: <b>${symbol}</b> — ${name}\n` +
         `📋 CA: <code>${mint}</code>\n` +
         `💵 Entry: <b>$${fmtTgPrice(price)}</b>\n` +
-        `💰 Size: <b>${cfg.positionSizeSol} SOL</b> (paper)\n` +
+        `💰 Size: <b>${sizeSol} SOL</b> (paper)${nightTag}\n` +
         `🛡️ SL: $${fmtTgPrice(pos.effectiveSlPrice)} (−${cfg.slPct}%)\n` +
         `🎯 TP1: $${fmtTgPrice(price * (1 + cfg.tp1Pct / 100))} (+${cfg.tp1Pct}%)\n` +
         `🎯 TP2: $${fmtTgPrice(price * (1 + cfg.tp2Pct / 100))} (+${cfg.tp2Pct}%)\n` +

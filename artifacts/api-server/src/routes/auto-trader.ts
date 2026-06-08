@@ -49,6 +49,17 @@ router.post("/auto-trader/resume", async (_req, res) => {
   }
 });
 
+// Bot scanner trades toggle (Change 3) — scanner keeps running, just no new trades open
+router.post("/auto-trader/enable-bot-trades", (_req, res) => {
+  autoTraderService.enableBotTrades();
+  res.json({ success: true, botTradesEnabled: true });
+});
+
+router.post("/auto-trader/disable-bot-trades", (_req, res) => {
+  autoTraderService.disableBotTrades();
+  res.json({ success: true, botTradesEnabled: false });
+});
+
 router.get("/auto-trader/history", (_req, res) => {
   const history = autoTraderService.getHistory();
   res.json({ success: true, count: history.length, data: history });

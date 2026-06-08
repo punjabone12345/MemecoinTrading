@@ -108,6 +108,7 @@ export interface CycleRecord {
 
 export interface AutoTraderStatus {
   paused: boolean;
+  botTradesEnabled: boolean;
   running: boolean;
   lastRunAt: number | null;
   lastRunTokensEvaluated: number;
@@ -655,6 +656,8 @@ function genuineCoinCheck(rugResult: RugCheckResult, pairAgeMin: number): Filter
 class AutoTraderService {
   private intervalId: ReturnType<typeof setInterval> | null = null;
   private paused = false;
+  // Change 3: bot scanner entries paused — scanner keeps monitoring, no new trades open
+  private botTradesEnabled = false;
   private running = false;
   private lastRunAt: number | null = null;
   private lastRunTokensEvaluated = 0;
@@ -760,6 +763,11 @@ class AutoTraderService {
   pause(): void { this.paused = true; logger.info("Auto-trader paused"); }
   resume(): void { this.paused = false; logger.info("Auto-trader resumed"); void this.run(); }
   isPaused(): boolean { return this.paused; }
+
+  enableBotTrades(): void  { this.botTradesEnabled = true;  logger.info("Auto-trader: bot scanner trades ENABLED"); }
+  disableBotTrades(): void { this.botTradesEnabled = false; logger.info("Auto-trader: bot scanner trades DISABLED — scanner monitoring only"); }
+  isBotTradesEnabled(): boolean { return this.botTradesEnabled; }
+
   getHistory(): CycleRecord[] { return [...this.history].reverse(); }
 
   resetCircuitBreaker(): void {
@@ -789,6 +797,7 @@ class AutoTraderService {
     const mh = marketHealthService.getLastResult();
     return {
       paused: this.paused,
+      botTradesEnabled: this.botTradesEnabled,
       running: this.running,
       lastRunAt: this.lastRunAt,
       lastRunTokensEvaluated: this.lastRunTokensEvaluated,
@@ -877,6 +886,11 @@ class AutoTraderService {
   private async run(): Promise<void> {
     if (this.running || this.paused) return;
 
+    // Change 3: bot scanner entries disabled — scanner pool still builds, no trades open
+    if (!this.botTradesEnabled) {
+      logger.debug("Auto-trader: bot scanner trades disabled — skipping cycle (scanner monitoring active)");
+      return;
+    }
 
     const { consecutiveLossLimit, consecutiveLossPauseHours, dailyLossLimitSol, dailyLossPauseHours } = this.config;
 

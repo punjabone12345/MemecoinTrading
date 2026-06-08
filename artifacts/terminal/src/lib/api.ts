@@ -412,6 +412,30 @@ export function useResetCircuitBreaker() {
   });
 }
 
+export function useEnableBotTrades() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async () => {
+      await fetch(apiUrl("/api/auto-trader/enable-bot-trades"), { method: "POST" });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["auto-trader-status"] });
+    },
+  });
+}
+
+export function useDisableBotTrades() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async () => {
+      await fetch(apiUrl("/api/auto-trader/disable-bot-trades"), { method: "POST" });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["auto-trader-status"] });
+    },
+  });
+}
+
 export function useLossJournal() {
   return useQuery<LossInsights>({
     queryKey: ["loss-journal"],
