@@ -179,7 +179,7 @@ const DEFAULT_CONFIG: AutoTraderConfig = {
   maxPriceDropH24Pct:  -55,     // allow recovering tokens
 
   // ── Circuit breaker ───────────────────────────────────────────────────────
-  consecutiveLossLimit:      3,  // 3 losses in a row triggers cooldown
+  consecutiveLossLimit:      15, // 15 losses in a row triggers cooldown
   consecutiveLossPauseHours: 1,  // 1 hour cooldown
   dailyLossLimitSol:         3,  // -3 SOL/day cap
   dailyLossPauseHours:      12,  // 12h pause on daily cap

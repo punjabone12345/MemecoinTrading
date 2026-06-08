@@ -155,7 +155,7 @@ class GraduationSniperService {
   private async loadPositions(): Promise<void> {
     try {
       const rows = await query<Record<string, unknown>>(
-        `SELECT * FROM sniper_positions ORDER BY entry_at DESC`,
+        `SELECT * FROM sniper_positions ORDER BY entry_at ASC`,
       );
       for (const row of rows) {
         const pos = this.rowToPosition(row);
@@ -167,6 +167,7 @@ class GraduationSniperService {
           this.seenMints.add(pos.mint);
         }
       }
+      // Keep newest MAX_CLOSED — with ASC order, slice(-N) = last N = newest
       if (this.closedPositions.length > MAX_CLOSED) {
         this.closedPositions = this.closedPositions.slice(-MAX_CLOSED);
       }

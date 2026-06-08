@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Target, Wifi, WifiOff, TrendingUp, TrendingDown, RefreshCw, Settings, X, CheckCircle2, XCircle, Clock, Zap, Trash2, Pencil, RotateCcw, AlertTriangle, Download } from "lucide-react";
+import { Target, Wifi, WifiOff, TrendingUp, TrendingDown, RefreshCw, Settings, X, CheckCircle2, XCircle, Clock, Zap, Trash2, Pencil, RotateCcw, AlertTriangle, Download, ExternalLink } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -288,6 +288,12 @@ function PositionRow({ pos }: { pos: SniperPosition }) {
             </div>
           </div>
         </div>
+        <div className="mt-2">
+          <a href={`https://dexscreener.com/solana/${pos.mint}`} target="_blank" rel="noreferrer"
+            className="flex items-center gap-1 text-[10px] text-violet-400/60 hover:text-violet-400 transition-colors">
+            <ExternalLink className="w-3 h-3" /> View on DexScreener
+          </a>
+        </div>
         {confirmDel && (
           <div className="mt-2 flex items-center gap-2 rounded-lg bg-red-500/10 border border-red-500/20 px-3 py-2">
             <span className="text-[10px] text-red-300 flex-1">Delete this position?</span>
@@ -425,13 +431,18 @@ function HistoryRow({ pos }: { pos: SniperPosition }) {
           )}
         </div>
 
-        {/* Action row: edit + delete always visible */}
-        <div className="flex items-center justify-between">
-          <div className="text-[10px] text-white/20">
-            {pos.tp1Hit && <span className="mr-1.5">TP1 ✓</span>}
-            {pos.tp2Hit && <span>TP2 ✓</span>}
-          </div>
+        {/* Action row: dexscreener + edit + delete always visible */}
+        <div className="flex items-center justify-between gap-2">
+          <a href={`https://dexscreener.com/solana/${pos.mint}`} target="_blank" rel="noreferrer"
+            className="flex items-center gap-1 text-[10px] text-violet-400/60 hover:text-violet-400 transition-colors">
+            <ExternalLink className="w-3 h-3" /> DexScreener
+          </a>
           <div className="flex gap-1.5">
+            {(pos.tp1Hit || pos.tp2Hit) && (
+              <span className="text-[9px] text-white/20 self-center mr-0.5">
+                {pos.tp1Hit && "TP1 ✓"}{pos.tp1Hit && pos.tp2Hit && " "}{pos.tp2Hit && "TP2 ✓"}
+              </span>
+            )}
             <button onClick={() => setShowEdit(true)}
               className="flex items-center gap-1 text-[10px] text-white/40 hover:text-amber-400 px-2 py-1 rounded bg-white/5 hover:bg-amber-500/15 transition-colors">
               <Pencil className="w-3 h-3" /> Edit
