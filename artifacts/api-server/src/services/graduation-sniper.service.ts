@@ -165,10 +165,24 @@ class GraduationSniperService {
   async init(): Promise<void> {
     await this.loadConfig();
     await this.loadPositions();
-    this.virtualBalance = this.config.virtualBalanceSol
-      - Array.from(this.openPositions.values()).reduce((s, p) => s + p.sizeSol, 0);
+
+    // Correctly restore virtual balance from DB state:
+    // start + all realized PNL (closed) + partial realized PNL (open TP hits) - remaining capital in open positions
+    const realizedFromClosed = this.closedPositions.reduce((s, p) => s + p.realizedPnlSol, 0);
+    const partialFromOpen    = Array.from(this.openPositions.values()).reduce((s, p) => s + p.realizedPnlSol, 0);
+    const capitalInOpen      = Array.from(this.openPositions.values()).reduce((s, p) => s + p.sizeSol * p.remainingFraction, 0);
+
+    this.virtualBalance = this.config.virtualBalanceSol + realizedFromClosed + partialFromOpen - capitalInOpen;
+
     logger.info(
-      { openPositions: this.openPositions.size, virtualBalance: this.virtualBalance, enabled: this.config.enabled },
+      {
+        openPositions:    this.openPositions.size,
+        virtualBalance:   this.virtualBalance.toFixed(4),
+        realizedFromClosed: realizedFromClosed.toFixed(4),
+        partialFromOpen:    partialFromOpen.toFixed(4),
+        capitalInOpen:      capitalInOpen.toFixed(4),
+        enabled:          this.config.enabled,
+      },
       "Graduation sniper: initialised",
     );
   }
