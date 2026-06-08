@@ -9,11 +9,23 @@ import { sendTelegram, isTelegramConfigured, toIST } from "../lib/telegram.js";
 const MIGRATION_WALLET   = "39azUYFWPz3VHgKCf3VChUwbpURdCHRxjWVowf5jUJjg";
 const PUMPFUN_PROGRAM_ID = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
 const DEXSCREENER_BASE   = "https://api.dexscreener.com";
-const PRICE_CHECK_MS     = 15_000;
 const RECONNECT_DELAY_MS = 1_000;
 const MAX_EVENTS         = 50;
 const MAX_CLOSED         = 100;
 const CONFIG_KEY         = "sniper_config";
+
+// ── Adaptive price-check intervals (FIX 3) ───────────────────────────────────
+const PRICE_LOOP_MS         = 10_000;         // main loop tick — 10 s
+const FAST_WINDOW_MS        = 30 * 60_000;    // first 30 min  → check every 10 s
+const MED_WINDOW_MS         = 2 * 60 * 60_000;// 30 min–2 h    → check every 30 s
+const FAST_INTERVAL_MS      = 10_000;
+const MED_INTERVAL_MS       = 30_000;
+const SLOW_INTERVAL_MS      = 60_000;
+
+// ── Hard-stop / dead-position thresholds (FIX 1 & 2) ─────────────────────────
+const HARD_STOP_PCT         = 50;             // -50 % absolute floor (FIX 1)
+const DEAD_POSITION_MS      = 2 * 60 * 60_000;// 2 h open with no movement (FIX 2)
+const DEAD_MOVE_PCT         = 5;              // < 5 % move = "dead"
 
 function uid(): string {
   return `snp-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
@@ -128,6 +140,9 @@ class GraduationSniperService {
   private seenMints: Set<string> = new Set();
   private virtualBalance = DEFAULT_CONFIG.virtualBalanceSol;
 
+  // Tracks when each position was last price-checked (adaptive interval, FIX 3)
+  private lastPositionCheckAt: Map<string, number> = new Map();
+
   // ── Init ───────────────────────────────────────────────────────────────────
 
   async init(): Promise<void> {
@@ -227,7 +242,8 @@ class GraduationSniperService {
     }
 
     this.connect(apiKey);
-    this.priceIntervalId = setInterval(() => void this.checkAllPrices(), PRICE_CHECK_MS);
+    // Adaptive loop ticks every 10 s; per-position rate-limiting is inside checkAllPrices
+    this.priceIntervalId = setInterval(() => void this.checkAllPrices(), PRICE_LOOP_MS);
     logger.info("Graduation sniper: started — WebSocket connecting");
   }
 
@@ -625,14 +641,30 @@ class GraduationSniperService {
     );
   }
 
-  // ── Price checking loop ────────────────────────────────────────────────────
+  // ── Price checking loop (adaptive intervals — FIX 3) ─────────────────────
 
   private async checkAllPrices(): Promise<void> {
     if (this.openPositions.size === 0) return;
 
-    const mints = Array.from(this.openPositions.keys());
+    const now = Date.now();
 
-    await Promise.allSettled(mints.map((mint) => this.checkPositionPrice(mint)));
+    // Only check positions whose adaptive interval has elapsed
+    const due = Array.from(this.openPositions.keys()).filter((mint) => {
+      const pos      = this.openPositions.get(mint)!;
+      const ageMs    = now - pos.entryAt;
+      const interval = ageMs < FAST_WINDOW_MS ? FAST_INTERVAL_MS
+                     : ageMs < MED_WINDOW_MS  ? MED_INTERVAL_MS
+                     : SLOW_INTERVAL_MS;
+      const last = this.lastPositionCheckAt.get(mint) ?? 0;
+      return (now - last) >= interval;
+    });
+
+    if (due.length === 0) return;
+
+    await Promise.allSettled(due.map((mint) => {
+      this.lastPositionCheckAt.set(mint, now);
+      return this.checkPositionPrice(mint);
+    }));
   }
 
   private async checkPositionPrice(mint: string): Promise<void> {
@@ -645,6 +677,7 @@ class GraduationSniperService {
     const { price } = priceData;
     pos.currentPrice = price;
 
+    const now        = Date.now();
     const cfg        = this.config;
     const tp1Price   = pos.entryPrice * (1 + cfg.tp1Pct / 100);
     const tp2Price   = pos.entryPrice * (1 + cfg.tp2Pct / 100);
@@ -654,10 +687,58 @@ class GraduationSniperService {
     // Update trailing high
     if (pos.tp2Hit && price > pos.trailingHigh) pos.trailingHigh = price;
 
-    // SL check (covers both fixed SL and breakeven-moved SL)
+    // ── FIX 1: Hard stop at -50% — absolute floor, no exceptions ─────────────
+    const hardStopPrice = pos.entryPrice * (1 - HARD_STOP_PCT / 100);
+    if (price <= hardStopPrice) {
+      const lossPct = ((price / pos.entryPrice) - 1) * 100;
+      logger.warn(
+        { mint, symbol: pos.symbol, price, entryPrice: pos.entryPrice, lossPct: lossPct.toFixed(1) },
+        "Graduation sniper: HARD STOP triggered",
+      );
+      if (isTelegramConfigured()) {
+        void sendTelegram(
+          `🚨 <b>SNIPER HARD STOP (PAPER)</b>\n` +
+          `──────────────────────\n` +
+          `🪙 Token: <b>${pos.symbol}</b>\n` +
+          `📋 CA: <code>${pos.mint}</code>\n` +
+          `📉 Drop: <b>${lossPct.toFixed(1)}%</b> — hard floor hit\n` +
+          `💵 Entry: $${fmtTgPrice(pos.entryPrice)} → Exit: $${fmtTgPrice(price)}\n` +
+          `🕐 ${toIST(new Date())}`,
+        );
+      }
+      this.closePosition(pos, `Hard Stop (${lossPct.toFixed(0)}%)`, price);
+      return;
+    }
+
+    // ── Standard SL (fixed -40% or breakeven after TP1) ──────────────────────
     if (price <= pos.effectiveSlPrice) {
       this.closePosition(pos, pos.tp1Hit ? "Trailing/Breakeven SL" : "Stop Loss (-40%)", price);
       return;
+    }
+
+    // ── FIX 2: Dead position exit — open >2 h with <5% movement ──────────────
+    if (!pos.tp1Hit) {
+      const ageMs   = now - pos.entryAt;
+      const movePct = Math.abs((price / pos.entryPrice - 1) * 100);
+      if (ageMs >= DEAD_POSITION_MS && movePct < DEAD_MOVE_PCT) {
+        logger.info(
+          { mint, symbol: pos.symbol, ageH: (ageMs / 3_600_000).toFixed(1), movePct: movePct.toFixed(2) },
+          "Graduation sniper: dead position exit — no momentum",
+        );
+        if (isTelegramConfigured()) {
+          void sendTelegram(
+            `💤 <b>SNIPER DEAD EXIT (PAPER)</b>\n` +
+            `──────────────────────\n` +
+            `🪙 Token: <b>${pos.symbol}</b>\n` +
+            `📋 CA: <code>${pos.mint}</code>\n` +
+            `⏱️ Held: ${(ageMs / 3_600_000).toFixed(1)}h with only ${movePct.toFixed(1)}% movement\n` +
+            `🔄 Freeing slot for fresh opportunities\n` +
+            `🕐 ${toIST(new Date())}`,
+          );
+        }
+        this.closePosition(pos, "Dead — No Momentum", price);
+        return;
+      }
     }
 
     // Trailing stop for runner (after TP2)
