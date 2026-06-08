@@ -101,31 +101,47 @@ const SETTINGS_FIELDS: SettingsField[] = [
 
 function SettingsPanel({ config, onClose }: { config: SniperConfig; onClose: () => void }) {
   const [draft, setDraft] = useState<SniperConfig>({ ...config });
+  const [saved, setSaved] = useState(false);
   const update = useUpdateSniperConfig();
+
+  function handleSave() {
+    update.mutate(draft, {
+      onSuccess: () => {
+        setSaved(true);
+        setTimeout(() => { setSaved(false); onClose(); }, 800);
+      },
+    });
+  }
+
   return (
-    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/70 backdrop-blur-sm px-2">
-      <div className="w-full max-w-md bg-[#12121e] border border-white/10 rounded-2xl overflow-hidden shadow-2xl">
-        <div className="flex items-center justify-between px-5 py-4 border-b border-white/10">
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/70 backdrop-blur-sm px-2 pb-2">
+      {/* Modal — flex column so footer is always visible */}
+      <div className="w-full max-w-md bg-[#12121e] border border-white/10 rounded-2xl shadow-2xl flex flex-col"
+        style={{ maxHeight: "calc(100dvh - 32px)" }}>
+        {/* Header — fixed */}
+        <div className="flex items-center justify-between px-5 py-4 border-b border-white/10 flex-shrink-0">
           <div className="flex items-center gap-2">
             <Settings className="w-4 h-4 text-violet-400" />
             <span className="text-sm font-bold text-white">Sniper Settings</span>
           </div>
           <button onClick={onClose} className="text-white/40 hover:text-white"><X className="w-4 h-4" /></button>
         </div>
-        <div className="px-5 py-4 space-y-4 max-h-[70vh] overflow-y-auto">
+
+        {/* Scrollable fields */}
+        <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4 min-h-0">
           {SETTINGS_FIELDS.map((f) => (
             <div key={f.key}>
               <div className="flex items-center justify-between mb-1">
                 <label className="text-xs font-semibold text-white/80">{f.label}</label>
                 {f.type === "boolean" ? (
                   <button onClick={() => setDraft((d) => ({ ...d, [f.key]: !d[f.key] }))}
-                    className={`relative w-10 h-5 rounded-full transition-colors ${draft[f.key] ? "bg-violet-500" : "bg-white/15"}`}>
+                    className={`relative w-10 h-5 rounded-full transition-colors flex-shrink-0 ${draft[f.key] ? "bg-violet-500" : "bg-white/15"}`}>
                     <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white transition-transform ${draft[f.key] ? "translate-x-5" : "translate-x-0"}`} />
                   </button>
                 ) : (
                   <input type="number" value={draft[f.key] as number} min={f.min} max={f.max} step={f.step}
                     onChange={(e) => setDraft((d) => ({ ...d, [f.key]: parseFloat(e.target.value) || 0 }))}
-                    className="w-24 px-2 py-1 rounded-lg bg-white/5 border border-white/10 text-white text-xs text-right focus:outline-none focus:border-violet-500"
+                    className="w-24 px-2 py-1 rounded-lg bg-white/5 border border-white/10 text-white text-xs text-right focus:outline-none focus:border-violet-500 flex-shrink-0"
                   />
                 )}
               </div>
@@ -133,11 +149,13 @@ function SettingsPanel({ config, onClose }: { config: SniperConfig; onClose: () 
             </div>
           ))}
         </div>
-        <div className="px-5 py-4 border-t border-white/10 flex gap-3">
+
+        {/* Footer — always visible, never scrolls away */}
+        <div className="flex-shrink-0 px-5 py-4 border-t border-white/10 flex gap-3">
           <Button variant="ghost" size="sm" onClick={onClose} className="flex-1 text-white/50 hover:text-white">Cancel</Button>
-          <Button size="sm" onClick={() => update.mutate(draft, { onSuccess: onClose })} disabled={update.isPending}
-            className="flex-1 bg-violet-500 hover:bg-violet-600 text-white font-bold">
-            {update.isPending ? "Saving…" : "Save Settings"}
+          <Button size="sm" onClick={handleSave} disabled={update.isPending}
+            className={`flex-1 font-bold transition-colors ${saved ? "bg-emerald-500 hover:bg-emerald-600" : "bg-violet-500 hover:bg-violet-600"} text-white`}>
+            {update.isPending ? "Saving…" : saved ? "✓ Saved!" : "Save Settings"}
           </Button>
         </div>
       </div>
