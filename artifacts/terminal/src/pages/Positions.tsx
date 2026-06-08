@@ -1,6 +1,51 @@
 import { useState } from "react";
 import { usePositions, useClosedPositions, useClosePosition, useDeleteClosedTrade, useEditClosedTrade } from "@/lib/api";
-import { TrendingUp, TrendingDown, Clock, ExternalLink, X, Trash2, Pencil, AlertTriangle, ChevronDown, ChevronUp, ShieldCheck, ShieldAlert } from "lucide-react";
+import { TrendingUp, TrendingDown, Clock, ExternalLink, X, Trash2, Pencil, AlertTriangle, ChevronDown, ChevronUp, ShieldCheck, ShieldAlert, Download } from "lucide-react";
+
+function downloadBotCsv(trades: ReturnType<typeof useClosedPositions>["data"]) {
+  if (!trades?.length) return;
+  function toIST(iso: string) {
+    return new Date(iso).toLocaleString("en-IN", {
+      timeZone: "Asia/Kolkata", month: "short", day: "numeric",
+      hour: "2-digit", minute: "2-digit", hour12: true,
+    });
+  }
+  function fmtHold(ms: number | undefined) {
+    if (!ms) return "";
+    const m = Math.floor(ms / 60_000);
+    return m < 60 ? `${m}m` : `${Math.floor(m / 60)}h ${m % 60}m`;
+  }
+  const headers = [
+    "Symbol", "Token Name", "Source", "Opened (IST)", "Closed (IST)", "Hold Time",
+    "Entry Price ($)", "Exit Price ($)", "Size (SOL)", "PNL (SOL)", "PNL %",
+    "Close Reason", "AI Provider", "AI Verdict", "AI Confidence %",
+  ];
+  const rows = trades.map((p) => [
+    p.symbol,
+    p.tokenName ?? "",
+    p.tradeSource === "rss" ? "Telegram" : "Bot",
+    p.openedAt ? toIST(p.openedAt) : "",
+    p.closedAt ? toIST(p.closedAt) : "",
+    fmtHold(p.holdTimeMs),
+    p.entryPrice?.toString() ?? "",
+    p.exitPrice?.toString()  ?? "",
+    p.sizeSol?.toString()    ?? "",
+    (p.pnlSol ?? 0).toFixed(6),
+    (p.pnlPercent ?? 0).toFixed(2),
+    p.closeReason ?? "",
+    p.llmProvider   ?? "",
+    p.llmVerdict    ?? "",
+    p.llmConfidence?.toString() ?? "",
+  ].map((v) => `"${String(v).replace(/"/g, '""')}"`).join(","));
+  const csv  = [headers.join(","), ...rows].join("\n");
+  const blob = new Blob([csv], { type: "text/csv" });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement("a");
+  a.href     = url;
+  a.download = `bot-trades-${new Date().toISOString().slice(0, 10)}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
 
 function formatPrice(price: number): string {
   if (!price) return "—";
@@ -498,6 +543,17 @@ export default function Positions() {
       {/* Closed Positions */}
       {tab === "Closed" && (
         <div className="space-y-3">
+          {closedPositions.length > 0 && (
+            <div className="flex justify-end">
+              <button
+                onClick={() => downloadBotCsv(closedPositions)}
+                className="flex items-center gap-1.5 text-[11px] text-white/40 hover:text-emerald-400 px-3 py-1.5 rounded-lg bg-white/5 hover:bg-emerald-500/10 border border-white/8 hover:border-emerald-500/20 transition-colors"
+              >
+                <Download className="w-3.5 h-3.5" />
+                Download CSV
+              </button>
+            </div>
+          )}
           {closedPositions.length === 0 ? (
             <div className="bg-[#0d0d18] border border-white/8 rounded-xl p-10 text-center">
               <p className="text-white/30 text-sm">No closed trades yet</p>
