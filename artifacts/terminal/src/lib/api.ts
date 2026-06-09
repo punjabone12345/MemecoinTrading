@@ -629,6 +629,24 @@ export function useEditSniperPosition() {
   });
 }
 
+export function useRecalculateSniperPnl() {
+  const queryClient = useQueryClient();
+  const { toast } = useToast();
+  return useMutation({
+    mutationFn: async (id: string) => {
+      const res = await fetch(apiUrl(`/api/sniper/positions/${id}/recalculate`), { method: "POST" });
+      if (!res.ok) { const j = await res.json(); throw new Error(j.error ?? "Recalculate failed"); }
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["sniper-history"] });
+      queryClient.invalidateQueries({ queryKey: ["sniper-status"] });
+      toast({ title: "P&L corrected", description: "Recalculated from entry/exit prices and config TP levels" });
+    },
+    onError: (e: Error) => toast({ title: "Recalculate failed", description: e.message, variant: "destructive" }),
+  });
+}
+
 export function useDeleteSniperEvent() {
   const queryClient = useQueryClient();
   return useMutation({

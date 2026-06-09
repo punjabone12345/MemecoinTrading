@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import {
   useSniperStatus, useSniperPositions, useSniperHistory, useSniperEvents, useUpdateSniperConfig,
   useDeleteSniperPosition, useEditSniperPosition, useDeleteSniperEvent, useResetSniperAccount,
+  useRecalculateSniperPnl,
 } from "@/lib/api";
 import { SniperPosition, SniperEvent, SniperConfig } from "@/lib/types";
 
@@ -404,7 +405,8 @@ function EventRow({ evt }: { evt: SniperEvent }) {
 function HistoryRow({ pos }: { pos: SniperPosition }) {
   const [showEdit,    setShowEdit]    = useState(false);
   const [confirmDel,  setConfirmDel]  = useState(false);
-  const deletePos = useDeleteSniperPosition();
+  const deletePos    = useDeleteSniperPosition();
+  const recalculate  = useRecalculateSniperPnl();
 
   const win     = pos.realizedPnlSol > 0;
   const holdMs  = pos.closedAt && pos.entryAt ? pos.closedAt - pos.entryAt : 0;
@@ -530,11 +532,16 @@ function HistoryRow({ pos }: { pos: SniperPosition }) {
             className="flex items-center gap-1 text-[10px] text-violet-400/60 hover:text-violet-400 transition-colors">
             <ExternalLink className="w-3 h-3" /> DexScreener
           </a>
-          <div className="flex gap-1.5">
-            {(pos.tp1Hit || pos.tp2Hit) && (
-              <span className="text-[9px] text-white/20 self-center mr-0.5">
-                {pos.tp1Hit && "TP1 ✓"}{pos.tp1Hit && pos.tp2Hit && " "}{pos.tp2Hit && "TP2 ✓"}
-              </span>
+          <div className="flex gap-1.5 flex-wrap justify-end">
+            {pos.exitPrice && (
+              <button
+                onClick={() => recalculate.mutate(pos.id)}
+                disabled={recalculate.isPending}
+                title="Recalculate P&L from entry/exit prices using config TP levels"
+                className="flex items-center gap-1 text-[10px] text-white/40 hover:text-cyan-400 px-2 py-1 rounded bg-white/5 hover:bg-cyan-500/15 transition-colors disabled:opacity-40">
+                <RefreshCw className={`w-3 h-3 ${recalculate.isPending ? "animate-spin" : ""}`} />
+                {recalculate.isPending ? "…" : "Correct P&L"}
+              </button>
             )}
             <button onClick={() => setShowEdit(true)}
               className="flex items-center gap-1 text-[10px] text-white/40 hover:text-amber-400 px-2 py-1 rounded bg-white/5 hover:bg-amber-500/15 transition-colors">

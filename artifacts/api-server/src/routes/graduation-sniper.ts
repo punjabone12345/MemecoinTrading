@@ -62,6 +62,17 @@ router.patch("/sniper/positions/:id", async (req, res) => {
   }
 });
 
+// ── Recalculate P&L from first principles (fixes bug-inflated totals) ───────
+router.post("/sniper/positions/:id/recalculate", async (req, res) => {
+  try {
+    const updated = await graduationSniperService.recalculatePnl(req.params.id!);
+    if (!updated) return res.status(404).json({ success: false, error: "Closed position not found or missing exit price" });
+    res.json({ success: true, data: updated });
+  } catch (err) {
+    res.status(500).json({ success: false, error: (err as Error).message });
+  }
+});
+
 // ── Delete a position (open or closed) ─────────────────────────────────────
 router.delete("/sniper/positions/:id", async (req, res) => {
   try {

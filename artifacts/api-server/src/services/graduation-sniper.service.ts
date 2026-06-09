@@ -1247,6 +1247,56 @@ class GraduationSniperService {
     return true;
   }
 
+  /**
+   * Recalculate realizedPnlSol + breakdown for a closed position using deterministic
+   * math: TP prices are derived from entryPrice + config percentages, runner uses exitPrice.
+   * This corrects any previously inflated values from the concurrency bug.
+   */
+  async recalculatePnl(id: string): Promise<SniperPosition | null> {
+    const pos = this.closedPositions.find((p) => p.id === id);
+    if (!pos || !pos.exitPrice || pos.entryPrice <= 0) return null;
+
+    const cfg       = this.config;
+    const tp1Frac   = cfg.tp1ClosePct / 100;
+    const tp2Frac   = cfg.tp2ClosePct / 100;
+    const tp1Price  = pos.entryPrice * (1 + cfg.tp1Pct / 100);
+    const tp2Price  = pos.entryPrice * (1 + cfg.tp2Pct / 100);
+
+    let tp1Sol   = 0;
+    let tp2Sol   = 0;
+    let runnerSol = 0;
+    let realized  = 0;
+
+    if (pos.tp1Hit && pos.tp2Hit) {
+      const remainFrac = Math.max(0, 1 - tp1Frac - tp2Frac);
+      tp1Sol    = (tp1Price / pos.entryPrice - 1) * pos.sizeSol * tp1Frac;
+      tp2Sol    = (tp2Price / pos.entryPrice - 1) * pos.sizeSol * tp2Frac;
+      runnerSol = (pos.exitPrice / pos.entryPrice - 1) * pos.sizeSol * remainFrac;
+      realized  = tp1Sol + tp2Sol + runnerSol;
+    } else if (pos.tp1Hit) {
+      const remainFrac = Math.max(0, 1 - tp1Frac);
+      tp1Sol    = (tp1Price / pos.entryPrice - 1) * pos.sizeSol * tp1Frac;
+      runnerSol = (pos.exitPrice / pos.entryPrice - 1) * pos.sizeSol * remainFrac;
+      realized  = tp1Sol + runnerSol;
+    } else {
+      runnerSol = (pos.exitPrice / pos.entryPrice - 1) * pos.sizeSol;
+      realized  = runnerSol;
+    }
+
+    pos.realizedPnlSol   = realized;
+    pos.tp1RealizedSol   = tp1Sol;
+    pos.tp2RealizedSol   = tp2Sol;
+    pos.runnerRealizedSol = runnerSol;
+    this.updateLivePnl(pos);
+    await this.persistPosition(pos);
+
+    logger.info(
+      { id, symbol: pos.symbol, realized: realized.toFixed(6), tp1: tp1Sol.toFixed(6), tp2: tp2Sol.toFixed(6), runner: runnerSol.toFixed(6) },
+      "Graduation sniper: P&L recalculated",
+    );
+    return { ...pos };
+  }
+
   async editPosition(id: string, patch: {
     entryPrice?: number;
     exitPrice?: number;
