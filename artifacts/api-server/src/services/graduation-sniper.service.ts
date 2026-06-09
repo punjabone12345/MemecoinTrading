@@ -741,42 +741,76 @@ class GraduationSniperService {
   }
 
   private async fetchPrice(mint: string): Promise<{ price: number; symbol: string; name: string; liquidityUsd: number } | null> {
-    try {
-      type DexPair = {
-        priceUsd: string;
-        baseToken: { symbol: string; name: string };
-        liquidity?: { usd?: number };
-        dexId?: string;
-      };
-      const res = await axios.get<DexPair[]>(
-        `${DEXSCREENER_BASE}/tokens/v1/solana/${mint}`,
-        { timeout: 8_000 },
-      );
-      const pairs: DexPair[] = Array.isArray(res.data) ? res.data : [];
-      if (pairs.length === 0) return null;
+    type DexPair = {
+      priceUsd: string;
+      baseToken: { symbol: string; name: string };
+      liquidity?: { usd?: number };
+      dexId?: string;
+    };
 
-      // Prefer Raydium pair with highest liquidity
-      const sorted = [...pairs].sort((a, b) => {
-        const aRay = a.dexId === "raydium" ? 1 : 0;
-        const bRay = b.dexId === "raydium" ? 1 : 0;
-        if (bRay !== aRay) return bRay - aRay;
-        return (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0);
-      });
+    // ── Fetch DexScreener + Jupiter in parallel ───────────────────────────────
+    const [dexResult, jupResult] = await Promise.allSettled([
+      axios.get<DexPair[]>(`${DEXSCREENER_BASE}/tokens/v1/solana/${mint}`, { timeout: 8_000 }),
+      axios.get<{ data: Record<string, { price: number }> }>(
+        `https://price.jup.ag/v6/price?ids=${mint}`,
+        { timeout: 6_000 },
+      ),
+    ]);
 
-      const best         = sorted[0]!;
-      const price        = parseFloat(best.priceUsd) || 0;
-      const liquidityUsd = best.liquidity?.usd ?? 0;
-      if (price <= 0) return null;
-
-      return {
-        price,
-        liquidityUsd,
-        symbol: best.baseToken.symbol,
-        name:   best.baseToken.name,
-      };
-    } catch {
-      return null;
+    // ── Parse Jupiter price (reads directly from on-chain AMM, zero index lag) ─
+    let jupiterPrice = 0;
+    if (jupResult.status === "fulfilled") {
+      try {
+        jupiterPrice = jupResult.value.data?.data?.[mint]?.price ?? 0;
+      } catch { /* ignore */ }
     }
+
+    // ── Parse DexScreener pairs ───────────────────────────────────────────────
+    let dexPairs: DexPair[] = [];
+    if (dexResult.status === "fulfilled") {
+      dexPairs = Array.isArray(dexResult.value.data) ? dexResult.value.data : [];
+    }
+
+    // Prefer Raydium pair with highest liquidity
+    const sorted = [...dexPairs].sort((a, b) => {
+      const aRay = a.dexId === "raydium" ? 1 : 0;
+      const bRay = b.dexId === "raydium" ? 1 : 0;
+      if (bRay !== aRay) return bRay - aRay;
+      return (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0);
+    });
+
+    const best         = sorted[0];
+    const dexPrice     = best ? (parseFloat(best.priceUsd) || 0) : 0;
+    const liquidityUsd = best?.liquidity?.usd ?? 0;
+    const symbol       = best?.baseToken?.symbol ?? mint.slice(0, 8);
+    const name         = best?.baseToken?.name   ?? symbol;
+    const hasRaydium   = sorted.some((p) => p.dexId === "raydium");
+
+    // ── Price selection logic ─────────────────────────────────────────────────
+    // During the graduation migration window, DexScreener still shows the old
+    // pump.fun bonding-curve pair (stale price) while Raydium hasn't been indexed
+    // yet. Jupiter reads directly from the on-chain AMM so it reflects the real
+    // Raydium price immediately after migration. Use Jupiter when:
+    //   a) DexScreener has no Raydium pair yet (migration in progress), OR
+    //   b) Jupiter price is >10% higher (DexScreener lag on an established pair)
+    let price = dexPrice;
+
+    if (jupiterPrice > 0) {
+      const dexLagging = !hasRaydium || dexPrice <= 0;
+      const jupHigher  = dexPrice > 0 && (jupiterPrice / dexPrice - 1) > 0.10;
+
+      if (dexLagging || jupHigher) {
+        price = jupiterPrice;
+        logger.info(
+          { mint, dexPrice, jupiterPrice, hasRaydium, dexLagging, jupHigher },
+          "Graduation sniper: using Jupiter price (DexScreener lagging during migration)",
+        );
+      }
+    }
+
+    if (price <= 0) return null;
+
+    return { price, liquidityUsd, symbol, name };
   }
 
   // ── Position management ────────────────────────────────────────────────────
