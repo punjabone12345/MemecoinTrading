@@ -181,6 +181,8 @@ class GraduationSniperService {
   private lastPositionCheckAt: Map<string, number> = new Map();
   // Concurrency guard — prevents duplicate TP/SL executions during async gaps
   private processingMints: Set<string> = new Set();
+  // Concurrency guard — prevents duplicate graduation processing for same mint
+  private processingGraduations: Set<string> = new Set();
   // FIX 2: Liquidity monitoring — tracks last known liquidity per position
   private liquidityIntervalId: ReturnType<typeof setInterval> | null = null;
   private lastPositionLiquidityUsd: Map<string, number> = new Map();
@@ -232,20 +234,78 @@ class GraduationSniperService {
       const rows = await query<Record<string, unknown>>(
         `SELECT * FROM sniper_positions ORDER BY entry_at ASC`,
       );
+
+      const rawClosed: SniperPosition[] = [];
       for (const row of rows) {
         const pos = this.rowToPosition(row);
         if (pos.status === "open") {
+          // ── Auto-correct TP realized breakdown for open positions ────────────
+          // If TP was hit but breakdown cols are 0 (entered before cols existed),
+          // or if they're inflated (from old concurrency bug), always recalculate
+          // from the deterministic config formula so the display is correct.
+          if (pos.tp1Hit) {
+            pos.tp1RealizedSol = (this.config.tp1Pct / 100) * pos.sizeSol * (this.config.tp1ClosePct / 100);
+          }
+          if (pos.tp2Hit) {
+            pos.tp2RealizedSol = (this.config.tp2Pct / 100) * pos.sizeSol * (this.config.tp2ClosePct / 100);
+          }
+          // Sync realizedPnlSol to the corrected breakdown total (runner not yet realized)
+          if (pos.tp1Hit || pos.tp2Hit) {
+            pos.realizedPnlSol = pos.tp1RealizedSol + pos.tp2RealizedSol;
+          }
+          this.updateLivePnl(pos);
           this.openPositions.set(pos.mint, pos);
           this.seenMints.add(pos.mint);
         } else {
-          this.closedPositions.push(pos);
+          rawClosed.push(pos);
           this.seenMints.add(pos.mint);
         }
       }
-      // Keep newest MAX_CLOSED — with ASC order, slice(-N) = last N = newest
+
+      // ── Deduplicate closed positions ─────────────────────────────────────────
+      // Multiple DB rows can exist for the same mint (e.g. from the race-condition
+      // bug where two graduation events both passed checkSkipReason before either
+      // called enterPosition). Keep only the best record per mint; delete the rest.
+      const keepById = new Map<string, SniperPosition>();
+      const deleteIds: string[] = [];
+
+      // Group by mint, keep the one with the highest realizedPnlSol
+      const byMint = new Map<string, SniperPosition[]>();
+      for (const pos of rawClosed) {
+        const group = byMint.get(pos.mint) ?? [];
+        group.push(pos);
+        byMint.set(pos.mint, group);
+      }
+      for (const group of byMint.values()) {
+        // Sort: highest realizedPnlSol first; if tied, latest closedAt wins
+        group.sort((a, b) =>
+          b.realizedPnlSol - a.realizedPnlSol ||
+          (b.closedAt ?? 0) - (a.closedAt ?? 0)
+        );
+        keepById.set(group[0]!.id, group[0]!);
+        for (let i = 1; i < group.length; i++) deleteIds.push(group[i]!.id);
+      }
+
+      if (deleteIds.length > 0) {
+        logger.warn({ count: deleteIds.length, ids: deleteIds }, "Graduation sniper: deleting duplicate position rows from DB");
+        for (const id of deleteIds) {
+          try {
+            await execute(`DELETE FROM sniper_positions WHERE id = $1`, [id]);
+          } catch { /* best-effort */ }
+        }
+      }
+
+      // Restore sorted closed list (ASC by entry_at, trimmed to MAX_CLOSED)
+      this.closedPositions = Array.from(keepById.values())
+        .sort((a, b) => a.entryAt - b.entryAt);
       if (this.closedPositions.length > MAX_CLOSED) {
         this.closedPositions = this.closedPositions.slice(-MAX_CLOSED);
       }
+
+      logger.info(
+        { open: this.openPositions.size, closed: this.closedPositions.length, duplicatesDeleted: deleteIds.length },
+        "Graduation sniper: positions loaded",
+      );
     } catch (err) {
       logger.warn({ err: (err as Error).message }, "Graduation sniper: could not load positions");
     }
@@ -435,6 +495,19 @@ class GraduationSniperService {
         return;
       }
 
+      // ── Race-condition guard: reserve this mint before any async op ──────────
+      // Without this, two simultaneous graduation events for the same mint both
+      // pass checkSkipReason (seenMints only gets the mint inside enterPosition,
+      // which is AFTER all the awaits below), creating two DB rows.
+      if (this.processingGraduations.has(mint)) {
+        this.addEvent({ ...eventBase, action: "skipped", skipReason: "Graduation already in progress for this mint" });
+        logger.info({ mint }, "Graduation sniper: duplicate graduation event suppressed");
+        return;
+      }
+      this.processingGraduations.add(mint);
+
+      try {
+
       // Wait before entry so DEX price feeds have time to populate
       await new Promise((r) => setTimeout(r, this.config.waitBeforeEntryMs));
 
@@ -510,9 +583,16 @@ class GraduationSniperService {
 
       this.enterPosition(mint, symbol, name, entryPrice, signature);
       this.addEvent({ ...eventBase, symbol, action: "entered" });
-    } catch (err) {
-      logger.warn({ signature, err: (err as Error).message }, "Graduation sniper: error processing graduation");
-    }
+
+      } catch (err) {
+        logger.warn({ signature, err: (err as Error).message }, "Graduation sniper: error processing graduation");
+      } finally {
+        // Always release the mint so future graduations of the same token aren't
+        // permanently blocked (e.g. if we skipped due to rug but it recovers).
+        // seenMints handles the permanent "already traded" gate; this is just the
+        // in-flight concurrency gate.
+        this.processingGraduations.delete(mint);
+      }
   }
 
   private checkSkipReason(mint: string): string | null {
