@@ -306,6 +306,43 @@ function PositionRow({ pos }: { pos: SniperPosition }) {
             </div>
           </div>
         </div>
+        {/* Live P&L breakdown — shown once at least one TP has been hit */}
+        {(pos.tp1Hit || pos.tp2Hit) && (
+          <div className="mt-2 rounded-lg bg-white/[0.03] border border-white/[0.06] px-3 py-2">
+            <div className="text-[9px] font-bold text-white/30 uppercase tracking-wider mb-1.5">P&amp;L Breakdown</div>
+            <div className="flex gap-3 flex-wrap items-end">
+              {pos.tp1Hit && (
+                <div className="flex flex-col items-center">
+                  <span className="text-[9px] text-white/25">TP1</span>
+                  <span className={`text-[10px] font-bold ${pos.tp1RealizedSol >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                    {pos.tp1RealizedSol >= 0 ? "+" : ""}{fmt(pos.tp1RealizedSol, 4)}
+                  </span>
+                </div>
+              )}
+              {pos.tp2Hit && (
+                <div className="flex flex-col items-center">
+                  <span className="text-[9px] text-white/25">TP2</span>
+                  <span className={`text-[10px] font-bold ${pos.tp2RealizedSol >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                    {pos.tp2RealizedSol >= 0 ? "+" : ""}{fmt(pos.tp2RealizedSol, 4)}
+                  </span>
+                </div>
+              )}
+              <div className="flex flex-col items-center">
+                <span className="text-[9px] text-white/25">Unrealized</span>
+                <span className={`text-[10px] font-bold ${pos.unrealizedPnlSol >= 0 ? "text-blue-400" : "text-red-400"}`}>
+                  {pos.unrealizedPnlSol >= 0 ? "+" : ""}{fmt(pos.unrealizedPnlSol, 4)}
+                </span>
+              </div>
+              <div className="flex flex-col items-center ml-auto">
+                <span className="text-[9px] text-white/25">Total</span>
+                <span className={`text-[10px] font-bold ${pos.totalPnlSol >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                  {pos.totalPnlSol >= 0 ? "+" : ""}{fmt(pos.totalPnlSol, 4)}
+                </span>
+              </div>
+            </div>
+          </div>
+        )}
+
         <div className="mt-2">
           <a href={`https://dexscreener.com/solana/${pos.mint}`} target="_blank" rel="noreferrer"
             className="flex items-center gap-1 text-[10px] text-violet-400/60 hover:text-violet-400 transition-colors">
