@@ -164,8 +164,8 @@ function PositionCard({ pos }: { pos: PumpfunPosition }) {
             />
           </div>
           <div className="flex justify-between text-[9px]">
-            <span className={pos.tp1Hit ? "text-emerald-400" : "text-white/15"}>TP1 +300%</span>
-            <span className={pos.tp2Hit ? "text-violet-400" : "text-white/15"}>TP2 +1000%</span>
+            <span className={pos.tp1Hit ? "text-emerald-400" : "text-white/15"}>TP1 +200%</span>
+            <span className={pos.tp2Hit ? "text-violet-400" : "text-white/15"}>TP2 +500%</span>
           </div>
         </div>
         <div className="flex flex-wrap gap-1.5">
