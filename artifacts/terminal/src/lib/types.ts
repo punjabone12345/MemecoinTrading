@@ -214,6 +214,123 @@ export interface CycleRecord {
   decisions: CycleDecision[];
 }
 
+// ── Pump.fun Pre-Graduation Trader (Module A) ─────────────────────────────────
+
+export interface PumpfunScoreBreakdown {
+  graduationSpeed: number;
+  volumeAcceleration: number;
+  uniqueBuyerGrowth: number;
+  txVelocity: number;
+  mcapAcceleration: number;
+  holderDistribution: number;
+  whaleAccumulation: number;
+  creatorRisk: number;
+  momentumStrength: number;
+  total: number;
+}
+
+export type PumpfunTokenStatus =
+  | "watching" | "candidate" | "buySignal" | "bought"
+  | "graduated" | "exited" | "rejected";
+
+export interface PumpfunTrackedToken {
+  mint: string;
+  symbol: string;
+  name: string;
+  firstSeen: number;
+  lastUpdated: number;
+  priceUsd: number;
+  mcap: number;
+  graduationPct: number;
+  pairAddress: string;
+  uniqueBuyers: string[];
+  score: number;
+  scoreBreakdown: PumpfunScoreBreakdown;
+  status: PumpfunTokenStatus;
+  rejectionReason?: string;
+  positionId?: string;
+  creatorSold: boolean;
+}
+
+export interface PumpfunPosition {
+  id: string;
+  mint: string;
+  symbol: string;
+  name: string;
+  detectedAt: number;
+  entryAt: number;
+  entryPrice: number;
+  entryMcap: number;
+  entryGraduationPct: number;
+  entryScore: number;
+  currentPrice: number;
+  sizeSol: number;
+  tp1Hit: boolean;
+  tp2Hit: boolean;
+  remainingFraction: number;
+  effectiveSlPrice: number;
+  trailingHigh: number;
+  status: "open" | "closed";
+  realizedPnlSol: number;
+  unrealizedPnlSol: number;
+  totalPnlSol: number;
+  pnlPct: number;
+  closeReason?: string;
+  closedAt?: number;
+  exitPrice?: number;
+}
+
+export interface PumpfunEvent {
+  id: string;
+  ts: number;
+  mint: string;
+  symbol: string;
+  action: "entered" | "skipped" | "rejected";
+  skipReason?: string;
+  score?: number;
+  graduationPct?: number;
+}
+
+export interface PumpfunScoreWeights {
+  graduationSpeed: number;
+  volumeAcceleration: number;
+  uniqueBuyerGrowth: number;
+  txVelocity: number;
+  mcapAcceleration: number;
+  holderDistribution: number;
+  whaleAccumulation: number;
+  creatorRisk: number;
+  momentumStrength: number;
+}
+
+export interface PumpfunConfig {
+  enabled: boolean;
+  minAiScore: number;
+  positionSizeSol: number;
+  maxOpenPositions: number;
+  graduationMinPct: number;
+  graduationMaxPct: number;
+  virtualBalanceSol: number;
+  scoreWeights: PumpfunScoreWeights;
+}
+
+export interface PumpfunStatus {
+  wsConnected: boolean;
+  wsReconnects: number;
+  enabled: boolean;
+  trackedCount: number;
+  candidateCount: number;
+  tradesTotal: number;
+  wins: number;
+  losses: number;
+  totalRealizedPnlSol: number;
+  totalUnrealizedPnlSol: number;
+  totalCombinedPnlSol: number;
+  virtualBalance: number;
+  openCount: number;
+  config: PumpfunConfig;
+}
+
 // ── Graduation Sniper ────────────────────────────────────────────────────────
 
 export interface SniperConfig {

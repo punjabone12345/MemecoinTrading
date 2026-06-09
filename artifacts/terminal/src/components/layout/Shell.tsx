@@ -1,6 +1,6 @@
 import { ReactNode } from "react";
 import { Link, useLocation } from "wouter";
-import { LayoutDashboard, ListOrdered, BarChart3, Cpu, Activity, Target } from "lucide-react";
+import { LayoutDashboard, ListOrdered, BarChart3, Cpu, Rocket, Target } from "lucide-react";
 import { useWebSocket, useUnreadAlerts, useAutoTraderStatus } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 
@@ -8,7 +8,7 @@ const NAV_ITEMS = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard },
   { href: "/positions", label: "Positions", icon: ListOrdered },
   { href: "/analytics", label: "Analytics", icon: BarChart3 },
-  { href: "/scanner", label: "Scanner", icon: Activity },
+  { href: "/scanner", label: "Pump.fun", icon: Rocket },
   { href: "/auto-trader", label: "Bot", icon: Cpu },
   { href: "/sniper", label: "Sniper", icon: Target },
 ];

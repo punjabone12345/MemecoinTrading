@@ -1,0 +1,1 @@
+- [Pumpfun Module A vs Sniper Module B](pumpfun-vs-sniper.md) — two completely separate trading modules; never merge TP logic between them

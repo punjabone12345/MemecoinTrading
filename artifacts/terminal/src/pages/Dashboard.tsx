@@ -1,5 +1,5 @@
-import { usePortfolio, usePositions, useAutoTraderStatus, useResetAccount, useAnalytics } from "@/lib/api";
-import { TrendingUp, TrendingDown, Activity, Wallet, Target, Shield, RefreshCw } from "lucide-react";
+import { usePortfolio, usePositions, useAutoTraderStatus, useResetAccount, useAnalytics, usePumpfunStatus, usePumpfunHistory, usePumpfunPositions } from "@/lib/api";
+import { TrendingUp, TrendingDown, Activity, Wallet, Target, Shield, RefreshCw, Rocket } from "lucide-react";
 
 function formatSol(v: number | undefined) {
   if (v === undefined || v === null) return "0.0000";
@@ -37,6 +37,9 @@ export default function Dashboard() {
   const { data: status } = useAutoTraderStatus();
   const { data: analytics } = useAnalytics();
   const resetAccount = useResetAccount();
+  const { data: pfStatus } = usePumpfunStatus();
+  const { data: pfHistory = [] } = usePumpfunHistory();
+  const { data: pfPositions = [] } = usePumpfunPositions();
 
   const positions = positionsData?.positions ?? [];
   const totalLivePnl = positions.reduce((s, p) => s + (p.livePnlSol ?? 0), 0);
@@ -213,10 +216,13 @@ export default function Dashboard() {
         )}
       </div>
 
-      {/* Quick stats */}
+      {/* Post-Graduation Sniper stats */}
       {analytics && (
         <div className="bg-[#0d0d18] border border-white/8 rounded-xl p-4">
-          <h3 className="text-xs font-bold text-white/50 uppercase tracking-wider mb-3">Performance Summary</h3>
+          <div className="flex items-center gap-2 mb-3">
+            <Target className="w-3.5 h-3.5 text-violet-400" />
+            <h3 className="text-xs font-bold text-white/50 uppercase tracking-wider">Post-Graduation Sniper</h3>
+          </div>
           <div className="grid grid-cols-3 gap-3 text-center">
             <div>
               <p className="text-lg font-black text-white">{analytics.totalTrades}</p>
@@ -233,6 +239,60 @@ export default function Dashboard() {
           </div>
         </div>
       )}
+
+      {/* Pre-Graduation Pump.fun stats */}
+      {(() => {
+        const pfWins    = pfHistory.filter((p) => p.realizedPnlSol > 0).length;
+        const pfLosses  = pfHistory.filter((p) => p.realizedPnlSol <= 0).length;
+        const pfPnl     = pfHistory.reduce((s, p) => s + p.realizedPnlSol, 0) +
+                          pfPositions.reduce((s, p) => s + (p.totalPnlSol ?? 0), 0);
+        const pfWinRate = pfHistory.length > 0 ? (pfWins / pfHistory.length * 100) : 0;
+        return (
+          <div className="bg-[#0d0d18] border border-violet-500/15 rounded-xl p-4">
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-2">
+                <Rocket className="w-3.5 h-3.5 text-violet-400" />
+                <h3 className="text-xs font-bold text-violet-400/70 uppercase tracking-wider">Pre-Graduation Trader</h3>
+              </div>
+              <div className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                pfStatus?.enabled
+                  ? "bg-violet-500/15 text-violet-400"
+                  : "bg-white/5 text-white/30"
+              }`}>
+                <div className={`w-1.5 h-1.5 rounded-full ${pfStatus?.enabled ? "bg-violet-400 animate-pulse" : "bg-white/20"}`} />
+                {pfStatus?.enabled ? "ACTIVE" : "PAUSED"}
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-2 mb-3">
+              <div className="bg-white/4 rounded-lg p-2.5 text-center">
+                <p className="text-lg font-black text-white">{pfHistory.length}</p>
+                <p className="text-[10px] text-white/40">Total Trades</p>
+              </div>
+              <div className="bg-white/4 rounded-lg p-2.5 text-center">
+                <p className={`text-lg font-black ${pfWinRate >= 50 ? "text-emerald-400" : "text-red-400"}`}>
+                  {pfHistory.length > 0 ? `${pfWinRate.toFixed(0)}%` : "—"}
+                </p>
+                <p className="text-[10px] text-white/40">Win Rate</p>
+              </div>
+              <div className="bg-white/4 rounded-lg p-2.5 text-center">
+                <p className={`text-base font-black ${pfPnl >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                  {pfPnl >= 0 ? "+" : ""}{pfPnl.toFixed(4)}
+                </p>
+                <p className="text-[10px] text-white/40">Total PnL (SOL)</p>
+              </div>
+              <div className="bg-white/4 rounded-lg p-2.5 text-center">
+                <p className="text-lg font-black text-white">{pfPositions.length}</p>
+                <p className="text-[10px] text-white/40">Active Positions</p>
+              </div>
+            </div>
+            <div className="flex items-center justify-between text-[10px] text-white/30 pt-2 border-t border-white/5">
+              <span>Tracked: {pfStatus?.trackedCount ?? 0}</span>
+              <span>Candidates: {pfStatus?.candidateCount ?? 0}</span>
+              <span>Balance: {(pfStatus?.virtualBalance ?? 0).toFixed(3)} SOL</span>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Reset Account */}
       <div className="bg-[#0d0d18] border border-red-500/15 rounded-xl p-4">

@@ -8,6 +8,7 @@ import { autoTraderService } from "./services/auto-trader.service.js";
 import { startCommandPolling, registerCommandHandler, toIST, sendTelegram, isTelegramConfigured } from "./lib/telegram.js";
 import { lossJournalService } from "./services/loss-journal.service.js";
 import { graduationSniperService } from "./services/graduation-sniper.service.js";
+import { pumpfunTraderService } from "./services/pumpfun-trader.service.js";
 
 const rawPort = process.env["PORT"] ?? "8080";
 const port = Number(rawPort);
@@ -342,6 +343,39 @@ if (process.env["DATABASE_URL"]) {
           `ALTER TABLE positions ADD COLUMN IF NOT EXISTS ${col} ${type}`
         ).catch(() => {});
       }
+      // Pump.fun Pre-Graduation Trader table
+      await migClient.query(`
+        CREATE TABLE IF NOT EXISTS pumpfun_positions (
+          id TEXT PRIMARY KEY,
+          mint TEXT NOT NULL,
+          symbol TEXT,
+          name TEXT,
+          detected_at BIGINT,
+          entry_at BIGINT,
+          entry_price DOUBLE PRECISION,
+          entry_mcap DOUBLE PRECISION,
+          entry_graduation_pct DOUBLE PRECISION,
+          entry_score INTEGER,
+          current_price DOUBLE PRECISION,
+          size_sol DOUBLE PRECISION,
+          tp1_hit BOOLEAN DEFAULT FALSE,
+          tp2_hit BOOLEAN DEFAULT FALSE,
+          remaining_fraction DOUBLE PRECISION DEFAULT 1.0,
+          effective_sl_price DOUBLE PRECISION,
+          trailing_high DOUBLE PRECISION,
+          status TEXT DEFAULT 'open',
+          realized_pnl_sol DOUBLE PRECISION DEFAULT 0,
+          close_reason TEXT,
+          closed_at BIGINT,
+          exit_price DOUBLE PRECISION
+        )
+      `);
+      await migClient.query(`
+        CREATE TABLE IF NOT EXISTS kv_store (
+          key TEXT PRIMARY KEY,
+          value TEXT NOT NULL
+        )
+      `);
       // Graduation Sniper tables
       await migClient.query(`
         CREATE TABLE IF NOT EXISTS sniper_positions (
@@ -382,6 +416,8 @@ await paperTradingService.init();
 await autoTraderService.init();
 await graduationSniperService.init();
 graduationSniperService.start();
+await pumpfunTraderService.init();
+pumpfunTraderService.start();
 
 server.listen(port, () => {
   logger.info({ port }, "Apex Meme Trader AI — server listening");

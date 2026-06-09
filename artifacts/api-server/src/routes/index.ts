@@ -9,6 +9,7 @@ import alertsRouter from "./alerts.js";
 import autoTraderRouter from "./auto-trader.js";
 import lossJournalRouter from "./loss-journal.js";
 import graduationSniperRouter from "./graduation-sniper.js";
+import pumpfunTraderRouter from "./pumpfun-trader.js";
 
 const router: IRouter = Router();
 
@@ -22,5 +23,6 @@ router.use(alertsRouter);
 router.use(autoTraderRouter);
 router.use(lossJournalRouter);
 router.use(graduationSniperRouter);
+router.use(pumpfunTraderRouter);
 
 export default router;

@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { ScannedToken, Position, Portfolio, AnalyticsSnapshot, Alert, AutoTraderStatus, AutoTraderConfig, CycleRecord, LossInsights, SniperStatus, SniperPosition, SniperEvent, SniperConfig } from "./types";
+import { ScannedToken, Position, Portfolio, AnalyticsSnapshot, Alert, AutoTraderStatus, AutoTraderConfig, CycleRecord, LossInsights, SniperStatus, SniperPosition, SniperEvent, SniperConfig, PumpfunStatus, PumpfunTrackedToken, PumpfunPosition, PumpfunEvent, PumpfunConfig } from "./types";
 import { useToast } from "@/hooks/use-toast";
 
 // When the frontend is deployed separately from the backend (e.g. Vercel + Render),
@@ -658,6 +658,126 @@ export function useResetSniperAccount() {
       toast({ title: "Sniper account reset", description: "All positions cleared, balance restored." });
     },
     onError: () => toast({ title: "Reset failed", variant: "destructive" }),
+  });
+}
+
+// ── Pump.fun Pre-Graduation Trader hooks (Module A) ────────────────────────────
+
+export function usePumpfunStatus() {
+  return useQuery<PumpfunStatus>({
+    queryKey: ["pumpfun-status"],
+    queryFn: async () => {
+      const res  = await fetch(apiUrl("/api/pumpfun/status"));
+      const json = await res.json() as { data: PumpfunStatus };
+      return json.data;
+    },
+    refetchInterval: 5000,
+  });
+}
+
+export function usePumpfunTokens() {
+  return useQuery<PumpfunTrackedToken[]>({
+    queryKey: ["pumpfun-tokens"],
+    queryFn: async () => {
+      const res  = await fetch(apiUrl("/api/pumpfun/tokens"));
+      const json = await res.json() as { data: PumpfunTrackedToken[] };
+      return json.data ?? [];
+    },
+    refetchInterval: 10_000,
+  });
+}
+
+export function usePumpfunPositions() {
+  return useQuery<PumpfunPosition[]>({
+    queryKey: ["pumpfun-positions"],
+    queryFn: async () => {
+      const res  = await fetch(apiUrl("/api/pumpfun/positions"));
+      const json = await res.json() as { data: PumpfunPosition[] };
+      return json.data ?? [];
+    },
+    refetchInterval: 10_000,
+  });
+}
+
+export function usePumpfunHistory() {
+  return useQuery<PumpfunPosition[]>({
+    queryKey: ["pumpfun-history"],
+    queryFn: async () => {
+      const res  = await fetch(apiUrl("/api/pumpfun/history"));
+      const json = await res.json() as { data: PumpfunPosition[] };
+      return json.data ?? [];
+    },
+    refetchInterval: 30_000,
+  });
+}
+
+export function usePumpfunEvents() {
+  return useQuery<PumpfunEvent[]>({
+    queryKey: ["pumpfun-events"],
+    queryFn: async () => {
+      const res  = await fetch(apiUrl("/api/pumpfun/events"));
+      const json = await res.json() as { data: PumpfunEvent[] };
+      return json.data ?? [];
+    },
+    refetchInterval: 10_000,
+  });
+}
+
+export function usePumpfunConfig() {
+  return useQuery<PumpfunConfig>({
+    queryKey: ["pumpfun-config"],
+    queryFn: async () => {
+      const res  = await fetch(apiUrl("/api/pumpfun/config"));
+      const json = await res.json() as { data: PumpfunConfig };
+      return json.data;
+    },
+  });
+}
+
+export function useUpdatePumpfunConfig() {
+  const queryClient = useQueryClient();
+  const { toast } = useToast();
+  return useMutation({
+    mutationFn: async (config: Partial<PumpfunConfig>) => {
+      const res = await fetch(apiUrl("/api/pumpfun/config"), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(config),
+      });
+      const json = await res.json() as { data: PumpfunConfig };
+      return json.data;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["pumpfun-config"] });
+      queryClient.invalidateQueries({ queryKey: ["pumpfun-status"] });
+      toast({ title: "Pump.fun config saved", description: "Settings updated." });
+    },
+    onError: () => {
+      toast({ title: "Save failed", description: "Could not update config.", variant: "destructive" });
+    },
+  });
+}
+
+export function useInjectPumpfunToken() {
+  const queryClient = useQueryClient();
+  const { toast } = useToast();
+  return useMutation({
+    mutationFn: async (data: {
+      mint: string; symbol: string; name: string;
+      mcap: number; priceUsd: number; pairAddress: string;
+    }) => {
+      const res = await fetch(apiUrl("/api/pumpfun/inject"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(data),
+      });
+      if (!res.ok) throw new Error("Inject failed");
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["pumpfun-tokens"] });
+      toast({ title: "Token injected", description: "Token added to tracking list." });
+    },
+    onError: (e: Error) => toast({ title: "Inject failed", description: e.message, variant: "destructive" }),
   });
 }
 

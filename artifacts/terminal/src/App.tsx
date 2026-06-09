@@ -5,7 +5,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { Shell } from "@/components/layout/Shell";
 
 import Dashboard from "@/pages/Dashboard";
-import Scanner from "@/pages/Scanner";
+import PumpfunTrader from "@/pages/PumpfunTrader";
 import Positions from "@/pages/Positions";
 import Analytics from "@/pages/Analytics";
 import Watchlist from "@/pages/Watchlist";
@@ -21,7 +21,7 @@ function Router() {
     <Shell>
       <Switch>
         <Route path="/" component={Dashboard} />
-        <Route path="/scanner" component={Scanner} />
+        <Route path="/scanner" component={PumpfunTrader} />
         <Route path="/positions" component={Positions} />
         <Route path="/analytics" component={Analytics} />
         <Route path="/watchlist" component={Watchlist} />
