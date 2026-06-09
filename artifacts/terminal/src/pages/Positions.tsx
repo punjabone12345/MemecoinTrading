@@ -317,7 +317,8 @@ export default function Positions() {
                 </div>
               )}
               {pfOpenFiltered.map((p) => {
-                const pnl = typeof p.totalPnlSol === "number" ? p.totalPnlSol : 0;
+                const pnl = p.totalPnlSol ?? 0;
+                const pnlPct = p.pnlPct ?? 0;
                 const isWin = pnl >= 0;
                 const tp1Hit = p.tp1Hit ?? false;
                 const tp2Hit = p.tp2Hit ?? false;
@@ -328,12 +329,12 @@ export default function Positions() {
                         <Rocket className="w-4 h-4 text-violet-400" />
                         <span className="font-black text-white text-base">${p.symbol}</span>
                         <span className="text-white/35 text-xs">{p.name}</span>
-                        <span className="text-[9px] px-1.5 py-0.5 rounded-md bg-violet-500/15 text-violet-400">PF Pre-Grad</span>
+                        <span className="text-[9px] px-1.5 py-0.5 rounded-md bg-violet-500/15 text-violet-400">PF</span>
                         {tp1Hit && <span className="text-[9px] px-1.5 py-0.5 rounded-md bg-emerald-500/15 text-emerald-400">TP1 ✓</span>}
                         {tp2Hit && <span className="text-[9px] px-1.5 py-0.5 rounded-md bg-emerald-500/20 text-emerald-300">TP2 ✓</span>}
                       </div>
                       <div className={`text-sm font-black ${isWin ? "text-emerald-400" : "text-red-400"}`}>
-                        {isWin ? "+" : ""}{Math.abs(pnl).toFixed(4)} SOL
+                        {pnl >= 0 ? "+" : ""}{pnl.toFixed(4)} SOL
                       </div>
                     </div>
                     <div className="bg-[#0d0d18] px-4 py-3 space-y-3">
@@ -343,6 +344,12 @@ export default function Positions() {
                           <span className="font-mono text-white">${p.entryPrice < 0.0001 ? p.entryPrice.toFixed(10) : p.entryPrice.toFixed(6)}</span>
                         </div>
                         <div className="flex justify-between">
+                          <span className="text-white/35">Current</span>
+                          <span className={`font-mono font-bold ${isWin ? "text-emerald-400" : "text-red-400"}`}>
+                            {p.currentPrice > 0 ? `$${p.currentPrice < 0.0001 ? p.currentPrice.toFixed(10) : p.currentPrice.toFixed(6)}` : "—"}
+                          </span>
+                        </div>
+                        <div className="flex justify-between">
                           <span className="text-white/35">Size</span>
                           <span className="text-white">{p.sizeSol.toFixed(4)} SOL</span>
                         </div>
@@ -350,9 +357,14 @@ export default function Positions() {
                           <span className="text-white/35">Remaining</span>
                           <span className="text-white">{((p.remainingFraction ?? 1) * 100).toFixed(0)}%</span>
                         </div>
-                        <div className="flex justify-between items-center gap-1">
-                          <Clock className="w-3 h-3 text-white/25" />
-                          <span className="text-white/35 text-[9px]">{new Date(p.entryAt).toLocaleString("en-IN", { timeZone: "Asia/Kolkata", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: true })}</span>
+                      </div>
+                      <div className="flex items-center justify-between">
+                        <div className={`px-2.5 py-1 rounded-lg text-xs font-bold ${isWin ? "bg-emerald-500/15 text-emerald-400" : "bg-red-500/15 text-red-400"}`}>
+                          {pnlPct >= 0 ? "+" : ""}{pnlPct.toFixed(2)}% live
+                        </div>
+                        <div className="flex items-center gap-1 text-white/25 text-[10px]">
+                          <Clock className="w-3 h-3" />
+                          {new Date(p.entryAt).toLocaleString("en-IN", { timeZone: "Asia/Kolkata", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: true })}
                         </div>
                       </div>
                       <div className="bg-white/4 rounded-lg px-3 py-2">

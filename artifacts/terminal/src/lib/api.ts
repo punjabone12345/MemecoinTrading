@@ -705,7 +705,7 @@ export function usePumpfunTokens() {
   });
 }
 
-export function usePumpfunPositions() {
+export function usePumpfunPositions(refetchMs = 3000) {
   return useQuery<PumpfunPosition[]>({
     queryKey: ["pumpfun-positions"],
     queryFn: async () => {
@@ -713,7 +713,7 @@ export function usePumpfunPositions() {
       const json = await res.json() as { data: PumpfunPosition[] };
       return json.data ?? [];
     },
-    refetchInterval: 10_000,
+    refetchInterval: refetchMs,
   });
 }
 
