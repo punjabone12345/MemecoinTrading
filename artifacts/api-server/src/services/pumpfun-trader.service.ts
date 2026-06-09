@@ -51,10 +51,15 @@ const PF_STAGED_AFTER_TP1  = 35;
 // FIX 6: trading hours (6am–11pm IST) — same as sniper
 const PF_NIGHT_START_HOUR  = 23;
 const PF_NIGHT_END_HOUR    = 6;
-// FIX 5: minimum validations before entry
-const PF_MIN_TX_COUNT      = 50;           // at least 50 transactions before entry
-const PF_MAX_AGE_MS        = 30 * 60_000;  // token age must be < 30 minutes
-const PF_GRAD_MIN_AFTER_ENTRY = 80;        // exit if graduation drops below 80% after entry
+// Entry requirements — relaxed for near-graduation tokens
+const PF_MIN_TX_COUNT         = 5;            // only 5 txs required in normal zone (was 50 — too strict)
+const PF_MIN_TX_NEAR_GRAD     = 0;            // 0 txs required for 85%+ graduation tokens (they're already near graduating)
+const PF_MAX_AGE_MS           = 90 * 60_000;  // token age < 90 min (was 30 — blocked slow-climbing tokens)
+const PF_MAX_AGE_NEAR_GRAD_MS = 4 * 60 * 60_000; // 4 hours allowed for 85%+ grad tokens
+const PF_GRAD_MIN_AFTER_ENTRY = 80;           // exit if graduation drops below 80% after entry
+// Near-graduation tiers for fast-track entry
+const PF_NEAR_GRAD_PCT   = 85;  // fast-track tier 1: relaxed checks
+const PF_CLOSE_GRAD_PCT  = 92;  // fast-track tier 2: minimal checks, auto-pass score
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -190,10 +195,10 @@ export interface PumpfunStatus {
 // ── Defaults ──────────────────────────────────────────────────────────────────
 const DEFAULT_CONFIG: PumpfunConfig = {
   enabled: true,
-  minAiScore: 55,
-  positionSizeSol: 0.05,   // FIX 5: 0.05 SOL (smaller — higher risk pre-grad plays)
+  minAiScore: 35,           // lowered from 55 — scoring penalises late-discovered tokens unfairly
+  positionSizeSol: 0.05,   // 0.05 SOL (smaller — higher risk pre-grad plays)
   maxOpenPositions: 3,
-  graduationMinPct: 85,    // FIX 5: 85% threshold as specified
+  graduationMinPct: 80,    // lowered from 85 — discover tokens earlier for more tx history build-up
   graduationMaxPct: 99.5,
   virtualBalanceSol: 10.0,
   scoreWeights: {
@@ -1200,6 +1205,9 @@ class PumpfunTraderService {
     const now = nowSec();
     const scores = this.emptyBreakdown();
 
+    // Whether this token has meaningful live tx history (vs just discovered via DexScreener scan)
+    const hasTxHistory = token.txHistory.length >= 5;
+
     // 1. Graduation Speed (15%) — how fast graduation % is increasing
     {
       const snaps = token.mcapSnapshots;
@@ -1212,6 +1220,10 @@ class PumpfunTraderService {
         // Scale: >$5k/min = 100, $1k/min = 60, $500/min = 40
         const raw = Math.min(mcapPerMin / 50, 100);
         scores.graduationSpeed = Math.max(0, raw);
+      } else {
+        // No mcap history yet — use graduation % itself as a speed proxy.
+        // A token at 90% filled the bonding curve fast; treat it as solid progress.
+        scores.graduationSpeed = Math.min(token.graduationPct * 0.8, 80);
       }
     }
 
@@ -1224,6 +1236,8 @@ class PumpfunTraderService {
         scores.volumeAcceleration = Math.min(ratio * 50, 100);
       } else if (vol5m > 0.05) {
         scores.volumeAcceleration = 70; // active with no prior comparison
+      } else if (!hasTxHistory) {
+        scores.volumeAcceleration = 50; // neutral — no data, don't punish
       }
     }
 
@@ -1231,16 +1245,24 @@ class PumpfunTraderService {
     {
       const recent5m = token.txHistory.filter((h) => h.ts >= now - 5 * 60_000 && h.isBuy);
       const recentBuyers = new Set(recent5m.map((h) => h.wallet)).size;
-      // Scale: >20 unique buyers in 5m = 100, 10 = 60, 5 = 30
-      scores.uniqueBuyerGrowth = Math.min(recentBuyers * 5, 100);
+      if (recentBuyers > 0) {
+        // Scale: >20 unique buyers in 5m = 100, 10 = 60, 5 = 30
+        scores.uniqueBuyerGrowth = Math.min(recentBuyers * 5, 100);
+      } else if (!hasTxHistory) {
+        scores.uniqueBuyerGrowth = 50; // neutral — no data, don't punish
+      }
     }
 
     // 4. Transaction Velocity (10%) — txns per minute in last 5m
     {
       const txs5m  = txsInWindow(token.txHistory, 5 * 60_000);
       const txPerMin = txs5m / 5;
-      // Scale: >10 tx/min = 100, 5 = 60, 2 = 30
-      scores.txVelocity = Math.min(txPerMin * 10, 100);
+      if (txPerMin > 0) {
+        // Scale: >10 tx/min = 100, 5 = 60, 2 = 30
+        scores.txVelocity = Math.min(txPerMin * 10, 100);
+      } else if (!hasTxHistory) {
+        scores.txVelocity = 50; // neutral — no data, don't punish
+      }
     }
 
     // 5. Market Cap Acceleration (10%) — recent mcap growth rate
@@ -1254,6 +1276,8 @@ class PumpfunTraderService {
         const growth2 = early.val > 0 ? (mid.val - early.val) / early.val : 0;
         const accel   = growth1 - growth2;
         scores.mcapAcceleration = Math.max(0, Math.min(accel * 100 + 50, 100));
+      } else if (!hasTxHistory) {
+        scores.mcapAcceleration = 50; // neutral — not enough snapshots yet
       }
     }
 
@@ -1268,7 +1292,7 @@ class PumpfunTraderService {
         // Low concentration = high score: 100% = 0, 50% = 50, 20% = 90
         scores.holderDistribution = Math.max(0, 100 - maxPct);
       } else {
-        scores.holderDistribution = 50; // neutral if no data
+        scores.holderDistribution = 55; // slight positive neutral if no data
       }
     }
 
@@ -1279,6 +1303,8 @@ class PumpfunTraderService {
         const maxBuy = Math.max(...recent.map((h) => h.solAmount));
         // Scale: >1 SOL = 100, 0.5 SOL = 70, 0.1 SOL = 30
         scores.whaleAccumulation = Math.min(maxBuy * 80, 100);
+      } else if (!hasTxHistory) {
+        scores.whaleAccumulation = 50; // neutral — no data, don't punish
       }
     }
 
@@ -1296,6 +1322,8 @@ class PumpfunTraderService {
       if (total > 0) {
         const buyRatio = buys / total;
         scores.momentumStrength = Math.min(buyRatio * 120, 100);
+      } else if (!hasTxHistory) {
+        scores.momentumStrength = 55; // slight positive neutral if no data
       }
     }
 
@@ -1349,9 +1377,10 @@ class PumpfunTraderService {
       if (count >= 8) return "Suspected wash trading (same wallet 8+ buys)";
     }
 
-    // 5. Holder growth stagnation — no new unique buyers in last 5m (only check if token is 10m+ old)
+    // 5. Holder growth stagnation — only apply if we have enough tx history to make this meaningful
+    //    Near-graduation tokens discovered via DexScreener scan arrive with 0 txs — don't penalise them
     const ageMs = now - token.firstSeen;
-    if (ageMs > 10 * 60_000 && token.graduationPct >= 80) {
+    if (ageMs > 10 * 60_000 && token.graduationPct >= 80 && token.txHistory.length >= 10) {
       const recent5m = token.txHistory.filter((h) => h.ts >= now - 5 * 60_000 && h.isBuy);
       const recentBuyers = new Set(recent5m.map((h) => h.wallet)).size;
       if (recentBuyers === 0) return "Holder growth stagnated — no new buyers in 5m";
@@ -1376,18 +1405,27 @@ class PumpfunTraderService {
       const gradPct = token.graduationPct;
       const cfg     = this.config;
 
-      // Graduation-proximity bonus: tokens deep in the snipe zone get a score boost.
-      // Near-graduation tokens discovered via DexScreener may have no tx history yet
-      // so their raw score is low — but the bonding curve progress IS the signal.
+      // Graduation-proximity scoring:
+      // Near-graduation tokens discovered via DexScreener may have no tx history,
+      // so raw scores are near-zero. The bonding curve progress IS the signal here —
+      // the more SOL has filled the curve, the higher conviction on graduation.
       let effectiveScore = token.score;
-      if (gradPct >= 90) {
-        // At 90%+ graduation, proximity itself is a strong signal (+20 bonus, capped at 100)
-        const proximityBonus = Math.min((gradPct - 90) * 4, 20); // up to +20 at ~95%+
+
+      if (gradPct >= PF_CLOSE_GRAD_PCT) {
+        // Tier 2 (92%+): token is extremely close to graduating — auto-qualify it.
+        // Bonding curve is 92%+ filled; graduation is imminent. Score is irrelevant.
+        effectiveScore = Math.max(effectiveScore, cfg.minAiScore + 5);
+      } else if (gradPct >= PF_NEAR_GRAD_PCT) {
+        // Tier 1 (80-92%): significant progress — give a large proximity bonus so
+        // that tokens with thin tx history can still clear the minAiScore threshold.
+        const proximityBonus = Math.min((gradPct - PF_NEAR_GRAD_PCT) * 5, 40); // up to +40 at 88%+
         effectiveScore = Math.min(100, effectiveScore + proximityBonus);
-      }
-      if (gradPct >= 95) {
-        // Emergency proximity boost — token is very close to graduating, worth watching
-        effectiveScore = Math.max(effectiveScore, cfg.minAiScore - 5);
+        // Also ensure at least minAiScore-10 so a token at 85%+ with neutral signals can still enter
+        effectiveScore = Math.max(effectiveScore, cfg.minAiScore - 10);
+      } else if (gradPct >= cfg.graduationMinPct) {
+        // Standard zone (graduationMinPct to 80%): smaller bonus
+        const proximityBonus = Math.min((gradPct - cfg.graduationMinPct) * 2, 10);
+        effectiveScore = Math.min(100, effectiveScore + proximityBonus);
       }
 
       // Update status using effective score (includes proximity bonus)
@@ -1446,22 +1484,38 @@ class PumpfunTraderService {
       return;
     }
 
-    // FIX 5: Token age must be under 30 minutes
     const tokenAgeMs = Date.now() - token.firstSeen;
-    if (tokenAgeMs > PF_MAX_AGE_MS) {
+    const gradPct    = token.graduationPct;
+
+    // Age check — near-graduation tokens are allowed to be older because they
+    // spent time climbing the bonding curve before we discovered them.
+    // Tier 2 (92%+): skip age check entirely — imminent graduation overrides everything
+    // Tier 1 (85-92%): allow up to 4 hours
+    // Normal (graduationMinPct - 85%): allow up to 90 min
+    const maxAgeMs = gradPct >= PF_CLOSE_GRAD_PCT
+      ? Infinity
+      : gradPct >= PF_NEAR_GRAD_PCT
+        ? PF_MAX_AGE_NEAR_GRAD_MS
+        : PF_MAX_AGE_MS;
+
+    if (tokenAgeMs > maxAgeMs) {
       logger.info(
-        { mint: token.mint, symbol: token.symbol, ageMin: (tokenAgeMs / 60_000).toFixed(1) },
-        "Pump.fun trader: token too old (>30min) — skipping",
+        { mint: token.mint, symbol: token.symbol, ageMin: (tokenAgeMs / 60_000).toFixed(1), gradPct: gradPct.toFixed(1) },
+        "Pump.fun trader: token too old for this graduation tier — skipping",
       );
       return;
     }
 
-    // FIX 5: Must have at least 50 transactions
-    const txCount = token.txHistory.length;
-    if (txCount < PF_MIN_TX_COUNT) {
+    // Tx count check — near-graduation tokens discovered via DexScreener scan arrive
+    // with 0 tx history in our system. Their bonding curve progress is sufficient signal.
+    // For ANY token in the graduation entry zone (graduationMinPct%+): require 0 txs
+    // Below that: require at least PF_MIN_TX_COUNT (5) txs before entry
+    const txCount    = token.txHistory.length;
+    const minTxCount = gradPct >= this.config.graduationMinPct ? PF_MIN_TX_NEAR_GRAD : PF_MIN_TX_COUNT;
+    if (txCount < minTxCount) {
       logger.info(
-        { mint: token.mint, symbol: token.symbol, txCount },
-        "Pump.fun trader: insufficient transactions (<50) — skipping",
+        { mint: token.mint, symbol: token.symbol, txCount, minTxCount, gradPct: gradPct.toFixed(1) },
+        "Pump.fun trader: insufficient transactions — skipping",
       );
       return;
     }
