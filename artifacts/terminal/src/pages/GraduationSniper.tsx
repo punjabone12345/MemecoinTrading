@@ -422,6 +422,45 @@ function HistoryRow({ pos }: { pos: SniperPosition }) {
           </div>
         </div>
 
+        {/* P&L Breakdown — only show if any stage data is non-zero */}
+        {(pos.tp1RealizedSol !== 0 || pos.tp2RealizedSol !== 0 || pos.runnerRealizedSol !== 0) && (
+          <div className="mb-2 rounded-lg bg-white/[0.03] border border-white/[0.06] px-3 py-2">
+            <div className="text-[9px] font-bold text-white/35 uppercase tracking-wider mb-1.5">P&amp;L Breakdown</div>
+            <div className="flex gap-3 flex-wrap">
+              {pos.tp1Hit && (
+                <div className="flex flex-col items-center">
+                  <span className="text-[9px] text-white/30">TP1 ({Math.round((pos.sizeSol > 0 ? 40 : 0))}%)</span>
+                  <span className={`text-[11px] font-bold ${pos.tp1RealizedSol >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                    {pos.tp1RealizedSol >= 0 ? "+" : ""}{fmt(pos.tp1RealizedSol, 4)}
+                  </span>
+                </div>
+              )}
+              {pos.tp2Hit && (
+                <div className="flex flex-col items-center">
+                  <span className="text-[9px] text-white/30">TP2 (40%)</span>
+                  <span className={`text-[11px] font-bold ${pos.tp2RealizedSol >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                    {pos.tp2RealizedSol >= 0 ? "+" : ""}{fmt(pos.tp2RealizedSol, 4)}
+                  </span>
+                </div>
+              )}
+              {pos.runnerRealizedSol !== 0 && (
+                <div className="flex flex-col items-center">
+                  <span className="text-[9px] text-white/30">Runner</span>
+                  <span className={`text-[11px] font-bold ${pos.runnerRealizedSol >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                    {pos.runnerRealizedSol >= 0 ? "+" : ""}{fmt(pos.runnerRealizedSol, 4)}
+                  </span>
+                </div>
+              )}
+              <div className="flex flex-col items-center ml-auto">
+                <span className="text-[9px] text-white/30">Total</span>
+                <span className={`text-[11px] font-bold ${pos.realizedPnlSol >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                  {pos.realizedPnlSol >= 0 ? "+" : ""}{fmt(pos.realizedPnlSol, 4)}
+                </span>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Detail grid */}
         <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[10px] mb-2">
           <div className="flex justify-between">

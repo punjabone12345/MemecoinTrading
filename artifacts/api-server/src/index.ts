@@ -398,9 +398,16 @@ if (process.env["DATABASE_URL"]) {
           close_reason TEXT,
           closed_at BIGINT,
           exit_price DOUBLE PRECISION,
-          tx_signature TEXT
+          tx_signature TEXT,
+          tp1_realized_sol DOUBLE PRECISION DEFAULT 0,
+          tp2_realized_sol DOUBLE PRECISION DEFAULT 0,
+          runner_realized_sol DOUBLE PRECISION DEFAULT 0
         )
       `);
+      // Add breakdown columns to existing sniper_positions tables (idempotent)
+      await migClient.query(`ALTER TABLE sniper_positions ADD COLUMN IF NOT EXISTS tp1_realized_sol DOUBLE PRECISION DEFAULT 0`);
+      await migClient.query(`ALTER TABLE sniper_positions ADD COLUMN IF NOT EXISTS tp2_realized_sol DOUBLE PRECISION DEFAULT 0`);
+      await migClient.query(`ALTER TABLE sniper_positions ADD COLUMN IF NOT EXISTS runner_realized_sol DOUBLE PRECISION DEFAULT 0`);
       logger.info("DB migration: all tables ready");
     } finally {
       migClient.release();

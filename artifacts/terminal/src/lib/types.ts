@@ -374,6 +374,10 @@ export interface SniperPosition {
   closedAt?: number;
   exitPrice?: number;
   txSignature: string;
+  // P&L breakdown per stage
+  tp1RealizedSol: number;
+  tp2RealizedSol: number;
+  runnerRealizedSol: number;
 }
 
 export interface SniperEvent {

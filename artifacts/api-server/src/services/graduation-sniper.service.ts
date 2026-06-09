@@ -124,6 +124,10 @@ export interface SniperPosition {
   closedAt?: number;
   exitPrice?: number;
   txSignature: string;
+  // P&L breakdown per stage
+  tp1RealizedSol: number;
+  tp2RealizedSol: number;
+  runnerRealizedSol: number;
 }
 
 export interface SniperEvent {
@@ -175,6 +179,8 @@ class GraduationSniperService {
 
   // Adaptive price-check intervals
   private lastPositionCheckAt: Map<string, number> = new Map();
+  // Concurrency guard — prevents duplicate TP/SL executions during async gaps
+  private processingMints: Set<string> = new Set();
   // FIX 2: Liquidity monitoring — tracks last known liquidity per position
   private liquidityIntervalId: ReturnType<typeof setInterval> | null = null;
   private lastPositionLiquidityUsd: Map<string, number> = new Map();
@@ -270,6 +276,9 @@ class GraduationSniperService {
       closedAt:         row["closed_at"] ? Number(row["closed_at"]) : undefined,
       exitPrice:        row["exit_price"] ? Number(row["exit_price"]) : undefined,
       txSignature:      String(row["tx_signature"] ?? ""),
+      tp1RealizedSol:   Number(row["tp1_realized_sol"] ?? 0),
+      tp2RealizedSol:   Number(row["tp2_realized_sol"] ?? 0),
+      runnerRealizedSol: Number(row["runner_realized_sol"] ?? 0),
     };
     this.updateLivePnl(p);
     return p;
@@ -721,6 +730,9 @@ class GraduationSniperService {
       totalPnlSol:      0,
       pnlPct:           0,
       txSignature,
+      tp1RealizedSol:   0,
+      tp2RealizedSol:   0,
+      runnerRealizedSol: 0,
     };
 
     this.openPositions.set(mint, pos);
@@ -801,7 +813,8 @@ class GraduationSniperService {
     const remaining = pos.sizeSol * pos.remainingFraction;
     const closePnl  = (exitPrice / pos.entryPrice - 1) * remaining;
 
-    pos.realizedPnlSol += closePnl;
+    pos.runnerRealizedSol += closePnl;
+    pos.realizedPnlSol    += closePnl;
     pos.currentPrice    = exitPrice;
     pos.exitPrice       = exitPrice;
     pos.closeReason     = reason;
@@ -846,13 +859,22 @@ class GraduationSniperService {
     }
   }
 
-  private partialClose(pos: SniperPosition, closeOriginalFraction: number, reason: string, currentPrice: number): void {
+  private partialClose(
+    pos: SniperPosition,
+    closeOriginalFraction: number,
+    reason: string,
+    currentPrice: number,
+    breakdownKey?: "tp1" | "tp2",
+  ): void {
     const closeSize = pos.sizeSol * closeOriginalFraction;
     const closePnl  = (currentPrice / pos.entryPrice - 1) * closeSize;
-    pos.realizedPnlSol += closePnl;
+    pos.realizedPnlSol    += closePnl;
     pos.remainingFraction -= closeOriginalFraction;
     this.virtualBalance   += closeSize + closePnl;
-    pos.currentPrice = currentPrice;
+    pos.currentPrice       = currentPrice;
+
+    if (breakdownKey === "tp1") pos.tp1RealizedSol += closePnl;
+    else if (breakdownKey === "tp2") pos.tp2RealizedSol += closePnl;
 
     void this.persistPosition(pos);
 
@@ -985,7 +1007,7 @@ class GraduationSniperService {
     pos: SniperPosition, price: number, tp1Frac: number, tp1Pct: number, tp1ClosePct: number,
   ): Promise<void> {
     pos.tp1Hit           = true;
-    this.partialClose(pos, tp1Frac, `TP1 +${tp1Pct}% — sell ${tp1ClosePct}%`, price);
+    this.partialClose(pos, tp1Frac, `TP1 +${tp1Pct}% — sell ${tp1ClosePct}%`, price, "tp1");
     pos.effectiveSlPrice = pos.entryPrice; // breakeven SL stored for reference
 
     // Retry persist until confirmed — ensures SL update survives server restart
@@ -1045,6 +1067,20 @@ class GraduationSniperService {
   }
 
   private async checkPositionPrice(mint: string): Promise<void> {
+    // Concurrency guard — skip if a price check is already in-flight for this mint.
+    // Without this, the 10-s setInterval can fire a second tick while executeTP1Atomic
+    // is in its retry-persist loop (up to 30 s), causing TP2 to execute multiple times.
+    if (this.processingMints.has(mint)) return;
+    this.processingMints.add(mint);
+
+    try {
+      await this._checkPositionPriceInner(mint);
+    } finally {
+      this.processingMints.delete(mint);
+    }
+  }
+
+  private async _checkPositionPriceInner(mint: string): Promise<void> {
     const pos = this.openPositions.get(mint);
     if (!pos) return;
 
@@ -1107,7 +1143,7 @@ class GraduationSniperService {
     if (pos.tp1Hit && !pos.tp2Hit && price >= tp2Price) {
       pos.tp2Hit       = true;
       pos.trailingHigh = price;
-      this.partialClose(pos, tp2Frac, `TP2 +${cfg.tp2Pct}% — sell ${cfg.tp2ClosePct}%`, price);
+      this.partialClose(pos, tp2Frac, `TP2 +${cfg.tp2Pct}% — sell ${cfg.tp2ClosePct}%`, price, "tp2");
       logger.info({ mint, symbol: pos.symbol, price }, "Graduation sniper: TP2 hit — runner active");
       if (isTelegramConfigured()) {
         const partialPnl = (price / pos.entryPrice - 1) * pos.sizeSol * tp2Frac;
@@ -1134,26 +1170,31 @@ class GraduationSniperService {
         INSERT INTO sniper_positions (
           id, mint, symbol, name, detected_at, entry_at, entry_price, current_price,
           size_sol, tp1_hit, tp2_hit, remaining_fraction, effective_sl_price,
-          trailing_high, status, realized_pnl_sol, close_reason, closed_at, exit_price, tx_signature
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
+          trailing_high, status, realized_pnl_sol, close_reason, closed_at, exit_price, tx_signature,
+          tp1_realized_sol, tp2_realized_sol, runner_realized_sol
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
         ON CONFLICT (id) DO UPDATE SET
-          current_price     = EXCLUDED.current_price,
-          tp1_hit           = EXCLUDED.tp1_hit,
-          tp2_hit           = EXCLUDED.tp2_hit,
-          remaining_fraction= EXCLUDED.remaining_fraction,
-          effective_sl_price= EXCLUDED.effective_sl_price,
-          trailing_high     = EXCLUDED.trailing_high,
-          status            = EXCLUDED.status,
-          realized_pnl_sol  = EXCLUDED.realized_pnl_sol,
-          close_reason      = EXCLUDED.close_reason,
-          closed_at         = EXCLUDED.closed_at,
-          exit_price        = EXCLUDED.exit_price
+          current_price      = EXCLUDED.current_price,
+          tp1_hit            = EXCLUDED.tp1_hit,
+          tp2_hit            = EXCLUDED.tp2_hit,
+          remaining_fraction = EXCLUDED.remaining_fraction,
+          effective_sl_price = EXCLUDED.effective_sl_price,
+          trailing_high      = EXCLUDED.trailing_high,
+          status             = EXCLUDED.status,
+          realized_pnl_sol   = EXCLUDED.realized_pnl_sol,
+          close_reason       = EXCLUDED.close_reason,
+          closed_at          = EXCLUDED.closed_at,
+          exit_price         = EXCLUDED.exit_price,
+          tp1_realized_sol   = EXCLUDED.tp1_realized_sol,
+          tp2_realized_sol   = EXCLUDED.tp2_realized_sol,
+          runner_realized_sol= EXCLUDED.runner_realized_sol
       `, [
         pos.id, pos.mint, pos.symbol, pos.name, pos.detectedAt, pos.entryAt,
         pos.entryPrice, pos.currentPrice, pos.sizeSol, pos.tp1Hit, pos.tp2Hit,
         pos.remainingFraction, pos.effectiveSlPrice, pos.trailingHigh, pos.status,
         pos.realizedPnlSol, pos.closeReason ?? null, pos.closedAt ?? null,
         pos.exitPrice ?? null, pos.txSignature,
+        pos.tp1RealizedSol, pos.tp2RealizedSol, pos.runnerRealizedSol,
       ]);
     } catch (err) {
       logger.warn({ id: pos.id, err: (err as Error).message }, "Graduation sniper: persistPosition failed");
