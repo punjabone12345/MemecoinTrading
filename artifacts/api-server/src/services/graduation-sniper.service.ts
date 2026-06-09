@@ -35,18 +35,23 @@ const RUG_DROP_ABORT_PCT    = 20;             // abort if price drops ≥ 20 % i
 const MIN_ENTRY_PRICE_USD   = 0.00001;        // FIX 1: skip tokens priced below $0.00001 (pre-rug micro-caps)
 const MIN_POOL_SOL          = 10;             // FIX 2: skip if Raydium pool holds < 10 SOL on-chain (drained)
 
-// ── Night-session sizing (IST 23:00–04:00 = highest rug period) ───────────────
-const NIGHT_SESSION_SOL     = 0.05;           // half-size during night window
-const NIGHT_START_IST_HOUR  = 23;             // 11 pm IST
-const NIGHT_END_IST_HOUR    = 4;              // 4 am IST (exclusive)
+// ── Trading hours (IST) — active 6am–11pm, paused 11pm–6am ──────────────────
+// Night session (11pm–6am) shows 10+ hard stops and net-negative PNL.
+// Keep WebSocket connected, keep detecting — but block trade entry.
+const NIGHT_START_IST_HOUR  = 23;             // 11 pm IST — pause begins
+const NIGHT_END_IST_HOUR    = 6;              // 6 am IST — pause ends (exclusive)
 
-/** Returns true when the current clock time falls inside the high-rug night window (IST). */
+/** Returns true when the clock is inside the high-rug night window (11pm–6am IST). */
 function isNightSession(): boolean {
   const nowUtc   = new Date();
   const istMin   = (nowUtc.getUTCHours() * 60 + nowUtc.getUTCMinutes() + 330) % 1440; // UTC+5:30
   const istHour  = Math.floor(istMin / 60);
   return istHour >= NIGHT_START_IST_HOUR || istHour < NIGHT_END_IST_HOUR;
 }
+
+// ── 60-second early exit — catches fast rugs before -40% SL ──────────────────
+const FIRST_MIN_MS          = 60_000;         // monitor window: first 60 s after entry
+const FIRST_MIN_DROP_PCT    = 30;             // exit immediately if drop ≥ 30% in that window
 
 function uid(): string {
   return `snp-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
@@ -489,6 +494,7 @@ class GraduationSniperService {
 
   private checkSkipReason(mint: string): string | null {
     if (!this.config.enabled)                                    return "Sniper disabled";
+    if (isNightSession())                                        return "Night session paused (11pm–6am IST) — detecting only";
     if (this.seenMints.has(mint))                                return "Already traded this mint";
     if (this.openPositions.size >= this.config.maxOpenPositions) return `Max open positions (${this.config.maxOpenPositions}) reached`;
     if (blacklistService.isBlacklisted(mint))                    return "Mint in permanent blacklist";
@@ -676,10 +682,9 @@ class GraduationSniperService {
     const cfg = this.config;
     const id  = uid();
 
-    // ── Night-session position sizing (Change 2) ──────────────────────────────
-    // 11 pm – 4 am IST is the highest-rug window; use half-size to limit exposure.
-    const night   = isNightSession();
-    const sizeSol = night ? Math.min(NIGHT_SESSION_SOL, cfg.positionSizeSol) : cfg.positionSizeSol;
+    // Night session (11pm–6am IST) is fully blocked in checkSkipReason.
+    // This code only runs during active trading hours (6am–11pm IST).
+    const sizeSol = cfg.positionSizeSol;
 
     const pos: SniperPosition = {
       id,
@@ -842,6 +847,34 @@ class GraduationSniperService {
 
     // Update trailing high
     if (pos.tp2Hit && price > pos.trailingHigh) pos.trailingHigh = price;
+
+    // ── 60-second early exit — fast-rug protection ───────────────────────────
+    // Hard-stop rugs dump 60-90% within the first 1-3 minutes of entry.
+    // Exiting at -30% in the first 60 s saves ~20-30% vs waiting for the -40% SL.
+    if (!pos.tp1Hit && (now - pos.entryAt) <= FIRST_MIN_MS) {
+      const earlyDropPct = (1 - price / pos.entryPrice) * 100;
+      if (earlyDropPct >= FIRST_MIN_DROP_PCT) {
+        const lossPct = -earlyDropPct;
+        logger.warn(
+          { mint, symbol: pos.symbol, price, entryPrice: pos.entryPrice, dropPct: earlyDropPct.toFixed(1) },
+          "Graduation sniper: 60s early exit — fast rug detected",
+        );
+        if (isTelegramConfigured()) {
+          void sendTelegram(
+            `⚡ <b>SNIPER 60s EARLY EXIT (PAPER)</b>\n` +
+            `──────────────────────\n` +
+            `🪙 Token: <b>${pos.symbol}</b>\n` +
+            `📋 CA: <code>${pos.mint}</code>\n` +
+            `📉 Drop: <b>-${earlyDropPct.toFixed(1)}%</b> in first 60s\n` +
+            `💵 Entry: $${fmtTgPrice(pos.entryPrice)} → Exit: $${fmtTgPrice(price)}\n` +
+            `✅ Saved ~${(pos.sizeSol * (FIRST_MIN_DROP_PCT - HARD_STOP_PCT + 40) / 100).toFixed(3)} SOL vs SL\n` +
+            `🕐 ${toIST(new Date())}`,
+          );
+        }
+        this.closePosition(pos, `60s Early Exit (${lossPct.toFixed(0)}%)`, price);
+        return;
+      }
+    }
 
     // ── FIX 1: Hard stop at -50% — absolute floor, no exceptions ─────────────
     const hardStopPrice = pos.entryPrice * (1 - HARD_STOP_PCT / 100);
