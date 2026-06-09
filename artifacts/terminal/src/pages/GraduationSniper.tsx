@@ -1,11 +1,11 @@
 import { useState } from "react";
-import { Target, Wifi, WifiOff, TrendingUp, TrendingDown, RefreshCw, Settings, X, CheckCircle2, XCircle, Clock, Zap, Trash2, Pencil, RotateCcw, AlertTriangle, Download, ExternalLink, Activity } from "lucide-react";
+import { Target, Wifi, WifiOff, TrendingUp, TrendingDown, RefreshCw, Settings, X, CheckCircle2, XCircle, Clock, Zap, Trash2, Pencil, RotateCcw, AlertTriangle, Download, ExternalLink, Activity, PlusCircle } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   useSniperStatus, useSniperPositions, useSniperHistory, useSniperEvents, useUpdateSniperConfig,
   useDeleteSniperPosition, useEditSniperPosition, useDeleteSniperEvent, useResetSniperAccount,
-  useRecalculateSniperPnl,
+  useRecalculateSniperPnl, useInjectSniperPosition,
 } from "@/lib/api";
 import { SniperPosition, SniperEvent, SniperConfig } from "@/lib/types";
 
@@ -247,6 +247,70 @@ function ResetConfirmModal({ onClose }: { onClose: () => void }) {
             onClick={() => reset.mutate(undefined, { onSuccess: onClose })}
             className="flex-1 bg-red-500 hover:bg-red-600 text-white font-bold">
             {reset.isPending ? "Resetting…" : "Yes, Reset"}
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Inject Position modal ─────────────────────────────────────────────────────
+
+function InjectPositionModal({ onClose }: { onClose: () => void }) {
+  const inject = useInjectSniperPosition();
+  const [mint,       setMint]       = useState("");
+  const [symbol,     setSymbol]     = useState("");
+  const [entryPrice, setEntryPrice] = useState("");
+  const [sizeSol,    setSizeSol]    = useState("0.1");
+
+  function handleInject() {
+    const ep = parseFloat(entryPrice);
+    const ss = parseFloat(sizeSol);
+    if (!mint.trim() || isNaN(ep) || ep <= 0) return;
+    inject.mutate(
+      { mint: mint.trim(), symbol: symbol.trim() || mint.slice(0, 8), entryPrice: ep, sizeSol: isNaN(ss) || ss <= 0 ? 0.1 : ss },
+      { onSuccess: onClose },
+    );
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm px-3">
+      <div className="w-full max-w-sm bg-[#12121e] border border-amber-500/30 rounded-2xl overflow-hidden shadow-2xl">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-white/10">
+          <div className="flex items-center gap-2">
+            <PlusCircle className="w-4 h-4 text-amber-400" />
+            <span className="text-sm font-bold text-white">Re-enter Lost Position</span>
+          </div>
+          <button onClick={onClose} className="text-white/40 hover:text-white"><X className="w-4 h-4" /></button>
+        </div>
+        <div className="px-5 py-4 space-y-3">
+          <p className="text-[10px] text-amber-400/80 bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2 leading-relaxed">
+            Use this to re-enter a position that was lost after a server restart. The price will sync to the live Raydium rate within 10 seconds.
+          </p>
+          {[
+            { label: "Token Mint Address (CA)", value: mint, set: setMint, placeholder: "e.g. 8HjpXxx...pump", mono: true },
+            { label: "Symbol", value: symbol, set: setSymbol, placeholder: "e.g. STEPPA" },
+            { label: "Original Entry Price ($)", value: entryPrice, set: setEntryPrice, placeholder: "e.g. 0.00002151", type: "number" },
+            { label: "Position Size (SOL)", value: sizeSol, set: setSizeSol, placeholder: "e.g. 0.1", type: "number" },
+          ].map(({ label, value, set, placeholder, mono, type }) => (
+            <div key={label}>
+              <label className="text-xs font-semibold text-white/70 block mb-1">{label}</label>
+              <input
+                type={type ?? "text"}
+                step="any"
+                value={value}
+                onChange={(e) => set(e.target.value)}
+                placeholder={placeholder}
+                className={`w-full px-3 py-2 rounded-lg bg-white/5 border border-white/10 text-white text-xs focus:outline-none focus:border-amber-400 ${mono ? "font-mono" : ""}`}
+              />
+            </div>
+          ))}
+        </div>
+        <div className="px-5 py-4 border-t border-white/10 flex gap-3">
+          <Button variant="ghost" size="sm" onClick={onClose} className="flex-1 text-white/50 hover:text-white">Cancel</Button>
+          <Button size="sm" onClick={handleInject} disabled={inject.isPending || !mint.trim() || !entryPrice}
+            className="flex-1 bg-amber-500 hover:bg-amber-600 text-white font-bold">
+            {inject.isPending ? "Injecting…" : "Re-enter Position"}
           </Button>
         </div>
       </div>
@@ -575,6 +639,7 @@ function HistoryRow({ pos }: { pos: SniperPosition }) {
 export default function GraduationSniper() {
   const [showSettings, setShowSettings] = useState(false);
   const [showReset,    setShowReset]    = useState(false);
+  const [showInject,   setShowInject]   = useState(false);
   const { data: status, isLoading: statusLoading } = useSniperStatus();
   const { data: positions = [] } = useSniperPositions();
   const { data: history = []   } = useSniperHistory();
@@ -611,6 +676,10 @@ export default function GraduationSniper() {
               {status?.wsConnected ? <Wifi className="w-3 h-3" /> : <WifiOff className="w-3 h-3" />}
               {status?.wsConnected ? "LIVE" : "DISCONNECTED"}
             </div>
+            <button onClick={() => setShowInject(true)} title="Re-enter a lost position"
+              className="p-1.5 rounded-lg bg-white/5 hover:bg-amber-500/20 text-white/30 hover:text-amber-400 transition-colors">
+              <PlusCircle className="w-4 h-4" />
+            </button>
             <button onClick={() => setShowReset(true)} title="Reset account"
               className="p-1.5 rounded-lg bg-white/5 hover:bg-red-500/15 text-white/30 hover:text-red-400 transition-colors">
               <RotateCcw className="w-4 h-4" />
@@ -723,6 +792,7 @@ export default function GraduationSniper() {
 
       {showSettings && config && <SettingsPanel config={config} onClose={() => setShowSettings(false)} />}
       {showReset && <ResetConfirmModal onClose={() => setShowReset(false)} />}
+      {showInject && <InjectPositionModal onClose={() => setShowInject(false)} />}
     </div>
   );
 }

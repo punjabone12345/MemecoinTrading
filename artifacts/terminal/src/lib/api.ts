@@ -647,6 +647,34 @@ export function useRecalculateSniperPnl() {
   });
 }
 
+export function useInjectSniperPosition() {
+  const queryClient = useQueryClient();
+  const { toast } = useToast();
+  return useMutation({
+    mutationFn: async (payload: {
+      mint: string;
+      symbol: string;
+      entryPrice: number;
+      sizeSol: number;
+      entryAtMs?: number;
+    }) => {
+      const res = await fetch(apiUrl("/api/sniper/positions/inject"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) { const j = await res.json(); throw new Error(j.error ?? "Inject failed"); }
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["sniper-positions"] });
+      queryClient.invalidateQueries({ queryKey: ["sniper-status"] });
+      toast({ title: "Position re-entered", description: "Price will update within 10 seconds via Jupiter." });
+    },
+    onError: (e: Error) => toast({ title: "Inject failed", description: e.message, variant: "destructive" }),
+  });
+}
+
 export function useDeleteSniperEvent() {
   const queryClient = useQueryClient();
   return useMutation({

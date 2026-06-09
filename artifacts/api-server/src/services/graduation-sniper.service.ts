@@ -1456,6 +1456,64 @@ class GraduationSniperService {
     return { ...pos };
   }
 
+  /**
+   * Manually inject a position that was lost (e.g. server restart wiped in-memory state).
+   * Immediately starts tracking it through the normal price-check loop with Jupiter fallback.
+   */
+  async injectPosition(
+    mint: string,
+    symbol: string,
+    entryPrice: number,
+    sizeSol: number,
+    entryAtMs?: number,
+  ): Promise<SniperPosition> {
+    const cfg = this.config;
+    const now = Date.now();
+    const id  = uid();
+
+    const pos: SniperPosition = {
+      id,
+      mint,
+      symbol,
+      name:              symbol,
+      detectedAt:        entryAtMs ?? now,
+      entryAt:           entryAtMs ?? now,
+      entryPrice,
+      currentPrice:      entryPrice,
+      sizeSol,
+      tp1Hit:            false,
+      tp2Hit:            false,
+      remainingFraction: 1.0,
+      effectiveSlPrice:  entryPrice * (1 - cfg.slPct / 100),
+      trailingHigh:      entryPrice,
+      status:            "open",
+      realizedPnlSol:    0,
+      unrealizedPnlSol:  0,
+      totalPnlSol:       0,
+      pnlPct:            0,
+      txSignature:       "manual-inject",
+      tp1RealizedSol:    0,
+      tp2RealizedSol:    0,
+      runnerRealizedSol: 0,
+    };
+
+    this.openPositions.set(mint, pos);
+    this.seenMints.add(mint);
+    this.virtualBalance -= sizeSol;
+
+    await this.persistPosition(pos);
+
+    logger.info(
+      { mint, symbol, entryPrice, sizeSol },
+      "Graduation sniper: position manually injected — price loop will update immediately",
+    );
+
+    // Trigger an immediate price check so the UI updates within seconds
+    void this.checkPositionPrice(mint);
+
+    return { ...pos };
+  }
+
   async resetAccount(): Promise<void> {
     // Close/remove all open positions (refund virtual balance)
     for (const [mint] of this.openPositions) {
