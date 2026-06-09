@@ -399,15 +399,22 @@ export default function PumpfunTrader() {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          {/* WS status */}
+          {/* PumpPortal status */}
           <div className={`flex items-center gap-1 px-2 py-1 rounded-full text-[10px] font-bold ${
-            status?.wsConnected
+            status?.ppConnected
               ? "bg-emerald-500/15 text-emerald-400"
               : "bg-amber-500/15 text-amber-400"
           }`}>
-            {status?.wsConnected ? <Wifi className="w-3 h-3" /> : <WifiOff className="w-3 h-3" />}
-            {status?.wsConnected ? "WS Live" : "Polling"}
+            {status?.ppConnected ? <Wifi className="w-3 h-3" /> : <WifiOff className="w-3 h-3" />}
+            {status?.ppConnected ? "PumpPortal Live" : "Connecting…"}
           </div>
+          {/* Helius WS status — only show if connected */}
+          {status?.wsConnected && (
+            <div className="flex items-center gap-1 px-2 py-1 rounded-full text-[10px] font-bold bg-blue-500/15 text-blue-400">
+              <Wifi className="w-3 h-3" />
+              Helius
+            </div>
+          )}
           {/* Bot enabled */}
           <div className={`flex items-center gap-1 px-2 py-1 rounded-full text-[10px] font-bold ${
             status?.enabled

@@ -9,6 +9,7 @@ const PUMPFUN_PROGRAM_ID    = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
 const SOL_MINT              = "So11111111111111111111111111111111111111112";
 const GRADUATION_MCAP_USD   = 69_000;   // pump.fun graduation threshold (~$69k)
 const DEXSCREENER_BASE      = "https://api.dexscreener.com";
+const PUMPPORTAL_WS_URL     = "wss://pumpportal.fun/api/data";
 const CONFIG_KEY            = "pumpfun_config";
 const RECONNECT_DELAY_MS    = 3_000;
 const MAX_TRACKED_TOKENS    = 300;
@@ -16,10 +17,13 @@ const TOKEN_TTL_MS          = 2 * 60 * 60_000; // 2 hours
 const MARKET_DATA_INTERVAL  = 30_000;           // refresh DexScreener every 30s
 const SCORE_INTERVAL        = 15_000;           // score check every 15s
 const PRICE_CHECK_INTERVAL  = 10_000;           // position TP/SL every 10s
+const SOL_PRICE_INTERVAL    = 5 * 60_000;       // refresh SOL/USD price every 5 min
 const TX_QUEUE_DELAY        = 600;              // ms between getTransaction calls (rate-limit)
 const MAX_TX_QUEUE          = 50;              // max queued signatures
 const MAX_EVENTS            = 100;
 const MAX_CLOSED            = 200;
+// Grad% threshold above which we subscribe to individual token trades via PumpPortal
+const PP_TRADE_SUB_GRAD_PCT = 55;
 
 // ── Pre-graduation TP structure (different from post-grad sniper) ─────────────
 const SL_PCT         = 40;    // -40% SL
@@ -232,9 +236,19 @@ class PumpfunTraderService {
   private txQueue: string[] = [];
   private processingTxQueue = false;
 
+  // PumpPortal WebSocket (free, no key — primary discovery source)
+  private ppWs: WebSocket | null = null;
+  private ppConnected = false;
+  private ppReconnects = 0;
+  private ppSubscribedMints = new Set<string>();
+
+  // SOL/USD price (refreshed every 5 min, used to convert PumpPortal SOL mcap → USD)
+  private solPriceUsd = 150;
+
   private marketDataTimer: ReturnType<typeof setInterval> | null = null;
   private scoreTimer:      ReturnType<typeof setInterval> | null = null;
   private priceCheckTimer: ReturnType<typeof setInterval> | null = null;
+  private solPriceTimer:   ReturnType<typeof setInterval> | null = null;
 
   // ── Lifecycle ───────────────────────────────────────────────────────────────
 
@@ -250,12 +264,20 @@ class PumpfunTraderService {
   }
 
   start(): void {
+    // PumpPortal — always on (free, no key needed)
+    this.connectPumpPortal();
+
+    // Helius — optional enhancement for raw tx-level data
     const apiKey = process.env["HELIUS_API_KEY"];
     if (apiKey) {
       this.connectWebSocket(apiKey);
     } else {
-      logger.warn("Pump.fun trader: HELIUS_API_KEY not set — WebSocket disabled, using DexScreener polling only");
+      logger.info("Pump.fun trader: HELIUS_API_KEY not set — running on PumpPortal + DexScreener only");
     }
+
+    // Fetch SOL price immediately, then every 5 min
+    void this.fetchSolPrice();
+    this.solPriceTimer   = setInterval(() => void this.fetchSolPrice(), SOL_PRICE_INTERVAL);
 
     this.marketDataTimer = setInterval(() => void this.refreshMarketData(), MARKET_DATA_INTERVAL);
     this.scoreTimer      = setInterval(() => void this.runScoringCycle(), SCORE_INTERVAL);
@@ -327,6 +349,131 @@ class PumpfunTraderService {
     } catch (err) {
       logger.warn({ err: (err as Error).message }, "Pump.fun trader: failed to connect WebSocket");
       setTimeout(() => this.connectWebSocket(apiKey), RECONNECT_DELAY_MS);
+    }
+  }
+
+  // ── PumpPortal WebSocket (free, no API key) ─────────────────────────────────
+
+  private connectPumpPortal(): void {
+    try {
+      const ws = new WebSocket(PUMPPORTAL_WS_URL);
+
+      ws.on("open", () => {
+        this.ppConnected = true;
+        this.ppSubscribedMints.clear();
+        logger.info("Pump.fun trader: PumpPortal WebSocket connected — subscribing to new tokens");
+
+        // Subscribe to all new token creations
+        ws.send(JSON.stringify({ method: "subscribeNewToken" }));
+
+        // Re-subscribe to any tokens already in graduation range
+        const nearGrad = Array.from(this.trackedTokens.values())
+          .filter((t) => t.graduationPct >= PP_TRADE_SUB_GRAD_PCT)
+          .map((t) => t.mint);
+        if (nearGrad.length > 0) {
+          ws.send(JSON.stringify({ method: "subscribeTokenTrade", keys: nearGrad }));
+          for (const m of nearGrad) this.ppSubscribedMints.add(m);
+        }
+      });
+
+      ws.on("message", (raw) => {
+        try {
+          type PPEvent = {
+            txType?: string;
+            mint?: string;
+            traderPublicKey?: string;
+            solAmount?: number;
+            marketCapSol?: number;
+            name?: string;
+            symbol?: string;
+            bondingCurveKey?: string;
+          };
+          const msg = JSON.parse(raw.toString()) as PPEvent;
+          if (!msg.mint) return;
+
+          const mint        = msg.mint;
+          const txType      = msg.txType ?? "";
+          const solAmount   = msg.solAmount   ?? 0;
+          const mcapSol     = msg.marketCapSol ?? 0;
+          const mcapUsd     = mcapSol * this.solPriceUsd;
+          const gradPct     = Math.min((mcapUsd / GRADUATION_MCAP_USD) * 100, 100);
+          const trader      = msg.traderPublicKey ?? "unknown";
+
+          if (txType === "create") {
+            // Brand-new token launched on pump.fun
+            this.initToken(mint, trader);
+            const token = this.trackedTokens.get(mint);
+            if (token) {
+              token.symbol = msg.symbol ?? mint.slice(0, 6);
+              token.name   = msg.name   ?? mint.slice(0, 8);
+              if (mcapUsd > 0) {
+                token.mcap          = mcapUsd;
+                token.graduationPct = gradPct;
+                token.mcapSnapshots.push({ ts: nowSec(), val: mcapUsd });
+              }
+            }
+            logger.debug({ mint, symbol: msg.symbol, mcapUsd: mcapUsd.toFixed(0) }, "Pump.fun trader: new token via PumpPortal");
+          } else if (txType === "buy" || txType === "sell") {
+            // Trade on a tracked token
+            this.recordActivity(mint, trader, txType === "buy", solAmount);
+
+            // Update mcap from real-time trade data
+            const token = this.trackedTokens.get(mint);
+            if (token && mcapUsd > 0) {
+              token.mcap          = mcapUsd;
+              token.graduationPct = gradPct;
+              if (token.mcapSnapshots.length === 0 ||
+                  nowSec() - token.mcapSnapshots[token.mcapSnapshots.length - 1]!.ts > 30_000) {
+                token.mcapSnapshots.push({ ts: nowSec(), val: mcapUsd });
+                if (token.mcapSnapshots.length > 20) token.mcapSnapshots.shift();
+              }
+            }
+          }
+
+          // Subscribe to trades for tokens that enter the graduation range
+          if (gradPct >= PP_TRADE_SUB_GRAD_PCT && !this.ppSubscribedMints.has(mint) && this.ppConnected) {
+            ws.send(JSON.stringify({ method: "subscribeTokenTrade", keys: [mint] }));
+            this.ppSubscribedMints.add(mint);
+          }
+        } catch { /* ignore parse errors */ }
+      });
+
+      ws.on("close", () => {
+        this.ppConnected = false;
+        this.ppReconnects++;
+        logger.warn({ reconnects: this.ppReconnects }, "Pump.fun trader: PumpPortal WS closed, reconnecting…");
+        setTimeout(() => this.connectPumpPortal(), RECONNECT_DELAY_MS);
+      });
+
+      ws.on("error", (err) => {
+        logger.warn({ err: (err as Error).message }, "Pump.fun trader: PumpPortal WS error");
+      });
+
+      this.ppWs = ws;
+    } catch (err) {
+      logger.warn({ err: (err as Error).message }, "Pump.fun trader: failed to connect PumpPortal");
+      setTimeout(() => this.connectPumpPortal(), RECONNECT_DELAY_MS);
+    }
+  }
+
+  // ── SOL price fetch (for PumpPortal mcapSol → USD conversion) ───────────────
+
+  private async fetchSolPrice(): Promise<void> {
+    try {
+      type DexPair = { priceUsd?: string };
+      // Use DexScreener's SOL/USDC pair on Orca to get live SOL price
+      const res = await axios.get<{ pairs?: DexPair[] }>(
+        `${DEXSCREENER_BASE}/latest/dex/tokens/v1/solana/${SOL_MINT}`,
+        { timeout: 5_000 },
+      );
+      const pairs = res.data?.pairs ?? (Array.isArray(res.data) ? res.data as DexPair[] : []);
+      const price = parseFloat((pairs[0] as DexPair)?.priceUsd ?? "0");
+      if (price > 0) {
+        this.solPriceUsd = price;
+        logger.debug({ solPrice: price.toFixed(2) }, "Pump.fun trader: SOL price updated");
+      }
+    } catch {
+      // keep previous price — no action needed
     }
   }
 
@@ -1120,8 +1267,11 @@ class PumpfunTraderService {
     const unrealized = Array.from(this.openPositions.values()).reduce((s, p) => s + p.unrealizedPnlSol, 0);
 
     return {
-      wsConnected: this.wsConnected,
+      wsConnected:  this.wsConnected,
       wsReconnects: this.wsReconnects,
+      ppConnected:  this.ppConnected,
+      ppReconnects: this.ppReconnects,
+      solPriceUsd:  this.solPriceUsd,
       enabled: this.config.enabled,
       trackedCount: this.trackedTokens.size,
       candidateCount: Array.from(this.trackedTokens.values()).filter((t) => t.status === "candidate" || t.status === "buySignal").length,

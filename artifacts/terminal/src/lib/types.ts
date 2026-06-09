@@ -317,6 +317,9 @@ export interface PumpfunConfig {
 export interface PumpfunStatus {
   wsConnected: boolean;
   wsReconnects: number;
+  ppConnected: boolean;
+  ppReconnects: number;
+  solPriceUsd: number;
   enabled: boolean;
   trackedCount: number;
   candidateCount: number;
