@@ -1,5 +1,6 @@
 import WebSocket from "ws";
 import axios from "axios";
+import { createHash } from "crypto";
 import { logger } from "../lib/logger.js";
 import { query, execute } from "../lib/db.js";
 import { sendTelegram, isTelegramConfigured, toIST } from "../lib/telegram.js";
@@ -8,9 +9,13 @@ import { sendTelegram, isTelegramConfigured, toIST } from "../lib/telegram.js";
 const PUMPFUN_PROGRAM_ID    = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
 const SOL_MINT              = "So11111111111111111111111111111111111111112";
 const GRADUATION_MCAP_USD   = 69_000;   // pump.fun graduation threshold (~$69k)
+const GRADUATION_REAL_SOL   = 85_000_000_000n; // 85 SOL in lamports = on-chain graduation target
 const DEXSCREENER_BASE      = "https://api.dexscreener.com";
-const PUMPFUN_API_BASE      = "https://frontend-api.pump.fun";   // direct pump.fun frontend API
 const PUMPPORTAL_WS_URL     = "wss://pumpportal.fun/api/data";
+// Solana RPC — public mainnet (falls back to Helius if HELIUS_API_KEY set)
+const SOLANA_PUBLIC_RPC     = "https://api.mainnet-beta.solana.com";
+const ON_CHAIN_BATCH_SIZE   = 100;    // getMultipleAccounts limit
+const ON_CHAIN_INTERVAL     = 20_000; // refresh on-chain bonding curves every 20s
 const CONFIG_KEY            = "pumpfun_config";
 const RECONNECT_DELAY_MS    = 3_000;
 const MAX_TRACKED_TOKENS    = 500;
@@ -248,9 +253,13 @@ class PumpfunTraderService {
   // SOL/USD price (refreshed every 5 min, used to convert PumpPortal SOL mcap → USD)
   private solPriceUsd = 150;
 
+  // On-chain bonding curve PDA cache (mint → PDA base58 address)
+  private pdaCache = new Map<string, string>();
+
   private marketDataTimer:  ReturnType<typeof setInterval> | null = null;
   private pumpfunTimer:     ReturnType<typeof setInterval> | null = null;
   private nearGradTimer:    ReturnType<typeof setInterval> | null = null;
+  private onChainTimer:     ReturnType<typeof setInterval> | null = null;
   private scoreTimer:       ReturnType<typeof setInterval> | null = null;
   private priceCheckTimer:  ReturnType<typeof setInterval> | null = null;
   private solPriceTimer:    ReturnType<typeof setInterval> | null = null;
@@ -288,7 +297,9 @@ class PumpfunTraderService {
     this.solPriceTimer   = setInterval(() => void this.fetchSolPrice(), SOL_PRICE_INTERVAL);
 
     this.marketDataTimer = setInterval(() => void this.refreshMarketData(), MARKET_DATA_INTERVAL);
-    // Pump.fun bonding curve refresh (primary graduation% source)
+    // Primary graduation% source: on-chain bonding curve accounts via Solana RPC
+    this.onChainTimer    = setInterval(() => void this.refreshOnChainBondingCurves(), ON_CHAIN_INTERVAL);
+    // Secondary: DexScreener-based bonding curve refresh (covers tokens not yet on-chain readable)
     this.pumpfunTimer    = setInterval(() => void this.refreshPumpfunBondingCurves(), PUMPFUN_REFRESH_INTERVAL);
     // Near-graduation scanner — finds tokens at 80-99.5% that we haven't seen yet
     this.nearGradTimer   = setInterval(() => void this.scanNearGraduationTokens(), NEAR_GRAD_SCAN_INTERVAL);
@@ -300,6 +311,7 @@ class PumpfunTraderService {
     setTimeout(() => void this.refreshMarketData(), 4_000);
     setTimeout(() => void this.scanNearGraduationTokens(), 6_000);
     setTimeout(() => void this.refreshPumpfunBondingCurves(), 8_000);
+    setTimeout(() => void this.refreshOnChainBondingCurves(), 10_000);
     logger.info("Pump.fun pre-graduation trader: started");
   }
 
@@ -704,6 +716,205 @@ class PumpfunTraderService {
       }
     } catch (err) {
       logger.debug({ err: (err as Error).message }, "Pump.fun trader: near-grad scan error");
+    }
+  }
+
+  // ── On-chain bonding curve reader (Solana RPC) ───────────────────────────────
+
+  /**
+   * Derive the pump.fun bonding curve PDA for a given mint.
+   * Algorithm: SHA256(b"bonding-curve" || mintBytes || nonce || programIdBytes || b"ProgramDerivedAddress")
+   * where nonce decrements from 255 until the hash is NOT a valid Ed25519 point.
+   * Uses only Node.js built-in crypto — no Solana SDK required.
+   */
+  private computeBondingCurvePda(mint: string): string {
+    if (this.pdaCache.has(mint)) return this.pdaCache.get(mint)!;
+
+    const B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+
+    // Base58 decode to Buffer
+    function b58Dec(s: string): Buffer {
+      let n = 0n;
+      for (const c of s) { const i = B58.indexOf(c); if (i < 0) throw new Error("bad b58"); n = n * 58n + BigInt(i); }
+      const out: number[] = [];
+      while (n > 0n) { out.unshift(Number(n & 0xffn)); n >>= 8n; }
+      const leading = s.match(/^1*/)?.[0]?.length ?? 0;
+      return Buffer.concat([Buffer.alloc(leading), Buffer.from(out)]);
+    }
+
+    // Base58 encode
+    function b58Enc(buf: Buffer): string {
+      if (buf.length === 0) return "";
+      let n = BigInt("0x" + buf.toString("hex"));
+      let s = "";
+      while (n > 0n) { s = B58[Number(n % 58n)] + s; n /= 58n; }
+      const leading = buf.findIndex((b) => b !== 0);
+      return "1".repeat(leading < 0 ? buf.length : leading) + s;
+    }
+
+    // Ed25519 off-curve check — a valid PDA hash must NOT be a valid curve point
+    // Uses the curve equation: x² = (y²-1) / (d·y²+1) mod p
+    const P255 = (1n << 255n) - 19n;
+    const D_ED = 37095705934669439343138083508754565189542113879843219016388785533085940283555n;
+
+    function mpow(base: bigint, exp: bigint, mod: bigint): bigint {
+      let r = 1n; base %= mod;
+      for (; exp > 0n; exp >>= 1n) { if (exp & 1n) r = r * base % mod; base = base * base % mod; }
+      return r;
+    }
+
+    function isOnCurve(bytes: Buffer): boolean {
+      // Extract y (little-endian, clear sign bit)
+      const y = BigInt("0x" + Buffer.from(bytes).reverse().toString("hex")) & ((1n << 255n) - 1n);
+      const y2 = y * y % P255;
+      const u  = (y2 - 1n + P255) % P255;
+      const v  = (D_ED * y2 + 1n) % P255;
+      const x2 = u * mpow(v, P255 - 2n, P255) % P255;
+      if (x2 === 0n) return u === 0n; // identity point only if y=±1
+      return mpow(x2, (P255 - 1n) / 2n, P255) === 1n; // Legendre symbol
+    }
+
+    const mintBytes    = b58Dec(mint);
+    const programBytes = b58Dec(PUMPFUN_PROGRAM_ID);
+    const marker       = Buffer.from("ProgramDerivedAddress");
+    const seed         = Buffer.from("bonding-curve");
+
+    for (let nonce = 255; nonce >= 0; nonce--) {
+      const h = createHash("sha256");
+      h.update(seed);
+      h.update(mintBytes);
+      h.update(Buffer.from([nonce]));
+      h.update(programBytes);
+      h.update(marker);
+      const digest = h.digest();
+      if (!isOnCurve(digest)) {
+        const pda = b58Enc(digest);
+        this.pdaCache.set(mint, pda);
+        return pda;
+      }
+    }
+    throw new Error(`PDA not found for mint ${mint}`);
+  }
+
+  /**
+   * Read bonding curve accounts directly from Solana blockchain.
+   * Uses getMultipleAccounts (up to 100 per call) for efficiency.
+   * Bonding curve account layout (after 8-byte discriminator):
+   *   [8]  virtualTokenReserves  u64
+   *   [16] virtualSolReserves    u64
+   *   [24] realTokenReserves     u64
+   *   [32] realSolReserves       u64  ← graduation progress source
+   *   [40] tokenTotalSupply      u64
+   *   [48] complete              bool ← instant graduation detection
+   */
+  private async refreshOnChainBondingCurves(): Promise<void> {
+    const mints = Array.from(this.trackedTokens.keys())
+      .filter((m) => {
+        const t = this.trackedTokens.get(m)!;
+        return t.status !== "graduated" && t.status !== "exited";
+      });
+    if (mints.length === 0) return;
+
+    // Use Helius RPC if key available (better rate limits), else public mainnet
+    const apiKey = process.env["HELIUS_API_KEY"];
+    const rpcUrl = apiKey
+      ? `https://mainnet.helius-rpc.com/?api-key=${apiKey}`
+      : SOLANA_PUBLIC_RPC;
+
+    // Compute PDA addresses for all tracked tokens (cached after first compute)
+    const pdaToMint = new Map<string, string>();
+    for (const mint of mints) {
+      try {
+        const pda = this.computeBondingCurvePda(mint);
+        pdaToMint.set(pda, mint);
+      } catch { /* skip uncomputable PDAs */ }
+    }
+
+    const pdas = Array.from(pdaToMint.keys());
+    let graduated = 0, updated = 0;
+
+    // Process in batches of 100 (getMultipleAccounts limit)
+    for (let i = 0; i < pdas.length; i += ON_CHAIN_BATCH_SIZE) {
+      const batch = pdas.slice(i, i + ON_CHAIN_BATCH_SIZE);
+      try {
+        type RpcResp = {
+          result?: {
+            value?: (null | {
+              data: [string, string]; // [base64, "base64"]
+              executable?: boolean;
+            })[];
+          };
+        };
+        const res = await axios.post<RpcResp>(
+          rpcUrl,
+          {
+            jsonrpc: "2.0", id: 1,
+            method:  "getMultipleAccounts",
+            params:  [batch, { encoding: "base64" }],
+          },
+          { timeout: 10_000 },
+        );
+
+        const values = res.data?.result?.value ?? [];
+        for (let j = 0; j < batch.length; j++) {
+          const pda   = batch[j];
+          const acct  = values[j];
+          const mint  = pdaToMint.get(pda);
+          if (!mint || !acct) continue;
+
+          const token = this.trackedTokens.get(mint);
+          if (!token) continue;
+
+          const data = Buffer.from(acct.data[0], "base64");
+          if (data.length < 49) continue; // account too small to be a bonding curve
+
+          // Parse the bonding curve account
+          const realSolReserves   = data.readBigUInt64LE(32);
+          const complete          = data[48] === 1;
+
+          // Calculate graduation% from actual on-chain data
+          const gradPct = complete
+            ? 100
+            : Math.min(Number(realSolReserves * 100n / GRADUATION_REAL_SOL), 99.9);
+
+          // Update token with authoritative on-chain data
+          if (gradPct > token.graduationPct || complete) {
+            token.graduationPct = gradPct;
+            token.lastUpdated   = Date.now();
+            updated++;
+          }
+
+          // Handle graduation — flip status immediately
+          if (complete && token.status !== "bought") {
+            token.status = "graduated";
+            token.graduationPct = 100;
+            graduated++;
+            logger.info(
+              { mint, symbol: token.symbol, realSolReserves: realSolReserves.toString() },
+              "Pump.fun trader: 🎓 TOKEN GRADUATED (on-chain confirmed)",
+            );
+          }
+
+          // Subscribe to PumpPortal trades for high-grad tokens not yet subscribed
+          if (gradPct >= PP_TRADE_SUB_GRAD_PCT && this.ppConnected && this.ppWs && !this.ppSubscribedMints.has(mint)) {
+            this.ppWs.send(JSON.stringify({ method: "subscribeTokenTrade", keys: [mint] }));
+            this.ppSubscribedMints.add(mint);
+          }
+        }
+      } catch (err) {
+        logger.debug({ err: (err as Error).message }, "Pump.fun trader: on-chain bonding curve read error");
+      }
+      // Pace RPC calls — respect rate limits
+      if (i + ON_CHAIN_BATCH_SIZE < pdas.length) {
+        await new Promise((r) => setTimeout(r, 500));
+      }
+    }
+
+    if (updated > 0 || graduated > 0) {
+      logger.info(
+        { updated, graduated, rpc: apiKey ? "helius" : "public" },
+        "Pump.fun trader: on-chain bonding curves refreshed ⛓️",
+      );
     }
   }
 
@@ -1233,7 +1444,22 @@ class PumpfunTraderService {
     this.addEvent({ id: uid(), ts: Date.now(), mint: token.mint, symbol: token.symbol, action: "entered", score: token.score, graduationPct: token.graduationPct });
     void this.savePosition(pos);
 
-    logger.info({ mint: token.mint, symbol: token.symbol, price, sizeSol, score: token.score, gradPct: token.graduationPct.toFixed(1) }, "Pump.fun trader: position entered ✅");
+    // ── CONFIRMED TRADE LOG ─────────────────────────────────────────────────
+    logger.info({
+      type:       "TRADE_OPEN",
+      mint:       token.mint,
+      symbol:     token.symbol,
+      name:       token.name,
+      entryPrice: price,
+      sizeSol,
+      slPrice,
+      gradPct:    token.graduationPct.toFixed(1) + "%",
+      mcapUsd:    token.mcap.toFixed(0),
+      aiScore:    token.score,
+      balance:    this.virtualBalance.toFixed(4) + " SOL (after)",
+    }, "┌─ PUMP.FUN PRE-GRAD ENTRY ──────────────────────────────────┐");
+    logger.info({ symbol: token.symbol, entryUsd: `$${price.toFixed(8)}`, sl: `$${slPrice.toFixed(8)} (-${SL_PCT}%)`, grad: `${token.graduationPct.toFixed(1)}%` },
+      "│  Entered position — waiting for graduation pump           │");
 
     if (isTelegramConfigured()) {
       void sendTelegram(
@@ -1279,7 +1505,22 @@ class PumpfunTraderService {
     void this.savePosition(pos);
 
     const isWin = pnlSol > 0;
-    logger.info({ mint: pos.mint, symbol: pos.symbol, reason, pnlSol: pnlSol.toFixed(4), pnlPct: pnlPct.toFixed(1) }, "Pump.fun trader: position closed");
+    // ── CONFIRMED TRADE LOG ─────────────────────────────────────────────────
+    logger.info({
+      type:       "TRADE_CLOSE",
+      mint:       pos.mint,
+      symbol:     pos.symbol,
+      reason,
+      entryPrice: pos.entryPrice,
+      exitPrice:  price,
+      pnlSol:     (isWin ? "+" : "") + pnlSol.toFixed(4) + " SOL",
+      pnlPct:     (isWin ? "+" : "") + pnlPct.toFixed(1) + "%",
+      sizeSol:    pos.sizeSol,
+      entryGrad:  pos.entryGraduationPct.toFixed(1) + "%",
+      balance:    this.virtualBalance.toFixed(4) + " SOL (after)",
+    }, isWin
+      ? "└─ PUMP.FUN CLOSE ✅ WIN ──────────────────────────────────────┘"
+      : "└─ PUMP.FUN CLOSE ❌ LOSS ─────────────────────────────────────┘");
 
     if (isTelegramConfigured()) {
       void sendTelegram(
