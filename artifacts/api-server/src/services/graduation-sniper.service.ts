@@ -859,13 +859,27 @@ class GraduationSniperService {
   }
 
   private async loadClosedFingerprints(): Promise<void> {
+    // Always seed from DB closed positions first — this covers any case where
+    // the file was wiped, the container was recycled, or it's a fresh deploy.
+    for (const pos of this.closedPositions) {
+      this.closedTradeFingerprints.add(this.tradeFingerprint(pos));
+    }
+
     try {
       const { readFile } = await import("fs/promises");
       const raw = await readFile("./data/closed_trades.json", "utf-8");
       const arr = JSON.parse(raw) as string[];
-      this.closedTradeFingerprints = new Set(arr);
+      // Merge file fingerprints (may cover deleted DB rows)
+      for (const fp of arr) {
+        this.closedTradeFingerprints.add(fp);
+      }
+    } catch { /* file doesn't exist yet — DB fingerprints above are sufficient */ }
+
+    if (this.closedTradeFingerprints.size > 0) {
       logger.info({ count: this.closedTradeFingerprints.size }, "Graduation sniper: loaded closed trade fingerprints");
-    } catch { /* file doesn't exist yet — fine */ }
+      // Persist the merged set so the file stays up-to-date
+      void this.saveClosedFingerprints();
+    }
   }
 
   private async saveClosedFingerprints(): Promise<void> {

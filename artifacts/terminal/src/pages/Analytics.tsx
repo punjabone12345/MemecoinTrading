@@ -2,13 +2,13 @@ import { useState } from "react";
 import {
   useAnalytics, useClosedPositions, useLossJournal,
   useDeleteJournalEntry, useClearJournal, useEditClosedTrade,
-  useAutoTraderStatus,
+  useAutoTraderStatus, usePumpfunHistory,
 } from "@/lib/api";
 import type { LossInsights, LossJournalEntry, FilterSuggestion, MarketHealthStatus } from "@/lib/types";
 import {
   TrendingUp, TrendingDown, Award, Target, Clock, BarChart2,
   BookOpen, AlertTriangle, Lightbulb, ChevronDown, ChevronUp,
-  Trash2, Pencil, Trophy, ThumbsDown, ThumbsUp, Activity,
+  Trash2, Pencil, Trophy, ThumbsDown, ThumbsUp, Activity, Rocket,
 } from "lucide-react";
 import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, Cell } from "recharts";
 
@@ -250,6 +250,7 @@ type AnalysisTab = "overview" | "journal" | "suggestions" | "trades";
 export default function Analytics() {
   const { data: analytics } = useAnalytics();
   const { data: closedPositions = [] } = useClosedPositions();
+  const { data: pfHistory = [] } = usePumpfunHistory();
   const { data: lossData } = useLossJournal();
   const { data: botStatus } = useAutoTraderStatus();
   const deleteEntry = useDeleteJournalEntry();
@@ -301,7 +302,7 @@ export default function Analytics() {
           { key: "overview" as AnalysisTab, label: "Overview" },
           { key: "journal" as AnalysisTab, label: `Journal (${lossData?.totalTrades ?? 0})` },
           { key: "suggestions" as AnalysisTab, label: "Tips" },
-          { key: "trades" as AnalysisTab, label: `Trades (${closedPositions.length})` },
+          { key: "trades" as AnalysisTab, label: `Trades (${closedPositions.length + pfHistory.length})` },
         ]).map((t) => (
           <button key={t.key} onClick={() => setTab(t.key)}
             className={`flex-1 py-2 rounded-lg text-[9px] font-bold transition-all ${
@@ -521,12 +522,15 @@ export default function Analytics() {
       {/* ── Trades Tab ── */}
       {tab === "trades" && (
         <div className="space-y-2">
-          {closedPositions.length === 0 ? (
+          {closedPositions.length === 0 && pfHistory.length === 0 ? (
             <div className="bg-[#0d0d18] border border-white/6 rounded-xl p-10 text-center">
               <Activity className="w-10 h-10 text-white/10 mx-auto mb-3" />
               <p className="text-white/30 text-sm">No closed trades yet</p>
             </div>
-          ) : closedPositions.map((p) => {
+          ) : null}
+
+          {/* Paper trading closed trades */}
+          {closedPositions.map((p) => {
             const pnl = p.pnlSol ?? 0;
             const pnlPct = p.pnlPercent ?? 0;
             const isWin = pnl >= 0;
@@ -570,6 +574,48 @@ export default function Analytics() {
               </div>
             );
           })}
+
+          {/* Pump.fun closed trades */}
+          {pfHistory.length > 0 && (
+            <>
+              {closedPositions.length > 0 && (
+                <div className="flex items-center gap-2 pt-1">
+                  <div className="h-px flex-1 bg-white/6" />
+                  <span className="text-[9px] text-violet-400/50 font-bold uppercase tracking-wider flex items-center gap-1">
+                    <Rocket className="w-2.5 h-2.5" /> Pump.fun Trades
+                  </span>
+                  <div className="h-px flex-1 bg-white/6" />
+                </div>
+              )}
+              {pfHistory.map((p) => {
+                const pnl = p.realizedPnlSol;
+                const isWin = pnl >= 0;
+                const pnlPct = p.entryPrice > 0 && p.exitPrice ? ((p.exitPrice / p.entryPrice) - 1) * 100 : 0;
+                return (
+                  <div key={p.id} className={`bg-[#0d0d18] border rounded-xl p-3.5 ${isWin ? "border-emerald-500/15" : "border-red-500/10"}`}>
+                    <div className="flex items-start justify-between">
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <Rocket className="w-3 h-3 text-violet-400/60" />
+                          <span className="text-sm font-black text-white">${p.symbol}</span>
+                          <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-md ${isWin ? "bg-emerald-500/15 text-emerald-400" : "bg-red-500/15 text-red-400"}`}>
+                            {isWin ? "+" : ""}{pnlPct.toFixed(1)}%
+                          </span>
+                          <span className="text-[9px] px-1.5 py-0.5 rounded-md bg-violet-500/15 text-violet-400">PF</span>
+                        </div>
+                        <p className="text-[9px] text-white/25 mt-0.5">
+                          {p.closeReason ?? "closed"} · {p.closedAt ? new Date(p.closedAt).toLocaleString("en-IN", { timeZone: "Asia/Kolkata", day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit", hour12: true }) : "—"}
+                        </p>
+                      </div>
+                      <p className={`text-sm font-black ${isWin ? "text-emerald-400" : "text-red-400"}`}>
+                        {isWin ? "+" : ""}{Math.abs(pnl).toFixed(4)} SOL
+                      </p>
+                    </div>
+                  </div>
+                );
+              })}
+            </>
+          )}
         </div>
       )}
 
