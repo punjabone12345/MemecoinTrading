@@ -469,6 +469,8 @@ class GraduationSniperService {
 
   private async processGraduation(signature: string): Promise<void> {
     const detectedAt = Date.now();
+    // Track which mint we reserved in processingGraduations so finally can clean it up
+    let reservedMint: string | null = null;
     try {
       const extracted = await this.extractMintFromTx(signature);
       if (!extracted) {
@@ -505,8 +507,7 @@ class GraduationSniperService {
         return;
       }
       this.processingGraduations.add(mint);
-
-      try {
+      reservedMint = mint;
 
       // Wait before entry so DEX price feeds have time to populate
       await new Promise((r) => setTimeout(r, this.config.waitBeforeEntryMs));
@@ -584,15 +585,14 @@ class GraduationSniperService {
       this.enterPosition(mint, symbol, name, entryPrice, signature);
       this.addEvent({ ...eventBase, symbol, action: "entered" });
 
-      } catch (err) {
-        logger.warn({ signature, err: (err as Error).message }, "Graduation sniper: error processing graduation");
-      } finally {
-        // Always release the mint so future graduations of the same token aren't
-        // permanently blocked (e.g. if we skipped due to rug but it recovers).
-        // seenMints handles the permanent "already traded" gate; this is just the
-        // in-flight concurrency gate.
-        this.processingGraduations.delete(mint);
-      }
+    } catch (err) {
+      logger.warn({ signature, err: (err as Error).message }, "Graduation sniper: error processing graduation");
+    } finally {
+      // Release the mint reservation so future graduation events for the same
+      // token aren't permanently blocked. seenMints is the permanent gate;
+      // processingGraduations is only the in-flight concurrency gate.
+      if (reservedMint) this.processingGraduations.delete(reservedMint);
+    }
   }
 
   private checkSkipReason(mint: string): string | null {
