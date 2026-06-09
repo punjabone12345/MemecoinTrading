@@ -9,15 +9,18 @@ const PUMPFUN_PROGRAM_ID    = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
 const SOL_MINT              = "So11111111111111111111111111111111111111112";
 const GRADUATION_MCAP_USD   = 69_000;   // pump.fun graduation threshold (~$69k)
 const DEXSCREENER_BASE      = "https://api.dexscreener.com";
+const PUMPFUN_API_BASE      = "https://frontend-api.pump.fun";   // direct pump.fun frontend API
 const PUMPPORTAL_WS_URL     = "wss://pumpportal.fun/api/data";
 const CONFIG_KEY            = "pumpfun_config";
 const RECONNECT_DELAY_MS    = 3_000;
-const MAX_TRACKED_TOKENS    = 300;
+const MAX_TRACKED_TOKENS    = 500;
 const TOKEN_TTL_MS          = 2 * 60 * 60_000; // 2 hours
 const MARKET_DATA_INTERVAL  = 30_000;           // refresh DexScreener every 30s
+const PUMPFUN_REFRESH_INTERVAL = 15_000;        // refresh pump.fun bonding curve data every 15s
+const NEAR_GRAD_SCAN_INTERVAL  = 25_000;        // scan pump.fun for near-graduation tokens every 25s
 const SCORE_INTERVAL        = 15_000;           // score check every 15s
 const PRICE_CHECK_INTERVAL  = 10_000;           // position TP/SL every 10s
-const SOL_PRICE_INTERVAL    = 5 * 60_000;       // refresh SOL/USD price every 5 min
+const SOL_PRICE_INTERVAL    = 2 * 60_000;       // refresh SOL/USD price every 2 min
 const TX_QUEUE_DELAY        = 600;              // ms between getTransaction calls (rate-limit)
 const MAX_TX_QUEUE          = 50;              // max queued signatures
 const MAX_EVENTS            = 100;
@@ -169,10 +172,10 @@ export interface PumpfunStatus {
 // ── Defaults ──────────────────────────────────────────────────────────────────
 const DEFAULT_CONFIG: PumpfunConfig = {
   enabled: true,
-  minAiScore: 80,
+  minAiScore: 55,          // lowered from 80 — near-grad tokens won't have high activity scores
   positionSizeSol: 0.1,
   maxOpenPositions: 3,
-  graduationMinPct: 85,
+  graduationMinPct: 80,    // lowered from 85 — start watching earlier for better entries
   graduationMaxPct: 99.5,
   virtualBalanceSol: 10.0,
   scoreWeights: {
@@ -245,10 +248,15 @@ class PumpfunTraderService {
   // SOL/USD price (refreshed every 5 min, used to convert PumpPortal SOL mcap → USD)
   private solPriceUsd = 150;
 
-  private marketDataTimer: ReturnType<typeof setInterval> | null = null;
-  private scoreTimer:      ReturnType<typeof setInterval> | null = null;
-  private priceCheckTimer: ReturnType<typeof setInterval> | null = null;
-  private solPriceTimer:   ReturnType<typeof setInterval> | null = null;
+  private marketDataTimer:  ReturnType<typeof setInterval> | null = null;
+  private pumpfunTimer:     ReturnType<typeof setInterval> | null = null;
+  private nearGradTimer:    ReturnType<typeof setInterval> | null = null;
+  private scoreTimer:       ReturnType<typeof setInterval> | null = null;
+  private priceCheckTimer:  ReturnType<typeof setInterval> | null = null;
+  private solPriceTimer:    ReturnType<typeof setInterval> | null = null;
+  // track which mints we've already fetched from pump.fun API to pace requests
+  private pfApiFetchQueue:  string[] = [];
+  private pfApiFetching = false;
 
   // ── Lifecycle ───────────────────────────────────────────────────────────────
 
@@ -275,16 +283,23 @@ class PumpfunTraderService {
       logger.info("Pump.fun trader: HELIUS_API_KEY not set — running on PumpPortal + DexScreener only");
     }
 
-    // Fetch SOL price immediately, then every 5 min
+    // Fetch SOL price immediately, then every 2 min
     void this.fetchSolPrice();
     this.solPriceTimer   = setInterval(() => void this.fetchSolPrice(), SOL_PRICE_INTERVAL);
 
     this.marketDataTimer = setInterval(() => void this.refreshMarketData(), MARKET_DATA_INTERVAL);
+    // Pump.fun bonding curve refresh (primary graduation% source)
+    this.pumpfunTimer    = setInterval(() => void this.refreshPumpfunBondingCurves(), PUMPFUN_REFRESH_INTERVAL);
+    // Near-graduation scanner — finds tokens at 80-99.5% that we haven't seen yet
+    this.nearGradTimer   = setInterval(() => void this.scanNearGraduationTokens(), NEAR_GRAD_SCAN_INTERVAL);
+
     this.scoreTimer      = setInterval(() => void this.runScoringCycle(), SCORE_INTERVAL);
     this.priceCheckTimer = setInterval(() => void this.checkPositionPrices(), PRICE_CHECK_INTERVAL);
 
-    // Initial market data fetch after a short delay
-    setTimeout(() => void this.refreshMarketData(), 5_000);
+    // Kick off initial scans after a short delay
+    setTimeout(() => void this.refreshMarketData(), 4_000);
+    setTimeout(() => void this.scanNearGraduationTokens(), 6_000);
+    setTimeout(() => void this.refreshPumpfunBondingCurves(), 8_000);
     logger.info("Pump.fun pre-graduation trader: started");
   }
 
@@ -459,21 +474,236 @@ class PumpfunTraderService {
   // ── SOL price fetch (for PumpPortal mcapSol → USD conversion) ───────────────
 
   private async fetchSolPrice(): Promise<void> {
+    // Use DexScreener Raydium SOL/USDC pair — always accessible, always accurate
     try {
-      type DexPair = { priceUsd?: string };
-      // Use DexScreener's SOL/USDC pair on Orca to get live SOL price
-      const res = await axios.get<{ pairs?: DexPair[] }>(
-        `${DEXSCREENER_BASE}/latest/dex/tokens/v1/solana/${SOL_MINT}`,
+      type DexPair = { priceUsd?: string; priceNative?: string };
+      type DexRes  = { pairs?: DexPair[] } | DexPair[];
+      // Raydium SOL/USDC pair — verified 2025-06 with $1.85B liquidity
+      const res = await axios.get<DexRes>(
+        `${DEXSCREENER_BASE}/latest/dex/pairs/solana/FHZfpXSzm1XrgUQQs9JrqDT3o4QS4M6ebV2wX2YLtRZ8`,
         { timeout: 5_000 },
       );
-      const pairs = res.data?.pairs ?? (Array.isArray(res.data) ? res.data as DexPair[] : []);
-      const price = parseFloat((pairs[0] as DexPair)?.priceUsd ?? "0");
-      if (price > 0) {
+      const pairs: DexPair[] = Array.isArray(res.data)
+        ? res.data
+        : (res.data as { pairs?: DexPair[] }).pairs ?? [];
+      const price = parseFloat(pairs[0]?.priceUsd ?? "0");
+      if (price > 10) {
         this.solPriceUsd = price;
-        logger.debug({ solPrice: price.toFixed(2) }, "Pump.fun trader: SOL price updated");
+        logger.debug({ solPrice: price.toFixed(2) }, "Pump.fun trader: SOL price updated (DexScreener Raydium)");
+        return;
       }
-    } catch {
-      // keep previous price — no action needed
+    } catch { /* fall through */ }
+
+    // Fallback: search for SOL/USDC on DexScreener
+    try {
+      type SearchRes = { pairs?: { priceUsd?: string; chainId?: string; baseToken?: { symbol?: string }; quoteToken?: { symbol?: string }; liquidity?: { usd?: number } }[] };
+      const res = await axios.get<SearchRes>(
+        `${DEXSCREENER_BASE}/latest/dex/search?q=SOL+USDC`,
+        { timeout: 5_000 },
+      );
+      const pairs = res.data?.pairs ?? [];
+      const solUsdc = pairs
+        .filter((p) => p.chainId === "solana" && p.baseToken?.symbol === "SOL" && (p.liquidity?.usd ?? 0) > 100_000)
+        .sort((a, b) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0))[0];
+      const price = parseFloat(solUsdc?.priceUsd ?? "0");
+      if (price > 10) {
+        this.solPriceUsd = price;
+        logger.debug({ solPrice: price.toFixed(2) }, "Pump.fun trader: SOL price updated (DexScreener search)");
+      }
+    } catch { /* keep previous price */ }
+  }
+
+  // ── Pump.fun-specific bonding curve refresh via DexScreener ─────────────────
+
+  /**
+   * DexScreener DOES index pre-graduation pump.fun tokens (dexId = "pumpfun").
+   * This refreshes graduation% for tracked tokens by querying their mint addresses.
+   */
+  private async refreshPumpfunBondingCurves(): Promise<void> {
+    // Focus on tokens with low or stale graduation data — these most need refreshing
+    const mints = Array.from(this.trackedTokens.keys())
+      .filter((m) => {
+        const t = this.trackedTokens.get(m)!;
+        return t.status !== "graduated" && t.status !== "exited";
+      })
+      .slice(0, 60); // process up to 60 tokens (2 DexScreener batches)
+
+    if (mints.length === 0) return;
+
+    const batches: string[][] = [];
+    for (let i = 0; i < mints.length; i += 30) batches.push(mints.slice(i, i + 30));
+
+    for (const batch of batches) {
+      try {
+        type DexPair = {
+          pairAddress: string;
+          dexId?: string;
+          baseToken: { address: string; symbol: string; name: string };
+          priceUsd: string;
+          marketCap?: number;
+          fdv?: number;
+          pairCreatedAt?: number;
+        };
+        const res = await axios.get<DexPair[]>(
+          `${DEXSCREENER_BASE}/tokens/v1/solana/${batch.join(",")}`,
+          { timeout: 8_000 },
+        );
+        const pairs = Array.isArray(res.data) ? res.data : [];
+        for (const pair of pairs) {
+          if (pair.dexId !== "pumpfun") continue; // only pump.fun pre-graduation pairs
+          const mint  = pair.baseToken?.address;
+          const token = mint ? this.trackedTokens.get(mint) : undefined;
+          if (!token) continue;
+
+          const mcap    = pair.marketCap ?? pair.fdv ?? 0;
+          const gradPct = Math.min((mcap / GRADUATION_MCAP_USD) * 100, 100);
+          const price   = parseFloat(pair.priceUsd) || 0;
+
+          if (gradPct > 0) token.graduationPct = gradPct;
+          if (mcap > 0)    token.mcap          = mcap;
+          if (price > 0)   token.priceUsd      = price;
+          if (pair.pairAddress) token.pairAddress = pair.pairAddress;
+          token.symbol = pair.baseToken.symbol ?? token.symbol;
+          token.name   = pair.baseToken.name   ?? token.name;
+          token.lastUpdated = Date.now();
+
+          // Mark graduated if mcap exceeds threshold
+          if (gradPct >= 100 && token.status !== "bought") {
+            token.status = "graduated";
+          }
+        }
+      } catch (err) {
+        logger.debug({ err: (err as Error).message }, "Pump.fun trader: bonding curve refresh error");
+      }
+      await new Promise((r) => setTimeout(r, 300));
+    }
+  }
+
+  /**
+   * Scan DexScreener for pump.fun pairs in the graduation zone ($45k–$68k mcap).
+   * DexScreener indexes all pump.fun pairs with accurate market caps.
+   * This discovers near-graduation tokens we haven't seen via PumpPortal.
+   */
+  private async scanNearGraduationTokens(): Promise<void> {
+    if (!this.config.enabled) return;
+
+    // Graduation range in USD: from ~65% graduation to just before graduation
+    const GRAD_SCAN_MIN = GRADUATION_MCAP_USD * 0.60; // ~$41k (60% grad)
+    const GRAD_SCAN_MAX = GRADUATION_MCAP_USD * 0.995; // ~$68.7k (99.5% grad)
+
+    try {
+      // Fetch recently active token profiles from DexScreener — covers recent pump.fun launches
+      type DexProfile = {
+        chainId?: string;
+        tokenAddress?: string;
+        url?: string;
+        header?: string;
+        description?: string;
+        links?: unknown[];
+      };
+      const profilesRes = await axios.get<DexProfile[]>(
+        `${DEXSCREENER_BASE}/token-profiles/latest/v1`,
+        { timeout: 6_000 },
+      ).catch(() => ({ data: [] as DexProfile[] }));
+      const profiles = Array.isArray(profilesRes.data) ? profilesRes.data : [];
+      const solanaAddrs = profiles
+        .filter((p) => p.chainId === "solana" && p.tokenAddress)
+        .map((p) => p.tokenAddress!)
+        .slice(0, 60);
+
+      // Also look up pairs via DexScreener search using common pump.fun token patterns
+      const searchTerms = ["meme", "pump", "based", "moon", "ai", "dog", "cat"];
+      const searchResults: string[] = [];
+      for (const term of searchTerms.slice(0, 4)) {
+        try {
+          type SearchRes = { pairs?: { chainId?: string; dexId?: string; baseToken?: { address?: string }; marketCap?: number; pairCreatedAt?: number }[] };
+          const sr = await axios.get<SearchRes>(
+            `${DEXSCREENER_BASE}/latest/dex/search?q=${term}`,
+            { timeout: 5_000 },
+          );
+          const matching = (sr.data?.pairs ?? [])
+            .filter((p) =>
+              p.chainId === "solana" &&
+              p.dexId === "pumpfun" &&
+              (p.marketCap ?? 0) >= GRAD_SCAN_MIN &&
+              (p.marketCap ?? 0) <= GRAD_SCAN_MAX
+            )
+            .map((p) => p.baseToken?.address)
+            .filter(Boolean) as string[];
+          searchResults.push(...matching);
+        } catch { /* ignore individual search errors */ }
+        await new Promise((r) => setTimeout(r, 200));
+      }
+
+      // Combine and deduplicate all candidate addresses
+      const allMints = Array.from(new Set([...solanaAddrs, ...searchResults]))
+        .filter((m) => !this.trackedTokens.has(m))
+        .slice(0, 60);
+
+      if (allMints.length === 0) return;
+
+      // Look up full data for candidates in batches
+      const batches: string[][] = [];
+      for (let i = 0; i < allMints.length; i += 30) batches.push(allMints.slice(i, i + 30));
+
+      let discovered = 0;
+      for (const batch of batches) {
+        try {
+          type DexPair = {
+            pairAddress: string;
+            dexId?: string;
+            baseToken: { address: string; symbol: string; name: string };
+            priceUsd: string;
+            marketCap?: number;
+            fdv?: number;
+            pairCreatedAt?: number;
+          };
+          const res = await axios.get<DexPair[]>(
+            `${DEXSCREENER_BASE}/tokens/v1/solana/${batch.join(",")}`,
+            { timeout: 8_000 },
+          );
+          const pairs = Array.isArray(res.data) ? res.data : [];
+
+          for (const pair of pairs) {
+            if (pair.dexId !== "pumpfun") continue; // only pre-graduation pump.fun pairs
+            const mint = pair.baseToken?.address;
+            if (!mint || this.trackedTokens.has(mint)) continue;
+
+            const mcap    = pair.marketCap ?? pair.fdv ?? 0;
+            const gradPct = Math.min((mcap / GRADUATION_MCAP_USD) * 100, 100);
+            if (gradPct < 60) continue; // below our interest threshold
+
+            const price = parseFloat(pair.priceUsd) || 0;
+
+            this.initToken(mint, "unknown");
+            const t = this.trackedTokens.get(mint)!;
+            t.symbol        = pair.baseToken.symbol ?? mint.slice(0, 6);
+            t.name          = pair.baseToken.name   ?? mint.slice(0, 8);
+            t.graduationPct = gradPct;
+            t.mcap          = mcap;
+            t.priceUsd      = price;
+            t.pairAddress   = pair.pairAddress ?? "";
+            t.lastUpdated   = Date.now();
+            discovered++;
+
+            // Immediately subscribe to live trades for this token via PumpPortal
+            if (this.ppConnected && this.ppWs && !this.ppSubscribedMints.has(mint)) {
+              this.ppWs.send(JSON.stringify({ method: "subscribeTokenTrade", keys: [mint] }));
+              this.ppSubscribedMints.add(mint);
+            }
+
+            logger.debug({ mint, symbol: t.symbol, gradPct: gradPct.toFixed(1), mcap: mcap.toFixed(0) },
+              "Pump.fun trader: near-graduation token discovered via DexScreener");
+          }
+        } catch { /* ignore batch errors */ }
+        await new Promise((r) => setTimeout(r, 250));
+      }
+
+      if (discovered > 0) {
+        logger.info({ discovered }, "Pump.fun trader: near-graduation scanner found new tokens ✅");
+      }
+    } catch (err) {
+      logger.debug({ err: (err as Error).message }, "Pump.fun trader: near-grad scan error");
     }
   }
 
@@ -646,10 +876,11 @@ class PumpfunTraderService {
   // ── DexScreener market data refresh ────────────────────────────────────────
 
   private async refreshMarketData(): Promise<void> {
-    const mints = Array.from(this.trackedTokens.keys()).slice(0, 30);
+    // Get ALL tracked tokens (no outer slice — the bug was here!)
+    const mints = Array.from(this.trackedTokens.keys());
     if (mints.length === 0) return;
 
-    // Batch into groups of 30 (DexScreener limit)
+    // Batch into groups of 30 (DexScreener limit per request)
     const batches: string[][] = [];
     for (let i = 0; i < mints.length; i += 30) batches.push(mints.slice(i, i + 30));
 
@@ -913,9 +1144,23 @@ class PumpfunTraderService {
       const gradPct = token.graduationPct;
       const cfg     = this.config;
 
-      // Update status
+      // Graduation-proximity bonus: tokens deep in the snipe zone get a score boost.
+      // Near-graduation tokens discovered via DexScreener may have no tx history yet
+      // so their raw score is low — but the bonding curve progress IS the signal.
+      let effectiveScore = token.score;
+      if (gradPct >= 90) {
+        // At 90%+ graduation, proximity itself is a strong signal (+20 bonus, capped at 100)
+        const proximityBonus = Math.min((gradPct - 90) * 4, 20); // up to +20 at ~95%+
+        effectiveScore = Math.min(100, effectiveScore + proximityBonus);
+      }
+      if (gradPct >= 95) {
+        // Emergency proximity boost — token is very close to graduating, worth watching
+        effectiveScore = Math.max(effectiveScore, cfg.minAiScore - 5);
+      }
+
+      // Update status using effective score (includes proximity bonus)
       if (gradPct >= cfg.graduationMinPct && gradPct <= cfg.graduationMaxPct) {
-        token.status = token.score >= cfg.minAiScore ? "buySignal" : "candidate";
+        token.status = effectiveScore >= cfg.minAiScore ? "buySignal" : "candidate";
       } else if (gradPct > 0 && gradPct < cfg.graduationMinPct) {
         token.status = "watching";
       }
