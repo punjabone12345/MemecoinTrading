@@ -1395,7 +1395,7 @@ class PumpfunTraderService {
     if (!this.config.enabled) return;
 
     for (const [mint, token] of this.trackedTokens) {
-      if (token.status === "bought" || token.status === "graduated" || token.status === "exited") continue;
+      if (token.status === "bought" || token.status === "graduated" || token.status === "exited" || token.status === "rejected") continue;
 
       // Calculate score
       const breakdown = this.scoreToken(token);

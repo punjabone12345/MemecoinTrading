@@ -132,7 +132,7 @@ export default function Positions() {
       {/* ── Open Positions ── */}
       {tab === "Open" && (
         <div className="space-y-3">
-          {openPositions.length === 0 ? (
+          {openPositions.length === 0 && pfOpenFiltered.length === 0 ? (
             <div className="bg-[#0d0d18] border border-white/6 rounded-xl p-10 text-center">
               <Target className="w-10 h-10 text-white/10 mx-auto mb-3" />
               <p className="text-white/25 text-sm">No open positions</p>
@@ -303,6 +303,72 @@ export default function Positions() {
               </div>
             );
           })}
+
+          {/* Pump.fun open positions */}
+          {pfOpenFiltered.length > 0 && (
+            <>
+              {openPositions.length > 0 && (
+                <div className="flex items-center gap-2 pt-1">
+                  <div className="h-px flex-1 bg-white/6" />
+                  <span className="text-[9px] text-violet-400/50 font-bold uppercase tracking-wider flex items-center gap-1">
+                    <Rocket className="w-2.5 h-2.5" /> Pump.fun Open
+                  </span>
+                  <div className="h-px flex-1 bg-white/6" />
+                </div>
+              )}
+              {pfOpenFiltered.map((p) => {
+                const pnl = typeof p.totalPnlSol === "number" ? p.totalPnlSol : 0;
+                const isWin = pnl >= 0;
+                const tp1Hit = p.tp1Hit ?? false;
+                const tp2Hit = p.tp2Hit ?? false;
+                return (
+                  <div key={p.id} className={`rounded-2xl overflow-hidden border ${isWin ? "border-emerald-500/20" : "border-red-500/20"}`}>
+                    <div className={`px-4 py-3 flex items-center justify-between ${isWin ? "bg-emerald-500/8" : "bg-red-500/8"}`}>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <Rocket className="w-4 h-4 text-violet-400" />
+                        <span className="font-black text-white text-base">${p.symbol}</span>
+                        <span className="text-white/35 text-xs">{p.name}</span>
+                        <span className="text-[9px] px-1.5 py-0.5 rounded-md bg-violet-500/15 text-violet-400">PF Pre-Grad</span>
+                        {tp1Hit && <span className="text-[9px] px-1.5 py-0.5 rounded-md bg-emerald-500/15 text-emerald-400">TP1 ✓</span>}
+                        {tp2Hit && <span className="text-[9px] px-1.5 py-0.5 rounded-md bg-emerald-500/20 text-emerald-300">TP2 ✓</span>}
+                      </div>
+                      <div className={`text-sm font-black ${isWin ? "text-emerald-400" : "text-red-400"}`}>
+                        {isWin ? "+" : ""}{Math.abs(pnl).toFixed(4)} SOL
+                      </div>
+                    </div>
+                    <div className="bg-[#0d0d18] px-4 py-3 space-y-3">
+                      <div className="grid grid-cols-2 gap-x-4 gap-y-2 text-xs">
+                        <div className="flex justify-between">
+                          <span className="text-white/35">Entry</span>
+                          <span className="font-mono text-white">${p.entryPrice < 0.0001 ? p.entryPrice.toFixed(10) : p.entryPrice.toFixed(6)}</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-white/35">Size</span>
+                          <span className="text-white">{p.sizeSol.toFixed(4)} SOL</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-white/35">Remaining</span>
+                          <span className="text-white">{((p.remainingFraction ?? 1) * 100).toFixed(0)}%</span>
+                        </div>
+                        <div className="flex justify-between items-center gap-1">
+                          <Clock className="w-3 h-3 text-white/25" />
+                          <span className="text-white/35 text-[9px]">{new Date(p.entryAt).toLocaleString("en-IN", { timeZone: "Asia/Kolkata", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: true })}</span>
+                        </div>
+                      </div>
+                      <div className="bg-white/4 rounded-lg px-3 py-2">
+                        <p className="text-white/25 text-[9px] mb-0.5">Mint</p>
+                        <p className="font-mono text-[9px] text-white/50 break-all">{p.mint}</p>
+                      </div>
+                      <a href={`https://dexscreener.com/solana/${p.mint}`} target="_blank" rel="noopener noreferrer"
+                        className="flex items-center justify-center gap-1.5 py-2.5 rounded-xl bg-violet-500/10 border border-violet-500/20 text-violet-400 text-xs font-semibold">
+                        <ExternalLink className="w-3.5 h-3.5" /> View on DEX
+                      </a>
+                    </div>
+                  </div>
+                );
+              })}
+            </>
+          )}
         </div>
       )}
 
