@@ -22,7 +22,7 @@ const MAX_TRACKED_TOKENS    = 500;
 const TOKEN_TTL_MS          = 2 * 60 * 60_000; // 2 hours
 const MARKET_DATA_INTERVAL  = 30_000;           // refresh DexScreener every 30s
 const PUMPFUN_REFRESH_INTERVAL = 15_000;        // refresh pump.fun bonding curve data every 15s
-const NEAR_GRAD_SCAN_INTERVAL  = 25_000;        // scan pump.fun for near-graduation tokens every 25s
+const NEAR_GRAD_SCAN_INTERVAL  = 10_000;        // FIX 5: scan pump.fun for near-graduation tokens every 10s
 const SCORE_INTERVAL        = 15_000;           // score check every 15s
 const PRICE_CHECK_INTERVAL  = 10_000;           // position TP/SL every 10s
 const SOL_PRICE_INTERVAL    = 2 * 60_000;       // refresh SOL/USD price every 2 min
@@ -33,15 +33,28 @@ const MAX_CLOSED            = 200;
 // Grad% threshold above which we subscribe to individual token trades via PumpPortal
 const PP_TRADE_SUB_GRAD_PCT = 55;
 
-// ── Pre-graduation TP structure (different from post-grad sniper) ─────────────
-const SL_PCT         = 40;    // -40% SL
-const TP1_PCT        = 300;   // +300% TP1
+// ── Pre-graduation TP/SL structure ────────────────────────────────────────────
+// FIX 5: updated TP targets (200%/500%) + FIX 6: staged SL mirrors sniper
+const SL_PCT         = 40;    // kept for legacy SL price calculation on entry
+const TP1_PCT        = 200;   // +200% TP1 (was 300 — higher upside from earlier entry)
 const TP1_CLOSE_PCT  = 25;    // sell 25% at TP1
-const TP2_PCT        = 1000;  // +1000% TP2
+const TP2_PCT        = 500;   // +500% TP2 (was 1000)
 const TP2_CLOSE_PCT  = 25;    // sell 25% at TP2
 const TRAILING_PCT   = 40;    // 40% trail from peak (moonbag after TP2)
-const FIRST_MIN_MS   = 60_000;
-const FIRST_MIN_DROP = 30;    // 60s early exit at -30%
+// FIX 5 staged SL — mirrors graduation-sniper.service.ts FIX 1
+const PF_STAGED_PHASE1_MS  = 2 * 60_000;   // first 2 min: 20% from entry
+const PF_STAGED_PHASE2_MS  = 10 * 60_000;  // 2-10 min: 25% from peak
+const PF_STAGED_PHASE1_PCT = 20;
+const PF_STAGED_PHASE2_PCT = 25;
+const PF_STAGED_PHASE3_PCT = 30;
+const PF_STAGED_AFTER_TP1  = 35;
+// FIX 6: trading hours (6am–11pm IST) — same as sniper
+const PF_NIGHT_START_HOUR  = 23;
+const PF_NIGHT_END_HOUR    = 6;
+// FIX 5: minimum validations before entry
+const PF_MIN_TX_COUNT      = 50;           // at least 50 transactions before entry
+const PF_MAX_AGE_MS        = 30 * 60_000;  // token age must be < 30 minutes
+const PF_GRAD_MIN_AFTER_ENTRY = 80;        // exit if graduation drops below 80% after entry
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -177,10 +190,10 @@ export interface PumpfunStatus {
 // ── Defaults ──────────────────────────────────────────────────────────────────
 const DEFAULT_CONFIG: PumpfunConfig = {
   enabled: true,
-  minAiScore: 55,          // lowered from 80 — near-grad tokens won't have high activity scores
-  positionSizeSol: 0.1,
+  minAiScore: 55,
+  positionSizeSol: 0.05,   // FIX 5: 0.05 SOL (smaller — higher risk pre-grad plays)
   maxOpenPositions: 3,
-  graduationMinPct: 80,    // lowered from 85 — start watching earlier for better entries
+  graduationMinPct: 85,    // FIX 5: 85% threshold as specified
   graduationMaxPct: 99.5,
   virtualBalanceSol: 10.0,
   scoreWeights: {
@@ -195,6 +208,14 @@ const DEFAULT_CONFIG: PumpfunConfig = {
     momentumStrength:   0.05,
   },
 };
+
+// ── FIX 6: Trading hours helper (6am–11pm IST) ────────────────────────────────
+function isPfNightSession(): boolean {
+  const nowUtc  = new Date();
+  const istMin  = (nowUtc.getUTCHours() * 60 + nowUtc.getUTCMinutes() + 330) % 1440;
+  const istHour = Math.floor(istMin / 60);
+  return istHour >= PF_NIGHT_START_HOUR || istHour < PF_NIGHT_END_HOUR;
+}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function uid(): string {
@@ -1419,6 +1440,32 @@ class PumpfunTraderService {
     if (this.openPositions.size >= this.config.maxOpenPositions) return;
     if (this.virtualBalance < this.config.positionSizeSol) return;
 
+    // FIX 6: No new entries during night session (11pm–6am IST)
+    if (isPfNightSession()) {
+      logger.info({ mint: token.mint, symbol: token.symbol }, "Pump.fun trader: night session (11pm–6am IST) — skipping entry");
+      return;
+    }
+
+    // FIX 5: Token age must be under 30 minutes
+    const tokenAgeMs = Date.now() - token.firstSeen;
+    if (tokenAgeMs > PF_MAX_AGE_MS) {
+      logger.info(
+        { mint: token.mint, symbol: token.symbol, ageMin: (tokenAgeMs / 60_000).toFixed(1) },
+        "Pump.fun trader: token too old (>30min) — skipping",
+      );
+      return;
+    }
+
+    // FIX 5: Must have at least 50 transactions
+    const txCount = token.txHistory.length;
+    if (txCount < PF_MIN_TX_COUNT) {
+      logger.info(
+        { mint: token.mint, symbol: token.symbol, txCount },
+        "Pump.fun trader: insufficient transactions (<50) — skipping",
+      );
+      return;
+    }
+
     const cfg      = this.config;
     const id       = uid();
     const price    = token.priceUsd;
@@ -1447,6 +1494,7 @@ class PumpfunTraderService {
     // ── CONFIRMED TRADE LOG ─────────────────────────────────────────────────
     logger.info({
       type:       "TRADE_OPEN",
+      tag:        "PRE-GRAD",
       mint:       token.mint,
       symbol:     token.symbol,
       name:       token.name,
@@ -1456,24 +1504,31 @@ class PumpfunTraderService {
       gradPct:    token.graduationPct.toFixed(1) + "%",
       mcapUsd:    token.mcap.toFixed(0),
       aiScore:    token.score,
+      txCount,
+      ageMin:     (tokenAgeMs / 60_000).toFixed(1),
       balance:    this.virtualBalance.toFixed(4) + " SOL (after)",
     }, "┌─ PUMP.FUN PRE-GRAD ENTRY ──────────────────────────────────┐");
-    logger.info({ symbol: token.symbol, entryUsd: `$${price.toFixed(8)}`, sl: `$${slPrice.toFixed(8)} (-${SL_PCT}%)`, grad: `${token.graduationPct.toFixed(1)}%` },
-      "│  Entered position — waiting for graduation pump           │");
+    logger.info({
+      symbol: token.symbol,
+      entryUsd: `$${price.toFixed(8)}`,
+      stagedSL: `Phase 1: -20% in 2m | Phase 2: -25% from peak | Phase 3: -30% from peak`,
+      grad: `${token.graduationPct.toFixed(1)}%`,
+    }, "│  Entered PRE-GRAD position — staged SL active             │");
 
     if (isTelegramConfigured()) {
       void sendTelegram(
-        `🟣 <b>PRE-GRADUATION ENTRY</b>\n──────────────────────\n` +
+        `🟣 <b>PRE-GRAD ENTRY [85%+ BONDING]</b>\n──────────────────────\n` +
         `🪙 Token: <b>${token.symbol}</b> / ${token.name}\n` +
         `📋 CA: <code>${token.mint}</code>\n` +
         `🏆 AI Score: <b>${token.score}/100</b>\n` +
         `🎓 Graduation: <b>${token.graduationPct.toFixed(1)}%</b>\n` +
         `💰 Market Cap: ${fmtMcap(token.mcap)}\n` +
         `📊 Volume (5m): ${volInWindow(token.txHistory, 5 * 60_000).toFixed(3)} SOL\n` +
-        `👥 Unique Buyers: ${token.uniqueBuyers.length}\n` +
-        `💵 Entry: $${fmt4(price)}\n` +
-        `🛑 SL: $${fmt4(slPrice)} (-${SL_PCT}%)\n` +
-        `✅ Position Opened (${sizeSol} SOL)\n` +
+        `👥 Unique Buyers: ${token.uniqueBuyers.length} | TXs: ${txCount}\n` +
+        `⏱️ Token Age: ${(tokenAgeMs / 60_000).toFixed(1)}m\n` +
+        `💵 Entry: $${fmt4(price)} | Size: ${sizeSol} SOL\n` +
+        `🛡️ Staged SL: -20% (2m) → -25% peak → -30% peak\n` +
+        `🎯 TP1: +${TP1_PCT}% | TP2: +${TP2_PCT}%\n` +
         `🕐 ${toIST(new Date())}`,
       );
     }
@@ -1568,20 +1623,65 @@ class PumpfunTraderService {
       pos.totalPnlSol      = pos.realizedPnlSol + unrealized;
       pos.pnlPct           = (price / pos.entryPrice - 1) * 100;
 
-      if (pos.tp2Hit && price > pos.trailingHigh) pos.trailingHigh = price;
+      // FIX 5: Always update trailing high (not just after TP2)
+      if (price > pos.trailingHigh) pos.trailingHigh = price;
 
-      // 60-second early exit
-      if (!pos.tp1Hit && ageMs <= FIRST_MIN_MS) {
-        const dropPct = (1 - price / pos.entryPrice) * 100;
-        if (dropPct >= FIRST_MIN_DROP) {
-          this.closePosition(pos, `60s Early Exit (-${dropPct.toFixed(0)}%)`, price);
-          continue;
+      // FIX 5: Staged SL — replaces 60s early exit + fixed SL
+      const dropFromEntry = (1 - price / pos.entryPrice) * 100;
+      const dropFromPeak  = pos.trailingHigh > 0 ? (1 - price / pos.trailingHigh) * 100 : 0;
+      let stagedSLHit = false;
+
+      if (!pos.tp2Hit) {
+        if (pos.tp1Hit) {
+          if (dropFromPeak >= PF_STAGED_AFTER_TP1) {
+            this.closePosition(pos, `Staged SL: -${dropFromPeak.toFixed(0)}% from TP1 peak`, price);
+            stagedSLHit = true;
+          }
+        } else if (ageMs <= PF_STAGED_PHASE1_MS) {
+          if (dropFromEntry >= PF_STAGED_PHASE1_PCT) {
+            this.closePosition(pos, `Staged SL: -${dropFromEntry.toFixed(0)}% in first 2m`, price);
+            stagedSLHit = true;
+          }
+        } else if (ageMs <= PF_STAGED_PHASE2_MS) {
+          if (dropFromPeak >= PF_STAGED_PHASE2_PCT) {
+            this.closePosition(pos, `Staged SL: -${dropFromPeak.toFixed(0)}% from peak (2-10m)`, price);
+            stagedSLHit = true;
+          }
+        } else {
+          if (dropFromPeak >= PF_STAGED_PHASE3_PCT) {
+            this.closePosition(pos, `Staged SL: -${dropFromPeak.toFixed(0)}% from peak (>10m)`, price);
+            stagedSLHit = true;
+          }
         }
       }
+      if (stagedSLHit) {
+        if (isTelegramConfigured()) {
+          void sendTelegram(
+            `🛑 <b>PRE-GRAD STAGED SL</b>\n──────────────────────\n` +
+            `🪙 Token: <b>${pos.symbol}</b>\n📋 CA: <code>${pos.mint}</code>\n` +
+            `📉 Drop from ${pos.tp1Hit ? "TP1 peak" : ageMs <= PF_STAGED_PHASE1_MS ? "entry (2m)" : "peak"}\n` +
+            `💵 Entry: $${fmt4(pos.entryPrice)} → Exit: $${fmt4(price)}\n` +
+            `🕐 ${toIST(new Date())}`,
+          );
+        }
+        continue;
+      }
 
-      // SL
-      if (price <= pos.effectiveSlPrice) {
-        this.closePosition(pos, pos.tp1Hit ? "Breakeven SL" : `Stop Loss (-${SL_PCT}%)`, price);
+      // FIX 5: Exit if graduation % drops below 80% after entry (rug signal)
+      if (token && !pos.tp1Hit && token.graduationPct < PF_GRAD_MIN_AFTER_ENTRY) {
+        logger.warn(
+          { mint: pos.mint, symbol: pos.symbol, gradPct: token.graduationPct.toFixed(1) },
+          "Pump.fun trader: graduation % dropped below 80% after entry — exiting",
+        );
+        if (isTelegramConfigured()) {
+          void sendTelegram(
+            `⚠️ <b>PRE-GRAD GRAD DROP EXIT</b>\n──────────────────────\n` +
+            `🪙 Token: <b>${pos.symbol}</b>\n📋 CA: <code>${pos.mint}</code>\n` +
+            `🎓 Graduation dropped to <b>${token.graduationPct.toFixed(1)}%</b> (below 80%)\n` +
+            `⚠️ Possible bonding curve manipulation — exiting\n🕐 ${toIST(new Date())}`,
+          );
+        }
+        this.closePosition(pos, `Grad Drop Below 80% (${token.graduationPct.toFixed(1)}%)`, price);
         continue;
       }
 
@@ -1594,40 +1694,37 @@ class PumpfunTraderService {
         }
       }
 
-      // TP1 — +300%, sell 25%
+      // TP1 — FIX 5: +200%, sell 25%
       if (!pos.tp1Hit && price >= tp1Price) {
         pos.tp1Hit = true;
         this.partialClose(pos, TP1_CLOSE_PCT / 100, price, `TP1 (+${TP1_PCT}%)`);
-        pos.effectiveSlPrice = pos.entryPrice; // move SL to breakeven
+        pos.effectiveSlPrice = pos.entryPrice; // kept for reference
 
         if (isTelegramConfigured()) {
           void sendTelegram(
-            `🟢 <b>PRE-GRADUATION TP1</b>\n──────────────────────\n` +
+            `🟢 <b>PRE-GRAD TP1 HIT</b>\n──────────────────────\n` +
             `🪙 Token: <b>${pos.symbol}</b>\n` +
-            `📈 PnL: <b>+${TP1_PCT}%</b>\n` +
-            `💰 ${TP1_CLOSE_PCT}% Position Closed\n` +
-            `🛑 SL moved to breakeven\n` +
-            `🕐 ${toIST(new Date())}`,
+            `📈 Price: +${TP1_PCT}% from entry\n` +
+            `💰 ${TP1_CLOSE_PCT}% sold — 35% trail now active\n` +
+            `🛡️ SL at breakeven | TP2: +${TP2_PCT}%\n🕐 ${toIST(new Date())}`,
           );
         }
         void this.savePosition(pos);
       }
 
-      // TP2 — +1000%, sell 25%
+      // TP2 — FIX 5: +500%, sell 25%
       if (pos.tp1Hit && !pos.tp2Hit && price >= tp2Price) {
-        pos.tp2Hit    = true;
+        pos.tp2Hit       = true;
         pos.trailingHigh = price;
         this.partialClose(pos, TP2_CLOSE_PCT / 100, price, `TP2 (+${TP2_PCT}%)`);
 
         if (isTelegramConfigured()) {
           void sendTelegram(
-            `🚀 <b>PRE-GRADUATION TP2</b>\n──────────────────────\n` +
+            `🚀 <b>PRE-GRAD TP2 HIT</b>\n──────────────────────\n` +
             `🪙 Token: <b>${pos.symbol}</b>\n` +
-            `🌙 PnL: <b>+${TP2_PCT}%</b>\n` +
-            `💰 ${TP2_CLOSE_PCT}% Position Closed\n` +
-            `🎯 Moonbag Active (${pos.remainingFraction * 100 | 0}% remaining)\n` +
-            `📈 Trailing Stop: ${TRAILING_PCT}% below peak\n` +
-            `🕐 ${toIST(new Date())}`,
+            `🌙 Price: +${TP2_PCT}% from entry\n` +
+            `💰 ${TP2_CLOSE_PCT}% sold — moonbag active\n` +
+            `🎯 Trailing Stop: ${TRAILING_PCT}% below peak\n🕐 ${toIST(new Date())}`,
           );
         }
         void this.savePosition(pos);

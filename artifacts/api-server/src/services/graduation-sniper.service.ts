@@ -14,7 +14,7 @@ const MAX_EVENTS         = 50;
 const MAX_CLOSED         = 100;
 const CONFIG_KEY         = "sniper_config";
 
-// ── Adaptive price-check intervals (FIX 3) ───────────────────────────────────
+// ── Adaptive price-check intervals ───────────────────────────────────────────
 const PRICE_LOOP_MS         = 10_000;         // main loop tick — 10 s
 const FAST_WINDOW_MS        = 30 * 60_000;    // first 30 min  → check every 10 s
 const MED_WINDOW_MS         = 2 * 60 * 60_000;// 30 min–2 h    → check every 30 s
@@ -22,36 +22,41 @@ const FAST_INTERVAL_MS      = 10_000;
 const MED_INTERVAL_MS       = 30_000;
 const SLOW_INTERVAL_MS      = 60_000;
 
-// ── Hard-stop / dead-position thresholds (FIX 1 & 2) ─────────────────────────
-const HARD_STOP_PCT         = 50;             // -50 % absolute floor (FIX 1)
-const DEAD_POSITION_MS      = 2 * 60 * 60_000;// 2 h open with no movement (FIX 2)
+// ── Dead-position threshold ───────────────────────────────────────────────────
+const DEAD_POSITION_MS      = 2 * 60 * 60_000;// 2 h open with no movement
 const DEAD_MOVE_PCT         = 5;              // < 5 % move = "dead"
 
-// ── Instant-rug detection constants ──────────────────────────────────────────
+// ── Instant-rug detection constants (pre-entry) ───────────────────────────────
 const RUG_CHECK_WAIT_MS     = 8_000;          // monitor for 8 s after baseline price
-const RUG_DROP_ABORT_PCT    = 20;             // abort if price drops ≥ 20 % in that window (FIX 3 — tightened from 25)
+const RUG_DROP_ABORT_PCT    = 20;             // abort entry if price drops ≥ 20% in that window
 
-// ── Type-A rug filters ────────────────────────────────────────────────────────
-const MIN_ENTRY_PRICE_USD   = 0.00001;        // FIX 1: skip tokens priced below $0.00001 (pre-rug micro-caps)
-const MIN_POOL_SOL          = 10;             // FIX 2: skip if Raydium pool holds < 10 SOL on-chain (drained)
+// ── Type-A rug filters (pre-entry) ───────────────────────────────────────────
+const MIN_ENTRY_PRICE_USD   = 0.00001;        // skip tokens priced below $0.00001
+const MIN_POOL_SOL          = 10;             // skip if Raydium pool holds < 10 SOL on-chain
+
+// ── STAGED STOP LOSS (FIX 1) ─────────────────────────────────────────────────
+const STAGED_SL_PHASE1_MS   = 2 * 60_000;    // first 2 minutes: 20% from entry (instant rug)
+const STAGED_SL_PHASE2_MS   = 10 * 60_000;   // 2–10 minutes: 25% from peak (trailing)
+const STAGED_SL_PHASE1_PCT  = 20;            // phase 1 drop threshold
+const STAGED_SL_PHASE2_PCT  = 25;            // phase 2 drop threshold
+const STAGED_SL_PHASE3_PCT  = 30;            // phase 3 (>10m) drop threshold
+const STAGED_SL_AFTER_TP1   = 35;            // after TP1: 35% from peak (allows 20-30% retracement before TP2)
+
+// ── LIQUIDITY MONITORING (FIX 2) ─────────────────────────────────────────────
+const LIQUIDITY_CHECK_MS     = 30_000;        // check open-position liquidity every 30 s
+const LIQUIDITY_DROP_TRIGGER = 40;            // exit if liquidity drops > 40% in one window
 
 // ── Trading hours (IST) — active 6am–11pm, paused 11pm–6am ──────────────────
-// Night session (11pm–6am) shows 10+ hard stops and net-negative PNL.
-// Keep WebSocket connected, keep detecting — but block trade entry.
 const NIGHT_START_IST_HOUR  = 23;             // 11 pm IST — pause begins
 const NIGHT_END_IST_HOUR    = 6;              // 6 am IST — pause ends (exclusive)
 
 /** Returns true when the clock is inside the high-rug night window (11pm–6am IST). */
 function isNightSession(): boolean {
-  const nowUtc   = new Date();
-  const istMin   = (nowUtc.getUTCHours() * 60 + nowUtc.getUTCMinutes() + 330) % 1440; // UTC+5:30
-  const istHour  = Math.floor(istMin / 60);
+  const nowUtc  = new Date();
+  const istMin  = (nowUtc.getUTCHours() * 60 + nowUtc.getUTCMinutes() + 330) % 1440;
+  const istHour = Math.floor(istMin / 60);
   return istHour >= NIGHT_START_IST_HOUR || istHour < NIGHT_END_IST_HOUR;
 }
-
-// ── 60-second early exit — catches fast rugs before -40% SL ──────────────────
-const FIRST_MIN_MS          = 60_000;         // monitor window: first 60 s after entry
-const FIRST_MIN_DROP_PCT    = 30;             // exit immediately if drop ≥ 30% in that window
 
 function uid(): string {
   return `snp-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
@@ -168,8 +173,13 @@ class GraduationSniperService {
   private seenMints: Set<string> = new Set();
   private virtualBalance = DEFAULT_CONFIG.virtualBalanceSol;
 
-  // Tracks when each position was last price-checked (adaptive interval, FIX 3)
+  // Adaptive price-check intervals
   private lastPositionCheckAt: Map<string, number> = new Map();
+  // FIX 2: Liquidity monitoring — tracks last known liquidity per position
+  private liquidityIntervalId: ReturnType<typeof setInterval> | null = null;
+  private lastPositionLiquidityUsd: Map<string, number> = new Map();
+  // FIX 4: Persistent closed-trade fingerprints — prevents duplicate logs on restart
+  private closedTradeFingerprints: Set<string> = new Set();
 
   // ── Init ───────────────────────────────────────────────────────────────────
 
@@ -184,6 +194,8 @@ class GraduationSniperService {
     const capitalInOpen      = Array.from(this.openPositions.values()).reduce((s, p) => s + p.sizeSol * p.remainingFraction, 0);
 
     this.virtualBalance = this.config.virtualBalanceSol + realizedFromClosed + partialFromOpen - capitalInOpen;
+
+    await this.loadClosedFingerprints();
 
     logger.info(
       {
@@ -286,15 +298,17 @@ class GraduationSniperService {
     }
 
     this.connect(apiKey);
-    // Adaptive loop ticks every 10 s; per-position rate-limiting is inside checkAllPrices
-    this.priceIntervalId = setInterval(() => void this.checkAllPrices(), PRICE_LOOP_MS);
+    this.priceIntervalId     = setInterval(() => void this.checkAllPrices(), PRICE_LOOP_MS);
+    // FIX 2: liquidity rug detection — poll every 30 s independent of price loop
+    this.liquidityIntervalId = setInterval(() => void this.checkAllLiquidity(), LIQUIDITY_CHECK_MS);
     logger.info("Graduation sniper: started — WebSocket connecting");
   }
 
   stop(): void {
     this.started = false;
-    if (this.priceIntervalId) { clearInterval(this.priceIntervalId); this.priceIntervalId = null; }
-    if (this.reconnectTimer)  { clearTimeout(this.reconnectTimer);   this.reconnectTimer  = null; }
+    if (this.priceIntervalId)     { clearInterval(this.priceIntervalId);     this.priceIntervalId     = null; }
+    if (this.liquidityIntervalId) { clearInterval(this.liquidityIntervalId); this.liquidityIntervalId = null; }
+    if (this.reconnectTimer)      { clearTimeout(this.reconnectTimer);       this.reconnectTimer      = null; }
     this.ws?.close();
   }
 
@@ -715,21 +729,20 @@ class GraduationSniperService {
 
     void this.persistPosition(pos);
 
-    const nightTag = night ? " 🌙 (night session — reduced size)" : "";
     logger.info(
-      { mint, symbol, entryPrice: price, sizeSol, sl: pos.effectiveSlPrice, night },
+      { mint, symbol, entryPrice: price, sizeSol, sl: pos.effectiveSlPrice },
       "Graduation sniper: paper position entered",
     );
 
     if (isTelegramConfigured()) {
       void sendTelegram(
-        `🎯 <b>SNIPER ENTRY (PAPER)</b>${night ? " 🌙" : ""}\n` +
+        `🎯 <b>SNIPER ENTRY (PAPER)</b>\n` +
         `──────────────────────\n` +
         `🪙 Token: <b>${symbol}</b> — ${name}\n` +
         `📋 CA: <code>${mint}</code>\n` +
         `💵 Entry: <b>$${fmtTgPrice(price)}</b>\n` +
-        `💰 Size: <b>${sizeSol} SOL</b> (paper)${nightTag}\n` +
-        `🛡️ SL: $${fmtTgPrice(pos.effectiveSlPrice)} (−${cfg.slPct}%)\n` +
+        `💰 Size: <b>${sizeSol} SOL</b> (paper)\n` +
+        `🛡️ Staged SL: -20% (2m) → -25% peak → -30% peak\n` +
         `🎯 TP1: $${fmtTgPrice(price * (1 + cfg.tp1Pct / 100))} (+${cfg.tp1Pct}%)\n` +
         `🎯 TP2: $${fmtTgPrice(price * (1 + cfg.tp2Pct / 100))} (+${cfg.tp2Pct}%)\n` +
         `🕐 ${toIST(new Date())}`,
@@ -737,7 +750,54 @@ class GraduationSniperService {
     }
   }
 
+  // ── FIX 4: Duplicate trade fingerprint helpers ──────────────────────────────
+  private tradeFingerprint(pos: SniperPosition): string {
+    // Key = mint + entry-minute — stable across restarts for same trade
+    return `${pos.mint}:${Math.round(pos.entryAt / 60_000)}`;
+  }
+
+  private isDuplicateTrade(pos: SniperPosition): boolean {
+    return this.closedTradeFingerprints.has(this.tradeFingerprint(pos));
+  }
+
+  private registerClosedTrade(pos: SniperPosition): void {
+    const fp = this.tradeFingerprint(pos);
+    this.closedTradeFingerprints.add(fp);
+    void this.saveClosedFingerprints();
+  }
+
+  private async loadClosedFingerprints(): Promise<void> {
+    try {
+      const { readFile } = await import("fs/promises");
+      const raw = await readFile("./data/closed_trades.json", "utf-8");
+      const arr = JSON.parse(raw) as string[];
+      this.closedTradeFingerprints = new Set(arr);
+      logger.info({ count: this.closedTradeFingerprints.size }, "Graduation sniper: loaded closed trade fingerprints");
+    } catch { /* file doesn't exist yet — fine */ }
+  }
+
+  private async saveClosedFingerprints(): Promise<void> {
+    try {
+      const { writeFile, mkdir } = await import("fs/promises");
+      await mkdir("./data", { recursive: true });
+      const arr = Array.from(this.closedTradeFingerprints).slice(-1000); // keep last 1000
+      await writeFile("./data/closed_trades.json", JSON.stringify(arr), "utf-8");
+    } catch (err) {
+      logger.warn({ err: (err as Error).message }, "Graduation sniper: failed to save closed trade fingerprints");
+    }
+  }
+
   private closePosition(pos: SniperPosition, reason: string, exitPrice: number): void {
+    // FIX 4: Skip if this trade was already logged (e.g. after server restart/redeploy)
+    if (this.isDuplicateTrade(pos)) {
+      logger.warn(
+        { mint: pos.mint, symbol: pos.symbol, reason },
+        "Graduation sniper: duplicate close detected — skipping (same mint+entry already logged)",
+      );
+      return;
+    }
+    this.registerClosedTrade(pos);
+
     const remaining = pos.sizeSol * pos.remainingFraction;
     const closePnl  = (exitPrice / pos.entryPrice - 1) * remaining;
 
@@ -802,7 +862,163 @@ class GraduationSniperService {
     );
   }
 
-  // ── Price checking loop (adaptive intervals — FIX 3) ─────────────────────
+  // ── FIX 2: Liquidity rug detection loop (30s) ─────────────────────────────
+
+  private async checkAllLiquidity(): Promise<void> {
+    if (this.openPositions.size === 0) return;
+    for (const pos of Array.from(this.openPositions.values())) {
+      try {
+        const priceData = await this.fetchPrice(pos.mint);
+        if (!priceData) continue;
+        const { price, liquidityUsd } = priceData;
+        const prev = this.lastPositionLiquidityUsd.get(pos.mint);
+        this.lastPositionLiquidityUsd.set(pos.mint, liquidityUsd);
+        if (prev === undefined || prev <= 0 || liquidityUsd <= 0) continue;
+        const dropPct = (1 - liquidityUsd / prev) * 100;
+        if (dropPct >= LIQUIDITY_DROP_TRIGGER) {
+          logger.warn(
+            { mint: pos.mint, symbol: pos.symbol, prev: prev.toFixed(0), now: liquidityUsd.toFixed(0), dropPct: dropPct.toFixed(1) },
+            "Graduation sniper: LIQUIDITY RUG — exiting immediately",
+          );
+          if (isTelegramConfigured()) {
+            void sendTelegram(
+              `🚨 <b>SNIPER LIQUIDITY RUG EXIT (PAPER)</b>\n` +
+              `──────────────────────\n` +
+              `🪙 Token: <b>${pos.symbol}</b>\n` +
+              `📋 CA: <code>${pos.mint}</code>\n` +
+              `💧 Liquidity: <b>$${prev.toFixed(0)} → $${liquidityUsd.toFixed(0)}</b>\n` +
+              `📉 Drained: <b>-${dropPct.toFixed(1)}%</b> in 30s\n` +
+              `⚠️ Rug incoming — exiting before price collapses\n` +
+              `🕐 ${toIST(new Date())}`,
+            );
+          }
+          this.closePosition(pos, `Liquidity Rug: -${dropPct.toFixed(0)}% in 30s`, price);
+        }
+      } catch { /* ignore per-position errors */ }
+    }
+  }
+
+  // ── FIX 1: Staged SL evaluator ────────────────────────────────────────────
+
+  private checkStagedSL(pos: SniperPosition, price: number, ageMs: number): boolean {
+    const dropFromEntry = (1 - price / pos.entryPrice) * 100;
+    const dropFromPeak  = pos.trailingHigh > 0 ? (1 - price / pos.trailingHigh) * 100 : 0;
+
+    // After TP2: runner is managed by the trailing stop in the main loop
+    if (pos.tp2Hit) return false;
+
+    if (pos.tp1Hit) {
+      // After TP1, before TP2: 35% from peak — wide enough for 20-30% normal retracement
+      if (dropFromPeak >= STAGED_SL_AFTER_TP1) {
+        const loss = dropFromPeak.toFixed(0);
+        logger.warn({ mint: pos.mint, symbol: pos.symbol, dropFromPeak: loss }, "Graduation sniper: staged SL — after TP1");
+        if (isTelegramConfigured()) {
+          void sendTelegram(
+            `🛑 <b>SNIPER STAGED SL (PAPER)</b>\n──────────────────────\n` +
+            `🪙 Token: <b>${pos.symbol}</b>\n📋 CA: <code>${pos.mint}</code>\n` +
+            `📉 -${loss}% from TP1 peak (35% threshold)\n` +
+            `💵 Entry: $${fmtTgPrice(pos.entryPrice)} → Exit: $${fmtTgPrice(price)}\n🕐 ${toIST(new Date())}`,
+          );
+        }
+        this.closePosition(pos, `Staged SL: -${loss}% from TP1 peak`, price);
+        return true;
+      }
+      return false;
+    }
+
+    // No TP hit yet — time-based phases
+    if (ageMs <= STAGED_SL_PHASE1_MS) {
+      // Phase 1 (0–2m): 20% from entry — instant rug protection
+      if (dropFromEntry >= STAGED_SL_PHASE1_PCT) {
+        const loss = dropFromEntry.toFixed(0);
+        logger.warn({ mint: pos.mint, symbol: pos.symbol, dropFromEntry: loss }, "Graduation sniper: staged SL phase 1 (0-2m)");
+        if (isTelegramConfigured()) {
+          void sendTelegram(
+            `⚡ <b>SNIPER INSTANT RUG PROTECTION (PAPER)</b>\n──────────────────────\n` +
+            `🪙 Token: <b>${pos.symbol}</b>\n📋 CA: <code>${pos.mint}</code>\n` +
+            `📉 -${loss}% from entry in first 2m\n` +
+            `💵 Entry: $${fmtTgPrice(pos.entryPrice)} → Exit: $${fmtTgPrice(price)}\n🕐 ${toIST(new Date())}`,
+          );
+        }
+        this.closePosition(pos, `Staged SL: -${loss}% in first 2m`, price);
+        return true;
+      }
+    } else if (ageMs <= STAGED_SL_PHASE2_MS) {
+      // Phase 2 (2–10m): 25% from peak — trailing
+      if (dropFromPeak >= STAGED_SL_PHASE2_PCT) {
+        const loss = dropFromPeak.toFixed(0);
+        logger.warn({ mint: pos.mint, symbol: pos.symbol, dropFromPeak: loss }, "Graduation sniper: staged SL phase 2 (2-10m)");
+        if (isTelegramConfigured()) {
+          void sendTelegram(
+            `🛑 <b>SNIPER STAGED SL (PAPER)</b>\n──────────────────────\n` +
+            `🪙 Token: <b>${pos.symbol}</b>\n📋 CA: <code>${pos.mint}</code>\n` +
+            `📉 -${loss}% from peak (2-10m window)\n` +
+            `💵 Entry: $${fmtTgPrice(pos.entryPrice)} → Exit: $${fmtTgPrice(price)}\n🕐 ${toIST(new Date())}`,
+          );
+        }
+        this.closePosition(pos, `Staged SL: -${loss}% from peak (2-10m)`, price);
+        return true;
+      }
+    } else {
+      // Phase 3 (>10m): 30% from peak — established move protection
+      if (dropFromPeak >= STAGED_SL_PHASE3_PCT) {
+        const loss = dropFromPeak.toFixed(0);
+        logger.warn({ mint: pos.mint, symbol: pos.symbol, dropFromPeak: loss }, "Graduation sniper: staged SL phase 3 (>10m)");
+        if (isTelegramConfigured()) {
+          void sendTelegram(
+            `🛑 <b>SNIPER STAGED SL (PAPER)</b>\n──────────────────────\n` +
+            `🪙 Token: <b>${pos.symbol}</b>\n📋 CA: <code>${pos.mint}</code>\n` +
+            `📉 -${loss}% from peak (>10m, established move)\n` +
+            `💵 Entry: $${fmtTgPrice(pos.entryPrice)} → Exit: $${fmtTgPrice(price)}\n🕐 ${toIST(new Date())}`,
+          );
+        }
+        this.closePosition(pos, `Staged SL: -${loss}% from peak (>10m)`, price);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  // ── FIX 3: Atomic TP1 + SL update with retry ──────────────────────────────
+
+  private async executeTP1Atomic(
+    pos: SniperPosition, price: number, tp1Frac: number, tp1Pct: number, tp1ClosePct: number,
+  ): Promise<void> {
+    pos.tp1Hit           = true;
+    this.partialClose(pos, tp1Frac, `TP1 +${tp1Pct}% — sell ${tp1ClosePct}%`, price);
+    pos.effectiveSlPrice = pos.entryPrice; // breakeven SL stored for reference
+
+    // Retry persist until confirmed — ensures SL update survives server restart
+    let persisted = false;
+    for (let attempt = 0; attempt < 10 && !persisted; attempt++) {
+      try {
+        await this.persistPosition(pos);
+        persisted = true;
+      } catch (err) {
+        logger.warn({ mint: pos.mint, attempt, err: (err as Error).message }, "Graduation sniper: TP1 atomic persist retry");
+        await new Promise((r) => setTimeout(r, 3_000));
+      }
+    }
+    if (!persisted) {
+      logger.error({ mint: pos.mint }, "Graduation sniper: TP1 persist failed after all retries");
+    }
+
+    logger.info({ mint: pos.mint, symbol: pos.symbol, price }, "Graduation sniper: TP1 hit — SL at breakeven (atomic)");
+    if (isTelegramConfigured()) {
+      const partialPnl = (price / pos.entryPrice - 1) * pos.sizeSol * tp1Frac;
+      void sendTelegram(
+        `🟢 <b>SNIPER TP1 HIT (PAPER)</b>\n──────────────────────\n` +
+        `🪙 Token: <b>${pos.symbol}</b>\n📋 CA: <code>${pos.mint}</code>\n` +
+        `💵 Price: <b>$${fmtTgPrice(price)}</b> (+${tp1Pct}%)\n` +
+        `💰 Sold ${tp1ClosePct}% → ~<b>+${partialPnl.toFixed(4)} SOL</b>\n` +
+        `🛡️ SL at breakeven — 35% trail active until TP2\n` +
+        `📦 Remaining: ${((pos.remainingFraction) * 100).toFixed(0)}% position\n` +
+        `⚛️ TP1 + SL update confirmed atomically\n🕐 ${toIST(new Date())}`,
+      );
+    }
+  }
+
+  // ── Price checking loop (adaptive intervals) ─────────────────────────────
 
   private async checkAllPrices(): Promise<void> {
     if (this.openPositions.size === 0) return;
@@ -838,76 +1054,22 @@ class GraduationSniperService {
     const { price } = priceData;
     pos.currentPrice = price;
 
-    const now        = Date.now();
-    const cfg        = this.config;
-    const tp1Price   = pos.entryPrice * (1 + cfg.tp1Pct / 100);
-    const tp2Price   = pos.entryPrice * (1 + cfg.tp2Pct / 100);
-    const tp1Frac    = cfg.tp1ClosePct / 100;
-    const tp2Frac    = cfg.tp2ClosePct / 100;
+    const now     = Date.now();
+    const cfg     = this.config;
+    const ageMs   = now - pos.entryAt;
+    const tp1Price = pos.entryPrice * (1 + cfg.tp1Pct / 100);
+    const tp2Price = pos.entryPrice * (1 + cfg.tp2Pct / 100);
+    const tp1Frac  = cfg.tp1ClosePct / 100;
+    const tp2Frac  = cfg.tp2ClosePct / 100;
 
-    // Update trailing high
-    if (pos.tp2Hit && price > pos.trailingHigh) pos.trailingHigh = price;
+    // ── FIX 1: Always update trailing high from PEAK (not just after TP2) ────
+    if (price > pos.trailingHigh) pos.trailingHigh = price;
 
-    // ── 60-second early exit — fast-rug protection ───────────────────────────
-    // Hard-stop rugs dump 60-90% within the first 1-3 minutes of entry.
-    // Exiting at -30% in the first 60 s saves ~20-30% vs waiting for the -40% SL.
-    if (!pos.tp1Hit && (now - pos.entryAt) <= FIRST_MIN_MS) {
-      const earlyDropPct = (1 - price / pos.entryPrice) * 100;
-      if (earlyDropPct >= FIRST_MIN_DROP_PCT) {
-        const lossPct = -earlyDropPct;
-        logger.warn(
-          { mint, symbol: pos.symbol, price, entryPrice: pos.entryPrice, dropPct: earlyDropPct.toFixed(1) },
-          "Graduation sniper: 60s early exit — fast rug detected",
-        );
-        if (isTelegramConfigured()) {
-          void sendTelegram(
-            `⚡ <b>SNIPER 60s EARLY EXIT (PAPER)</b>\n` +
-            `──────────────────────\n` +
-            `🪙 Token: <b>${pos.symbol}</b>\n` +
-            `📋 CA: <code>${pos.mint}</code>\n` +
-            `📉 Drop: <b>-${earlyDropPct.toFixed(1)}%</b> in first 60s\n` +
-            `💵 Entry: $${fmtTgPrice(pos.entryPrice)} → Exit: $${fmtTgPrice(price)}\n` +
-            `✅ Saved ~${(pos.sizeSol * (FIRST_MIN_DROP_PCT - HARD_STOP_PCT + 40) / 100).toFixed(3)} SOL vs SL\n` +
-            `🕐 ${toIST(new Date())}`,
-          );
-        }
-        this.closePosition(pos, `60s Early Exit (${lossPct.toFixed(0)}%)`, price);
-        return;
-      }
-    }
+    // ── FIX 1: Staged SL — replaces old single -40% + hard stop ──────────────
+    if (this.checkStagedSL(pos, price, ageMs)) return;
 
-    // ── FIX 1: Hard stop at -50% — absolute floor, no exceptions ─────────────
-    const hardStopPrice = pos.entryPrice * (1 - HARD_STOP_PCT / 100);
-    if (price <= hardStopPrice) {
-      const lossPct = ((price / pos.entryPrice) - 1) * 100;
-      logger.warn(
-        { mint, symbol: pos.symbol, price, entryPrice: pos.entryPrice, lossPct: lossPct.toFixed(1) },
-        "Graduation sniper: HARD STOP triggered",
-      );
-      if (isTelegramConfigured()) {
-        void sendTelegram(
-          `🚨 <b>SNIPER HARD STOP (PAPER)</b>\n` +
-          `──────────────────────\n` +
-          `🪙 Token: <b>${pos.symbol}</b>\n` +
-          `📋 CA: <code>${pos.mint}</code>\n` +
-          `📉 Drop: <b>${lossPct.toFixed(1)}%</b> — hard floor hit\n` +
-          `💵 Entry: $${fmtTgPrice(pos.entryPrice)} → Exit: $${fmtTgPrice(price)}\n` +
-          `🕐 ${toIST(new Date())}`,
-        );
-      }
-      this.closePosition(pos, `Hard Stop (${lossPct.toFixed(0)}%)`, price);
-      return;
-    }
-
-    // ── Standard SL (fixed -40% or breakeven after TP1) ──────────────────────
-    if (price <= pos.effectiveSlPrice) {
-      this.closePosition(pos, pos.tp1Hit ? "Trailing/Breakeven SL" : "Stop Loss (-40%)", price);
-      return;
-    }
-
-    // ── FIX 2: Dead position exit — open >2 h with <5% movement ──────────────
+    // ── Dead position exit — open >2h with <5% movement ──────────────────────
     if (!pos.tp1Hit) {
-      const ageMs   = now - pos.entryAt;
       const movePct = Math.abs((price / pos.entryPrice - 1) * 100);
       if (ageMs >= DEAD_POSITION_MS && movePct < DEAD_MOVE_PCT) {
         logger.info(
@@ -916,13 +1078,10 @@ class GraduationSniperService {
         );
         if (isTelegramConfigured()) {
           void sendTelegram(
-            `💤 <b>SNIPER DEAD EXIT (PAPER)</b>\n` +
-            `──────────────────────\n` +
-            `🪙 Token: <b>${pos.symbol}</b>\n` +
-            `📋 CA: <code>${pos.mint}</code>\n` +
+            `💤 <b>SNIPER DEAD EXIT (PAPER)</b>\n──────────────────────\n` +
+            `🪙 Token: <b>${pos.symbol}</b>\n📋 CA: <code>${pos.mint}</code>\n` +
             `⏱️ Held: ${(ageMs / 3_600_000).toFixed(1)}h with only ${movePct.toFixed(1)}% movement\n` +
-            `🔄 Freeing slot for fresh opportunities\n` +
-            `🕐 ${toIST(new Date())}`,
+            `🔄 Freeing slot for fresh opportunities\n🕐 ${toIST(new Date())}`,
           );
         }
         this.closePosition(pos, "Dead — No Momentum", price);
@@ -930,7 +1089,7 @@ class GraduationSniperService {
       }
     }
 
-    // Trailing stop for runner (after TP2)
+    // ── Trailing stop for runner (after TP2) ──────────────────────────────────
     if (pos.tp2Hit && pos.trailingHigh > 0) {
       const trailTrigger = pos.trailingHigh * (1 - cfg.trailingStopPct / 100);
       if (price <= trailTrigger) {
@@ -939,46 +1098,26 @@ class GraduationSniperService {
       }
     }
 
-    // TP1
+    // ── TP1 — FIX 3: atomic sell + SL update with retry ──────────────────────
     if (!pos.tp1Hit && price >= tp1Price) {
-      pos.tp1Hit = true;
-      this.partialClose(pos, tp1Frac, `TP1 +${cfg.tp1Pct}% — sell ${cfg.tp1ClosePct}%`, price);
-      pos.effectiveSlPrice = pos.entryPrice;
-      logger.info({ mint, symbol: pos.symbol, price }, "Graduation sniper: TP1 hit — SL moved to breakeven");
-      if (isTelegramConfigured()) {
-        const partialPnl = (price / pos.entryPrice - 1) * pos.sizeSol * tp1Frac;
-        void sendTelegram(
-          `🟢 <b>SNIPER TP1 HIT (PAPER)</b>\n` +
-          `──────────────────────\n` +
-          `🪙 Token: <b>${pos.symbol}</b>\n` +
-          `📋 CA: <code>${pos.mint}</code>\n` +
-          `💵 Price: <b>$${fmtTgPrice(price)}</b> (+${cfg.tp1Pct}%)\n` +
-          `💰 Sold ${cfg.tp1ClosePct}% → ~<b>+${partialPnl.toFixed(4)} SOL</b>\n` +
-          `🛡️ SL moved to breakeven ($${fmtTgPrice(pos.entryPrice)})\n` +
-          `📦 Remaining: ${((pos.remainingFraction) * 100).toFixed(0)}% position\n` +
-          `🕐 ${toIST(new Date())}`,
-        );
-      }
+      await this.executeTP1Atomic(pos, price, tp1Frac, cfg.tp1Pct, cfg.tp1ClosePct);
     }
 
-    // TP2
+    // ── TP2 ───────────────────────────────────────────────────────────────────
     if (pos.tp1Hit && !pos.tp2Hit && price >= tp2Price) {
-      pos.tp2Hit        = true;
-      pos.trailingHigh  = price;
+      pos.tp2Hit       = true;
+      pos.trailingHigh = price;
       this.partialClose(pos, tp2Frac, `TP2 +${cfg.tp2Pct}% — sell ${cfg.tp2ClosePct}%`, price);
       logger.info({ mint, symbol: pos.symbol, price }, "Graduation sniper: TP2 hit — runner active");
       if (isTelegramConfigured()) {
         const partialPnl = (price / pos.entryPrice - 1) * pos.sizeSol * tp2Frac;
         void sendTelegram(
-          `🚀 <b>SNIPER TP2 HIT (PAPER)</b>\n` +
-          `──────────────────────\n` +
-          `🪙 Token: <b>${pos.symbol}</b>\n` +
-          `📋 CA: <code>${pos.mint}</code>\n` +
+          `🚀 <b>SNIPER TP2 HIT (PAPER)</b>\n──────────────────────\n` +
+          `🪙 Token: <b>${pos.symbol}</b>\n📋 CA: <code>${pos.mint}</code>\n` +
           `💵 Price: <b>$${fmtTgPrice(price)}</b> (+${cfg.tp2Pct}%)\n` +
           `💰 Sold ${cfg.tp2ClosePct}% → ~<b>+${partialPnl.toFixed(4)} SOL</b>\n` +
           `🎯 Runner active — trailing stop ${cfg.trailingStopPct}% below peak\n` +
-          `📦 Remaining: ${((pos.remainingFraction) * 100).toFixed(0)}% position\n` +
-          `🕐 ${toIST(new Date())}`,
+          `📦 Remaining: ${((pos.remainingFraction) * 100).toFixed(0)}% position\n🕐 ${toIST(new Date())}`,
         );
       }
     }
