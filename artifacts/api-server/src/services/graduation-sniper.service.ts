@@ -177,6 +177,11 @@ class GraduationSniperService {
   private seenMints: Set<string> = new Set();
   private virtualBalance = DEFAULT_CONFIG.virtualBalanceSol;
 
+  // Persistent stats — computed from ALL DB rows on startup so they are never
+  // bounded by MAX_CLOSED.  Incremented live on every close.
+  private persistentWins   = 0;
+  private persistentLosses = 0;
+
   // Adaptive price-check intervals
   private lastPositionCheckAt: Map<string, number> = new Map();
   // Concurrency guard — prevents duplicate TP/SL executions during async gaps
@@ -293,6 +298,15 @@ class GraduationSniperService {
             await execute(`DELETE FROM sniper_positions WHERE id = $1`, [id]);
           } catch { /* best-effort */ }
         }
+      }
+
+      // ── Compute persistent win/loss counts from the FULL deduplicated set ────
+      // Must happen BEFORE the MAX_CLOSED trim so every trade is counted.
+      this.persistentWins   = 0;
+      this.persistentLosses = 0;
+      for (const pos of keepById.values()) {
+        if (pos.realizedPnlSol > 0) this.persistentWins++;
+        else this.persistentLosses++;
       }
 
       // Restore sorted closed list (ASC by entry_at, trimmed to MAX_CLOSED)
@@ -918,6 +932,9 @@ class GraduationSniperService {
     this.updateLivePnl(pos);
 
     this.virtualBalance += remaining + closePnl;
+    // Increment persistent counters — these are NEVER truncated, track all trades
+    if (pos.realizedPnlSol > 0) this.persistentWins++;
+    else this.persistentLosses++;
     this.openPositions.delete(pos.mint);
     this.closedPositions.push(pos);
     if (this.closedPositions.length > MAX_CLOSED) this.closedPositions.shift();
@@ -1451,9 +1468,10 @@ class GraduationSniperService {
   // ── Getters ────────────────────────────────────────────────────────────────
 
   getStatus(): SniperStatus {
-    const closed = this.closedPositions;
-    const wins   = closed.filter((p) => p.realizedPnlSol > 0).length;
-    const losses = closed.filter((p) => p.realizedPnlSol <= 0).length;
+    // Use persistent counters — these cover ALL trades ever closed, not just the
+    // most recent MAX_CLOSED kept in the in-memory list.
+    const wins   = this.persistentWins;
+    const losses = this.persistentLosses;
 
     // Capital still deployed in open positions (at cost basis)
     const capitalInOpen = Array.from(this.openPositions.values())
