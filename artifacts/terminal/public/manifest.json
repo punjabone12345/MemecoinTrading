@@ -1,11 +1,11 @@
 {
-  "name": "Apex Meme Trader",
-  "short_name": "ApexTrader",
-  "description": "AI-powered Solana memecoin auto-trading bot",
+  "name": "Memecoin Sniper",
+  "short_name": "Memecoin Sniper",
+  "description": "Pump.fun → Raydium graduation sniper — catch memecoins the moment they hit Raydium.",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#0a0a0f",
-  "theme_color": "#7c3aed",
+  "theme_color": "#0a0a0f",
   "orientation": "portrait-primary",
   "icons": [
     {
@@ -26,6 +26,5 @@
       "type": "image/svg+xml"
     }
   ],
-  "categories": ["finance", "utilities"],
-  "screenshots": []
+  "categories": ["finance", "utilities"]
 }
