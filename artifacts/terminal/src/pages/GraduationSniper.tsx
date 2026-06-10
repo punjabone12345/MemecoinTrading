@@ -4,7 +4,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   useSniperStatus, useSniperPositions, useSniperHistory, useSniperEvents, useUpdateSniperConfig,
-  useDeleteSniperPosition, useEditSniperPosition, useDeleteSniperEvent, useResetSniperAccount,
+  useDeleteSniperPosition, useEditSniperPosition, useDeleteSniperEvent, useResetSniperAccount, useCloseSniperPosition,
   useRecalculateSniperPnl, useInjectSniperPosition,
 } from "@/lib/api";
 import { SniperPosition, SniperEvent, SniperConfig } from "@/lib/types";
@@ -321,9 +321,11 @@ function InjectPositionModal({ onClose }: { onClose: () => void }) {
 // ── Position row (open) ───────────────────────────────────────────────────────
 
 function PositionRow({ pos }: { pos: SniperPosition }) {
-  const [showEdit,    setShowEdit]    = useState(false);
-  const [confirmDel,  setConfirmDel]  = useState(false);
+  const [showEdit,      setShowEdit]      = useState(false);
+  const [confirmDel,    setConfirmDel]    = useState(false);
+  const [confirmClose,  setConfirmClose]  = useState(false);
   const deletePos = useDeleteSniperPosition();
+  const closePos  = useCloseSniperPosition();
   const pct  = pos.pnlPct;
   const pos_ = pct >= 0;
 
@@ -364,7 +366,11 @@ function PositionRow({ pos }: { pos: SniperPosition }) {
                 className="p-1 rounded bg-white/5 hover:bg-amber-500/20 text-white/40 hover:text-amber-400 transition-colors" title="Edit">
                 <Pencil className="w-3 h-3" />
               </button>
-              <button onClick={() => setConfirmDel(true)}
+              <button onClick={() => { setConfirmClose(true); setConfirmDel(false); }}
+                className="p-1 rounded bg-white/5 hover:bg-emerald-500/20 text-white/40 hover:text-emerald-400 transition-colors" title="Close at market price">
+                <X className="w-3 h-3" />
+              </button>
+              <button onClick={() => { setConfirmDel(true); setConfirmClose(false); }}
                 className="p-1 rounded bg-white/5 hover:bg-red-500/20 text-white/40 hover:text-red-400 transition-colors" title="Delete">
                 <Trash2 className="w-3 h-3" />
               </button>
@@ -414,6 +420,19 @@ function PositionRow({ pos }: { pos: SniperPosition }) {
             <ExternalLink className="w-3 h-3" /> View on DexScreener
           </a>
         </div>
+        {confirmClose && (
+          <div className="mt-2 flex items-center gap-2 rounded-lg bg-emerald-500/10 border border-emerald-500/20 px-3 py-2">
+            <span className="text-[10px] text-emerald-300 flex-1">
+              Close at market price now? ({fmtPct(pct)} · {pos_ ? "+" : ""}{fmt(pos.totalPnlSol, 4)} SOL)
+            </span>
+            <button
+              onClick={() => closePos.mutate(pos.id, { onSuccess: () => setConfirmClose(false) })}
+              className="text-[10px] font-bold text-emerald-400 hover:text-emerald-300 px-2 py-0.5 rounded bg-emerald-500/20">
+              {closePos.isPending ? "…" : "Close"}
+            </button>
+            <button onClick={() => setConfirmClose(false)} className="text-[10px] text-white/40 hover:text-white">Cancel</button>
+          </div>
+        )}
         {confirmDel && (
           <div className="mt-2 flex items-center gap-2 rounded-lg bg-red-500/10 border border-red-500/20 px-3 py-2">
             <span className="text-[10px] text-red-300 flex-1">Delete this position?</span>

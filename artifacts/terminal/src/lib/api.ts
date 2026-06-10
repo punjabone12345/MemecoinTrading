@@ -142,6 +142,25 @@ export function useUpdateSniperConfig() {
   });
 }
 
+export function useCloseSniperPosition() {
+  const queryClient = useQueryClient();
+  const { toast } = useToast();
+  return useMutation({
+    mutationFn: async (id: string) => {
+      const res = await fetch(apiUrl(`/api/sniper/positions/${id}/close`), { method: "POST" });
+      if (!res.ok) { const j = await res.json(); throw new Error(j.error ?? "Close failed"); }
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["sniper-positions"] });
+      queryClient.invalidateQueries({ queryKey: ["sniper-history"] });
+      queryClient.invalidateQueries({ queryKey: ["sniper-status"] });
+      toast({ title: "Position closed at market price" });
+    },
+    onError: (e: Error) => toast({ title: "Close failed", description: e.message, variant: "destructive" }),
+  });
+}
+
 export function useDeleteSniperPosition() {
   const queryClient = useQueryClient();
   const { toast } = useToast();

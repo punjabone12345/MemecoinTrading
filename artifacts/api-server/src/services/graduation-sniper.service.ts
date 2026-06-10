@@ -1339,6 +1339,20 @@ class GraduationSniperService {
 
   // ── Mutation helpers (edit / delete / reset) ──────────────────────────────
 
+  async manualClosePosition(id: string): Promise<SniperPosition | null> {
+    const openEntry = Array.from(this.openPositions.entries()).find(([, p]) => p.id === id);
+    if (!openEntry) return null;
+    const [, pos] = openEntry;
+
+    // Fetch current market price for this mint
+    const priceData = await this.fetchPrice(pos.mint);
+    const exitPrice = priceData?.price ?? pos.currentPrice ?? pos.entryPrice;
+
+    // Re-use the same close path as automated closes (credits virtualBalance, moves to closedPositions)
+    this.closePosition(pos, "Manual close", exitPrice);
+    return pos;
+  }
+
   async deletePosition(id: string): Promise<boolean> {
     // Check open positions (keyed by mint)
     const openEntry = Array.from(this.openPositions.entries()).find(([, p]) => p.id === id);

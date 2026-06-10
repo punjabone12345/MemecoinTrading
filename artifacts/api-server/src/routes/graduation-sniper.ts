@@ -73,6 +73,18 @@ router.post("/sniper/positions/:id/recalculate", async (req, res) => {
   }
 });
 
+// ── Manually close an open position at current market price ─────────────────
+router.post("/sniper/positions/:id/close", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const pos = await graduationSniperService.manualClosePosition(id!);
+    if (!pos) return res.status(404).json({ success: false, error: "Open position not found" });
+    res.json({ success: true, data: pos });
+  } catch (err) {
+    res.status(500).json({ success: false, error: (err as Error).message });
+  }
+});
+
 // ── Delete a position (open or closed) ─────────────────────────────────────
 router.delete("/sniper/positions/:id", async (req, res) => {
   try {
