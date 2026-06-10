@@ -11,7 +11,7 @@ const PUMPFUN_PROGRAM_ID = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
 const DEXSCREENER_BASE   = "https://api.dexscreener.com";
 const RECONNECT_DELAY_MS = 1_000;
 const MAX_EVENTS         = 50;
-const MAX_CLOSED         = 100;
+const MAX_CLOSED         = 100_000; // effectively unlimited — all trades kept in memory
 const CONFIG_KEY         = "sniper_config";
 
 // ── Adaptive price-check intervals ───────────────────────────────────────────

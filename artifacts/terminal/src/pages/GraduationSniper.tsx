@@ -733,7 +733,7 @@ export default function GraduationSniper() {
             </button>
           ) : null}
         >
-          {history.slice(0, 50).map((p) => <HistoryRow key={p.id} pos={p} />)}
+          {history.map((p) => <HistoryRow key={p.id} pos={p} />)}
         </SectionWithActions>
       </div>
 
