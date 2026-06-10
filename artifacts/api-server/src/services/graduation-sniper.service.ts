@@ -1451,20 +1451,31 @@ class GraduationSniperService {
   // ── Getters ────────────────────────────────────────────────────────────────
 
   getStatus(): SniperStatus {
-    const closed     = this.closedPositions;
-    const wins       = closed.filter((p) => p.realizedPnlSol > 0).length;
-    const losses     = closed.filter((p) => p.realizedPnlSol <= 0).length;
-    const realized   = closed.reduce((s, p) => s + p.realizedPnlSol, 0);
+    const closed = this.closedPositions;
+    const wins   = closed.filter((p) => p.realizedPnlSol > 0).length;
+    const losses = closed.filter((p) => p.realizedPnlSol <= 0).length;
 
-    // Live unrealized: sum of all open positions' current unrealized PNL
-    // (includes partial-close realized already credited to virtualBalance)
+    // Capital still deployed in open positions (at cost basis)
+    const capitalInOpen = Array.from(this.openPositions.values())
+      .reduce((s, p) => s + p.sizeSol * p.remainingFraction, 0);
+
+    // Live unrealized P&L on still-open positions
     const unrealized = Array.from(this.openPositions.values()).reduce((s, p) => {
       this.updateLivePnl(p);
       return s + p.unrealizedPnlSol;
     }, 0);
 
-    // Also include realized PNL from TP hits on still-open positions
-    const partialOpen = Array.from(this.openPositions.values()).reduce((s, p) => s + p.realizedPnlSol, 0);
+    // TRUE realized P&L: derived from virtualBalance — the ground truth that
+    // tracks every single close/TP credit incrementally.  The in-memory
+    // closedPositions list is capped at MAX_CLOSED so summing it directly
+    // under-counts once the session exceeds that limit.
+    //
+    // virtualBalance = startingBalance + allRealizedProfits - capitalInOpen
+    //  =>  allRealizedProfits = virtualBalance - startingBalance + capitalInOpen
+    //
+    // "allRealizedProfits" includes both fully-closed-position profits AND
+    // partial-TP credits on still-open positions.
+    const realizedAll = this.virtualBalance - this.config.virtualBalanceSol + capitalInOpen;
 
     return {
       wsConnected:            this.wsConnected,
@@ -1474,9 +1485,9 @@ class GraduationSniperService {
       tradesTotal:            this.seenMints.size,
       wins,
       losses,
-      totalRealizedPnlSol:    realized + partialOpen,
+      totalRealizedPnlSol:    realizedAll,
       totalUnrealizedPnlSol:  unrealized,
-      totalCombinedPnlSol:    realized + partialOpen + unrealized,
+      totalCombinedPnlSol:    realizedAll + unrealized,
       virtualBalance:         this.virtualBalance,
       openCount:              this.openPositions.size,
       config:                 this.config,
