@@ -1332,6 +1332,17 @@ class GraduationSniperService {
 
   // ── Mutation helpers (edit / delete / reset) ──────────────────────────────
 
+  /**
+   * Recompute allTimeRealizedSol / allTimeWins / allTimeLosses from the
+   * closedPositions array. Must be called after any mutation that changes
+   * realizedPnlSol on a closed position (delete, edit, recalculate).
+   */
+  private resyncAllTimeAccumulators(): void {
+    this.allTimeRealizedSol = this.closedPositions.reduce((s, p) => s + p.realizedPnlSol, 0);
+    this.allTimeWins        = this.closedPositions.filter((p) => p.realizedPnlSol > 0).length;
+    this.allTimeLosses      = this.closedPositions.filter((p) => p.realizedPnlSol <= 0).length;
+  }
+
   async deletePosition(id: string): Promise<boolean> {
     // Check open positions (keyed by mint)
     const openEntry = Array.from(this.openPositions.entries()).find(([, p]) => p.id === id);
@@ -1346,6 +1357,8 @@ class GraduationSniperService {
       const pos = this.closedPositions[idx]!;
       this.seenMints.delete(pos.mint);
       this.closedPositions.splice(idx, 1);
+      // Resync so header P&L/wins/losses no longer include the deleted trade
+      this.resyncAllTimeAccumulators();
     }
     try {
       await execute(`DELETE FROM sniper_positions WHERE id = $1`, [id]);
@@ -1418,6 +1431,9 @@ class GraduationSniperService {
     this.updateLivePnl(pos);
     await this.persistPosition(pos);
 
+    // Resync so header totals immediately reflect the corrected P&L
+    this.resyncAllTimeAccumulators();
+
     logger.info(
       { id, symbol: pos.symbol, realized: realized.toFixed(6), tp1: tp1Sol.toFixed(6), tp2: tp2Sol.toFixed(6), runner: runnerSol.toFixed(6) },
       "Graduation sniper: P&L recalculated",
@@ -1453,6 +1469,10 @@ class GraduationSniperService {
 
     this.updateLivePnl(pos);
     await this.persistPosition(pos);
+
+    // Resync all-time accumulators if this is a closed position — realizedPnl may have changed
+    if (pos.status === "closed") this.resyncAllTimeAccumulators();
+
     return { ...pos };
   }
 
