@@ -15,21 +15,10 @@ export function isTelegramConfigured(): boolean {
 
 /**
  * Returns true when the bot scanner is allowed to open new entries (IST).
- * Window 1: 12:00 AM – 09:59 AM IST
- * Window 2: 02:00 PM – 04:59 PM IST
- * Pause:    10:00 AM – 01:59 PM IST  and  05:00 PM – 11:59 PM IST
- *
- * RSS / Telegram signals are NOT subject to this check — they run 24 h.
- * Open-position exits are always allowed regardless of this flag.
+ * Always returns true — bot runs 24/7 with no time-based pauses.
  */
 export function isBotScannerTradingHours(): boolean {
-  const istHour = new Date().toLocaleString("en-IN", {
-    timeZone: "Asia/Kolkata",
-    hour: "numeric",
-    hour12: false,
-  });
-  const hour = parseInt(istHour, 10);
-  return (hour >= 0 && hour < 10) || (hour >= 14 && hour < 17);
+  return true;
 }
 
 /** Format a Date as IST string (UTC+5:30) */

@@ -46,17 +46,6 @@ const STAGED_SL_AFTER_TP1   = 35;            // after TP1: 35% from peak (allows
 const LIQUIDITY_CHECK_MS     = 30_000;        // check open-position liquidity every 30 s
 const LIQUIDITY_DROP_TRIGGER = 40;            // exit if liquidity drops > 40% in one window
 
-// ── Trading hours (IST) — active 6am–11pm, paused 11pm–6am ──────────────────
-const NIGHT_START_IST_HOUR  = 23;             // 11 pm IST — pause begins
-const NIGHT_END_IST_HOUR    = 6;              // 6 am IST — pause ends (exclusive)
-
-/** Returns true when the clock is inside the high-rug night window (11pm–6am IST). */
-function isNightSession(): boolean {
-  const nowUtc  = new Date();
-  const istMin  = (nowUtc.getUTCHours() * 60 + nowUtc.getUTCMinutes() + 330) % 1440;
-  const istHour = Math.floor(istMin / 60);
-  return istHour >= NIGHT_START_IST_HOUR || istHour < NIGHT_END_IST_HOUR;
-}
 
 function uid(): string {
   return `snp-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
@@ -622,7 +611,6 @@ class GraduationSniperService {
 
   private checkSkipReason(mint: string): string | null {
     if (!this.config.enabled)                                    return "Sniper disabled";
-    if (isNightSession())                                        return "Night session paused (11pm–6am IST) — detecting only";
     if (this.seenMints.has(mint))                                return "Already traded this mint";
     if (this.openPositions.size >= this.config.maxOpenPositions) return `Max open positions (${this.config.maxOpenPositions}) reached`;
     if (blacklistService.isBlacklisted(mint))                    return "Mint in permanent blacklist";
