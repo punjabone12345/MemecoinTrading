@@ -178,6 +178,12 @@ class GraduationSniperService {
   private seenMints: Set<string> = new Set();
   private virtualBalance = DEFAULT_CONFIG.virtualBalanceSol;
 
+  // ALL-time accumulators — NOT limited by MAX_CLOSED so P&L stays accurate
+  // even after the in-memory closed-positions list is trimmed.
+  private allTimeRealizedSol = 0;
+  private allTimeWins = 0;
+  private allTimeLosses = 0;
+
   // Adaptive price-check intervals
   private lastPositionCheckAt: Map<string, number> = new Map();
   // Concurrency guard — prevents duplicate TP/SL executions during async gaps
@@ -197,23 +203,24 @@ class GraduationSniperService {
     await this.loadPositions();
 
     // Correctly restore virtual balance from DB state:
-    // start + all realized PNL (closed) + partial realized PNL (open TP hits) - remaining capital in open positions
-    const realizedFromClosed = this.closedPositions.reduce((s, p) => s + p.realizedPnlSol, 0);
-    const partialFromOpen    = Array.from(this.openPositions.values()).reduce((s, p) => s + p.realizedPnlSol, 0);
-    const capitalInOpen      = Array.from(this.openPositions.values()).reduce((s, p) => s + p.sizeSol * p.remainingFraction, 0);
+    // start + ALL realized PNL (closed, full history) + partial realized (open TP hits) - remaining capital in open
+    // Use allTimeRealizedSol (set by loadPositions from the full DB result) so that
+    // trimmed-out positions beyond MAX_CLOSED are still counted.
+    const partialFromOpen = Array.from(this.openPositions.values()).reduce((s, p) => s + p.realizedPnlSol, 0);
+    const capitalInOpen   = Array.from(this.openPositions.values()).reduce((s, p) => s + p.sizeSol * p.remainingFraction, 0);
 
-    this.virtualBalance = this.config.virtualBalanceSol + realizedFromClosed + partialFromOpen - capitalInOpen;
+    this.virtualBalance = this.config.virtualBalanceSol + this.allTimeRealizedSol + partialFromOpen - capitalInOpen;
 
     await this.loadClosedFingerprints();
 
     logger.info(
       {
-        openPositions:    this.openPositions.size,
-        virtualBalance:   this.virtualBalance.toFixed(4),
-        realizedFromClosed: realizedFromClosed.toFixed(4),
+        openPositions:      this.openPositions.size,
+        virtualBalance:     this.virtualBalance.toFixed(4),
+        allTimeRealized:    this.allTimeRealizedSol.toFixed(4),
         partialFromOpen:    partialFromOpen.toFixed(4),
         capitalInOpen:      capitalInOpen.toFixed(4),
-        enabled:          this.config.enabled,
+        enabled:            this.config.enabled,
       },
       "Graduation sniper: initialised",
     );
@@ -300,15 +307,28 @@ class GraduationSniperService {
         }
       }
 
-      // Restore sorted closed list (ASC by entry_at, trimmed to MAX_CLOSED)
-      this.closedPositions = Array.from(keepById.values())
+      // Restore sorted closed list (ASC by entry_at)
+      const allClosed = Array.from(keepById.values())
         .sort((a, b) => a.entryAt - b.entryAt);
-      if (this.closedPositions.length > MAX_CLOSED) {
-        this.closedPositions = this.closedPositions.slice(-MAX_CLOSED);
-      }
+
+      // Accumulate ALL-time P&L/win/loss BEFORE trimming so the stats survive
+      // beyond the MAX_CLOSED in-memory window.
+      this.allTimeRealizedSol = allClosed.reduce((s, p) => s + p.realizedPnlSol, 0);
+      this.allTimeWins        = allClosed.filter((p) => p.realizedPnlSol > 0).length;
+      this.allTimeLosses      = allClosed.filter((p) => p.realizedPnlSol <= 0).length;
+
+      // Keep only the most-recent MAX_CLOSED trades in memory for the history UI
+      this.closedPositions = allClosed.length > MAX_CLOSED
+        ? allClosed.slice(-MAX_CLOSED)
+        : allClosed;
 
       logger.info(
-        { open: this.openPositions.size, closed: this.closedPositions.length, duplicatesDeleted: deleteIds.length },
+        {
+          open: this.openPositions.size,
+          closed: this.closedPositions.length,
+          totalInDb: allClosed.length,
+          duplicatesDeleted: deleteIds.length,
+        },
         "Graduation sniper: positions loaded",
       );
     } catch (err) {
@@ -909,6 +929,9 @@ class GraduationSniperService {
     this.updateLivePnl(pos);
 
     this.virtualBalance += remaining + closePnl;
+    // Update all-time accumulators BEFORE pushing (so they include this trade)
+    this.allTimeRealizedSol += pos.realizedPnlSol;
+    if (pos.realizedPnlSol > 0) this.allTimeWins++; else this.allTimeLosses++;
     this.openPositions.delete(pos.mint);
     this.closedPositions.push(pos);
     if (this.closedPositions.length > MAX_CLOSED) this.closedPositions.shift();
@@ -1423,6 +1446,9 @@ class GraduationSniperService {
     this.seenMints.clear();
     this.graduationsToday = 0;
     this.virtualBalance = this.config.virtualBalanceSol;
+    this.allTimeRealizedSol = 0;
+    this.allTimeWins = 0;
+    this.allTimeLosses = 0;
 
     try {
       await execute(`DELETE FROM sniper_positions`, []);
@@ -1442,10 +1468,10 @@ class GraduationSniperService {
   // ── Getters ────────────────────────────────────────────────────────────────
 
   getStatus(): SniperStatus {
-    const closed   = this.closedPositions;
-    const wins     = closed.filter((p) => p.realizedPnlSol > 0).length;
-    const losses   = closed.filter((p) => p.realizedPnlSol <= 0).length;
-    const realized = closed.reduce((s, p) => s + p.realizedPnlSol, 0);
+    // Use all-time accumulators (not closedPositions which is capped at MAX_CLOSED)
+    // so wins/losses/realized are correct even after 100+ trades.
+    const wins     = this.allTimeWins;
+    const losses   = this.allTimeLosses;
 
     // Single-pass over open positions so all three figures are computed from
     // the same snapshot — prevents COMBINED ≠ REALIZED + UNREALIZED drift.
@@ -1459,7 +1485,7 @@ class GraduationSniperService {
       capitalInOpen += pos.sizeSol * pos.remainingFraction;
     }
 
-    const totalRealized   = realized + partialOpen;
+    const totalRealized   = this.allTimeRealizedSol + partialOpen;
     const totalUnrealized = unrealized;
 
     return {
