@@ -674,7 +674,7 @@ export default function GraduationSniper() {
           <div className="mt-3 pt-2.5 border-t border-white/6 flex items-center justify-between text-[9px] text-white/30">
             <span>Starting balance: <span className="text-white/50 font-semibold">{fmt(config?.virtualBalanceSol ?? 10, 1)} SOL</span></span>
             <span>Current wallet: <span className="text-amber-400/80 font-semibold">{fmt(status?.virtualBalance ?? 0, 3)} SOL</span></span>
-            <span>In positions: <span className="text-white/50 font-semibold">{fmt(Math.max(0, (config?.virtualBalanceSol ?? 10) + totalPnl - (status?.virtualBalance ?? 0)), 3)} SOL</span></span>
+            <span>In positions: <span className="text-white/50 font-semibold">{fmt(status?.capitalInOpen ?? 0, 3)} SOL</span></span>
           </div>
         </div>
 

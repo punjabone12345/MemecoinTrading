@@ -151,6 +151,7 @@ export interface SniperStatus {
   totalRealizedPnlSol: number;
   totalUnrealizedPnlSol: number;
   totalCombinedPnlSol: number;
+  capitalInOpen: number;
   virtualBalance: number;
   openCount: number;
   config: SniperConfig;
@@ -240,17 +241,21 @@ class GraduationSniperService {
         const pos = this.rowToPosition(row);
         if (pos.status === "open") {
           // ── Auto-correct TP realized breakdown for open positions ────────────
-          // If TP was hit but breakdown cols are 0 (entered before cols existed),
-          // or if they're inflated (from old concurrency bug), always recalculate
-          // from the deterministic config formula so the display is correct.
-          if (pos.tp1Hit) {
+          // Only fill in breakdown cols that are missing (== 0), which means the
+          // position was created before those columns existed (legacy records).
+          // For records that already have actual trade values, trust the DB —
+          // overwriting them with formula estimates corrupts the real P&L.
+          let legacyFixed = false;
+          if (pos.tp1Hit && pos.tp1RealizedSol === 0) {
             pos.tp1RealizedSol = (this.config.tp1Pct / 100) * pos.sizeSol * (this.config.tp1ClosePct / 100);
+            legacyFixed = true;
           }
-          if (pos.tp2Hit) {
+          if (pos.tp2Hit && pos.tp2RealizedSol === 0) {
             pos.tp2RealizedSol = (this.config.tp2Pct / 100) * pos.sizeSol * (this.config.tp2ClosePct / 100);
+            legacyFixed = true;
           }
-          // Sync realizedPnlSol to the corrected breakdown total (runner not yet realized)
-          if (pos.tp1Hit || pos.tp2Hit) {
+          // Only sync realizedPnlSol if we had to fill in missing legacy data
+          if (legacyFixed) {
             pos.realizedPnlSol = pos.tp1RealizedSol + pos.tp2RealizedSol;
           }
           this.updateLivePnl(pos);
@@ -1437,20 +1442,25 @@ class GraduationSniperService {
   // ── Getters ────────────────────────────────────────────────────────────────
 
   getStatus(): SniperStatus {
-    const closed     = this.closedPositions;
-    const wins       = closed.filter((p) => p.realizedPnlSol > 0).length;
-    const losses     = closed.filter((p) => p.realizedPnlSol <= 0).length;
-    const realized   = closed.reduce((s, p) => s + p.realizedPnlSol, 0);
+    const closed   = this.closedPositions;
+    const wins     = closed.filter((p) => p.realizedPnlSol > 0).length;
+    const losses   = closed.filter((p) => p.realizedPnlSol <= 0).length;
+    const realized = closed.reduce((s, p) => s + p.realizedPnlSol, 0);
 
-    // Live unrealized: sum of all open positions' current unrealized PNL
-    // (includes partial-close realized already credited to virtualBalance)
-    const unrealized = Array.from(this.openPositions.values()).reduce((s, p) => {
-      this.updateLivePnl(p);
-      return s + p.unrealizedPnlSol;
-    }, 0);
+    // Single-pass over open positions so all three figures are computed from
+    // the same snapshot — prevents COMBINED ≠ REALIZED + UNREALIZED drift.
+    let unrealized  = 0;
+    let partialOpen = 0;
+    let capitalInOpen = 0;
+    for (const pos of this.openPositions.values()) {
+      this.updateLivePnl(pos);
+      unrealized    += pos.unrealizedPnlSol;
+      partialOpen   += pos.realizedPnlSol;
+      capitalInOpen += pos.sizeSol * pos.remainingFraction;
+    }
 
-    // Also include realized PNL from TP hits on still-open positions
-    const partialOpen = Array.from(this.openPositions.values()).reduce((s, p) => s + p.realizedPnlSol, 0);
+    const totalRealized   = realized + partialOpen;
+    const totalUnrealized = unrealized;
 
     return {
       wsConnected:            this.wsConnected,
@@ -1460,9 +1470,10 @@ class GraduationSniperService {
       tradesTotal:            this.seenMints.size,
       wins,
       losses,
-      totalRealizedPnlSol:    realized + partialOpen,
-      totalUnrealizedPnlSol:  unrealized,
-      totalCombinedPnlSol:    realized + partialOpen + unrealized,
+      totalRealizedPnlSol:    totalRealized,
+      totalUnrealizedPnlSol:  totalUnrealized,
+      totalCombinedPnlSol:    totalRealized + totalUnrealized,
+      capitalInOpen,
       virtualBalance:         this.virtualBalance,
       openCount:              this.openPositions.size,
       config:                 this.config,
