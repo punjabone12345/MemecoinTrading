@@ -122,6 +122,29 @@ async function pollUpdates(): Promise<void> {
   }
 }
 
+/**
+ * Drain any updates that were queued before this process started.
+ * Sets lastUpdateId to the latest update_id WITHOUT processing those messages,
+ * so only new commands sent AFTER this restart are handled.
+ */
+async function drainPendingUpdates(): Promise<void> {
+  if (!BOT_TOKEN) return;
+  try {
+    // offset: -1 fetches only the single most-recent update (non-blocking)
+    const res = await axios.get(
+      `https://api.telegram.org/bot${BOT_TOKEN}/getUpdates`,
+      { params: { offset: -1, timeout: 0, limit: 1 }, timeout: 10_000 },
+    );
+    const updates: Array<{ update_id: number }> = res.data?.result ?? [];
+    if (updates.length > 0) {
+      lastUpdateId = updates[updates.length - 1]!.update_id;
+      logger.info({ lastUpdateId }, "Telegram: drained pending updates — skipping stale commands");
+    }
+  } catch (err) {
+    logger.debug({ err }, "Telegram: drain skipped (will process from offset 0)");
+  }
+}
+
 export function startCommandPolling(): void {
   if (!isTelegramConfigured()) {
     logger.info("Telegram command polling skipped — not configured");
@@ -147,7 +170,12 @@ export function startCommandPolling(): void {
     setTimeout(poll, 2_000);
   };
 
-  setTimeout(poll, 3_000);
+  // Drain stale messages first, then start polling for new ones
+  drainPendingUpdates().then(() => {
+    setTimeout(poll, 3_000);
+  }).catch(() => {
+    setTimeout(poll, 3_000);
+  });
 }
 
 export function startHeartbeat(sendFn: () => void, intervalMs = 60 * 60 * 1_000): void {

@@ -1395,7 +1395,7 @@ class PumpfunTraderService {
     if (!this.config.enabled) return;
 
     for (const [mint, token] of this.trackedTokens) {
-      if (token.status === "bought" || token.status === "graduated" || token.status === "exited") continue;
+      if (token.status === "bought" || token.status === "graduated" || token.status === "exited" || token.status === "rejected") continue;
 
       // Calculate score
       const breakdown = this.scoreToken(token);
@@ -1722,21 +1722,33 @@ class PumpfunTraderService {
       }
 
       // FIX 5: Exit if graduation % drops below 80% after entry (rug signal)
+      // Guard: bonding curves can NEVER go backward by more than ~30 pp — a larger
+      // drop is stale/corrupt on-chain data, NOT a real graduation drop. Skip the
+      // exit to avoid false positives (e.g. 88% entry reading 26% = stale RPC node).
       if (token && !pos.tp1Hit && token.graduationPct < PF_GRAD_MIN_AFTER_ENTRY) {
-        logger.warn(
-          { mint: pos.mint, symbol: pos.symbol, gradPct: token.graduationPct.toFixed(1) },
-          "Pump.fun trader: graduation % dropped below 80% after entry — exiting",
-        );
-        if (isTelegramConfigured()) {
-          void sendTelegram(
-            `⚠️ <b>PRE-GRAD GRAD DROP EXIT</b>\n──────────────────────\n` +
-            `🪙 Token: <b>${pos.symbol}</b>\n📋 CA: <code>${pos.mint}</code>\n` +
-            `🎓 Graduation dropped to <b>${token.graduationPct.toFixed(1)}%</b> (below 80%)\n` +
-            `⚠️ Possible bonding curve manipulation — exiting\n🕐 ${toIST(new Date())}`,
+        const dropFromEntry = pos.entryGraduationPct - token.graduationPct;
+        if (dropFromEntry > 30) {
+          // Impossible real drop — stale/corrupt RPC data, skip exit
+          logger.warn(
+            { mint: pos.mint, symbol: pos.symbol, entryGrad: pos.entryGraduationPct, currentGrad: token.graduationPct.toFixed(1) },
+            "Pump.fun trader: ignoring impossible grad drop (>30pp from entry) — likely stale RPC data",
           );
+        } else {
+          logger.warn(
+            { mint: pos.mint, symbol: pos.symbol, gradPct: token.graduationPct.toFixed(1) },
+            "Pump.fun trader: graduation % dropped below 80% after entry — exiting",
+          );
+          if (isTelegramConfigured()) {
+            void sendTelegram(
+              `⚠️ <b>PRE-GRAD GRAD DROP EXIT</b>\n──────────────────────\n` +
+              `🪙 Token: <b>${pos.symbol}</b>\n📋 CA: <code>${pos.mint}</code>\n` +
+              `🎓 Graduation dropped to <b>${token.graduationPct.toFixed(1)}%</b> (below 80%)\n` +
+              `⚠️ Possible bonding curve manipulation — exiting\n🕐 ${toIST(new Date())}`,
+            );
+          }
+          this.closePosition(pos, `Grad Drop Below 80% (${token.graduationPct.toFixed(1)}%)`, price);
+          continue;
         }
-        this.closePosition(pos, `Grad Drop Below 80% (${token.graduationPct.toFixed(1)}%)`, price);
-        continue;
       }
 
       // TP2 trailing stop (moonbag)
