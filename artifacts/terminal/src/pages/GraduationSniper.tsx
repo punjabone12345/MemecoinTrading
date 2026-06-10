@@ -1,11 +1,11 @@
 import { useState } from "react";
-import { Target, Wifi, WifiOff, TrendingUp, TrendingDown, RefreshCw, Settings, X, CheckCircle2, XCircle, Clock, Zap, Trash2, Pencil, RotateCcw, AlertTriangle, Download, ExternalLink, Activity } from "lucide-react";
+import { Target, Wifi, WifiOff, TrendingUp, TrendingDown, RefreshCw, Settings, X, CheckCircle2, XCircle, Clock, Zap, Trash2, Pencil, RotateCcw, AlertTriangle, Download, ExternalLink, Activity, PlusCircle } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   useSniperStatus, useSniperPositions, useSniperHistory, useSniperEvents, useUpdateSniperConfig,
-  useDeleteSniperPosition, useEditSniperPosition, useDeleteSniperEvent, useResetSniperAccount,
-  useRecalculateSniperPnl,
+  useDeleteSniperPosition, useEditSniperPosition, useDeleteSniperEvent, useResetSniperAccount, useCloseSniperPosition,
+  useRecalculateSniperPnl, useInjectSniperPosition,
 } from "@/lib/api";
 import { SniperPosition, SniperEvent, SniperConfig } from "@/lib/types";
 
@@ -254,12 +254,78 @@ function ResetConfirmModal({ onClose }: { onClose: () => void }) {
   );
 }
 
+// ── Inject Position modal ─────────────────────────────────────────────────────
+
+function InjectPositionModal({ onClose }: { onClose: () => void }) {
+  const inject = useInjectSniperPosition();
+  const [mint,       setMint]       = useState("");
+  const [symbol,     setSymbol]     = useState("");
+  const [entryPrice, setEntryPrice] = useState("");
+  const [sizeSol,    setSizeSol]    = useState("0.1");
+
+  function handleInject() {
+    const ep = parseFloat(entryPrice);
+    const ss = parseFloat(sizeSol);
+    if (!mint.trim() || isNaN(ep) || ep <= 0) return;
+    inject.mutate(
+      { mint: mint.trim(), symbol: symbol.trim() || mint.slice(0, 8), entryPrice: ep, sizeSol: isNaN(ss) || ss <= 0 ? 0.1 : ss },
+      { onSuccess: onClose },
+    );
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm px-3">
+      <div className="w-full max-w-sm bg-[#12121e] border border-amber-500/30 rounded-2xl overflow-hidden shadow-2xl">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-white/10">
+          <div className="flex items-center gap-2">
+            <PlusCircle className="w-4 h-4 text-amber-400" />
+            <span className="text-sm font-bold text-white">Re-enter Lost Position</span>
+          </div>
+          <button onClick={onClose} className="text-white/40 hover:text-white"><X className="w-4 h-4" /></button>
+        </div>
+        <div className="px-5 py-4 space-y-3">
+          <p className="text-[10px] text-amber-400/80 bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2 leading-relaxed">
+            Use this to re-enter a position that was lost after a server restart. The price will sync to the live Raydium rate within 10 seconds.
+          </p>
+          {[
+            { label: "Token Mint Address (CA)", value: mint, set: setMint, placeholder: "e.g. 8HjpXxx...pump", mono: true },
+            { label: "Symbol", value: symbol, set: setSymbol, placeholder: "e.g. STEPPA" },
+            { label: "Original Entry Price ($)", value: entryPrice, set: setEntryPrice, placeholder: "e.g. 0.00002151", type: "number" },
+            { label: "Position Size (SOL)", value: sizeSol, set: setSizeSol, placeholder: "e.g. 0.1", type: "number" },
+          ].map(({ label, value, set, placeholder, mono, type }) => (
+            <div key={label}>
+              <label className="text-xs font-semibold text-white/70 block mb-1">{label}</label>
+              <input
+                type={type ?? "text"}
+                step="any"
+                value={value}
+                onChange={(e) => set(e.target.value)}
+                placeholder={placeholder}
+                className={`w-full px-3 py-2 rounded-lg bg-white/5 border border-white/10 text-white text-xs focus:outline-none focus:border-amber-400 ${mono ? "font-mono" : ""}`}
+              />
+            </div>
+          ))}
+        </div>
+        <div className="px-5 py-4 border-t border-white/10 flex gap-3">
+          <Button variant="ghost" size="sm" onClick={onClose} className="flex-1 text-white/50 hover:text-white">Cancel</Button>
+          <Button size="sm" onClick={handleInject} disabled={inject.isPending || !mint.trim() || !entryPrice}
+            className="flex-1 bg-amber-500 hover:bg-amber-600 text-white font-bold">
+            {inject.isPending ? "Injecting…" : "Re-enter Position"}
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Position row (open) ───────────────────────────────────────────────────────
 
 function PositionRow({ pos }: { pos: SniperPosition }) {
-  const [showEdit,    setShowEdit]    = useState(false);
-  const [confirmDel,  setConfirmDel]  = useState(false);
+  const [showEdit,      setShowEdit]      = useState(false);
+  const [confirmDel,    setConfirmDel]    = useState(false);
+  const [confirmClose,  setConfirmClose]  = useState(false);
   const deletePos = useDeleteSniperPosition();
+  const closePos  = useCloseSniperPosition();
   const pct  = pos.pnlPct;
   const pos_ = pct >= 0;
 
@@ -300,7 +366,11 @@ function PositionRow({ pos }: { pos: SniperPosition }) {
                 className="p-1 rounded bg-white/5 hover:bg-amber-500/20 text-white/40 hover:text-amber-400 transition-colors" title="Edit">
                 <Pencil className="w-3 h-3" />
               </button>
-              <button onClick={() => setConfirmDel(true)}
+              <button onClick={() => { setConfirmClose(true); setConfirmDel(false); }}
+                className="p-1 rounded bg-white/5 hover:bg-emerald-500/20 text-white/40 hover:text-emerald-400 transition-colors" title="Close at market price">
+                <X className="w-3 h-3" />
+              </button>
+              <button onClick={() => { setConfirmDel(true); setConfirmClose(false); }}
                 className="p-1 rounded bg-white/5 hover:bg-red-500/20 text-white/40 hover:text-red-400 transition-colors" title="Delete">
                 <Trash2 className="w-3 h-3" />
               </button>
@@ -350,6 +420,19 @@ function PositionRow({ pos }: { pos: SniperPosition }) {
             <ExternalLink className="w-3 h-3" /> View on DexScreener
           </a>
         </div>
+        {confirmClose && (
+          <div className="mt-2 flex items-center gap-2 rounded-lg bg-emerald-500/10 border border-emerald-500/20 px-3 py-2">
+            <span className="text-[10px] text-emerald-300 flex-1">
+              Close at market price now? ({fmtPct(pct)} · {pos_ ? "+" : ""}{fmt(pos.totalPnlSol, 4)} SOL)
+            </span>
+            <button
+              onClick={() => closePos.mutate(pos.id, { onSuccess: () => setConfirmClose(false) })}
+              className="text-[10px] font-bold text-emerald-400 hover:text-emerald-300 px-2 py-0.5 rounded bg-emerald-500/20">
+              {closePos.isPending ? "…" : "Close"}
+            </button>
+            <button onClick={() => setConfirmClose(false)} className="text-[10px] text-white/40 hover:text-white">Cancel</button>
+          </div>
+        )}
         {confirmDel && (
           <div className="mt-2 flex items-center gap-2 rounded-lg bg-red-500/10 border border-red-500/20 px-3 py-2">
             <span className="text-[10px] text-red-300 flex-1">Delete this position?</span>
@@ -575,6 +658,7 @@ function HistoryRow({ pos }: { pos: SniperPosition }) {
 export default function GraduationSniper() {
   const [showSettings, setShowSettings] = useState(false);
   const [showReset,    setShowReset]    = useState(false);
+  const [showInject,   setShowInject]   = useState(false);
   const { data: status, isLoading: statusLoading } = useSniperStatus();
   const { data: positions = [] } = useSniperPositions();
   const { data: history = []   } = useSniperHistory();
@@ -583,7 +667,11 @@ export default function GraduationSniper() {
   const config        = status?.config;
   const totalPnl      = status?.totalRealizedPnlSol ?? 0;
   const unrealizedPnl = status?.totalUnrealizedPnlSol ?? 0;
-  const combinedPnl   = status?.totalCombinedPnlSol ?? 0;
+  const capitalInOpen = status?.capitalInOpen ?? 0;
+  // Combined = wallet gain + capital still deployed + live unrealized float
+  // Always consistent with virtualBalance regardless of any accounting drift
+  const startingBal   = status?.config?.virtualBalanceSol ?? 10;
+  const combinedPnl   = (status?.virtualBalance ?? startingBal) - startingBal + capitalInOpen + unrealizedPnl;
   const pnlPos        = totalPnl >= 0;
   const combinedPos   = combinedPnl >= 0;
   const winRate       = status && (status.wins + status.losses) > 0
@@ -596,11 +684,26 @@ export default function GraduationSniper() {
       <div className="sticky top-0 z-10 bg-[#0d0d15]/95 backdrop-blur-md border-b border-white/8 px-4 py-3">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2.5">
-            <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-amber-500 to-orange-600 flex items-center justify-center">
-              <Target className="w-4 h-4 text-white" />
+            <div className="w-9 h-9 flex items-center justify-center flex-shrink-0">
+              <svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <circle cx="18" cy="18" r="16" stroke="url(#sc1)" strokeWidth="2"/>
+                <circle cx="18" cy="18" r="10" stroke="url(#sc1)" strokeWidth="1.5" strokeDasharray="3 2"/>
+                <circle cx="18" cy="18" r="3.5" fill="url(#sc1)"/>
+                <line x1="18" y1="2" x2="18" y2="8" stroke="url(#sc1)" strokeWidth="2" strokeLinecap="round"/>
+                <line x1="18" y1="28" x2="18" y2="34" stroke="url(#sc1)" strokeWidth="2" strokeLinecap="round"/>
+                <line x1="2" y1="18" x2="8" y2="18" stroke="url(#sc1)" strokeWidth="2" strokeLinecap="round"/>
+                <line x1="28" y1="18" x2="34" y2="18" stroke="url(#sc1)" strokeWidth="2" strokeLinecap="round"/>
+                <defs>
+                  <linearGradient id="sc1" x1="2" y1="2" x2="34" y2="34" gradientUnits="userSpaceOnUse">
+                    <stop stopColor="#10b981"/>
+                    <stop offset="0.5" stopColor="#6366f1"/>
+                    <stop offset="1" stopColor="#f59e0b"/>
+                  </linearGradient>
+                </defs>
+              </svg>
             </div>
             <div>
-              <h1 className="text-sm font-black text-white leading-none">Graduation Sniper</h1>
+              <h1 className="text-sm font-black text-white leading-none tracking-wider">MEMECOIN <span className="text-emerald-400">SNIPER</span></h1>
               <p className="text-[9px] text-white/35 leading-none mt-0.5">Pump.fun → Raydium · Paper Mode</p>
             </div>
           </div>
@@ -611,6 +714,10 @@ export default function GraduationSniper() {
               {status?.wsConnected ? <Wifi className="w-3 h-3" /> : <WifiOff className="w-3 h-3" />}
               {status?.wsConnected ? "LIVE" : "DISCONNECTED"}
             </div>
+            <button onClick={() => setShowInject(true)} title="Re-enter a lost position"
+              className="p-1.5 rounded-lg bg-white/5 hover:bg-amber-500/20 text-white/30 hover:text-amber-400 transition-colors">
+              <PlusCircle className="w-4 h-4" />
+            </button>
             <button onClick={() => setShowReset(true)} title="Reset account"
               className="p-1.5 rounded-lg bg-white/5 hover:bg-red-500/15 text-white/30 hover:text-red-400 transition-colors">
               <RotateCcw className="w-4 h-4" />
@@ -674,7 +781,7 @@ export default function GraduationSniper() {
           <div className="mt-3 pt-2.5 border-t border-white/6 flex items-center justify-between text-[9px] text-white/30">
             <span>Starting balance: <span className="text-white/50 font-semibold">{fmt(config?.virtualBalanceSol ?? 10, 1)} SOL</span></span>
             <span>Current wallet: <span className="text-amber-400/80 font-semibold">{fmt(status?.virtualBalance ?? 0, 3)} SOL</span></span>
-            <span>In positions: <span className="text-white/50 font-semibold">{fmt((status?.openCount ?? 0) === 0 ? 0 : Math.max(0, (config?.virtualBalanceSol ?? 10) + totalPnl - (status?.virtualBalance ?? 0)), 3)} SOL</span></span>
+            <span>In positions: <span className="text-white/50 font-semibold">{fmt(capitalInOpen, 3)} SOL</span></span>
           </div>
         </div>
 
@@ -723,6 +830,7 @@ export default function GraduationSniper() {
 
       {showSettings && config && <SettingsPanel config={config} onClose={() => setShowSettings(false)} />}
       {showReset && <ResetConfirmModal onClose={() => setShowReset(false)} />}
+      {showInject && <InjectPositionModal onClose={() => setShowInject(false)} />}
     </div>
   );
 }
