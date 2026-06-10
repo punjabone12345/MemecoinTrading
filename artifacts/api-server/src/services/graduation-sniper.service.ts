@@ -974,10 +974,14 @@ class GraduationSniperService {
     currentPrice: number,
     breakdownKey?: "tp1" | "tp2",
   ): void {
-    const closeSize = pos.sizeSol * closeOriginalFraction;
+    // Guard: never sell more than what's actually remaining
+    const actualFraction = Math.min(closeOriginalFraction, pos.remainingFraction);
+    if (actualFraction <= 0) return; // nothing left to close
+
+    const closeSize = pos.sizeSol * actualFraction;
     const closePnl  = (currentPrice / pos.entryPrice - 1) * closeSize;
     pos.realizedPnlSol    += closePnl;
-    pos.remainingFraction -= closeOriginalFraction;
+    pos.remainingFraction  = Math.max(0, pos.remainingFraction - actualFraction);
     this.virtualBalance   += closeSize + closePnl;
     pos.currentPrice       = currentPrice;
 
