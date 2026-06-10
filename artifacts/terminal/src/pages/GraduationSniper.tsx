@@ -1,11 +1,11 @@
 import { useState } from "react";
-import { Target, Wifi, WifiOff, TrendingUp, TrendingDown, RefreshCw, Settings, X, CheckCircle2, XCircle, Clock, Zap, Trash2, Pencil, RotateCcw, AlertTriangle, Download, ExternalLink, Activity } from "lucide-react";
+import { Target, Wifi, WifiOff, TrendingUp, TrendingDown, RefreshCw, Settings, X, CheckCircle2, XCircle, Clock, Zap, Trash2, Pencil, RotateCcw, AlertTriangle, Download, ExternalLink, Activity, LogOut } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   useSniperStatus, useSniperPositions, useSniperHistory, useSniperEvents, useUpdateSniperConfig,
   useDeleteSniperPosition, useEditSniperPosition, useDeleteSniperEvent, useResetSniperAccount,
-  useRecalculateSniperPnl,
+  useRecalculateSniperPnl, useCloseSniperPosition,
 } from "@/lib/api";
 import { SniperPosition, SniperEvent, SniperConfig } from "@/lib/types";
 
@@ -259,7 +259,9 @@ function ResetConfirmModal({ onClose }: { onClose: () => void }) {
 function PositionRow({ pos }: { pos: SniperPosition }) {
   const [showEdit,    setShowEdit]    = useState(false);
   const [confirmDel,  setConfirmDel]  = useState(false);
+  const [confirmClose, setConfirmClose] = useState(false);
   const deletePos = useDeleteSniperPosition();
+  const closePos  = useCloseSniperPosition();
   const pct  = pos.pnlPct;
   const pos_ = pct >= 0;
 
@@ -296,6 +298,10 @@ function PositionRow({ pos }: { pos: SniperPosition }) {
             <div className="text-[10px] text-white/30">Cur ${fmtPrice(pos.currentPrice)}</div>
             <div className="text-[10px] text-white/25">{fmt(pos.remainingFraction * 100, 0)}% pos</div>
             <div className="flex gap-1 mt-1">
+              <button onClick={() => setConfirmClose(true)}
+                className="p-1 rounded bg-white/5 hover:bg-orange-500/20 text-white/40 hover:text-orange-400 transition-colors" title="Close at market price">
+                <LogOut className="w-3 h-3" />
+              </button>
               <button onClick={() => setShowEdit(true)}
                 className="p-1 rounded bg-white/5 hover:bg-amber-500/20 text-white/40 hover:text-amber-400 transition-colors" title="Edit">
                 <Pencil className="w-3 h-3" />
@@ -350,6 +356,16 @@ function PositionRow({ pos }: { pos: SniperPosition }) {
             <ExternalLink className="w-3 h-3" /> View on DexScreener
           </a>
         </div>
+        {confirmClose && (
+          <div className="mt-2 flex items-center gap-2 rounded-lg bg-orange-500/10 border border-orange-500/20 px-3 py-2">
+            <span className="text-[10px] text-orange-300 flex-1">Close at current price (${fmtPrice(pos.currentPrice)})?</span>
+            <button onClick={() => closePos.mutate(pos.id, { onSuccess: () => setConfirmClose(false) })}
+              className="text-[10px] font-bold text-orange-400 hover:text-orange-300 px-2 py-0.5 rounded bg-orange-500/20">
+              {closePos.isPending ? "…" : "Close"}
+            </button>
+            <button onClick={() => setConfirmClose(false)} className="text-[10px] text-white/40 hover:text-white">Cancel</button>
+          </div>
+        )}
         {confirmDel && (
           <div className="mt-2 flex items-center gap-2 rounded-lg bg-red-500/10 border border-red-500/20 px-3 py-2">
             <span className="text-[10px] text-red-300 flex-1">Delete this position?</span>

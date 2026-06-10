@@ -1356,6 +1356,26 @@ class GraduationSniperService {
   }
 
   /**
+   * Manually close an open position at the current market price (fetched from Jupiter).
+   * Falls back to the last known currentPrice if the price fetch fails.
+   */
+  async manualClosePosition(id: string): Promise<SniperPosition | null> {
+    const openEntry = Array.from(this.openPositions.entries()).find(([, p]) => p.id === id);
+    if (!openEntry) return null;
+    const [, pos] = openEntry;
+
+    // Try to get a fresh price; fall back to last known price
+    let exitPrice = pos.currentPrice;
+    try {
+      const priceData = await this.fetchPrice(pos.mint);
+      if (priceData && priceData.price > 0) exitPrice = priceData.price;
+    } catch { /* ignore — use last known price */ }
+
+    this.closePosition(pos, "Manual close", exitPrice);
+    return { ...pos };
+  }
+
+  /**
    * Recalculate realizedPnlSol + breakdown for a closed position using deterministic
    * math: TP prices are derived from entryPrice + config percentages, runner uses exitPrice.
    * This corrects any previously inflated values from the concurrency bug.
