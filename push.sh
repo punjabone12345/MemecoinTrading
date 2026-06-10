@@ -11,10 +11,18 @@ REMOTE="https://punjabone12345:${GITHUB_TOKEN}@github.com/punjabone12345/Memecoi
 echo "🔧  Setting authenticated remote..."
 git remote set-url origin "$REMOTE"
 
-echo "⬆️   Pushing to GitHub..."
+echo "⬇️   Fetching latest from GitHub..."
+git fetch origin main
+
+echo "🔀  Merging GitHub's commits into this branch..."
+git merge origin/main --no-edit --strategy-option=ours
+
+echo "⬆️   Pushing merged history to GitHub..."
 git push origin main
 
 echo "🔒  Restoring clean remote URL..."
 git remote set-url origin "https://github.com/punjabone12345/MemecoinTrading.git"
 
-echo "✅  Done! Changes pushed to GitHub."
+echo ""
+echo "✅  Done! Both sets of commits are now on GitHub."
+echo "    Your local code is kept as-is (this Replit's version wins on any conflicts)."
