@@ -1,14 +1,10 @@
-import { useState, useEffect, useRef } from "react";
+import { useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { ScannedToken, Position, Portfolio, AnalyticsSnapshot, Alert, AutoTraderStatus, AutoTraderConfig, CycleRecord, LossInsights, SniperStatus, SniperPosition, SniperEvent, SniperConfig, PumpfunStatus, PumpfunTrackedToken, PumpfunPosition, PumpfunEvent, PumpfunConfig } from "./types";
+import { SniperStatus, SniperPosition, SniperEvent, SniperConfig } from "./types";
 import { useToast } from "@/hooks/use-toast";
 
-// When the frontend is deployed separately from the backend (e.g. Vercel + Render),
-// set VITE_API_BASE_URL to the backend's origin (e.g. https://your-app.onrender.com).
-// Leave it empty (default) when both run on the same host (dev / single-host deploy).
 const API_BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, "") ?? "";
 
-/** Prefix a path with the backend origin when deployed separately */
 function apiUrl(path: string): string {
   return `${API_BASE}${path}`;
 }
@@ -16,20 +12,17 @@ function apiUrl(path: string): string {
 export function useWebSocket() {
   const queryClient = useQueryClient();
   const wsRef = useRef<WebSocket | null>(null);
-  const { toast } = useToast();
 
   useEffect(() => {
-    let timeoutId: any;
+    let timeoutId: ReturnType<typeof setTimeout>;
     let isMounted = true;
 
     function connect() {
       let wsUrl: string;
       if (API_BASE) {
-        // Cross-host deployment: derive WS URL from the backend origin
         const wsProto = API_BASE.startsWith("https://") ? "wss://" : "ws://";
         wsUrl = `${wsProto}${API_BASE.replace(/^https?:\/\//, "")}/ws`;
       } else {
-        // Same-host (dev Vite proxy or single-host prod): use window.location
         const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
         wsUrl = `${protocol}//${window.location.host}/ws`;
       }
@@ -37,29 +30,16 @@ export function useWebSocket() {
 
       ws.onmessage = (event) => {
         try {
-          const data = JSON.parse(event.data);
-          if (data.type === "scanner_update") {
-            queryClient.setQueryData(["scanner"], data.data);
-          } else if (data.type === "position_update") {
-            queryClient.setQueryData(["positions"], data.data);
-          } else if (data.type === "portfolio_update") {
-            queryClient.setQueryData(["portfolio"], data.data);
-          } else if (data.type === "alert") {
-            queryClient.setQueryData<Alert[]>(["alerts"], (old = []) => [data.data, ...old]);
-            toast({
-              title: data.data.title,
-              description: data.data.message,
-            });
+          const data = JSON.parse(event.data as string);
+          if (data.type === "sniper_update") {
+            queryClient.invalidateQueries({ queryKey: ["sniper-positions"] });
+            queryClient.invalidateQueries({ queryKey: ["sniper-status"] });
           }
-        } catch (e) {
-          // parse error
-        }
+        } catch (_) {}
       };
 
       ws.onclose = () => {
-        if (isMounted) {
-          timeoutId = setTimeout(connect, 3000);
-        }
+        if (isMounted) timeoutId = setTimeout(connect, 3000);
       };
 
       wsRef.current = ws;
@@ -72,430 +52,10 @@ export function useWebSocket() {
       clearTimeout(timeoutId);
       if (wsRef.current) wsRef.current.close();
     };
-  }, [queryClient, toast]);
+  }, [queryClient]);
 }
 
-// Queries
-export function useScanner() {
-  return useQuery({
-    queryKey: ["scanner"],
-    queryFn: async () => {
-      const res = await fetch(apiUrl("/api/scanner"));
-      const json = await res.json();
-      return (json.data ?? json) as ScannedToken[];
-    },
-    refetchInterval: 5000,
-  });
-}
-
-export function usePositions() {
-  return useQuery({
-    queryKey: ["positions"],
-    queryFn: async () => {
-      const res = await fetch(apiUrl("/api/positions"));
-      const json = await res.json();
-      return (json.data ?? json) as { positions: Position[]; portfolio: Portfolio };
-    },
-    refetchInterval: 1000,
-  });
-}
-
-export function useClosedPositions() {
-  return useQuery({
-    queryKey: ["closed-positions"],
-    queryFn: async () => {
-      const res = await fetch(apiUrl("/api/positions/closed"));
-      const json = await res.json();
-      return (json.data ?? json) as Position[];
-    },
-  });
-}
-
-export function usePortfolio() {
-  return useQuery({
-    queryKey: ["portfolio"],
-    queryFn: async () => {
-      const res = await fetch(apiUrl("/api/positions/portfolio"));
-      const json = await res.json();
-      return (json.data ?? json) as Portfolio;
-    },
-    refetchInterval: 1000,
-  });
-}
-
-export function useAnalytics() {
-  return useQuery({
-    queryKey: ["analytics"],
-    queryFn: async () => {
-      const res = await fetch(apiUrl("/api/analytics"));
-      const json = await res.json();
-      return (json.data ?? json) as AnalyticsSnapshot;
-    },
-  });
-}
-
-export function useAlerts() {
-  return useQuery({
-    queryKey: ["alerts"],
-    queryFn: async () => {
-      const res = await fetch(apiUrl("/api/alerts"));
-      const json = await res.json();
-      return (json.data ?? json) as Alert[];
-    },
-  });
-}
-
-export function useUnreadAlerts() {
-  return useQuery({
-    queryKey: ["alerts-unread"],
-    queryFn: async () => {
-      const res = await fetch(apiUrl("/api/alerts/unread"));
-      const json = await res.json();
-      return (json.data ?? json) as Alert[];
-    },
-    refetchInterval: 5000,
-  });
-}
-
-export function useAutoTraderStatus() {
-  return useQuery({
-    queryKey: ["auto-trader-status"],
-    queryFn: async () => {
-      const res = await fetch(apiUrl("/api/auto-trader/status"));
-      const json = await res.json();
-      return (json.data ?? json) as AutoTraderStatus;
-    },
-    refetchInterval: 5000,
-  });
-}
-
-export function useAutoTraderConfig() {
-  return useQuery({
-    queryKey: ["auto-trader-config"],
-    queryFn: async () => {
-      const res = await fetch(apiUrl("/api/auto-trader/config"));
-      const json = await res.json();
-      return (json.data ?? json) as AutoTraderConfig;
-    },
-  });
-}
-
-export function useAutoTraderHistory() {
-  return useQuery({
-    queryKey: ["auto-trader-history"],
-    queryFn: async () => {
-      const res = await fetch(apiUrl("/api/auto-trader/history"));
-      const json = await res.json();
-      return (json.data ?? json) as CycleRecord[];
-    },
-    refetchInterval: 10_000,
-  });
-}
-
-export function useWatchlist() {
-  return useQuery({
-    queryKey: ["watchlist"],
-    queryFn: async () => {
-      const res = await fetch(apiUrl("/api/watchlist"));
-      const json = await res.json();
-      return (json.data ?? json) as any[];
-    },
-  });
-}
-
-// Mutations
-export function useClosePosition() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: async (positionId: string) => {
-      await fetch(apiUrl("/api/paper-sell"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ positionId }),
-      });
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["positions"] });
-      queryClient.invalidateQueries({ queryKey: ["closed-positions"] });
-      queryClient.invalidateQueries({ queryKey: ["portfolio"] });
-    },
-  });
-}
-
-export function useResetAccount() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: async () => {
-      const res = await fetch(apiUrl("/api/reset"), { method: "POST" });
-      if (!res.ok) throw new Error("Reset failed");
-    },
-    onSuccess: () => {
-      queryClient.setQueryData(["closed-positions"], []);
-      queryClient.setQueryData(["positions"], { positions: [], portfolio: null });
-      queryClient.setQueryData(["portfolio"], null);
-      queryClient.setQueryData(["analytics"], null);
-      queryClient.setQueryData(["loss-journal"], null);
-      queryClient.invalidateQueries();
-    },
-  });
-}
-
-export function useDeleteClosedTrade() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: async (positionId: string) => {
-      const res = await fetch(apiUrl(`/api/positions/history/${positionId}`), { method: "DELETE" });
-      if (!res.ok) {
-        const json = await res.json();
-        throw new Error(json.error ?? "Delete failed");
-      }
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["closed-positions"] });
-      queryClient.invalidateQueries({ queryKey: ["portfolio"] });
-      queryClient.invalidateQueries({ queryKey: ["positions"] });
-      queryClient.invalidateQueries({ queryKey: ["analytics"] });
-    },
-  });
-}
-
-export function useEditClosedTrade() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: async (payload: {
-      positionId: string;
-      pnlSol?: number;
-      pnlPercent?: number;
-      entryPrice?: number;
-      exitPrice?: number;
-      closeReason?: "manual" | "stop_loss" | "take_profit";
-      note?: string;
-      tradeSource?: "bot" | "rss";
-    }) => {
-      const { positionId, ...body } = payload;
-      const res = await fetch(apiUrl(`/api/positions/history/${positionId}`), {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      if (!res.ok) {
-        const json = await res.json();
-        throw new Error(json.error ?? "Edit failed");
-      }
-      return res.json();
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["closed-positions"] });
-      queryClient.invalidateQueries({ queryKey: ["portfolio"] });
-      queryClient.invalidateQueries({ queryKey: ["positions"] });
-      queryClient.invalidateQueries({ queryKey: ["analytics"] });
-    },
-  });
-}
-
-export function useAddWatchlist() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: async (data: { pairAddress: string; note?: string }) => {
-      await fetch(apiUrl("/api/watchlist"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(data),
-      });
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["watchlist"] });
-    },
-  });
-}
-
-export function useRemoveWatchlist() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: async (pairAddress: string) => {
-      await fetch(apiUrl(`/api/watchlist/${pairAddress}`), { method: "DELETE" });
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["watchlist"] });
-    },
-  });
-}
-
-export function useUpdateWatchlistNote() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: async (data: { pairAddress: string; note: string }) => {
-      await fetch(apiUrl(`/api/watchlist/${data.pairAddress}`), {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ note: data.note }),
-      });
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["watchlist"] });
-    },
-  });
-}
-
-export function useMarkAlertRead() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: async (id: string) => {
-      await fetch(apiUrl(`/api/alerts/${id}/read`), { method: "PATCH" });
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["alerts"] });
-      queryClient.invalidateQueries({ queryKey: ["alerts-unread"] });
-    },
-  });
-}
-
-export function useMarkAllAlertsRead() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: async () => {
-      await fetch(apiUrl("/api/alerts/read-all"), { method: "POST" });
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["alerts"] });
-      queryClient.invalidateQueries({ queryKey: ["alerts-unread"] });
-    },
-  });
-}
-
-export function useClearAlerts() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: async () => {
-      await fetch(apiUrl("/api/alerts"), { method: "DELETE" });
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["alerts"] });
-      queryClient.invalidateQueries({ queryKey: ["alerts-unread"] });
-    },
-  });
-}
-
-export function usePauseAutoTrader() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: async () => {
-      await fetch(apiUrl("/api/auto-trader/pause"), { method: "POST" });
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["auto-trader-status"] });
-    },
-  });
-}
-
-export function useResumeAutoTrader() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: async () => {
-      await fetch(apiUrl("/api/auto-trader/resume"), { method: "POST" });
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["auto-trader-status"] });
-    },
-  });
-}
-
-export function useResetCircuitBreaker() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: async () => {
-      await fetch(apiUrl("/api/auto-trader/reset-circuit-breaker"), { method: "POST" });
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["auto-trader-status"] });
-    },
-  });
-}
-
-export function useEnableBotTrades() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: async () => {
-      await fetch(apiUrl("/api/auto-trader/enable-bot-trades"), { method: "POST" });
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["auto-trader-status"] });
-    },
-  });
-}
-
-export function useDisableBotTrades() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: async () => {
-      await fetch(apiUrl("/api/auto-trader/disable-bot-trades"), { method: "POST" });
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["auto-trader-status"] });
-    },
-  });
-}
-
-export function useLossJournal() {
-  return useQuery<LossInsights>({
-    queryKey: ["loss-journal"],
-    queryFn: async () => {
-      const res = await fetch(apiUrl("/api/loss-journal"));
-      const json = await res.json();
-      return json.data as LossInsights;
-    },
-    refetchInterval: 30_000,
-    staleTime: 15_000,
-  });
-}
-
-export function useDeleteJournalEntry() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: async (positionId: string) => {
-      const res = await fetch(apiUrl(`/api/loss-journal/entries/${positionId}`), { method: "DELETE" });
-      if (!res.ok) {
-        const json = await res.json();
-        throw new Error(json.error ?? "Delete failed");
-      }
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["loss-journal"] });
-    },
-  });
-}
-
-export function useClearJournal() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: async () => {
-      const res = await fetch(apiUrl("/api/loss-journal/entries"), { method: "DELETE" });
-      if (!res.ok) throw new Error("Clear failed");
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["loss-journal"] });
-    },
-  });
-}
-
-export function useUpdateAutoTraderConfig() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: async (config: Partial<AutoTraderConfig>) => {
-      await fetch(apiUrl("/api/auto-trader/config"), {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(config),
-      });
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["auto-trader-config"] });
-      queryClient.invalidateQueries({ queryKey: ["auto-trader-status"] });
-    },
-  });
-}
-
-// ── Graduation Sniper hooks ────────────────────────────────────────────────
+// ── Sniper queries ─────────────────────────────────────────────────────────────
 
 export function useSniperStatus() {
   return useQuery<SniperStatus>({
@@ -556,6 +116,8 @@ export function useSniperConfig() {
   });
 }
 
+// ── Sniper mutations ───────────────────────────────────────────────────────────
+
 export function useUpdateSniperConfig() {
   const queryClient = useQueryClient();
   const { toast } = useToast();
@@ -572,7 +134,7 @@ export function useUpdateSniperConfig() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["sniper-config"] });
       queryClient.invalidateQueries({ queryKey: ["sniper-status"] });
-      toast({ title: "Sniper config saved", description: "Settings updated successfully." });
+      toast({ title: "Settings saved", description: "Sniper config updated successfully." });
     },
     onError: () => {
       toast({ title: "Save failed", description: "Could not update sniper config.", variant: "destructive" });
@@ -641,7 +203,7 @@ export function useRecalculateSniperPnl() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["sniper-history"] });
       queryClient.invalidateQueries({ queryKey: ["sniper-status"] });
-      toast({ title: "P&L corrected", description: "Recalculated from entry/exit prices and config TP levels" });
+      toast({ title: "P&L corrected", description: "Recalculated from entry/exit prices and config TP levels." });
     },
     onError: (e: Error) => toast({ title: "Recalculate failed", description: e.message, variant: "destructive" }),
   });
@@ -669,7 +231,7 @@ export function useInjectSniperPosition() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["sniper-positions"] });
       queryClient.invalidateQueries({ queryKey: ["sniper-status"] });
-      toast({ title: "Position re-entered", description: "Price will update within 10 seconds via Jupiter." });
+      toast({ title: "Position re-entered", description: "Price will sync via Jupiter within 10 seconds." });
     },
     onError: (e: Error) => toast({ title: "Inject failed", description: e.message, variant: "destructive" }),
   });
@@ -701,129 +263,8 @@ export function useResetSniperAccount() {
       queryClient.invalidateQueries({ queryKey: ["sniper-history"] });
       queryClient.invalidateQueries({ queryKey: ["sniper-events"] });
       queryClient.invalidateQueries({ queryKey: ["sniper-status"] });
-      toast({ title: "Sniper account reset", description: "All positions cleared, balance restored." });
+      toast({ title: "Account reset", description: "All positions cleared, balance restored." });
     },
     onError: () => toast({ title: "Reset failed", variant: "destructive" }),
   });
 }
-
-// ── Pump.fun Pre-Graduation Trader hooks (Module A) ────────────────────────────
-
-export function usePumpfunStatus() {
-  return useQuery<PumpfunStatus>({
-    queryKey: ["pumpfun-status"],
-    queryFn: async () => {
-      const res  = await fetch(apiUrl("/api/pumpfun/status"));
-      const json = await res.json() as { data: PumpfunStatus };
-      return json.data;
-    },
-    refetchInterval: 5000,
-  });
-}
-
-export function usePumpfunTokens() {
-  return useQuery<PumpfunTrackedToken[]>({
-    queryKey: ["pumpfun-tokens"],
-    queryFn: async () => {
-      const res  = await fetch(apiUrl("/api/pumpfun/tokens"));
-      const json = await res.json() as { data: PumpfunTrackedToken[] };
-      return json.data ?? [];
-    },
-    refetchInterval: 10_000,
-  });
-}
-
-export function usePumpfunPositions(refetchMs = 3000) {
-  return useQuery<PumpfunPosition[]>({
-    queryKey: ["pumpfun-positions"],
-    queryFn: async () => {
-      const res  = await fetch(apiUrl("/api/pumpfun/positions"));
-      const json = await res.json() as { data: PumpfunPosition[] };
-      return json.data ?? [];
-    },
-    refetchInterval: refetchMs,
-  });
-}
-
-export function usePumpfunHistory() {
-  return useQuery<PumpfunPosition[]>({
-    queryKey: ["pumpfun-history"],
-    queryFn: async () => {
-      const res  = await fetch(apiUrl("/api/pumpfun/history"));
-      const json = await res.json() as { data: PumpfunPosition[] };
-      return json.data ?? [];
-    },
-    refetchInterval: 30_000,
-  });
-}
-
-export function usePumpfunEvents() {
-  return useQuery<PumpfunEvent[]>({
-    queryKey: ["pumpfun-events"],
-    queryFn: async () => {
-      const res  = await fetch(apiUrl("/api/pumpfun/events"));
-      const json = await res.json() as { data: PumpfunEvent[] };
-      return json.data ?? [];
-    },
-    refetchInterval: 10_000,
-  });
-}
-
-export function usePumpfunConfig() {
-  return useQuery<PumpfunConfig>({
-    queryKey: ["pumpfun-config"],
-    queryFn: async () => {
-      const res  = await fetch(apiUrl("/api/pumpfun/config"));
-      const json = await res.json() as { data: PumpfunConfig };
-      return json.data;
-    },
-  });
-}
-
-export function useUpdatePumpfunConfig() {
-  const queryClient = useQueryClient();
-  const { toast } = useToast();
-  return useMutation({
-    mutationFn: async (config: Partial<PumpfunConfig>) => {
-      const res = await fetch(apiUrl("/api/pumpfun/config"), {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(config),
-      });
-      const json = await res.json() as { data: PumpfunConfig };
-      return json.data;
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["pumpfun-config"] });
-      queryClient.invalidateQueries({ queryKey: ["pumpfun-status"] });
-      toast({ title: "Pump.fun config saved", description: "Settings updated." });
-    },
-    onError: () => {
-      toast({ title: "Save failed", description: "Could not update config.", variant: "destructive" });
-    },
-  });
-}
-
-export function useInjectPumpfunToken() {
-  const queryClient = useQueryClient();
-  const { toast } = useToast();
-  return useMutation({
-    mutationFn: async (data: {
-      mint: string; symbol: string; name: string;
-      mcap: number; priceUsd: number; pairAddress: string;
-    }) => {
-      const res = await fetch(apiUrl("/api/pumpfun/inject"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(data),
-      });
-      if (!res.ok) throw new Error("Inject failed");
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["pumpfun-tokens"] });
-      toast({ title: "Token injected", description: "Token added to tracking list." });
-    },
-    onError: (e: Error) => toast({ title: "Inject failed", description: e.message, variant: "destructive" }),
-  });
-}
-

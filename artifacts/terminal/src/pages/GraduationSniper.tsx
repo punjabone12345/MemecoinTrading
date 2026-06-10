@@ -661,11 +661,26 @@ export default function GraduationSniper() {
       <div className="sticky top-0 z-10 bg-[#0d0d15]/95 backdrop-blur-md border-b border-white/8 px-4 py-3">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2.5">
-            <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-amber-500 to-orange-600 flex items-center justify-center">
-              <Target className="w-4 h-4 text-white" />
+            <div className="w-9 h-9 flex items-center justify-center flex-shrink-0">
+              <svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <circle cx="18" cy="18" r="16" stroke="url(#sc1)" strokeWidth="2"/>
+                <circle cx="18" cy="18" r="10" stroke="url(#sc1)" strokeWidth="1.5" strokeDasharray="3 2"/>
+                <circle cx="18" cy="18" r="3.5" fill="url(#sc1)"/>
+                <line x1="18" y1="2" x2="18" y2="8" stroke="url(#sc1)" strokeWidth="2" strokeLinecap="round"/>
+                <line x1="18" y1="28" x2="18" y2="34" stroke="url(#sc1)" strokeWidth="2" strokeLinecap="round"/>
+                <line x1="2" y1="18" x2="8" y2="18" stroke="url(#sc1)" strokeWidth="2" strokeLinecap="round"/>
+                <line x1="28" y1="18" x2="34" y2="18" stroke="url(#sc1)" strokeWidth="2" strokeLinecap="round"/>
+                <defs>
+                  <linearGradient id="sc1" x1="2" y1="2" x2="34" y2="34" gradientUnits="userSpaceOnUse">
+                    <stop stopColor="#10b981"/>
+                    <stop offset="0.5" stopColor="#6366f1"/>
+                    <stop offset="1" stopColor="#f59e0b"/>
+                  </linearGradient>
+                </defs>
+              </svg>
             </div>
             <div>
-              <h1 className="text-sm font-black text-white leading-none">Graduation Sniper</h1>
+              <h1 className="text-sm font-black text-white leading-none tracking-wider">MEMECOIN <span className="text-emerald-400">SNIPER</span></h1>
               <p className="text-[9px] text-white/35 leading-none mt-0.5">Pump.fun → Raydium · Paper Mode</p>
             </div>
           </div>
