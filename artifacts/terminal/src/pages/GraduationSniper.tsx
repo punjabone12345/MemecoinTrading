@@ -648,7 +648,11 @@ export default function GraduationSniper() {
   const config        = status?.config;
   const totalPnl      = status?.totalRealizedPnlSol ?? 0;
   const unrealizedPnl = status?.totalUnrealizedPnlSol ?? 0;
-  const combinedPnl   = status?.totalCombinedPnlSol ?? 0;
+  const capitalInOpen = status?.capitalInOpen ?? 0;
+  // Combined = wallet gain + capital still deployed + live unrealized float
+  // Always consistent with virtualBalance regardless of any accounting drift
+  const startingBal   = status?.config?.virtualBalanceSol ?? 10;
+  const combinedPnl   = (status?.virtualBalance ?? startingBal) - startingBal + capitalInOpen + unrealizedPnl;
   const pnlPos        = totalPnl >= 0;
   const combinedPos   = combinedPnl >= 0;
   const winRate       = status && (status.wins + status.losses) > 0
@@ -758,7 +762,7 @@ export default function GraduationSniper() {
           <div className="mt-3 pt-2.5 border-t border-white/6 flex items-center justify-between text-[9px] text-white/30">
             <span>Starting balance: <span className="text-white/50 font-semibold">{fmt(config?.virtualBalanceSol ?? 10, 1)} SOL</span></span>
             <span>Current wallet: <span className="text-amber-400/80 font-semibold">{fmt(status?.virtualBalance ?? 0, 3)} SOL</span></span>
-            <span>In positions: <span className="text-white/50 font-semibold">{fmt((status?.openCount ?? 0) === 0 ? 0 : Math.max(0, (config?.virtualBalanceSol ?? 10) + totalPnl - (status?.virtualBalance ?? 0)), 3)} SOL</span></span>
+            <span>In positions: <span className="text-white/50 font-semibold">{fmt(capitalInOpen, 3)} SOL</span></span>
           </div>
         </div>
 

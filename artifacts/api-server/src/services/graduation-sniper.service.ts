@@ -141,6 +141,7 @@ export interface SniperStatus {
   totalUnrealizedPnlSol: number;
   totalCombinedPnlSol: number;
   virtualBalance: number;
+  capitalInOpen: number;
   openCount: number;
   config: SniperConfig;
 }
@@ -1343,7 +1344,19 @@ class GraduationSniperService {
     const openEntry = Array.from(this.openPositions.entries()).find(([, p]) => p.id === id);
     if (openEntry) {
       const [mint, pos] = openEntry;
+      // Return remaining capital to virtual balance
       this.virtualBalance += pos.sizeSol * pos.remainingFraction;
+      // Move to closedPositions so any already-realized TP profits stay in the PNL accounting
+      // (TP profits were already credited to virtualBalance; keeping them in closedPositions
+      //  prevents getStatus() totalRealizedPnlSol from losing track of them)
+      this.closedPositions.push({
+        ...pos,
+        status: "closed" as const,
+        closeReason: "deleted",
+        closedAt: Date.now(),
+        unrealizedPnlSol: 0,
+        unrealizedPnlPct: 0,
+      });
       this.openPositions.delete(mint);
       this.seenMints.delete(mint);
     } else {
@@ -1535,14 +1548,16 @@ class GraduationSniperService {
     const realized   = closed.reduce((s, p) => s + p.realizedPnlSol, 0);
 
     // Live unrealized: sum of all open positions' current unrealized PNL
-    // (includes partial-close realized already credited to virtualBalance)
     const unrealized = Array.from(this.openPositions.values()).reduce((s, p) => {
       this.updateLivePnl(p);
       return s + p.unrealizedPnlSol;
     }, 0);
 
-    // Also include realized PNL from TP hits on still-open positions
+    // Realized PNL from TP hits on still-open positions
     const partialOpen = Array.from(this.openPositions.values()).reduce((s, p) => s + p.realizedPnlSol, 0);
+
+    // Capital currently deployed in open positions (original cost basis of remaining fraction)
+    const capitalInOpen = Array.from(this.openPositions.values()).reduce((s, p) => s + p.sizeSol * p.remainingFraction, 0);
 
     return {
       wsConnected:            this.wsConnected,
@@ -1556,6 +1571,7 @@ class GraduationSniperService {
       totalUnrealizedPnlSol:  unrealized,
       totalCombinedPnlSol:    realized + partialOpen + unrealized,
       virtualBalance:         this.virtualBalance,
+      capitalInOpen,
       openCount:              this.openPositions.size,
       config:                 this.config,
     };

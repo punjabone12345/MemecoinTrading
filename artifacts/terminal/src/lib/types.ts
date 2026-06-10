@@ -402,6 +402,7 @@ export interface SniperStatus {
   totalUnrealizedPnlSol: number;
   totalCombinedPnlSol: number;
   virtualBalance: number;
+  capitalInOpen: number;
   openCount: number;
   config: SniperConfig;
 }
