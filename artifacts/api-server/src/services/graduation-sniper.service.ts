@@ -254,6 +254,100 @@ class GraduationSniperService {
     this.walletBalanceSol = await solanaWalletService.getBalance();
   }
 
+  // ── On-chain actual fill price (most accurate, matches GMGN/Solscan) ─────
+  // Parses the confirmed buy TX to get exact SOL spent and exact tokens received.
+  // Then computes: entryPriceUSD = (solSpent × SOL/USD) ÷ tokensReceivedUI
+  // This is orders-of-magnitude more accurate than DexScreener (which lags 2-5m).
+  private async fetchActualBuyAmounts(
+    txSignature: string,
+    tokenMint: string,
+  ): Promise<{ solSpentUi: number; tokensReceivedRaw: number; tokensReceivedUi: number } | null> {
+    const apiKey = process.env["HELIUS_API_KEY"];
+    if (!apiKey) return null;
+
+    // Brief pause — Helius indexes confirmed TXs within ~1-2s
+    await new Promise((r) => setTimeout(r, 2_000));
+
+    try {
+      type TokenBalance = {
+        mint: string;
+        accountIndex: number;
+        uiTokenAmount: { amount: string; decimals: number; uiAmount: number | null };
+      };
+      type TxResult = {
+        result: {
+          transaction?: { message?: { accountKeys?: { pubkey: string }[] } };
+          meta?: {
+            preBalances?: number[];
+            postBalances?: number[];
+            preTokenBalances?: TokenBalance[];
+            postTokenBalances?: TokenBalance[];
+          };
+        } | null;
+      };
+
+      const res = await axios.post<TxResult>(
+        `https://mainnet.helius-rpc.com/?api-key=${apiKey}`,
+        {
+          jsonrpc: "2.0", id: 1, method: "getTransaction",
+          params: [txSignature, { encoding: "jsonParsed", maxSupportedTransactionVersion: 0 }],
+        },
+        { timeout: 15_000 },
+      );
+
+      const tx = res.data?.result;
+      if (!tx) return null;
+
+      const accountKeys = tx.transaction?.message?.accountKeys ?? [];
+      const walletPubkey = solanaWalletService.publicKey;
+      const walletIndex  = accountKeys.findIndex((k) => k.pubkey === walletPubkey);
+      if (walletIndex === -1) return null;
+
+      // Actual SOL deducted from wallet (lamports → SOL)
+      const preSol  = (tx.meta?.preBalances?.[walletIndex]  ?? 0) / 1_000_000_000;
+      const postSol = (tx.meta?.postBalances?.[walletIndex] ?? 0) / 1_000_000_000;
+      const solSpentUi = Math.max(0, preSol - postSol);
+
+      // Actual tokens received (raw = lamport-equivalent units; ui = human-readable)
+      const postBals = tx.meta?.postTokenBalances ?? [];
+      const preBals  = tx.meta?.preTokenBalances  ?? [];
+      const postEntry = postBals.find((b) => b.mint === tokenMint);
+      const preEntry  = preBals.find( (b) => b.mint === tokenMint);
+      const tokensReceivedRaw = Number(postEntry?.uiTokenAmount.amount ?? 0) - Number(preEntry?.uiTokenAmount.amount ?? 0);
+      const tokensReceivedUi  = (postEntry?.uiTokenAmount.uiAmount ?? 0) - (preEntry?.uiTokenAmount.uiAmount ?? 0);
+
+      if (solSpentUi <= 0 || tokensReceivedRaw <= 0 || tokensReceivedUi <= 0) return null;
+
+      logger.info(
+        { txSignature: txSignature.slice(0, 20), tokenMint, solSpentUi, tokensReceivedRaw, tokensReceivedUi },
+        "Graduation sniper: on-chain buy amounts fetched ✅",
+      );
+      return { solSpentUi, tokensReceivedRaw, tokensReceivedUi };
+    } catch (err) {
+      logger.warn({ txSignature: txSignature.slice(0, 20), err: (err as Error).message }, "Graduation sniper: fetchActualBuyAmounts failed");
+      return null;
+    }
+  }
+
+  // Fetches current SOL/USD price from DexScreener (USDC pair, very low lag).
+  // Used together with on-chain token amounts to compute true fill price.
+  private async fetchSolUsdPrice(): Promise<number | null> {
+    try {
+      const SOL_MINT = "So11111111111111111111111111111111111111112";
+      type DexPair = { priceUsd: string; quoteToken?: { symbol: string } };
+      const res = await axios.get<DexPair[]>(
+        `${DEXSCREENER_BASE}/tokens/v1/solana/${SOL_MINT}`,
+        { timeout: 5_000 },
+      );
+      const pairs = Array.isArray(res.data) ? res.data : [];
+      const usdcPair = pairs.find((p) => p.quoteToken?.symbol === "USDC") ?? pairs[0];
+      const price = parseFloat(usdcPair?.priceUsd ?? "0");
+      return price > 0 ? price : null;
+    } catch {
+      return null;
+    }
+  }
+
   // ── Startup phantom-position cleanup ─────────────────────────────────────
   // Queries on-chain token balance for each open position. Any position with
   // 0 tokens in the wallet is a phantom (buy TX failed but was recorded anyway).
@@ -940,24 +1034,51 @@ class GraduationSniperService {
       return;
     }
 
-    // ── Fetch actual fill price after confirmed buy ────────────────────────────
-    // The `price` arg was fetched from DexScreener BEFORE the buy TX.
-    // By the time Jupiter fills, the market may have moved 10-30%.
-    // Re-fetching AFTER on-chain confirmation gives the actual fill-time price
-    // which makes P&L comparisons against Solscan accurate.
+    // ── Derive actual fill price from on-chain TX data ────────────────────────
+    // Priority 1 (most accurate — matches GMGN/Solscan exactly):
+    //   Parse confirmed TX → actual SOL spent + actual tokens received → price in USD
+    // Priority 2 (fallback — DexScreener after buy, better than pre-buy price):
+    //   Re-fetch DexScreener price after confirmation
+    // Priority 3 (last resort):
+    //   Use the pre-buy DexScreener price passed in as `price`
+    //
+    // This is why app showed 29k while GMGN showed 35k: the old code used `price`
+    // which was fetched BEFORE the buy, before any slippage/movement applied.
     let actualEntryPrice = price;
+    let actualTokenAmount = tokenAmount; // start with Jupiter quote's outAmount
+
     try {
-      const postBuyData = await this.fetchPrice(mint);
-      if (postBuyData && postBuyData.price > 0) {
-        const delta = ((postBuyData.price / price - 1) * 100).toFixed(1);
-        logger.info(
-          { mint, symbol, preBuyPrice: price, actualEntryPrice: postBuyData.price, delta: `${delta}%` },
-          "Graduation sniper: entry price updated from post-buy DexScreener fetch",
-        );
-        actualEntryPrice = postBuyData.price;
+      const txAmounts = await this.fetchActualBuyAmounts(txSignature, mint);
+      if (txAmounts) {
+        // Use actual on-chain token amount (more accurate than Jupiter quote estimate)
+        if (txAmounts.tokensReceivedRaw > 0) {
+          actualTokenAmount = txAmounts.tokensReceivedRaw;
+        }
+        // Compute price from on-chain data: (SOL spent × SOL/USD) ÷ tokens received
+        if (txAmounts.solSpentUi > 0 && txAmounts.tokensReceivedUi > 0) {
+          const solUsdPrice = await this.fetchSolUsdPrice();
+          if (solUsdPrice && solUsdPrice > 0) {
+            const onChainPrice = (txAmounts.solSpentUi * solUsdPrice) / txAmounts.tokensReceivedUi;
+            const delta = ((onChainPrice / price - 1) * 100).toFixed(1);
+            logger.info(
+              { mint, symbol, onChainPrice, preBuyPrice: price, delta: `${delta}%`, solUsdPrice, solSpent: txAmounts.solSpentUi, tokensUi: txAmounts.tokensReceivedUi },
+              "Graduation sniper: on-chain fill price computed ✅ (matches GMGN/Solscan)",
+            );
+            actualEntryPrice = onChainPrice;
+          }
+        }
       }
-    } catch {
-      // Non-fatal: fall back to the pre-buy price if DexScreener is slow
+    } catch { /* non-fatal */ }
+
+    // Fallback: if on-chain approach failed, use post-buy DexScreener price
+    if (actualEntryPrice === price) {
+      try {
+        const postBuyData = await this.fetchPrice(mint);
+        if (postBuyData && postBuyData.price > 0) {
+          logger.info({ mint, symbol, dexPrice: postBuyData.price }, "Graduation sniper: using post-buy DexScreener fallback price");
+          actualEntryPrice = postBuyData.price;
+        }
+      } catch { /* non-fatal */ }
     }
 
     const pos: SniperPosition = {
@@ -973,17 +1094,17 @@ class GraduationSniperService {
       tp1Hit:            false,
       tp2Hit:            false,
       remainingFraction: 1.0,
-      effectiveSlPrice:  price * (1 - cfg.slPct / 100),
-      trailingHigh:      price,
+      effectiveSlPrice:  actualEntryPrice * (1 - cfg.slPct / 100),  // SL based on actual fill price
+      trailingHigh:      actualEntryPrice,                          // trailing high starts at actual fill price
       status:            "open",
       realizedPnlSol:    0,
       unrealizedPnlSol:  0,
       totalPnlSol:       0,
       pnlPct:            0,
       txSignature,
-      tokenAmount,
-      entrySig:          txSignature,   // buy tx — preserved forever
-      exitSig:           undefined,     // set only after confirmed on-chain sell
+      tokenAmount:       actualTokenAmount,   // actual on-chain tokens (for accurate sells)
+      entrySig:          txSignature,         // buy tx — preserved forever
+      exitSig:           undefined,           // set only after confirmed on-chain sell
       tp1RealizedSol:    0,
       tp2RealizedSol:    0,
       runnerRealizedSol: 0,
@@ -996,7 +1117,7 @@ class GraduationSniperService {
     void this.persistPosition(pos);
 
     logger.info(
-      { mint, symbol, entryPrice: price, sizeSol, tokenAmount, txSignature, sl: pos.effectiveSlPrice },
+      { mint, symbol, actualEntryPrice, preBuyPrice: price, sizeSol, actualTokenAmount, txSignature, sl: pos.effectiveSlPrice },
       "Graduation sniper: LIVE position entered ✅",
     );
 
@@ -1006,12 +1127,12 @@ class GraduationSniperService {
         `──────────────────────\n` +
         `🪙 Token: <b>${symbol}</b> — ${name}\n` +
         `📋 CA: <code>${mint}</code>\n` +
-        `💵 Entry: <b>$${fmtTgPrice(price)}</b>\n` +
+        `💵 Entry: <b>$${fmtTgPrice(actualEntryPrice)}</b>\n` +
         `💰 Size: <b>${sizeSol.toFixed(4)} SOL</b>\n` +
         `🔗 <a href="https://solscan.io/tx/${txSignature}">View on Solscan</a>\n` +
         `🛡️ Staged SL: -20% (2m) → -25% peak → -30% peak\n` +
-        `🎯 TP1: $${fmtTgPrice(price * (1 + cfg.tp1Pct / 100))} (+${cfg.tp1Pct}%)\n` +
-        `🎯 TP2: $${fmtTgPrice(price * (1 + cfg.tp2Pct / 100))} (+${cfg.tp2Pct}%)\n` +
+        `🎯 TP1: $${fmtTgPrice(actualEntryPrice * (1 + cfg.tp1Pct / 100))} (+${cfg.tp1Pct}%)\n` +
+        `🎯 TP2: $${fmtTgPrice(actualEntryPrice * (1 + cfg.tp2Pct / 100))} (+${cfg.tp2Pct}%)\n` +
         `🕐 ${toIST(new Date())}`,
       );
     }
