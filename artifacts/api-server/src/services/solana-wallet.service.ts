@@ -54,7 +54,7 @@ class SolanaWalletService {
 
   /**
    * Sign + send with skipPreflight for maximum speed (~300ms).
-   * Confirmation is tracked in the background — caller gets signature immediately.
+   * Used for BUY orders — confirmation is tracked in the background.
    * outAmount from Jupiter quote is used for P&L; actual confirmation is async.
    */
   async signAndSend(txBase64: string): Promise<string> {
@@ -64,8 +64,6 @@ class SolanaWalletService {
     const tx = VersionedTransaction.deserialize(txBuf);
     tx.sign([this.keypair]);
 
-    // skipPreflight = skip tx simulation on RPC node — saves ~200ms per tx
-    // processed commitment = accept tx as soon as it reaches the leader, don't wait for block
     const signature = await this.connection.sendRawTransaction(tx.serialize(), {
       skipPreflight: true,
       maxRetries: 5,
@@ -74,14 +72,50 @@ class SolanaWalletService {
 
     logger.info({ sig: signature.slice(0, 20) }, "SolanaWalletService: tx sent ⚡ (confirming in background)");
 
-    // Confirm asynchronously — we don't block the trade loop
     void this.confirmInBackground(signature);
 
     return signature;
   }
 
   /**
-   * Background confirmation tracker. Logs success/failure; caller already moved on.
+   * Sign + send and WAIT for on-chain confirmation before returning.
+   * Used for SELL orders — caller must not mark position as closed until this resolves.
+   * Throws if the transaction fails or is rejected on-chain.
+   */
+  async signAndSendAndConfirm(txBase64: string): Promise<string> {
+    if (!this.keypair) throw new Error("Wallet not ready — SOLANA_PRIVATE_KEY not set");
+
+    const txBuf = Buffer.from(txBase64, "base64");
+    const tx = VersionedTransaction.deserialize(txBuf);
+    tx.sign([this.keypair]);
+
+    const latest = await this.connection.getLatestBlockhash("confirmed");
+
+    const signature = await this.connection.sendRawTransaction(tx.serialize(), {
+      skipPreflight: true,
+      maxRetries: 5,
+      preflightCommitment: "processed",
+    });
+
+    logger.info({ sig: signature.slice(0, 20) }, "SolanaWalletService: sell tx sent — waiting for on-chain confirmation ⏳");
+
+    const result = await this.connection.confirmTransaction(
+      { signature, blockhash: latest.blockhash, lastValidBlockHeight: latest.lastValidBlockHeight },
+      "confirmed",
+    );
+
+    if (result.value.err) {
+      const errMsg = JSON.stringify(result.value.err);
+      logger.error({ sig: signature.slice(0, 20), err: errMsg }, "SolanaWalletService: sell tx FAILED on-chain ❌");
+      throw new Error(`Sell transaction rejected on-chain: ${errMsg}`);
+    }
+
+    logger.info({ sig: signature.slice(0, 20) }, "SolanaWalletService: sell tx confirmed on-chain ✅");
+    return signature;
+  }
+
+  /**
+   * Background confirmation tracker for buys. Logs success/failure; caller already moved on.
    */
   private async confirmInBackground(signature: string): Promise<void> {
     try {
@@ -96,7 +130,6 @@ class SolanaWalletService {
         logger.info({ sig: signature.slice(0, 20) }, "SolanaWalletService: tx confirmed ✅");
       }
     } catch (err) {
-      // confirmTransaction can time out if the block window expires — tx may still have landed
       logger.warn({ sig: signature.slice(0, 20), err: (err as Error).message }, "SolanaWalletService: confirmation timeout (tx may still confirm)");
     }
   }

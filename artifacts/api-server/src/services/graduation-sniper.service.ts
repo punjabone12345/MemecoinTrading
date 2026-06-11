@@ -937,7 +937,6 @@ class GraduationSniperService {
       );
       return;
     }
-    this.registerClosedTrade(pos);
 
     // Remove from open positions immediately so no concurrent close fires
     this.openPositions.delete(pos.mint);
@@ -945,7 +944,7 @@ class GraduationSniperService {
     const remaining   = pos.sizeSol * pos.remainingFraction;
     const tokensLeft  = Math.floor(pos.tokenAmount * pos.remainingFraction);
 
-    let solReceived   = remaining; // fallback: break-even
+    let solReceived   = remaining;
     let exitTxSig     = "";
     try {
       if (tokensLeft > 0) {
@@ -954,9 +953,19 @@ class GraduationSniperService {
         exitTxSig     = result.txSignature;
       }
     } catch (err) {
-      logger.error({ mint: pos.mint, reason, err: (err as Error).message }, "Graduation sniper: Jupiter sell (close) FAILED — using price-ratio fallback");
-      solReceived = remaining + (exitPrice / pos.entryPrice - 1) * remaining;
+      // CRITICAL: Sell failed — tokens are still in wallet. Re-open the position so the
+      // next price loop will retry. Do NOT mark as closed or record fake PnL.
+      logger.error(
+        { mint: pos.mint, symbol: pos.symbol, reason, err: (err as Error).message },
+        "Graduation sniper: Jupiter sell (close) FAILED ❌ — position re-opened, will retry next price tick",
+      );
+      this.openPositions.set(pos.mint, pos);
+      return;
     }
+
+    // Only register the fingerprint AFTER a confirmed sell — prevents marking
+    // a position as "already closed" when the sell hadn't actually executed.
+    this.registerClosedTrade(pos);
 
     const closePnl = solReceived - remaining;
 
@@ -1024,17 +1033,18 @@ class GraduationSniperService {
     const tokensToSell = Math.floor(pos.tokenAmount * actualFraction);
     const costBasis    = pos.sizeSol * actualFraction; // SOL cost for this fraction
 
-    let solReceived = costBasis; // fallback: break-even
+    let solReceived: number;
     let exitTxSig   = "";
-    try {
-      if (tokensToSell > 0) {
-        const result  = await jupiterSwapService.sell(pos.mint, tokensToSell, this.config.slippageBps, this.config.priorityFeeLamports);
-        solReceived   = result.solReceived;
-        exitTxSig     = result.txSignature;
-      }
-    } catch (err) {
-      logger.error({ mint: pos.mint, reason, err: (err as Error).message }, "Graduation sniper: Jupiter sell (partial) FAILED — using price-ratio fallback");
-      solReceived = costBasis + (currentPrice / pos.entryPrice - 1) * costBasis;
+
+    if (tokensToSell > 0) {
+      // CRITICAL: Do NOT catch sell failures here. If the sell throws, we let it
+      // propagate so the caller (TP1/TP2 logic) knows the tokens are still in wallet.
+      // Using a price-ratio fallback was the root cause of "sold in app, not on-chain".
+      const result  = await jupiterSwapService.sell(pos.mint, tokensToSell, this.config.slippageBps, this.config.priorityFeeLamports);
+      solReceived   = result.solReceived;
+      exitTxSig     = result.txSignature;
+    } else {
+      solReceived = costBasis;
     }
 
     const closePnl = solReceived - costBasis;
@@ -1173,7 +1183,15 @@ class GraduationSniperService {
     pos: SniperPosition, price: number, tp1Frac: number, tp1Pct: number, tp1ClosePct: number,
   ): Promise<void> {
     pos.tp1Hit           = true;
-    await this.partialClose(pos, tp1Frac, `TP1 +${tp1Pct}% — sell ${tp1ClosePct}%`, price, "tp1");
+    try {
+      await this.partialClose(pos, tp1Frac, `TP1 +${tp1Pct}% — sell ${tp1ClosePct}%`, price, "tp1");
+    } catch (err) {
+      // Sell failed on-chain — revert tp1Hit so the next price tick retries.
+      // Tokens are still in wallet; do NOT update PnL or remainingFraction.
+      pos.tp1Hit = false;
+      logger.error({ mint: pos.mint, symbol: pos.symbol, err: (err as Error).message }, "Graduation sniper: TP1 sell FAILED ❌ — reverted, will retry next tick");
+      return;
+    }
     pos.effectiveSlPrice = pos.entryPrice; // breakeven SL stored for reference
 
     // Retry persist until confirmed — ensures SL update survives server restart
@@ -1309,7 +1327,14 @@ class GraduationSniperService {
     if (pos.tp1Hit && !pos.tp2Hit && price >= tp2Price) {
       pos.tp2Hit       = true;
       pos.trailingHigh = price;
-      await this.partialClose(pos, tp2Frac, `TP2 +${cfg.tp2Pct}% — sell ${cfg.tp2ClosePct}%`, price, "tp2");
+      try {
+        await this.partialClose(pos, tp2Frac, `TP2 +${cfg.tp2Pct}% — sell ${cfg.tp2ClosePct}%`, price, "tp2");
+      } catch (err) {
+        // Sell failed on-chain — revert tp2Hit so the next price tick retries.
+        pos.tp2Hit = false;
+        logger.error({ mint, symbol: pos.symbol, err: (err as Error).message }, "Graduation sniper: TP2 sell FAILED ❌ — reverted, will retry next tick");
+        return;
+      }
       logger.info({ mint, symbol: pos.symbol, price }, "Graduation sniper: TP2 hit — runner active");
       if (isTelegramConfigured()) {
         const partialPnl = (price / pos.entryPrice - 1) * pos.sizeSol * tp2Frac;

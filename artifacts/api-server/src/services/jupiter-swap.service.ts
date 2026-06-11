@@ -137,7 +137,10 @@ class JupiterSwapService {
 
       const quote = await this.getQuote(tokenMint, SOL_MINT, amountRaw, effectiveSlippage);
       const swapTx      = await this.getSwapTx(quote, priorityFeeLamports);
-      const txSignature  = await solanaWalletService.signAndSend(swapTx);
+      // Use signAndSendAndConfirm for sells — we MUST verify the tx landed on-chain
+      // before the caller marks the position as closed. signAndSend (fire-and-forget)
+      // would let a failed tx silently close the position while tokens stay in wallet.
+      const txSignature  = await solanaWalletService.signAndSendAndConfirm(swapTx);
 
       const q = quote as Record<string, string>;
       const solReceived = Number(q["outAmount"]) / LAMPORTS_PER_SOL;
