@@ -161,6 +161,11 @@ if (process.env["DATABASE_URL"]) {
       await migClient.query(`ALTER TABLE sniper_positions ADD COLUMN IF NOT EXISTS tp2_realized_sol DOUBLE PRECISION DEFAULT 0`);
       await migClient.query(`ALTER TABLE sniper_positions ADD COLUMN IF NOT EXISTS runner_realized_sol DOUBLE PRECISION DEFAULT 0`);
       await migClient.query(`ALTER TABLE sniper_positions ADD COLUMN IF NOT EXISTS token_amount DOUBLE PRECISION DEFAULT 0`);
+      // Separate entry/exit tx signatures — entry_sig = buy tx (never changes),
+      // exit_sig = confirmed sell tx (NULL means sell was never confirmed on-chain).
+      // Positions with NULL exit_sig are "unverified" and may have fake P&L.
+      await migClient.query(`ALTER TABLE sniper_positions ADD COLUMN IF NOT EXISTS entry_sig TEXT DEFAULT ''`);
+      await migClient.query(`ALTER TABLE sniper_positions ADD COLUMN IF NOT EXISTS exit_sig TEXT`);
       logger.info("DB migration: all tables ready");
     } finally {
       migClient.release();

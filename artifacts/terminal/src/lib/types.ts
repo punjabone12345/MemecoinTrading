@@ -375,6 +375,8 @@ export interface SniperPosition {
   closedAt?: number;
   exitPrice?: number;
   txSignature: string;
+  entrySig: string;   // buy tx — confirmed on-chain entry
+  exitSig?: string;   // sell tx — only present for confirmed on-chain sells
   // P&L breakdown per stage
   tp1RealizedSol: number;
   tp2RealizedSol: number;

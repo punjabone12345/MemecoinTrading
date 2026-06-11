@@ -276,6 +276,28 @@ export function useInjectSniperPosition() {
   });
 }
 
+export function usePurgeUnverifiedHistory() {
+  const queryClient = useQueryClient();
+  const { toast } = useToast();
+  return useMutation({
+    mutationFn: async () => {
+      const res = await fetch(apiUrl("/api/sniper/history/purge-unverified"), { method: "POST" });
+      if (!res.ok) throw new Error("Purge failed");
+      const j = await res.json() as { data: { removed: number } };
+      return j.data;
+    },
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ["sniper-history"] });
+      queryClient.invalidateQueries({ queryKey: ["sniper-status"] });
+      toast({
+        title: data.removed > 0 ? `Purged ${data.removed} unverified record${data.removed > 1 ? "s" : ""}` : "Nothing to purge",
+        description: data.removed > 0 ? "Only on-chain confirmed trades remain in history." : "All history is already verified.",
+      });
+    },
+    onError: () => toast({ title: "Purge failed", variant: "destructive" }),
+  });
+}
+
 export function useDeleteSniperEvent() {
   const queryClient = useQueryClient();
   return useMutation({

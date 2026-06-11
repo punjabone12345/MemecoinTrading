@@ -118,6 +118,9 @@ export interface SniperPosition {
   exitPrice?: number;
   txSignature: string;
   tokenAmount: number;       // raw token units received on buy (for selling later)
+  // Separate entry/exit tx signatures for on-chain verification
+  entrySig: string;          // buy tx — set at entry, never overwritten
+  exitSig?: string;          // sell tx — only set after confirmed on-chain sell
   // P&L breakdown per stage
   tp1RealizedSol: number;
   tp2RealizedSol: number;
@@ -380,6 +383,8 @@ class GraduationSniperService {
       exitPrice:        row["exit_price"] ? Number(row["exit_price"]) : undefined,
       txSignature:      String(row["tx_signature"] ?? ""),
       tokenAmount:      Number(row["token_amount"] ?? 0),
+      entrySig:         String(row["entry_sig"] ?? ""),
+      exitSig:          row["exit_sig"] ? String(row["exit_sig"]) : undefined,
       tp1RealizedSol:   Number(row["tp1_realized_sol"] ?? 0),
       tp2RealizedSol:   Number(row["tp2_realized_sol"] ?? 0),
       runnerRealizedSol: Number(row["runner_realized_sol"] ?? 0),
@@ -873,6 +878,8 @@ class GraduationSniperService {
       pnlPct:            0,
       txSignature,
       tokenAmount,
+      entrySig:          txSignature,   // buy tx — preserved forever
+      exitSig:           undefined,     // set only after confirmed on-chain sell
       tp1RealizedSol:    0,
       tp2RealizedSol:    0,
       runnerRealizedSol: 0,
@@ -988,6 +995,8 @@ class GraduationSniperService {
     // Sell confirmed — now remove from open positions
     this.openPositions.delete(pos.mint);
     this.closingMints.delete(pos.mint);
+    // Record the confirmed on-chain sell tx — positions without this are "unverified"
+    if (exitTxSig) pos.exitSig = exitTxSig;
 
     // Only register the fingerprint AFTER a confirmed sell — prevents marking
     // a position as "already closed" when the sell hadn't actually executed.
@@ -1078,7 +1087,10 @@ class GraduationSniperService {
     pos.realizedPnlSol    += closePnl;
     pos.remainingFraction  = Math.max(0, pos.remainingFraction - actualFraction);
     pos.currentPrice       = currentPrice;
-    if (exitTxSig) pos.txSignature = exitTxSig;
+    if (exitTxSig) {
+      pos.txSignature = exitTxSig;
+      pos.exitSig     = exitTxSig;   // mark as verified on-chain sell
+    }
 
     if (breakdownKey === "tp1") pos.tp1RealizedSol += closePnl;
     else if (breakdownKey === "tp2") pos.tp2RealizedSol += closePnl;
@@ -1356,8 +1368,9 @@ class GraduationSniperService {
           id, mint, symbol, name, detected_at, entry_at, entry_price, current_price,
           size_sol, tp1_hit, tp2_hit, remaining_fraction, effective_sl_price,
           trailing_high, status, realized_pnl_sol, close_reason, closed_at, exit_price, tx_signature,
-          tp1_realized_sol, tp2_realized_sol, runner_realized_sol, token_amount
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)
+          tp1_realized_sol, tp2_realized_sol, runner_realized_sol, token_amount,
+          entry_sig, exit_sig
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)
         ON CONFLICT (id) DO UPDATE SET
           current_price      = EXCLUDED.current_price,
           tp1_hit            = EXCLUDED.tp1_hit,
@@ -1374,7 +1387,9 @@ class GraduationSniperService {
           tp2_realized_sol   = EXCLUDED.tp2_realized_sol,
           runner_realized_sol= EXCLUDED.runner_realized_sol,
           token_amount       = EXCLUDED.token_amount,
-          tx_signature       = EXCLUDED.tx_signature
+          tx_signature       = EXCLUDED.tx_signature,
+          entry_sig          = EXCLUDED.entry_sig,
+          exit_sig           = EXCLUDED.exit_sig
       `, [
         pos.id, pos.mint, pos.symbol, pos.name, pos.detectedAt, pos.entryAt,
         pos.entryPrice, pos.currentPrice, pos.sizeSol, pos.tp1Hit, pos.tp2Hit,
@@ -1382,6 +1397,7 @@ class GraduationSniperService {
         pos.realizedPnlSol, pos.closeReason ?? null, pos.closedAt ?? null,
         pos.exitPrice ?? null, pos.txSignature,
         pos.tp1RealizedSol, pos.tp2RealizedSol, pos.runnerRealizedSol, pos.tokenAmount ?? 0,
+        pos.entrySig ?? "", pos.exitSig ?? null,
       ]);
     } catch (err) {
       logger.warn({ id: pos.id, err: (err as Error).message }, "Graduation sniper: persistPosition failed");
@@ -1585,6 +1601,33 @@ class GraduationSniperService {
   }
 
   /**
+   * Delete all closed positions that have no confirmed on-chain sell (exitSig is null/empty).
+   * These are positions closed by the old buggy code that never actually executed a real sell.
+   * Returns the number of records removed.
+   */
+  async purgeUnverifiedHistory(): Promise<number> {
+    const before = this.closedPositions.length;
+    this.closedPositions = this.closedPositions.filter((p) => !!p.exitSig);
+    const removed = before - this.closedPositions.length;
+
+    if (removed > 0) {
+      this.resyncAllTimeAccumulators();
+      this.broadcast();
+      try {
+        // Remove from DB: closed positions with no exit_sig set
+        await execute(
+          `DELETE FROM sniper_positions WHERE status = 'closed' AND (exit_sig IS NULL OR exit_sig = '')`,
+          [],
+        );
+      } catch (err) {
+        logger.warn({ err: (err as Error).message }, "Graduation sniper: purgeUnverifiedHistory DB error");
+      }
+      logger.info({ removed }, "Graduation sniper: purged unverified history records");
+    }
+    return removed;
+  }
+
+  /**
    * Re-inject a position that was lost due to a server restart or missed entry.
    * No on-chain buy is executed — the tokens are assumed to already be in the wallet.
    * Jupiter price is fetched once to populate currentPrice; entryPrice is user-provided.
@@ -1631,6 +1674,8 @@ class GraduationSniperService {
       pnlPct:            0,
       txSignature:       "",
       tokenAmount:       estimatedTokens,
+      entrySig:          "",    // injected manually — no buy tx
+      exitSig:           undefined,
       tp1RealizedSol:    0,
       tp2RealizedSol:    0,
       runnerRealizedSol: 0,

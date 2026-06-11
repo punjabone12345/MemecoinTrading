@@ -120,6 +120,16 @@ router.post("/sniper/positions/inject", async (req, res) => {
   }
 });
 
+// ── Purge unverified history (closes with no confirmed on-chain sell) ─────────
+router.post("/sniper/history/purge-unverified", async (_req, res) => {
+  try {
+    const removed = await graduationSniperService.purgeUnverifiedHistory();
+    res.json({ success: true, data: { removed } });
+  } catch (err) {
+    res.status(500).json({ success: false, error: (err as Error).message });
+  }
+});
+
 // ── Delete an event from the detection feed ─────────────────────────────────
 router.delete("/sniper/events/:id", (req, res) => {
   const { id } = req.params;

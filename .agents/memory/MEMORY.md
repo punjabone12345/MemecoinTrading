@@ -2,3 +2,4 @@
 - [Pumpfun bonding curve scanner fixes](pumpfun-scanner-fixes.md) — dexId="pumpfun" (not "pump"), SOL/USDC pair address, graduation mcap, and discovered bugs
 - [On-chain bonding curve reader](onchain-bonding-curve.md) — pure-Node.js PDA derivation + getMultipleAccounts; no Solana SDK needed; confirmed working
 - [Real trading architecture](real-trading-arch.md) — Jupiter v6 + Solana web3.js swaps; @solana/web3.js externalized in esbuild; closePosition/partialClose/checkStagedSL all async
+- [Sniper trade verification](sniper-trade-verification.md) — entrySig/exitSig fields distinguish verified vs fake trades; purgeUnverifiedHistory() cleans old buggy data
