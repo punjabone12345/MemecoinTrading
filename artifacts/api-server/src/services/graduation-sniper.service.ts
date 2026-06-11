@@ -1,5 +1,6 @@
 import WebSocket from "ws";
 import axios from "axios";
+import { PublicKey } from "@solana/web3.js";
 import { logger } from "../lib/logger.js";
 import { query, execute } from "../lib/db.js";
 import { blacklistService } from "./blacklist.service.js";
@@ -90,7 +91,9 @@ const DEFAULT_CONFIG: SniperConfig = {
   trailingStopPct:      30,
   waitBeforeEntryMs:    3000,
   slippageBps:          1000,    // 10% — memecoins need wide slippage
-  priorityFeeLamports:  1_000_000, // 0.001 SOL — fast confirmation
+  priorityFeeLamports:  50_000,  // 0.00005 SOL — sufficient priority without destroying small trades
+  // NOTE: 1_000_000 (0.001 SOL) was the old default — it was 20x the trade size for 0.0001 SOL trades.
+  // 50_000 lamports is still ~10x the Solana base fee and fast enough for graduation sniping.
 };
 
 export interface SniperPosition {
@@ -228,6 +231,10 @@ class GraduationSniperService {
     // Fetch real wallet balance on startup
     this.walletBalanceSol = await solanaWalletService.getBalance();
 
+    // Validate open positions: close any that have no tokens in the actual wallet.
+    // These are phantom positions from failed buy TXs that were recorded before on-chain confirmation.
+    await this.validateOpenPositions();
+
     logger.info(
       {
         openPositions:   this.openPositions.size,
@@ -245,6 +252,83 @@ class GraduationSniperService {
 
   private async refreshWalletBalance(): Promise<void> {
     this.walletBalanceSol = await solanaWalletService.getBalance();
+  }
+
+  // ── Startup phantom-position cleanup ─────────────────────────────────────
+  // Queries on-chain token balance for each open position. Any position with
+  // 0 tokens in the wallet is a phantom (buy TX failed but was recorded anyway).
+  // These are closed as a loss so the dashboard shows accurate real P&L.
+  private async fetchWalletTokenBalance(mint: string): Promise<number | null> {
+    if (!solanaWalletService.isReady || !solanaWalletService.publicKey) return null;
+    try {
+      const walletPubkey = new PublicKey(solanaWalletService.publicKey);
+      const mintPubkey   = new PublicKey(mint);
+      const accounts     = await solanaWalletService.connection.getParsedTokenAccountsByOwner(
+        walletPubkey,
+        { mint: mintPubkey },
+        "confirmed",
+      );
+      const total = accounts.value.reduce((sum, acc) => {
+        const parsed = acc.account.data as { parsed?: { info?: { tokenAmount?: { uiAmount?: number | null } } } };
+        return sum + (parsed.parsed?.info?.tokenAmount?.uiAmount ?? 0);
+      }, 0);
+      return total;
+    } catch (err) {
+      logger.warn({ mint, err: (err as Error).message }, "Graduation sniper: fetchWalletTokenBalance failed");
+      return null; // unknown — do not close
+    }
+  }
+
+  private async validateOpenPositions(): Promise<void> {
+    if (!solanaWalletService.isReady) return;
+    if (this.openPositions.size === 0) return;
+
+    logger.info({ count: this.openPositions.size }, "Graduation sniper: validating open positions against on-chain balances…");
+
+    for (const [mint, pos] of Array.from(this.openPositions.entries())) {
+      const balance = await this.fetchWalletTokenBalance(mint);
+      if (balance === null) {
+        logger.warn({ mint, symbol: pos.symbol }, "Startup validation: balance query failed — leaving position open");
+        continue;
+      }
+
+      if (balance === 0) {
+        logger.warn(
+          { mint, symbol: pos.symbol, recordedTokens: pos.tokenAmount },
+          "Startup validation: 0 tokens in wallet — closing as phantom position",
+        );
+        this.openPositions.delete(mint);
+        pos.status        = "closed";
+        pos.closeReason   = "Phantom — buy TX failed, no tokens received";
+        pos.closedAt      = Date.now();
+        pos.exitPrice     = pos.currentPrice > 0 ? pos.currentPrice : pos.entryPrice;
+        pos.remainingFraction = 0;
+        // Record the full size as a loss (SOL was never actually spent because the TX
+        // failed on-chain, but we must zero out the position and mark it clearly).
+        pos.realizedPnlSol = -pos.sizeSol;
+        this.updateLivePnl(pos);
+        this.closedPositions.push(pos);
+        this.allTimeRealizedSol += pos.realizedPnlSol;
+        this.allTimeLosses++;
+        await this.persistPosition(pos);
+        this.registerClosedTrade(pos);
+
+        if (isTelegramConfigured()) {
+          void sendTelegram(
+            `⚠️ <b>PHANTOM POSITION DETECTED</b>\n` +
+            `──────────────────────\n` +
+            `🪙 Token: <b>${pos.symbol}</b>\n` +
+            `📋 CA: <code>${pos.mint}</code>\n` +
+            `❌ No tokens found in wallet — buy TX likely failed on-chain\n` +
+            `📝 Position closed. Check your wallet & Solscan for the buy TX:\n` +
+            `🔗 <a href="https://solscan.io/tx/${pos.entrySig}">Buy TX on Solscan</a>\n` +
+            `🕐 ${toIST(new Date())}`,
+          );
+        }
+      } else {
+        logger.info({ mint, symbol: pos.symbol, balance }, "Startup validation: position confirmed ✅");
+      }
+    }
   }
 
   private async loadConfig(): Promise<void> {
@@ -837,7 +921,7 @@ class GraduationSniperService {
     const cfg = this.config;
     const id  = uid();
 
-    // Execute real on-chain buy via Jupiter
+    // Execute real on-chain buy via Jupiter — confirmed before recording position
     let txSignature: string;
     let tokenAmount: number;
     let sizeSol: number;
@@ -856,6 +940,26 @@ class GraduationSniperService {
       return;
     }
 
+    // ── Fetch actual fill price after confirmed buy ────────────────────────────
+    // The `price` arg was fetched from DexScreener BEFORE the buy TX.
+    // By the time Jupiter fills, the market may have moved 10-30%.
+    // Re-fetching AFTER on-chain confirmation gives the actual fill-time price
+    // which makes P&L comparisons against Solscan accurate.
+    let actualEntryPrice = price;
+    try {
+      const postBuyData = await this.fetchPrice(mint);
+      if (postBuyData && postBuyData.price > 0) {
+        const delta = ((postBuyData.price / price - 1) * 100).toFixed(1);
+        logger.info(
+          { mint, symbol, preBuyPrice: price, actualEntryPrice: postBuyData.price, delta: `${delta}%` },
+          "Graduation sniper: entry price updated from post-buy DexScreener fetch",
+        );
+        actualEntryPrice = postBuyData.price;
+      }
+    } catch {
+      // Non-fatal: fall back to the pre-buy price if DexScreener is slow
+    }
+
     const pos: SniperPosition = {
       id,
       mint,
@@ -863,8 +967,8 @@ class GraduationSniperService {
       name,
       detectedAt:        Date.now(),
       entryAt:           Date.now(),
-      entryPrice:        price,
-      currentPrice:      price,
+      entryPrice:        actualEntryPrice,
+      currentPrice:      actualEntryPrice,
       sizeSol,
       tp1Hit:            false,
       tp2Hit:            false,
@@ -1080,7 +1184,14 @@ class GraduationSniperService {
       solReceived   = result.solReceived;
       exitTxSig     = result.txSignature;
     } else {
-      solReceived = costBasis;
+      // tokensToSell is 0 — this should never happen in normal operation.
+      // Do NOT use solReceived = costBasis (that was fake P&L — recording breakeven when no sell happened).
+      // Just abort — no real trade executed, no P&L to record.
+      logger.warn(
+        { mint: pos.mint, symbol: pos.symbol, tokenAmount: pos.tokenAmount, fraction: actualFraction },
+        "Graduation sniper: partialClose tokensToSell=0 — skipping (no fake P&L)",
+      );
+      return;
     }
 
     const closePnl = solReceived - costBasis;

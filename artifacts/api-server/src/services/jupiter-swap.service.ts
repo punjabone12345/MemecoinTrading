@@ -84,8 +84,9 @@ class JupiterSwapService {
   }
 
   // ── BUY ───────────────────────────────────────────────────────────────────
-  // Retries up to 3 times with 1.5s / 3s delays.
-  // Common failure: fresh pump.fun graduate not yet indexed by Jupiter (takes 2-5s).
+  // Retries quote+build up to 3 times (fresh graduates take 2-5s to appear in Jupiter).
+  // Uses signAndSendAndConfirm so the position is ONLY recorded after the TX lands on-chain.
+  // This prevents phantom positions caused by failed buys being recorded as real entries.
   async buy(
     tokenMint: string,
     solAmount: number,
@@ -103,15 +104,18 @@ class JupiterSwapService {
 
       const quote = await this.getQuote(SOL_MINT, tokenMint, amountLamports, slippageBps);
       const swapTx      = await this.getSwapTx(quote, priorityFeeLamports);
-      const txSignature  = await solanaWalletService.signAndSend(swapTx);
+      // CRITICAL: use signAndSendAndConfirm (not fire-and-forget signAndSend).
+      // We must confirm the buy TX landed on-chain before recording the position.
+      // signAndSend was the root cause of phantom positions and unmatched buy/no-sell losses.
+      const txSignature  = await solanaWalletService.signAndSendAndConfirm(swapTx);
 
       const q = quote as Record<string, string>;
       const tokenAmount = Number(q["outAmount"]);
       const solSpent    = Number(q["inAmount"]) / LAMPORTS_PER_SOL;
 
-      logger.info({ tokenMint, solSpent, tokenAmount, txSignature, attempt }, "Jupiter: buy ✅");
+      logger.info({ tokenMint, solSpent, tokenAmount, txSignature, attempt }, "Jupiter: buy confirmed on-chain ✅");
       return { txSignature, tokenAmount, solSpent, attempt };
-    }, 3, 1500);
+    }, 3, 2000);
   }
 
   // ── SELL ──────────────────────────────────────────────────────────────────
