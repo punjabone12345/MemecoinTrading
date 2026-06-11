@@ -1213,11 +1213,21 @@ class GraduationSniperService {
 
     let solReceived   = remaining;
     let exitTxSig     = "";
+    const walletReady = solanaWalletService.isReady;
     try {
-      if (tokensLeft > 0) {
+      if (tokensLeft > 0 && walletReady) {
         const result  = await jupiterSwapService.sell(pos.mint, tokensLeft, this.config.slippageBps, this.config.priorityFeeLamports);
         solReceived   = result.solReceived;
         exitTxSig     = result.txSignature;
+      } else if (tokensLeft > 0 && !walletReady) {
+        // No wallet configured — paper/virtual close at current price.
+        // solReceived stays = remaining (cost basis), so P&L reflects price move correctly.
+        const priceRatio = pos.entryPrice > 0 ? exitPrice / pos.entryPrice : 1;
+        solReceived = remaining * priceRatio;
+        logger.warn(
+          { mint: pos.mint, symbol: pos.symbol, reason },
+          "Graduation sniper: wallet not configured — recording virtual close (no on-chain tx)",
+        );
       }
     } catch (err) {
       // CRITICAL: Sell failed — tokens are still in wallet.
@@ -1311,13 +1321,21 @@ class GraduationSniperService {
     let solReceived: number;
     let exitTxSig   = "";
 
-    if (tokensToSell > 0) {
+    if (tokensToSell > 0 && solanaWalletService.isReady) {
       // CRITICAL: Do NOT catch sell failures here. If the sell throws, we let it
       // propagate so the caller (TP1/TP2 logic) knows the tokens are still in wallet.
       // Using a price-ratio fallback was the root cause of "sold in app, not on-chain".
       const result  = await jupiterSwapService.sell(pos.mint, tokensToSell, this.config.slippageBps, this.config.priorityFeeLamports);
       solReceived   = result.solReceived;
       exitTxSig     = result.txSignature;
+    } else if (tokensToSell > 0 && !solanaWalletService.isReady) {
+      // No wallet — virtual/paper partial close at current price
+      const priceRatio = pos.entryPrice > 0 ? currentPrice / pos.entryPrice : 1;
+      solReceived = costBasis * priceRatio;
+      logger.warn(
+        { mint: pos.mint, symbol: pos.symbol, reason },
+        "Graduation sniper: wallet not configured — recording virtual partial close (no on-chain tx)",
+      );
     } else {
       // tokensToSell is 0 — this should never happen in normal operation.
       // Do NOT use solReceived = costBasis (that was fake P&L — recording breakeven when no sell happened).
