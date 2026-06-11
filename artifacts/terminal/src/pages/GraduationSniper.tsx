@@ -1,11 +1,12 @@
 import { useState } from "react";
-import { Target, Wifi, WifiOff, TrendingUp, TrendingDown, RefreshCw, Settings, X, CheckCircle2, XCircle, Clock, Zap, Trash2, Pencil, RotateCcw, AlertTriangle, Download, ExternalLink, Activity, LogOut } from "lucide-react";
+import { useQueryClient } from "@tanstack/react-query";
+import { Target, Wifi, WifiOff, TrendingUp, TrendingDown, RefreshCw, Settings, X, CheckCircle2, XCircle, Clock, Zap, Trash2, Pencil, RotateCcw, AlertTriangle, Download, ExternalLink, Activity, LogOut, Wallet, Copy } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   useSniperStatus, useSniperPositions, useSniperHistory, useSniperEvents, useUpdateSniperConfig,
   useDeleteSniperPosition, useEditSniperPosition, useDeleteSniperEvent, useResetSniperAccount,
-  useRecalculateSniperPnl, useCloseSniperPosition,
+  useRecalculateSniperPnl, useCloseSniperPosition, useWalletBalance,
 } from "@/lib/api";
 import { SniperPosition, SniperEvent, SniperConfig } from "@/lib/types";
 
@@ -599,7 +600,10 @@ function HistoryRow({ pos }: { pos: SniperPosition }) {
 export default function GraduationSniper() {
   const [showSettings, setShowSettings] = useState(false);
   const [showReset,    setShowReset]    = useState(false);
+  const [copied,       setCopied]       = useState(false);
+  const queryClient = useQueryClient();
   const { data: status, isLoading: statusLoading } = useSniperStatus();
+  const { data: wallet, isFetching: walletFetching } = useWalletBalance();
   const { data: positions = [] } = useSniperPositions();
   const { data: history = []   } = useSniperHistory();
   const { data: events = []    } = useSniperEvents();
@@ -614,6 +618,19 @@ export default function GraduationSniper() {
     ? Math.round((status.wins / (status.wins + status.losses)) * 100)
     : null;
 
+  function copyAddress() {
+    if (!wallet?.address) return;
+    navigator.clipboard.writeText(wallet.address).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    });
+  }
+
+  function refreshWallet() {
+    void queryClient.invalidateQueries({ queryKey: ["sniper-wallet"] });
+    void queryClient.invalidateQueries({ queryKey: ["sniper-status"] });
+  }
+
   return (
     <div className="min-h-screen bg-[#0a0a0f]">
       {/* ── Header ── */}
@@ -625,7 +642,7 @@ export default function GraduationSniper() {
             </div>
             <div>
               <h1 className="text-sm font-black text-white leading-none">Graduation Sniper</h1>
-              <p className="text-[9px] text-white/35 leading-none mt-0.5">Pump.fun → Raydium · Paper Mode</p>
+              <p className="text-[9px] text-white/35 leading-none mt-0.5">Pump.fun → Raydium · {wallet?.ready ? <span className="text-emerald-400/80 font-bold">🔴 LIVE</span> : "Wallet not configured"}</p>
             </div>
           </div>
           <div className="flex items-center gap-2">
@@ -694,11 +711,45 @@ export default function GraduationSniper() {
               <span className="text-[9px] text-white/25">SOL · total</span>
             </div>
           </div>
-          {/* Balance context */}
-          <div className="mt-3 pt-2.5 border-t border-white/6 flex items-center justify-between text-[9px] text-white/30">
-            <span>Wallet: <span className={`font-semibold ${status?.walletReady ? "text-emerald-400/80" : "text-red-400/80"}`}>{status?.walletReady ? "🔴 LIVE" : "⚠️ Not configured"}</span></span>
-            <span>Balance: <span className="text-amber-400/80 font-semibold">{fmt(status?.walletBalance ?? 0, 3)} SOL</span></span>
-            <span>In positions: <span className="text-white/50 font-semibold">{fmt(status?.capitalInOpen ?? 0, 3)} SOL</span></span>
+          {/* Wallet row */}
+          <div className="mt-3 pt-2.5 border-t border-white/6">
+            {wallet?.ready ? (
+              <div className="flex items-center gap-2">
+                <Wallet className="w-3 h-3 text-emerald-400 shrink-0" />
+                <span className="text-[9px] text-emerald-400/80 font-bold tracking-wide">LIVE</span>
+                <span className="text-[9px] text-white/25 font-mono truncate flex-1">
+                  {wallet.address.slice(0, 6)}…{wallet.address.slice(-6)}
+                </span>
+                <button onClick={copyAddress} title="Copy address"
+                  className="p-0.5 rounded hover:bg-white/10 text-white/30 hover:text-white/70 transition-colors">
+                  <Copy className="w-2.5 h-2.5" />
+                </button>
+                {wallet.solscan && (
+                  <a href={wallet.solscan} target="_blank" rel="noopener noreferrer" title="View on Solscan"
+                    className="p-0.5 rounded hover:bg-white/10 text-white/30 hover:text-amber-400/80 transition-colors">
+                    <ExternalLink className="w-2.5 h-2.5" />
+                  </a>
+                )}
+                <span className="text-[9px] text-amber-400/80 font-bold ml-auto">
+                  {fmt(wallet.balance, 4)} SOL
+                </span>
+                <button onClick={refreshWallet} title="Refresh balance"
+                  className={`p-0.5 rounded hover:bg-white/10 text-white/30 hover:text-white/70 transition-colors ${walletFetching ? "animate-spin" : ""}`}>
+                  <RefreshCw className="w-2.5 h-2.5" />
+                </button>
+                {copied && <span className="text-[8px] text-emerald-400 font-bold">Copied!</span>}
+              </div>
+            ) : (
+              <div className="flex items-center gap-2 text-[9px] text-white/30">
+                <Wallet className="w-3 h-3 text-amber-400/50 shrink-0" />
+                <span className="text-amber-400/60 font-semibold">⚠️ Wallet not configured</span>
+                <span className="text-white/20">— set SOLANA_PRIVATE_KEY env var to enable live trading</span>
+              </div>
+            )}
+            <div className="flex items-center justify-between mt-1.5 text-[9px] text-white/25">
+              <span>In positions: <span className="text-white/40 font-semibold">{fmt(status?.capitalInOpen ?? 0, 3)} SOL</span></span>
+              <span>Available: <span className="text-white/40 font-semibold">{fmt(Math.max(0, (wallet?.balance ?? 0) - (status?.capitalInOpen ?? 0)), 3)} SOL</span></span>
+            </div>
           </div>
         </div>
 

@@ -57,6 +57,25 @@ export function useWebSocket() {
 
 // ── Sniper queries ─────────────────────────────────────────────────────────────
 
+export interface WalletInfo {
+  address: string;
+  balance: number;
+  ready: boolean;
+  solscan: string | null;
+}
+
+export function useWalletBalance() {
+  return useQuery<WalletInfo>({
+    queryKey: ["sniper-wallet"],
+    queryFn: async () => {
+      const res = await fetch(apiUrl("/api/sniper/wallet"));
+      const json = await res.json() as { data: WalletInfo };
+      return json.data;
+    },
+    refetchInterval: 15000,
+  });
+}
+
 export function useSniperStatus() {
   return useQuery<SniperStatus>({
     queryKey: ["sniper-status"],
