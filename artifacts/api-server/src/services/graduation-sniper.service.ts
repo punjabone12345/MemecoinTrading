@@ -39,6 +39,13 @@ const DEAD_MOVE_PCT         = 5;              // < 5 % move = "dead"
 // already included in positionSizeSol-equivalent cost from Jupiter's quote).
 const TX_OVERHEAD_SOL = 0.003;
 
+// ── Sell failure give-up threshold ────────────────────────────────────────────
+// After this many consecutive cross-tick sell failures for the same position,
+// force a virtual close and alert via Telegram so the user can manually sell
+// via Phantom. Prevents infinite retry loops draining SOL on fees when the
+// Raydium pool is dead/drained (Custom: 6024 / ExceededSlippage errors).
+const MAX_SELL_FAILS = 15;
+
 // ── Instant-rug detection constants (pre-entry) ───────────────────────────────
 const RUG_CHECK_WAIT_MS     = 8_000;          // monitor for 8 s after baseline price
 const RUG_DROP_ABORT_PCT    = 20;             // abort entry if price drops ≥ 20% in that window
@@ -219,6 +226,10 @@ class GraduationSniperService {
   private closingMints: Set<string> = new Set();
   // Concurrency guard — prevents duplicate graduation processing for same mint
   private processingGraduations: Set<string> = new Set();
+  // Cross-tick sell failure counter — incremented each time a close is retried.
+  // When it hits MAX_SELL_FAILS the position is force-closed virtually so the
+  // infinite fee-draining retry loop is broken (Custom: 6024 dead-pool errors).
+  private sellFailCount: Map<string, number> = new Map();
   // FIX 2: Liquidity monitoring — tracks last known liquidity per position
   private liquidityIntervalId: ReturnType<typeof setInterval> | null = null;
   private lastPositionLiquidityUsd: Map<string, number> = new Map();
@@ -1327,22 +1338,81 @@ class GraduationSniperService {
             reason = `${reason} (sold externally — tokens not in wallet)`;
             // Fall through to the normal close-recording logic below
           } else {
-            // Tokens are still in wallet — release guard and retry next tick
+            // Tokens are still in wallet — track cross-tick failures
+            const fails = (this.sellFailCount.get(pos.mint) ?? 0) + 1;
+            this.sellFailCount.set(pos.mint, fails);
+
+            if (fails < MAX_SELL_FAILS) {
+              // Below give-up threshold — release guard and retry next tick
+              this.closingMints.delete(pos.mint);
+              logger.error(
+                { mint: pos.mint, symbol: pos.symbol, reason, errMsg, onChainBalance, sellFailCount: fails, maxSellFails: MAX_SELL_FAILS },
+                "Graduation sniper: Jupiter sell (close) FAILED ❌ — tokens still in wallet, will retry next price tick",
+              );
+              return;
+            }
+
+            // Hit MAX_SELL_FAILS — pool is likely dead (Custom: 6024 / ExceededSlippage).
+            // Force a virtual close so this retry loop stops draining SOL on fees.
+            // Tokens may still be in wallet — user must sell manually via Phantom.
+            logger.error(
+              { mint: pos.mint, symbol: pos.symbol, reason, errMsg, sellFailCount: fails },
+              "Graduation sniper: sell FAILED 15 consecutive times — force-closing virtually. TOKENS MAY STILL BE IN WALLET — manual Phantom sell required.",
+            );
+            const priceRatio = pos.entryPrice > 0 ? exitPrice / pos.entryPrice : 1;
+            solReceived = remaining * priceRatio;
+            reason = `${reason} — UNSELLABLE after ${fails} attempts (dead pool). SELL MANUALLY VIA PHANTOM.`;
+            if (isTelegramConfigured()) {
+              void sendTelegram(
+                `🚨 <b>UNSELLABLE POSITION — ACTION REQUIRED</b>\n` +
+                `──────────────────────\n` +
+                `🪙 Token: <b>${pos.symbol}</b>\n` +
+                `📋 CA: <code>${pos.mint}</code>\n` +
+                `❌ Sell failed ${fails}x — Raydium pool likely dead/drained\n` +
+                `⚠️ Tokens may still be in your wallet\n` +
+                `👉 <b>Please sell manually via Phantom or Raydium UI</b>\n` +
+                `🔗 <a href="https://raydium.io/swap/?inputMint=${pos.mint}&outputMint=So11111111111111111111111111111111111111112">Sell on Raydium</a>\n` +
+                `🕐 ${toIST(new Date())}`,
+              );
+            }
+            // Fall through to close-recording logic below (virtual close at price ratio)
+          }
+        } catch (balErr) {
+          // Balance check failed — track cross-tick failures
+          const fails = (this.sellFailCount.get(pos.mint) ?? 0) + 1;
+          this.sellFailCount.set(pos.mint, fails);
+
+          if (fails < MAX_SELL_FAILS) {
             this.closingMints.delete(pos.mint);
             logger.error(
-              { mint: pos.mint, symbol: pos.symbol, reason, errMsg, onChainBalance },
-              "Graduation sniper: Jupiter sell (close) FAILED ❌ — tokens still in wallet, will retry next price tick",
+              { mint: pos.mint, symbol: pos.symbol, reason, errMsg, balErr: (balErr as Error).message, sellFailCount: fails },
+              "Graduation sniper: Jupiter sell FAILED ❌ and balance check also failed — will retry next price tick",
             );
             return;
           }
-        } catch (balErr) {
-          // Balance check failed — err on the side of caution and retry next tick
-          this.closingMints.delete(pos.mint);
+
+          // Give up — force virtual close
           logger.error(
-            { mint: pos.mint, symbol: pos.symbol, reason, errMsg, balErr: (balErr as Error).message },
-            "Graduation sniper: Jupiter sell FAILED ❌ and balance check also failed — will retry next price tick",
+            { mint: pos.mint, symbol: pos.symbol, reason, errMsg, sellFailCount: fails },
+            "Graduation sniper: sell + balance-check both FAILED 15 consecutive times — force-closing virtually.",
           );
-          return;
+          const priceRatio = pos.entryPrice > 0 ? exitPrice / pos.entryPrice : 1;
+          solReceived = remaining * priceRatio;
+          reason = `${reason} — UNSELLABLE after ${fails} attempts. SELL MANUALLY VIA PHANTOM.`;
+          if (isTelegramConfigured()) {
+            void sendTelegram(
+              `🚨 <b>UNSELLABLE POSITION — ACTION REQUIRED</b>\n` +
+              `──────────────────────\n` +
+              `🪙 Token: <b>${pos.symbol}</b>\n` +
+              `📋 CA: <code>${pos.mint}</code>\n` +
+              `❌ Sell failed ${fails}x — Raydium pool likely dead/drained\n` +
+              `⚠️ Tokens may still be in your wallet\n` +
+              `👉 <b>Please sell manually via Phantom or Raydium UI</b>\n` +
+              `🔗 <a href="https://raydium.io/swap/?inputMint=${pos.mint}&outputMint=So11111111111111111111111111111111111111112">Sell on Raydium</a>\n` +
+              `🕐 ${toIST(new Date())}`,
+            );
+          }
+          // Fall through to close-recording logic below
         }
       } else {
         // No wallet — can't check balance, retry next tick
@@ -1358,6 +1428,7 @@ class GraduationSniperService {
     // Sell confirmed — now remove from open positions
     this.openPositions.delete(pos.mint);
     this.closingMints.delete(pos.mint);
+    this.sellFailCount.delete(pos.mint); // reset on confirmed close
     // Record the confirmed on-chain sell tx — positions without this are "unverified"
     if (exitTxSig) pos.exitSig = exitTxSig;
 
