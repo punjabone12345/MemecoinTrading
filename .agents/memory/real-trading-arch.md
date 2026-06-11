@@ -11,9 +11,11 @@ description: Jupiter v6 swaps, Solana wallet service, async call chain, key desi
 
 ## Jupiter swap service
 - `jupiter-swap.service.ts` — buy (SOL→token) and sell (token→SOL)
-- Jupiter v6 API: `https://quote-api.jup.ag/v6/quote` and `.../swap`
+- **IMPORTANT:** Use Jupiter Lite API — `https://lite-api.jup.ag/swap/v1/quote` and `.../swap`
+- Old `quote-api.jup.ag` domain is dead (ENOTFOUND) — never use it again
+- Lite API swap body uses `prioritizationFeeLamports: <number>` (plain int, NOT the v6 nested object)
+- Lite API still returns `swapTransaction` field (same as v6) — no field name change needed
 - SOL mint: `So11111111111111111111111111111111111111112`
-- Both methods have fallback to price-ratio P&L if Jupiter fails (avoids crash)
 
 ## Async call chain (critical)
 - `enterPosition`, `partialClose`, `closePosition` are all `async`
