@@ -79,7 +79,8 @@ class SolanaWalletService {
 
   /**
    * Sign + send and WAIT for on-chain confirmation before returning.
-   * Used for SELL orders — caller must not mark position as closed until this resolves.
+   * Used for BOTH BUY and SELL orders — position is only recorded / closed
+   * after this resolves successfully.
    * Throws if the transaction fails or is rejected on-chain.
    */
   async signAndSendAndConfirm(txBase64: string): Promise<string> {

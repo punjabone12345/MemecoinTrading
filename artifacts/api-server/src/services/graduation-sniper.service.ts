@@ -29,6 +29,16 @@ const SLOW_INTERVAL_MS      = 60_000;
 const DEAD_POSITION_MS      = 2 * 60 * 60_000;// 2 h open with no movement
 const DEAD_MOVE_PCT         = 5;              // < 5 % move = "dead"
 
+// ── Minimum SOL reserve needed above positionSizeSol ─────────────────────────
+// Covers ALL transaction overhead so the bot never attempts a trade it cannot pay for:
+//   • Token account rent   ≈ 0.00204 SOL (Solana charges this to create a new
+//                                         token account; Jupiter adds it automatically)
+//   • Solana base TX fee   ≈ 0.000005 SOL per transaction × 2 (buy + sell)
+//   • Small safety buffer  ≈ 0.0005 SOL
+// Total conservative reserve = 0.003 SOL (regardless of priority fee — that is
+// already included in positionSizeSol-equivalent cost from Jupiter's quote).
+const TX_OVERHEAD_SOL = 0.003;
+
 // ── Instant-rug detection constants (pre-entry) ───────────────────────────────
 const RUG_CHECK_WAIT_MS     = 8_000;          // monitor for 8 s after baseline price
 const RUG_DROP_ABORT_PCT    = 20;             // abort entry if price drops ≥ 20% in that window
@@ -831,7 +841,11 @@ class GraduationSniperService {
     if (this.seenMints.has(mint))                                return "Already traded this mint";
     if (this.openPositions.size >= this.config.maxOpenPositions) return `Max open positions (${this.config.maxOpenPositions}) reached`;
     if (blacklistService.isBlacklisted(mint))                    return "Mint in permanent blacklist";
-    if (this.walletBalanceSol < this.config.positionSizeSol)     return `Insufficient wallet balance (${this.walletBalanceSol.toFixed(3)} SOL < ${this.config.positionSizeSol} SOL)`;
+    // Must have enough for the trade PLUS fees/rent so the TX never fails on-chain.
+    // TX_OVERHEAD_SOL = 0.003 covers: token account rent (~0.00204) + base TX fees + buffer.
+    const minRequired = this.config.positionSizeSol + TX_OVERHEAD_SOL;
+    if (this.walletBalanceSol < minRequired)
+      return `Insufficient balance — need ${minRequired.toFixed(4)} SOL (${this.config.positionSizeSol} trade + ${TX_OVERHEAD_SOL} fees/rent), have ${this.walletBalanceSol.toFixed(4)} SOL`;
     return null;
   }
 
