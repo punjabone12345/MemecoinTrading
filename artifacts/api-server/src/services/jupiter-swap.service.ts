@@ -23,14 +23,15 @@ export interface SellResult {
 }
 
 // ── Retry helper ──────────────────────────────────────────────────────────────
-// Retries any async fn up to maxAttempts times with linear back-off.
+// Retries any async fn up to maxAttempts times with exponential back-off.
 // For buy: fresh graduates may take 2-5s to appear in Jupiter routing — retries fix that.
 // For sell: escalating slippage is passed in; caller controls it per attempt.
+// Special handling for 429 (rate limit): waits longer and respects Retry-After header.
 async function withRetry<T>(
   label: string,
   fn: (attempt: number) => Promise<T>,
-  maxAttempts = 3,
-  baseDelayMs = 1500,
+  maxAttempts = 5,
+  baseDelayMs = 2000,
 ): Promise<T> {
   let lastErr: unknown;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -45,8 +46,19 @@ async function withRetry<T>(
         `Jupiter: attempt ${attempt}/${maxAttempts} failed — ${msg}`);
 
       if (attempt < maxAttempts) {
-        const delay = baseDelayMs * attempt;       // 1.5s, 3s
-        logger.info({ label, delay }, `Jupiter: waiting ${delay}ms before retry`);
+        let delay: number;
+        if (status === 429) {
+          // Rate limited — respect Retry-After header if present, else use long exponential wait
+          const retryAfter = Number(axErr.response?.headers?.["retry-after"] ?? 0);
+          delay = retryAfter > 0
+            ? retryAfter * 1000
+            : Math.min(baseDelayMs * Math.pow(2, attempt - 1), 30_000); // 2s, 4s, 8s, 16s … capped at 30s
+          logger.warn({ label, delay, retryAfter }, `Jupiter: 429 rate limit — waiting ${delay}ms`);
+        } else {
+          // Other errors: exponential back-off capped at 15s
+          delay = Math.min(baseDelayMs * Math.pow(2, attempt - 1), 15_000);
+          logger.info({ label, delay }, `Jupiter: waiting ${delay}ms before retry`);
+        }
         await new Promise(r => setTimeout(r, delay));
       }
     }

@@ -183,6 +183,8 @@ class GraduationSniperService {
   // WebSocket broadcaster — set by the WS server after init so the sniper
   // can push real-time updates to all connected frontend clients.
   private broadcaster: (() => void) | null = null;
+  // Interval for detecting external sells (e.g. via Phantom wallet)
+  private externalSellCheckId: ReturnType<typeof setInterval> | null = null;
 
   setBroadcaster(fn: () => void): void {
     this.broadcaster = fn;
@@ -611,14 +613,18 @@ class GraduationSniperService {
     }, PRICE_LOOP_MS);
     // FIX 2: liquidity rug detection — poll every 30 s independent of price loop
     this.liquidityIntervalId = setInterval(() => void this.checkAllLiquidity(), LIQUIDITY_CHECK_MS);
+    // FIX 5: external sell detector — poll wallet token balances every 60 s
+    // Catches positions sold via Phantom wallet that the bot doesn't know about
+    this.externalSellCheckId = setInterval(() => void this.checkExternalSells(), 60_000);
     logger.info("Graduation sniper: started — WebSocket connecting");
   }
 
   stop(): void {
     this.started = false;
-    if (this.priceIntervalId)     { clearInterval(this.priceIntervalId);     this.priceIntervalId     = null; }
-    if (this.liquidityIntervalId) { clearInterval(this.liquidityIntervalId); this.liquidityIntervalId = null; }
-    if (this.reconnectTimer)      { clearTimeout(this.reconnectTimer);       this.reconnectTimer      = null; }
+    if (this.priceIntervalId)      { clearInterval(this.priceIntervalId);      this.priceIntervalId      = null; }
+    if (this.liquidityIntervalId)  { clearInterval(this.liquidityIntervalId);  this.liquidityIntervalId  = null; }
+    if (this.externalSellCheckId)  { clearInterval(this.externalSellCheckId);  this.externalSellCheckId  = null; }
+    if (this.reconnectTimer)       { clearTimeout(this.reconnectTimer);        this.reconnectTimer       = null; }
     this.ws?.close();
   }
 
@@ -1271,15 +1277,51 @@ class GraduationSniperService {
         );
       }
     } catch (err) {
-      // CRITICAL: Sell failed — tokens are still in wallet.
-      // Release the closing guard so the next price tick will retry.
-      // Do NOT mark as closed or record fake PnL.
-      this.closingMints.delete(pos.mint);
-      logger.error(
-        { mint: pos.mint, symbol: pos.symbol, reason, err: (err as Error).message },
-        "Graduation sniper: Jupiter sell (close) FAILED ❌ — will retry next price tick",
-      );
-      return;
+      const errMsg = (err as Error).message ?? String(err);
+
+      // Check if tokens are actually gone from the wallet (sold externally via Phantom).
+      // If on-chain balance is 0, the sell already happened — close the position cleanly
+      // instead of retrying forever in a fail loop.
+      if (walletReady) {
+        try {
+          const onChainBalance = await this.fetchWalletTokenBalance(pos.mint);
+          if (onChainBalance !== null && onChainBalance <= 0) {
+            logger.warn(
+              { mint: pos.mint, symbol: pos.symbol, reason, errMsg },
+              "Graduation sniper: sell failed but on-chain token balance is 0 — position was sold externally (Phantom). Closing cleanly.",
+            );
+            // Tokens are gone — record close at current price, SOL received is unknown so use price ratio
+            const priceRatio = pos.entryPrice > 0 ? exitPrice / pos.entryPrice : 1;
+            solReceived = remaining * priceRatio;
+            reason = `${reason} (sold externally — tokens not in wallet)`;
+            // Fall through to the normal close-recording logic below
+          } else {
+            // Tokens are still in wallet — release guard and retry next tick
+            this.closingMints.delete(pos.mint);
+            logger.error(
+              { mint: pos.mint, symbol: pos.symbol, reason, errMsg, onChainBalance },
+              "Graduation sniper: Jupiter sell (close) FAILED ❌ — tokens still in wallet, will retry next price tick",
+            );
+            return;
+          }
+        } catch (balErr) {
+          // Balance check failed — err on the side of caution and retry next tick
+          this.closingMints.delete(pos.mint);
+          logger.error(
+            { mint: pos.mint, symbol: pos.symbol, reason, errMsg, balErr: (balErr as Error).message },
+            "Graduation sniper: Jupiter sell FAILED ❌ and balance check also failed — will retry next price tick",
+          );
+          return;
+        }
+      } else {
+        // No wallet — can't check balance, retry next tick
+        this.closingMints.delete(pos.mint);
+        logger.error(
+          { mint: pos.mint, symbol: pos.symbol, reason, errMsg },
+          "Graduation sniper: Jupiter sell (close) FAILED ❌ — will retry next price tick",
+        );
+        return;
+      }
     }
 
     // Sell confirmed — now remove from open positions
@@ -1443,6 +1485,89 @@ class GraduationSniperService {
           void this.closePosition(pos, `Liquidity Rug: -${dropPct.toFixed(0)}% in 30s`, price);
         }
       } catch { /* ignore per-position errors */ }
+    }
+  }
+
+  // ── FIX 5: External sell detector (Phantom wallet sells) ──────────────────
+  // Polls on-chain token balances every 60s. If any open position has 0 tokens
+  // in the wallet, it was sold externally (via Phantom or another wallet).
+  // We mark it closed at the last known price so it disappears from the bot UI.
+
+  private async checkExternalSells(): Promise<void> {
+    if (!solanaWalletService.isReady || this.openPositions.size === 0) return;
+
+    for (const [mint, pos] of Array.from(this.openPositions.entries())) {
+      // Skip positions already mid-close
+      if (this.closingMints.has(mint)) continue;
+
+      try {
+        const balance = await this.fetchWalletTokenBalance(mint);
+        if (balance === null) continue; // RPC error — skip, check next tick
+        if (balance > 0) continue;     // tokens still present — nothing to do
+
+        // Balance is 0: tokens have been sold externally
+        logger.warn(
+          { mint, symbol: pos.symbol, recordedTokens: pos.tokenAmount },
+          "Graduation sniper: on-chain token balance is 0 — position was sold externally (Phantom). Auto-closing.",
+        );
+
+        // Get a fresh price for the record; fall back to last known
+        let exitPrice = pos.currentPrice > 0 ? pos.currentPrice : pos.entryPrice;
+        try {
+          const pd = await this.fetchPositionPrice(mint);
+          if (pd && pd.price > 0) exitPrice = pd.price;
+        } catch { /* ignore */ }
+
+        // Remove from open positions and record as closed
+        this.openPositions.delete(mint);
+        this.closingMints.delete(mint);
+
+        const priceRatio   = pos.entryPrice > 0 ? exitPrice / pos.entryPrice : 1;
+        const remaining    = pos.sizeSol * pos.remainingFraction;
+        const solReceived  = remaining * priceRatio;
+        const closePnl     = solReceived - remaining;
+
+        pos.runnerRealizedSol += closePnl;
+        pos.realizedPnlSol    += closePnl;
+        pos.currentPrice       = exitPrice;
+        pos.exitPrice          = exitPrice;
+        pos.closeReason        = "Sold externally (Phantom wallet)";
+        pos.closedAt           = Date.now();
+        pos.status             = "closed";
+        pos.remainingFraction  = 0;
+        this.updateLivePnl(pos);
+
+        this.allTimeRealizedSol += pos.realizedPnlSol;
+        if (pos.realizedPnlSol > 0) this.allTimeWins++; else this.allTimeLosses++;
+        this.closedPositions.push(pos);
+        if (this.closedPositions.length > MAX_CLOSED) this.closedPositions.shift();
+
+        this.registerClosedTrade(pos);
+        void this.persistPosition(pos);
+        void this.refreshWalletBalance();
+        this.broadcast();
+
+        logger.info(
+          { mint, symbol: pos.symbol, exitPrice, closePnl: closePnl.toFixed(4) },
+          "Graduation sniper: external-sell position closed ✅",
+        );
+
+        if (isTelegramConfigured()) {
+          const pnlStr = `${closePnl >= 0 ? "+" : ""}${closePnl.toFixed(4)} SOL`;
+          void sendTelegram(
+            `⚠️ <b>EXTERNAL SELL DETECTED</b>\n` +
+            `──────────────────────\n` +
+            `🪙 Token: <b>${pos.symbol}</b>\n` +
+            `📋 CA: <code>${pos.mint}</code>\n` +
+            `🔍 Tokens no longer in wallet — sold via Phantom or another wallet\n` +
+            `💰 Est. PNL: <b>${pnlStr}</b>\n` +
+            `📝 Position auto-closed in bot\n` +
+            `🕐 ${toIST(new Date())}`,
+          );
+        }
+      } catch (err) {
+        logger.warn({ mint, err: (err as Error).message }, "Graduation sniper: external sell check error — skipping");
+      }
     }
   }
 
