@@ -563,7 +563,10 @@ class GraduationSniperService {
       tp2Hit:           Boolean(row["tp2_hit"]),
       remainingFraction: Number(row["remaining_fraction"] ?? 1),
       effectiveSlPrice: Number(row["effective_sl_price"] ?? 0),
-      trailingHigh:     Number(row["trailing_high"] ?? 0),
+      // If trailing_high was never persisted (0 or NULL), fall back to entryPrice.
+      // Without this, the first price tick overwrites trailingHigh with the current
+      // (already-crashed) price, making dropFromPeak = 0% and SL never firing.
+      trailingHigh:     Number(row["trailing_high"]) || Number(row["entry_price"]) || 0,
       status:           (row["status"] as "open" | "closed") ?? "open",
       realizedPnlSol:   Number(row["realized_pnl_sol"] ?? 0),
       unrealizedPnlSol: 0,
@@ -1549,7 +1552,11 @@ class GraduationSniperService {
 
   private async checkStagedSL(pos: SniperPosition, price: number, ageMs: number): Promise<boolean> {
     const dropFromEntry = (1 - price / pos.entryPrice) * 100;
-    const dropFromPeak  = pos.trailingHigh > 0 ? (1 - price / pos.trailingHigh) * 100 : 0;
+    // Always use entryPrice as the floor for peak — if trailingHigh was loaded as 0
+    // from DB (NULL column) the first tick sets it to the crashed price, making
+    // dropFromPeak = 0% forever. entryPrice floor ensures SL always has a valid reference.
+    const peak         = Math.max(pos.trailingHigh, pos.entryPrice);
+    const dropFromPeak = peak > 0 ? (1 - price / peak) * 100 : dropFromEntry;
 
     // After TP2: runner is managed by the trailing stop in the main loop
     if (pos.tp2Hit) return false;
