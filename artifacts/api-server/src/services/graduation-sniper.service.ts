@@ -164,6 +164,18 @@ class GraduationSniperService {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private started = false;
 
+  // WebSocket broadcaster — set by the WS server after init so the sniper
+  // can push real-time updates to all connected frontend clients.
+  private broadcaster: (() => void) | null = null;
+
+  setBroadcaster(fn: () => void): void {
+    this.broadcaster = fn;
+  }
+
+  private broadcast(): void {
+    try { this.broadcaster?.(); } catch { /* ignore */ }
+  }
+
   private config: SniperConfig = { ...DEFAULT_CONFIG };
   private openPositions: Map<string, SniperPosition> = new Map();
   private closedPositions: SniperPosition[] = [];
@@ -988,6 +1000,7 @@ class GraduationSniperService {
 
     void this.persistPosition(pos);
     void this.refreshWalletBalance();
+    this.broadcast(); // push real-time update to all frontend clients
 
     logger.info(
       { mint: pos.mint, symbol: pos.symbol, reason, exitPrice, solReceived, pnl: pos.realizedPnlSol, txSignature: exitTxSig },
@@ -1058,6 +1071,7 @@ class GraduationSniperService {
 
     void this.persistPosition(pos);
     void this.refreshWalletBalance();
+    this.broadcast(); // push real-time update — TP1/TP2 partial close
 
     logger.info(
       { mint: pos.mint, symbol: pos.symbol, reason, tokensToSell, solReceived, closePnl: closePnl.toFixed(4), remaining: pos.remainingFraction, txSignature: exitTxSig },

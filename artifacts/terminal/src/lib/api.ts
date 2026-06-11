@@ -34,6 +34,7 @@ export function useWebSocket() {
           if (data.type === "sniper_update") {
             queryClient.invalidateQueries({ queryKey: ["sniper-positions"] });
             queryClient.invalidateQueries({ queryKey: ["sniper-status"] });
+            queryClient.invalidateQueries({ queryKey: ["sniper-history"] });
           }
         } catch (_) {}
       };
