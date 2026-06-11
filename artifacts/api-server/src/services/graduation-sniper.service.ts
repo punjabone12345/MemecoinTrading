@@ -1230,14 +1230,13 @@ class GraduationSniperService {
   }
 
   private async closePosition(pos: SniperPosition, reason: string, exitPrice: number): Promise<void> {
-    // FIX 4: Skip if this trade was already logged (e.g. after server restart/redeploy)
-    if (this.isDuplicateTrade(pos)) {
-      logger.warn(
-        { mint: pos.mint, symbol: pos.symbol, reason },
-        "Graduation sniper: duplicate close detected — skipping (same mint+entry already logged)",
-      );
-      return;
-    }
+    // NOTE: isDuplicateTrade is intentionally NOT checked here.
+    // A position in openPositions MUST always be closeable regardless of fingerprint history.
+    // The old check caused a permanent silent block: if a previous close attempt registered
+    // the fingerprint but the position was still open (e.g. DB write failed or server
+    // restarted), every future close — including manual — would silently no-op while the
+    // frontend showed a false "Position closed" toast. Fingerprint is only registered
+    // AFTER a confirmed sell (registerClosedTrade below) to prevent double-recording in history.
 
     // Guard: if a close is already in-flight for this mint, skip.
     // Position stays in openPositions so the frontend keeps showing it.
