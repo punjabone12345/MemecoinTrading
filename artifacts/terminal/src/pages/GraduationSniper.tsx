@@ -88,16 +88,17 @@ interface SettingsField {
 
 const SETTINGS_FIELDS: SettingsField[] = [
   { key: "enabled",           label: "Enable Sniper",          description: "Master switch — starts/stops catching graduations", type: "boolean" },
-  { key: "positionSizeSol",   label: "Position Size (SOL)",    description: "Virtual SOL per paper trade",          type: "number", min: 0.01, max: 10,   step: 0.01 },
-  { key: "maxOpenPositions",  label: "Max Open Positions",     description: "Halt entries above this count",        type: "number", min: 1,    max: 20,   step: 1    },
-  { key: "slPct",             label: "Stop Loss %",            description: "Exit whole position at this loss",     type: "number", min: 5,    max: 90,   step: 1    },
-  { key: "tp1Pct",            label: "TP1 Target %",           description: "First take-profit — sell TP1 Close %", type: "number", min: 20, max: 1000, step: 5 },
-  { key: "tp1ClosePct",       label: "TP1 Close %",            description: "% of position to sell at TP1",        type: "number", min: 10,   max: 90,   step: 5    },
-  { key: "tp2Pct",            label: "TP2 Target %",           description: "Second take-profit — sell TP2 Close %", type: "number", min: 50, max: 5000, step: 25 },
-  { key: "tp2ClosePct",       label: "TP2 Close %",            description: "% of original position to sell at TP2", type: "number", min: 5,  max: 80,   step: 5    },
-  { key: "trailingStopPct",   label: "Trailing Stop %",        description: "Runner trailing stop below peak",      type: "number", min: 5,    max: 80,   step: 5    },
-  { key: "waitBeforeEntryMs", label: "Entry Delay (ms)",       description: "Wait after detection before buying",   type: "number", min: 0,    max: 30000, step: 500 },
-  { key: "virtualBalanceSol", label: "Virtual Balance (SOL)",  description: "Starting virtual wallet size",         type: "number", min: 1,    max: 1000, step: 0.5  },
+  { key: "positionSizeSol",      label: "Position Size (SOL)",    description: "SOL per live trade",                   type: "number", min: 0.01, max: 10,     step: 0.01  },
+  { key: "maxOpenPositions",     label: "Max Open Positions",     description: "Halt entries above this count",        type: "number", min: 1,    max: 20,     step: 1     },
+  { key: "slPct",                label: "Stop Loss %",            description: "Exit whole position at this loss",     type: "number", min: 5,    max: 90,     step: 1     },
+  { key: "tp1Pct",               label: "TP1 Target %",           description: "First take-profit — sell TP1 Close %", type: "number", min: 20,  max: 1000,   step: 5     },
+  { key: "tp1ClosePct",          label: "TP1 Close %",            description: "% of position to sell at TP1",        type: "number", min: 10,   max: 90,     step: 5     },
+  { key: "tp2Pct",               label: "TP2 Target %",           description: "Second take-profit — sell TP2 Close %", type: "number", min: 50, max: 5000,   step: 25    },
+  { key: "tp2ClosePct",          label: "TP2 Close %",            description: "% of original position to sell at TP2", type: "number", min: 5,  max: 80,     step: 5     },
+  { key: "trailingStopPct",      label: "Trailing Stop %",        description: "Runner trailing stop below peak",      type: "number", min: 5,    max: 80,     step: 5     },
+  { key: "waitBeforeEntryMs",    label: "Entry Delay (ms)",       description: "Wait after detection before buying",   type: "number", min: 0,    max: 30000,  step: 500   },
+  { key: "slippageBps",          label: "Slippage (bps)",         description: "Max slippage: 1000 = 10%, 500 = 5%",  type: "number", min: 100,  max: 5000,   step: 100   },
+  { key: "priorityFeeLamports",  label: "Priority Fee (lamports)", description: "Tx priority fee: 1000000 = 0.001 SOL", type: "number", min: 0,   max: 10000000, step: 100000 },
 ];
 
 function SettingsPanel({ config, onClose }: { config: SniperConfig; onClose: () => void }) {
@@ -695,15 +696,15 @@ export default function GraduationSniper() {
           </div>
           {/* Balance context */}
           <div className="mt-3 pt-2.5 border-t border-white/6 flex items-center justify-between text-[9px] text-white/30">
-            <span>Starting balance: <span className="text-white/50 font-semibold">{fmt(config?.virtualBalanceSol ?? 10, 1)} SOL</span></span>
-            <span>Current wallet: <span className="text-amber-400/80 font-semibold">{fmt(status?.virtualBalance ?? 0, 3)} SOL</span></span>
+            <span>Wallet: <span className={`font-semibold ${status?.walletReady ? "text-emerald-400/80" : "text-red-400/80"}`}>{status?.walletReady ? "🔴 LIVE" : "⚠️ Not configured"}</span></span>
+            <span>Balance: <span className="text-amber-400/80 font-semibold">{fmt(status?.walletBalance ?? 0, 3)} SOL</span></span>
             <span>In positions: <span className="text-white/50 font-semibold">{fmt(status?.capitalInOpen ?? 0, 3)} SOL</span></span>
           </div>
         </div>
 
         {/* ── Stats grid ── */}
         <div className="grid grid-cols-3 gap-2">
-          <StatCard label="Virtual Balance" value={`${fmt(status?.virtualBalance ?? 0, 3)} SOL`} sub="paper wallet"
+          <StatCard label="Wallet Balance" value={`${fmt(status?.walletBalance ?? 0, 3)} SOL`} sub={status?.walletReady ? "live wallet" : "not configured"}
             icon={<Zap className="w-3.5 h-3.5 text-amber-400" />} accent="amber" />
           <StatCard label="Today's Grads" value={String(status?.graduationsToday ?? 0)} sub="detected"
             icon={<RefreshCw className="w-3.5 h-3.5 text-blue-400" />} accent="blue" />

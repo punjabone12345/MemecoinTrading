@@ -160,6 +160,7 @@ if (process.env["DATABASE_URL"]) {
       await migClient.query(`ALTER TABLE sniper_positions ADD COLUMN IF NOT EXISTS tp1_realized_sol DOUBLE PRECISION DEFAULT 0`);
       await migClient.query(`ALTER TABLE sniper_positions ADD COLUMN IF NOT EXISTS tp2_realized_sol DOUBLE PRECISION DEFAULT 0`);
       await migClient.query(`ALTER TABLE sniper_positions ADD COLUMN IF NOT EXISTS runner_realized_sol DOUBLE PRECISION DEFAULT 0`);
+      await migClient.query(`ALTER TABLE sniper_positions ADD COLUMN IF NOT EXISTS token_amount DOUBLE PRECISION DEFAULT 0`);
       logger.info("DB migration: all tables ready");
     } finally {
       migClient.release();

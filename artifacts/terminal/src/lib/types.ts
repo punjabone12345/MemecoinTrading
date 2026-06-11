@@ -347,7 +347,8 @@ export interface SniperConfig {
   tp2ClosePct: number;
   trailingStopPct: number;
   waitBeforeEntryMs: number;
-  virtualBalanceSol: number;
+  slippageBps: number;
+  priorityFeeLamports: number;
 }
 
 export interface SniperPosition {
@@ -402,8 +403,9 @@ export interface SniperStatus {
   totalUnrealizedPnlSol: number;
   totalCombinedPnlSol: number;
   capitalInOpen: number;
-  virtualBalance: number;
-  capitalInOpen: number;
+  walletBalance: number;
+  walletAddress: string;
+  walletReady: boolean;
   openCount: number;
   config: SniperConfig;
 }

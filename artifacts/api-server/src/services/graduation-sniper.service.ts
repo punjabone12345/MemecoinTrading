@@ -4,6 +4,8 @@ import { logger } from "../lib/logger.js";
 import { query, execute } from "../lib/db.js";
 import { blacklistService } from "./blacklist.service.js";
 import { sendTelegram, isTelegramConfigured, toIST } from "../lib/telegram.js";
+import { solanaWalletService } from "./solana-wallet.service.js";
+import { jupiterSwapService } from "./jupiter-swap.service.js";
 
 // ── Constants ────────────────────────────────────────────────────────────────
 const MIGRATION_WALLET   = "39azUYFWPz3VHgKCf3VChUwbpURdCHRxjWVowf5jUJjg";
@@ -72,21 +74,23 @@ export interface SniperConfig {
   tp2ClosePct: number;
   trailingStopPct: number;
   waitBeforeEntryMs: number;
-  virtualBalanceSol: number;
+  slippageBps: number;
+  priorityFeeLamports: number;
 }
 
 const DEFAULT_CONFIG: SniperConfig = {
-  enabled:           true,
-  positionSizeSol:   0.1,
-  maxOpenPositions:  5,
-  slPct:             40,
-  tp1Pct:            150,
-  tp1ClosePct:       40,
-  tp2Pct:            400,
-  tp2ClosePct:       40,
-  trailingStopPct:   30,
-  waitBeforeEntryMs: 3000,
-  virtualBalanceSol: 10.0,
+  enabled:              true,
+  positionSizeSol:      0.1,
+  maxOpenPositions:     5,
+  slPct:                40,
+  tp1Pct:               150,
+  tp1ClosePct:          40,
+  tp2Pct:               400,
+  tp2ClosePct:          40,
+  trailingStopPct:      30,
+  waitBeforeEntryMs:    3000,
+  slippageBps:          1000,    // 10% — memecoins need wide slippage
+  priorityFeeLamports:  1_000_000, // 0.001 SOL — fast confirmation
 };
 
 export interface SniperPosition {
@@ -113,6 +117,7 @@ export interface SniperPosition {
   closedAt?: number;
   exitPrice?: number;
   txSignature: string;
+  tokenAmount: number;       // raw token units received on buy (for selling later)
   // P&L breakdown per stage
   tp1RealizedSol: number;
   tp2RealizedSol: number;
@@ -141,7 +146,9 @@ export interface SniperStatus {
   totalUnrealizedPnlSol: number;
   totalCombinedPnlSol: number;
   capitalInOpen: number;
-  virtualBalance: number;
+  walletBalance: number;
+  walletAddress: string;
+  walletReady: boolean;
   openCount: number;
   config: SniperConfig;
 }
@@ -165,7 +172,7 @@ class GraduationSniperService {
   private graduationsToday = 0;
   private lastDayReset = new Date().toDateString();
   private seenMints: Set<string> = new Set();
-  private virtualBalance = DEFAULT_CONFIG.virtualBalanceSol;
+  private walletBalanceSol = 0; // refreshed from Solana RPC each price loop
 
   // ALL-time accumulators — NOT limited by MAX_CLOSED so P&L stays accurate
   // even after the in-memory closed-positions list is trimmed.
@@ -198,21 +205,28 @@ class GraduationSniperService {
     const partialFromOpen = Array.from(this.openPositions.values()).reduce((s, p) => s + p.realizedPnlSol, 0);
     const capitalInOpen   = Array.from(this.openPositions.values()).reduce((s, p) => s + p.sizeSol * p.remainingFraction, 0);
 
-    this.virtualBalance = this.config.virtualBalanceSol + this.allTimeRealizedSol + partialFromOpen - capitalInOpen;
-
     await this.loadClosedFingerprints();
+
+    // Fetch real wallet balance on startup
+    this.walletBalanceSol = await solanaWalletService.getBalance();
 
     logger.info(
       {
-        openPositions:      this.openPositions.size,
-        virtualBalance:     this.virtualBalance.toFixed(4),
-        allTimeRealized:    this.allTimeRealizedSol.toFixed(4),
-        partialFromOpen:    partialFromOpen.toFixed(4),
-        capitalInOpen:      capitalInOpen.toFixed(4),
-        enabled:            this.config.enabled,
+        openPositions:   this.openPositions.size,
+        walletBalance:   this.walletBalanceSol.toFixed(4),
+        walletAddress:   solanaWalletService.publicKey || "NOT SET",
+        walletReady:     solanaWalletService.isReady,
+        allTimeRealized: this.allTimeRealizedSol.toFixed(4),
+        partialFromOpen: partialFromOpen.toFixed(4),
+        capitalInOpen:   capitalInOpen.toFixed(4),
+        enabled:         this.config.enabled,
       },
       "Graduation sniper: initialised",
     );
+  }
+
+  private async refreshWalletBalance(): Promise<void> {
+    this.walletBalanceSol = await solanaWalletService.getBalance();
   }
 
   private async loadConfig(): Promise<void> {
@@ -350,6 +364,7 @@ class GraduationSniperService {
       closedAt:         row["closed_at"] ? Number(row["closed_at"]) : undefined,
       exitPrice:        row["exit_price"] ? Number(row["exit_price"]) : undefined,
       txSignature:      String(row["tx_signature"] ?? ""),
+      tokenAmount:      Number(row["token_amount"] ?? 0),
       tp1RealizedSol:   Number(row["tp1_realized_sol"] ?? 0),
       tp2RealizedSol:   Number(row["tp2_realized_sol"] ?? 0),
       runnerRealizedSol: Number(row["runner_realized_sol"] ?? 0),
@@ -381,7 +396,10 @@ class GraduationSniperService {
     }
 
     this.connect(apiKey);
-    this.priceIntervalId     = setInterval(() => void this.checkAllPrices(), PRICE_LOOP_MS);
+    this.priceIntervalId     = setInterval(() => {
+      void this.refreshWalletBalance();
+      void this.checkAllPrices();
+    }, PRICE_LOOP_MS);
     // FIX 2: liquidity rug detection — poll every 30 s independent of price loop
     this.liquidityIntervalId = setInterval(() => void this.checkAllLiquidity(), LIQUIDITY_CHECK_MS);
     logger.info("Graduation sniper: started — WebSocket connecting");
@@ -596,7 +614,7 @@ class GraduationSniperService {
         }
       }
 
-      this.enterPosition(mint, symbol, name, entryPrice, signature);
+      await this.enterPosition(mint, symbol, name, entryPrice, signature);
       this.addEvent({ ...eventBase, symbol, action: "entered" });
 
     } catch (err) {
@@ -611,10 +629,11 @@ class GraduationSniperService {
 
   private checkSkipReason(mint: string): string | null {
     if (!this.config.enabled)                                    return "Sniper disabled";
+    if (!solanaWalletService.isReady)                            return "Wallet not configured — set SOLANA_PRIVATE_KEY";
     if (this.seenMints.has(mint))                                return "Already traded this mint";
     if (this.openPositions.size >= this.config.maxOpenPositions) return `Max open positions (${this.config.maxOpenPositions}) reached`;
     if (blacklistService.isBlacklisted(mint))                    return "Mint in permanent blacklist";
-    if (this.virtualBalance < this.config.positionSizeSol)       return "Insufficient virtual balance";
+    if (this.walletBalanceSol < this.config.positionSizeSol)     return `Insufficient wallet balance (${this.walletBalanceSol.toFixed(3)} SOL < ${this.config.positionSizeSol} SOL)`;
     return null;
   }
 
@@ -794,59 +813,76 @@ class GraduationSniperService {
 
   // ── Position management ────────────────────────────────────────────────────
 
-  private enterPosition(mint: string, symbol: string, name: string, price: number, txSignature: string): void {
+  private async enterPosition(mint: string, symbol: string, name: string, price: number, _detectedTxSig: string): Promise<void> {
     const cfg = this.config;
     const id  = uid();
 
-    // Night session (11pm–6am IST) is fully blocked in checkSkipReason.
-    // This code only runs during active trading hours (6am–11pm IST).
-    const sizeSol = cfg.positionSizeSol;
+    // Execute real on-chain buy via Jupiter
+    let txSignature: string;
+    let tokenAmount: number;
+    let sizeSol: number;
+    try {
+      const result = await jupiterSwapService.buy(mint, cfg.positionSizeSol, cfg.slippageBps, cfg.priorityFeeLamports);
+      txSignature = result.txSignature;
+      tokenAmount = result.tokenAmount;
+      sizeSol     = result.solSpent;
+    } catch (err) {
+      logger.error({ mint, symbol, err: (err as Error).message }, "Graduation sniper: Jupiter buy FAILED — entry aborted");
+      if (isTelegramConfigured()) {
+        void sendTelegram(`❌ <b>SNIPER BUY FAILED</b>\n🪙 ${symbol}\n📋 <code>${mint}</code>\n⚠️ ${(err as Error).message}`);
+      }
+      // Release the seenMints lock so the next graduation event can retry
+      this.seenMints.delete(mint);
+      return;
+    }
 
     const pos: SniperPosition = {
       id,
       mint,
       symbol,
       name,
-      detectedAt:       Date.now(),
-      entryAt:          Date.now(),
-      entryPrice:       price,
-      currentPrice:     price,
+      detectedAt:        Date.now(),
+      entryAt:           Date.now(),
+      entryPrice:        price,
+      currentPrice:      price,
       sizeSol,
-      tp1Hit:           false,
-      tp2Hit:           false,
+      tp1Hit:            false,
+      tp2Hit:            false,
       remainingFraction: 1.0,
-      effectiveSlPrice: price * (1 - cfg.slPct / 100),
-      trailingHigh:     price,
-      status:           "open",
-      realizedPnlSol:   0,
-      unrealizedPnlSol: 0,
-      totalPnlSol:      0,
-      pnlPct:           0,
+      effectiveSlPrice:  price * (1 - cfg.slPct / 100),
+      trailingHigh:      price,
+      status:            "open",
+      realizedPnlSol:    0,
+      unrealizedPnlSol:  0,
+      totalPnlSol:       0,
+      pnlPct:            0,
       txSignature,
-      tp1RealizedSol:   0,
-      tp2RealizedSol:   0,
+      tokenAmount,
+      tp1RealizedSol:    0,
+      tp2RealizedSol:    0,
       runnerRealizedSol: 0,
     };
 
     this.openPositions.set(mint, pos);
     this.seenMints.add(mint);
-    this.virtualBalance -= sizeSol;
+    void this.refreshWalletBalance();
 
     void this.persistPosition(pos);
 
     logger.info(
-      { mint, symbol, entryPrice: price, sizeSol, sl: pos.effectiveSlPrice },
-      "Graduation sniper: paper position entered",
+      { mint, symbol, entryPrice: price, sizeSol, tokenAmount, txSignature, sl: pos.effectiveSlPrice },
+      "Graduation sniper: LIVE position entered ✅",
     );
 
     if (isTelegramConfigured()) {
       void sendTelegram(
-        `🎯 <b>SNIPER ENTRY (PAPER)</b>\n` +
+        `🎯 <b>SNIPER ENTRY 🔴 LIVE</b>\n` +
         `──────────────────────\n` +
         `🪙 Token: <b>${symbol}</b> — ${name}\n` +
         `📋 CA: <code>${mint}</code>\n` +
         `💵 Entry: <b>$${fmtTgPrice(price)}</b>\n` +
-        `💰 Size: <b>${sizeSol} SOL</b> (paper)\n` +
+        `💰 Size: <b>${sizeSol.toFixed(4)} SOL</b>\n` +
+        `🔗 <a href="https://solscan.io/tx/${txSignature}">View on Solscan</a>\n` +
         `🛡️ Staged SL: -20% (2m) → -25% peak → -30% peak\n` +
         `🎯 TP1: $${fmtTgPrice(price * (1 + cfg.tp1Pct / 100))} (+${cfg.tp1Pct}%)\n` +
         `🎯 TP2: $${fmtTgPrice(price * (1 + cfg.tp2Pct / 100))} (+${cfg.tp2Pct}%)\n` +
@@ -892,7 +928,7 @@ class GraduationSniperService {
     }
   }
 
-  private closePosition(pos: SniperPosition, reason: string, exitPrice: number): void {
+  private async closePosition(pos: SniperPosition, reason: string, exitPrice: number): Promise<void> {
     // FIX 4: Skip if this trade was already logged (e.g. after server restart/redeploy)
     if (this.isDuplicateTrade(pos)) {
       logger.warn(
@@ -903,32 +939,50 @@ class GraduationSniperService {
     }
     this.registerClosedTrade(pos);
 
-    const remaining = pos.sizeSol * pos.remainingFraction;
-    const closePnl  = (exitPrice / pos.entryPrice - 1) * remaining;
+    // Remove from open positions immediately so no concurrent close fires
+    this.openPositions.delete(pos.mint);
+
+    const remaining   = pos.sizeSol * pos.remainingFraction;
+    const tokensLeft  = Math.floor(pos.tokenAmount * pos.remainingFraction);
+
+    let solReceived   = remaining; // fallback: break-even
+    let exitTxSig     = "";
+    try {
+      if (tokensLeft > 0) {
+        const result  = await jupiterSwapService.sell(pos.mint, tokensLeft, this.config.slippageBps, this.config.priorityFeeLamports);
+        solReceived   = result.solReceived;
+        exitTxSig     = result.txSignature;
+      }
+    } catch (err) {
+      logger.error({ mint: pos.mint, reason, err: (err as Error).message }, "Graduation sniper: Jupiter sell (close) FAILED — using price-ratio fallback");
+      solReceived = remaining + (exitPrice / pos.entryPrice - 1) * remaining;
+    }
+
+    const closePnl = solReceived - remaining;
 
     pos.runnerRealizedSol += closePnl;
     pos.realizedPnlSol    += closePnl;
-    pos.currentPrice    = exitPrice;
-    pos.exitPrice       = exitPrice;
-    pos.closeReason     = reason;
-    pos.closedAt        = Date.now();
-    pos.status          = "closed";
-    pos.remainingFraction = 0;
+    pos.currentPrice       = exitPrice;
+    pos.exitPrice          = exitPrice;
+    if (exitTxSig) pos.txSignature = exitTxSig;
+    pos.closeReason        = reason;
+    pos.closedAt           = Date.now();
+    pos.status             = "closed";
+    pos.remainingFraction  = 0;
     this.updateLivePnl(pos);
 
-    this.virtualBalance += remaining + closePnl;
     // Update all-time accumulators BEFORE pushing (so they include this trade)
     this.allTimeRealizedSol += pos.realizedPnlSol;
     if (pos.realizedPnlSol > 0) this.allTimeWins++; else this.allTimeLosses++;
-    this.openPositions.delete(pos.mint);
     this.closedPositions.push(pos);
     if (this.closedPositions.length > MAX_CLOSED) this.closedPositions.shift();
 
     void this.persistPosition(pos);
+    void this.refreshWalletBalance();
 
     logger.info(
-      { mint: pos.mint, symbol: pos.symbol, reason, exitPrice, pnl: pos.realizedPnlSol },
-      "Graduation sniper: position closed",
+      { mint: pos.mint, symbol: pos.symbol, reason, exitPrice, solReceived, pnl: pos.realizedPnlSol, txSignature: exitTxSig },
+      "Graduation sniper: position CLOSED 🔴 LIVE",
     );
 
     if (isTelegramConfigured()) {
@@ -942,7 +996,7 @@ class GraduationSniperService {
         ? `${Math.floor(holdMs / 60_000)}m`
         : `${(holdMs / 3_600_000).toFixed(1)}h`;
       void sendTelegram(
-        `${emoji} <b>SNIPER CLOSED (PAPER)</b>\n` +
+        `${emoji} <b>SNIPER CLOSED 🔴 LIVE</b>\n` +
         `──────────────────────\n` +
         `🪙 Token: <b>${pos.symbol}</b>\n` +
         `📋 CA: <code>${pos.mint}</code>\n` +
@@ -950,37 +1004,54 @@ class GraduationSniperService {
         `💵 Entry: $${fmtTgPrice(pos.entryPrice)} → Exit: $${fmtTgPrice(exitPrice)}\n` +
         `💰 PNL: <b>${pnlStr}</b>\n` +
         `⏱️ Held: ${holdStr}\n` +
+        (exitTxSig ? `🔗 <a href="https://solscan.io/tx/${exitTxSig}">View on Solscan</a>\n` : "") +
         `🕐 ${toIST(new Date())}`,
       );
     }
   }
 
-  private partialClose(
+  private async partialClose(
     pos: SniperPosition,
     closeOriginalFraction: number,
     reason: string,
     currentPrice: number,
     breakdownKey?: "tp1" | "tp2",
-  ): void {
+  ): Promise<void> {
     // Guard: never sell more than what's actually remaining
     const actualFraction = Math.min(closeOriginalFraction, pos.remainingFraction);
-    if (actualFraction <= 0) return; // nothing left to close
+    if (actualFraction <= 0) return;
 
-    const closeSize = pos.sizeSol * actualFraction;
-    const closePnl  = (currentPrice / pos.entryPrice - 1) * closeSize;
+    const tokensToSell = Math.floor(pos.tokenAmount * actualFraction);
+    const costBasis    = pos.sizeSol * actualFraction; // SOL cost for this fraction
+
+    let solReceived = costBasis; // fallback: break-even
+    let exitTxSig   = "";
+    try {
+      if (tokensToSell > 0) {
+        const result  = await jupiterSwapService.sell(pos.mint, tokensToSell, this.config.slippageBps, this.config.priorityFeeLamports);
+        solReceived   = result.solReceived;
+        exitTxSig     = result.txSignature;
+      }
+    } catch (err) {
+      logger.error({ mint: pos.mint, reason, err: (err as Error).message }, "Graduation sniper: Jupiter sell (partial) FAILED — using price-ratio fallback");
+      solReceived = costBasis + (currentPrice / pos.entryPrice - 1) * costBasis;
+    }
+
+    const closePnl = solReceived - costBasis;
     pos.realizedPnlSol    += closePnl;
     pos.remainingFraction  = Math.max(0, pos.remainingFraction - actualFraction);
-    this.virtualBalance   += closeSize + closePnl;
     pos.currentPrice       = currentPrice;
+    if (exitTxSig) pos.txSignature = exitTxSig;
 
     if (breakdownKey === "tp1") pos.tp1RealizedSol += closePnl;
     else if (breakdownKey === "tp2") pos.tp2RealizedSol += closePnl;
 
     void this.persistPosition(pos);
+    void this.refreshWalletBalance();
 
     logger.info(
-      { mint: pos.mint, symbol: pos.symbol, reason, closeSize, closePnl, remaining: pos.remainingFraction },
-      "Graduation sniper: partial close",
+      { mint: pos.mint, symbol: pos.symbol, reason, tokensToSell, solReceived, closePnl: closePnl.toFixed(4), remaining: pos.remainingFraction, txSignature: exitTxSig },
+      "Graduation sniper: partial close 🔴 LIVE",
     );
   }
 
@@ -1004,7 +1075,7 @@ class GraduationSniperService {
           );
           if (isTelegramConfigured()) {
             void sendTelegram(
-              `🚨 <b>SNIPER LIQUIDITY RUG EXIT (PAPER)</b>\n` +
+              `🚨 <b>SNIPER LIQUIDITY RUG EXIT</b>\n` +
               `──────────────────────\n` +
               `🪙 Token: <b>${pos.symbol}</b>\n` +
               `📋 CA: <code>${pos.mint}</code>\n` +
@@ -1014,7 +1085,7 @@ class GraduationSniperService {
               `🕐 ${toIST(new Date())}`,
             );
           }
-          this.closePosition(pos, `Liquidity Rug: -${dropPct.toFixed(0)}% in 30s`, price);
+          void this.closePosition(pos, `Liquidity Rug: -${dropPct.toFixed(0)}% in 30s`, price);
         }
       } catch { /* ignore per-position errors */ }
     }
@@ -1022,7 +1093,7 @@ class GraduationSniperService {
 
   // ── FIX 1: Staged SL evaluator ────────────────────────────────────────────
 
-  private checkStagedSL(pos: SniperPosition, price: number, ageMs: number): boolean {
+  private async checkStagedSL(pos: SniperPosition, price: number, ageMs: number): Promise<boolean> {
     const dropFromEntry = (1 - price / pos.entryPrice) * 100;
     const dropFromPeak  = pos.trailingHigh > 0 ? (1 - price / pos.trailingHigh) * 100 : 0;
 
@@ -1030,71 +1101,66 @@ class GraduationSniperService {
     if (pos.tp2Hit) return false;
 
     if (pos.tp1Hit) {
-      // After TP1, before TP2: 35% from peak — wide enough for 20-30% normal retracement
       if (dropFromPeak >= STAGED_SL_AFTER_TP1) {
         const loss = dropFromPeak.toFixed(0);
         logger.warn({ mint: pos.mint, symbol: pos.symbol, dropFromPeak: loss }, "Graduation sniper: staged SL — after TP1");
         if (isTelegramConfigured()) {
           void sendTelegram(
-            `🛑 <b>SNIPER STAGED SL (PAPER)</b>\n──────────────────────\n` +
+            `🛑 <b>SNIPER STAGED SL</b>\n──────────────────────\n` +
             `🪙 Token: <b>${pos.symbol}</b>\n📋 CA: <code>${pos.mint}</code>\n` +
             `📉 -${loss}% from TP1 peak (35% threshold)\n` +
             `💵 Entry: $${fmtTgPrice(pos.entryPrice)} → Exit: $${fmtTgPrice(price)}\n🕐 ${toIST(new Date())}`,
           );
         }
-        this.closePosition(pos, `Staged SL: -${loss}% from TP1 peak`, price);
+        await this.closePosition(pos, `Staged SL: -${loss}% from TP1 peak`, price);
         return true;
       }
       return false;
     }
 
-    // No TP hit yet — time-based phases
     if (ageMs <= STAGED_SL_PHASE1_MS) {
-      // Phase 1 (0–2m): 20% from entry — instant rug protection
       if (dropFromEntry >= STAGED_SL_PHASE1_PCT) {
         const loss = dropFromEntry.toFixed(0);
         logger.warn({ mint: pos.mint, symbol: pos.symbol, dropFromEntry: loss }, "Graduation sniper: staged SL phase 1 (0-2m)");
         if (isTelegramConfigured()) {
           void sendTelegram(
-            `⚡ <b>SNIPER INSTANT RUG PROTECTION (PAPER)</b>\n──────────────────────\n` +
+            `⚡ <b>SNIPER INSTANT RUG PROTECTION</b>\n──────────────────────\n` +
             `🪙 Token: <b>${pos.symbol}</b>\n📋 CA: <code>${pos.mint}</code>\n` +
             `📉 -${loss}% from entry in first 2m\n` +
             `💵 Entry: $${fmtTgPrice(pos.entryPrice)} → Exit: $${fmtTgPrice(price)}\n🕐 ${toIST(new Date())}`,
           );
         }
-        this.closePosition(pos, `Staged SL: -${loss}% in first 2m`, price);
+        await this.closePosition(pos, `Staged SL: -${loss}% in first 2m`, price);
         return true;
       }
     } else if (ageMs <= STAGED_SL_PHASE2_MS) {
-      // Phase 2 (2–10m): 25% from peak — trailing
       if (dropFromPeak >= STAGED_SL_PHASE2_PCT) {
         const loss = dropFromPeak.toFixed(0);
         logger.warn({ mint: pos.mint, symbol: pos.symbol, dropFromPeak: loss }, "Graduation sniper: staged SL phase 2 (2-10m)");
         if (isTelegramConfigured()) {
           void sendTelegram(
-            `🛑 <b>SNIPER STAGED SL (PAPER)</b>\n──────────────────────\n` +
+            `🛑 <b>SNIPER STAGED SL</b>\n──────────────────────\n` +
             `🪙 Token: <b>${pos.symbol}</b>\n📋 CA: <code>${pos.mint}</code>\n` +
             `📉 -${loss}% from peak (2-10m window)\n` +
             `💵 Entry: $${fmtTgPrice(pos.entryPrice)} → Exit: $${fmtTgPrice(price)}\n🕐 ${toIST(new Date())}`,
           );
         }
-        this.closePosition(pos, `Staged SL: -${loss}% from peak (2-10m)`, price);
+        await this.closePosition(pos, `Staged SL: -${loss}% from peak (2-10m)`, price);
         return true;
       }
     } else {
-      // Phase 3 (>10m): 30% from peak — established move protection
       if (dropFromPeak >= STAGED_SL_PHASE3_PCT) {
         const loss = dropFromPeak.toFixed(0);
         logger.warn({ mint: pos.mint, symbol: pos.symbol, dropFromPeak: loss }, "Graduation sniper: staged SL phase 3 (>10m)");
         if (isTelegramConfigured()) {
           void sendTelegram(
-            `🛑 <b>SNIPER STAGED SL (PAPER)</b>\n──────────────────────\n` +
+            `🛑 <b>SNIPER STAGED SL</b>\n──────────────────────\n` +
             `🪙 Token: <b>${pos.symbol}</b>\n📋 CA: <code>${pos.mint}</code>\n` +
             `📉 -${loss}% from peak (>10m, established move)\n` +
             `💵 Entry: $${fmtTgPrice(pos.entryPrice)} → Exit: $${fmtTgPrice(price)}\n🕐 ${toIST(new Date())}`,
           );
         }
-        this.closePosition(pos, `Staged SL: -${loss}% from peak (>10m)`, price);
+        await this.closePosition(pos, `Staged SL: -${loss}% from peak (>10m)`, price);
         return true;
       }
     }
@@ -1107,7 +1173,7 @@ class GraduationSniperService {
     pos: SniperPosition, price: number, tp1Frac: number, tp1Pct: number, tp1ClosePct: number,
   ): Promise<void> {
     pos.tp1Hit           = true;
-    this.partialClose(pos, tp1Frac, `TP1 +${tp1Pct}% — sell ${tp1ClosePct}%`, price, "tp1");
+    await this.partialClose(pos, tp1Frac, `TP1 +${tp1Pct}% — sell ${tp1ClosePct}%`, price, "tp1");
     pos.effectiveSlPrice = pos.entryPrice; // breakeven SL stored for reference
 
     // Retry persist until confirmed — ensures SL update survives server restart
@@ -1129,7 +1195,7 @@ class GraduationSniperService {
     if (isTelegramConfigured()) {
       const partialPnl = (price / pos.entryPrice - 1) * pos.sizeSol * tp1Frac;
       void sendTelegram(
-        `🟢 <b>SNIPER TP1 HIT (PAPER)</b>\n──────────────────────\n` +
+        `🟢 <b>SNIPER TP1 HIT 🔴 LIVE</b>\n──────────────────────\n` +
         `🪙 Token: <b>${pos.symbol}</b>\n📋 CA: <code>${pos.mint}</code>\n` +
         `💵 Price: <b>$${fmtTgPrice(price)}</b> (+${tp1Pct}%)\n` +
         `💰 Sold ${tp1ClosePct}% → ~<b>+${partialPnl.toFixed(4)} SOL</b>\n` +
@@ -1202,7 +1268,7 @@ class GraduationSniperService {
     if (price > pos.trailingHigh) pos.trailingHigh = price;
 
     // ── FIX 1: Staged SL — replaces old single -40% + hard stop ──────────────
-    if (this.checkStagedSL(pos, price, ageMs)) return;
+    if (await this.checkStagedSL(pos, price, ageMs)) return;
 
     // ── Dead position exit — open >2h with <5% movement ──────────────────────
     if (!pos.tp1Hit) {
@@ -1214,13 +1280,13 @@ class GraduationSniperService {
         );
         if (isTelegramConfigured()) {
           void sendTelegram(
-            `💤 <b>SNIPER DEAD EXIT (PAPER)</b>\n──────────────────────\n` +
+            `💤 <b>SNIPER DEAD EXIT</b>\n──────────────────────\n` +
             `🪙 Token: <b>${pos.symbol}</b>\n📋 CA: <code>${pos.mint}</code>\n` +
             `⏱️ Held: ${(ageMs / 3_600_000).toFixed(1)}h with only ${movePct.toFixed(1)}% movement\n` +
             `🔄 Freeing slot for fresh opportunities\n🕐 ${toIST(new Date())}`,
           );
         }
-        this.closePosition(pos, "Dead — No Momentum", price);
+        await this.closePosition(pos, "Dead — No Momentum", price);
         return;
       }
     }
@@ -1229,7 +1295,7 @@ class GraduationSniperService {
     if (pos.tp2Hit && pos.trailingHigh > 0) {
       const trailTrigger = pos.trailingHigh * (1 - cfg.trailingStopPct / 100);
       if (price <= trailTrigger) {
-        this.closePosition(pos, "Trailing Stop (runner)", price);
+        await this.closePosition(pos, "Trailing Stop (runner)", price);
         return;
       }
     }
@@ -1243,12 +1309,12 @@ class GraduationSniperService {
     if (pos.tp1Hit && !pos.tp2Hit && price >= tp2Price) {
       pos.tp2Hit       = true;
       pos.trailingHigh = price;
-      this.partialClose(pos, tp2Frac, `TP2 +${cfg.tp2Pct}% — sell ${cfg.tp2ClosePct}%`, price, "tp2");
+      await this.partialClose(pos, tp2Frac, `TP2 +${cfg.tp2Pct}% — sell ${cfg.tp2ClosePct}%`, price, "tp2");
       logger.info({ mint, symbol: pos.symbol, price }, "Graduation sniper: TP2 hit — runner active");
       if (isTelegramConfigured()) {
         const partialPnl = (price / pos.entryPrice - 1) * pos.sizeSol * tp2Frac;
         void sendTelegram(
-          `🚀 <b>SNIPER TP2 HIT (PAPER)</b>\n──────────────────────\n` +
+          `🚀 <b>SNIPER TP2 HIT 🔴 LIVE</b>\n──────────────────────\n` +
           `🪙 Token: <b>${pos.symbol}</b>\n📋 CA: <code>${pos.mint}</code>\n` +
           `💵 Price: <b>$${fmtTgPrice(price)}</b> (+${cfg.tp2Pct}%)\n` +
           `💰 Sold ${cfg.tp2ClosePct}% → ~<b>+${partialPnl.toFixed(4)} SOL</b>\n` +
@@ -1271,8 +1337,8 @@ class GraduationSniperService {
           id, mint, symbol, name, detected_at, entry_at, entry_price, current_price,
           size_sol, tp1_hit, tp2_hit, remaining_fraction, effective_sl_price,
           trailing_high, status, realized_pnl_sol, close_reason, closed_at, exit_price, tx_signature,
-          tp1_realized_sol, tp2_realized_sol, runner_realized_sol
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
+          tp1_realized_sol, tp2_realized_sol, runner_realized_sol, token_amount
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)
         ON CONFLICT (id) DO UPDATE SET
           current_price      = EXCLUDED.current_price,
           tp1_hit            = EXCLUDED.tp1_hit,
@@ -1287,14 +1353,16 @@ class GraduationSniperService {
           exit_price         = EXCLUDED.exit_price,
           tp1_realized_sol   = EXCLUDED.tp1_realized_sol,
           tp2_realized_sol   = EXCLUDED.tp2_realized_sol,
-          runner_realized_sol= EXCLUDED.runner_realized_sol
+          runner_realized_sol= EXCLUDED.runner_realized_sol,
+          token_amount       = EXCLUDED.token_amount,
+          tx_signature       = EXCLUDED.tx_signature
       `, [
         pos.id, pos.mint, pos.symbol, pos.name, pos.detectedAt, pos.entryAt,
         pos.entryPrice, pos.currentPrice, pos.sizeSol, pos.tp1Hit, pos.tp2Hit,
         pos.remainingFraction, pos.effectiveSlPrice, pos.trailingHigh, pos.status,
         pos.realizedPnlSol, pos.closeReason ?? null, pos.closedAt ?? null,
         pos.exitPrice ?? null, pos.txSignature,
-        pos.tp1RealizedSol, pos.tp2RealizedSol, pos.runnerRealizedSol,
+        pos.tp1RealizedSol, pos.tp2RealizedSol, pos.runnerRealizedSol, pos.tokenAmount ?? 0,
       ]);
     } catch (err) {
       logger.warn({ id: pos.id, err: (err as Error).message }, "Graduation sniper: persistPosition failed");
@@ -1340,8 +1408,8 @@ class GraduationSniperService {
     const openEntry = Array.from(this.openPositions.entries()).find(([, p]) => p.id === id);
     if (openEntry) {
       const [mint, pos] = openEntry;
-      this.virtualBalance += pos.sizeSol * pos.remainingFraction;
       this.openPositions.delete(mint);
+      void this.refreshWalletBalance();
       this.seenMints.delete(mint);
     } else {
       const idx = this.closedPositions.findIndex((p) => p.id === id);
@@ -1376,7 +1444,7 @@ class GraduationSniperService {
       if (priceData && priceData.price > 0) exitPrice = priceData.price;
     } catch { /* ignore — use last known price */ }
 
-    this.closePosition(pos, "Manual close", exitPrice);
+    await this.closePosition(pos, "Manual close", exitPrice);
     return { ...pos };
   }
 
@@ -1477,7 +1545,7 @@ class GraduationSniperService {
     this.events = [];
     this.seenMints.clear();
     this.graduationsToday = 0;
-    this.virtualBalance = this.config.virtualBalanceSol;
+    void this.refreshWalletBalance();
     this.allTimeRealizedSol = 0;
     this.allTimeWins = 0;
     this.allTimeLosses = 0;
@@ -1487,7 +1555,7 @@ class GraduationSniperService {
     } catch (err) {
       logger.warn({ err: (err as Error).message }, "Graduation sniper: resetAccount DB error");
     }
-    logger.info({ virtualBalance: this.virtualBalance }, "Graduation sniper: account reset");
+    logger.info({ walletBalance: this.walletBalanceSol }, "Graduation sniper: account reset");
   }
 
   deleteEvent(id: string): boolean {
@@ -1532,7 +1600,9 @@ class GraduationSniperService {
       totalUnrealizedPnlSol:  totalUnrealized,
       totalCombinedPnlSol:    totalRealized + totalUnrealized,
       capitalInOpen,
-      virtualBalance:         this.virtualBalance,
+      walletBalance:          this.walletBalanceSol,
+      walletAddress:          solanaWalletService.publicKey,
+      walletReady:            solanaWalletService.isReady,
       openCount:              this.openPositions.size,
       config:                 this.config,
     };
