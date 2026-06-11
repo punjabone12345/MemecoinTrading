@@ -534,6 +534,22 @@ class GraduationSniperService {
         ? allClosed.slice(-MAX_CLOSED)
         : allClosed;
 
+      // ── Runtime trailingHigh correction ──────────────────────────────────────
+      // Fix any open position whose trailingHigh was persisted as 0 / NULL, or
+      // somehow set below entryPrice (e.g. server crashed before a new high was
+      // saved). Without this, phase-2/3 SL measures drop from the crashed price
+      // instead of entry, making dropFromPeak = 0% and SL never firing.
+      let corrected = 0;
+      for (const pos of this.openPositions.values()) {
+        if (pos.trailingHigh < pos.entryPrice) {
+          pos.trailingHigh = pos.entryPrice;
+          corrected++;
+        }
+      }
+      if (corrected > 0) {
+        logger.warn({ corrected }, "Graduation sniper: corrected trailingHigh to entryPrice for stale positions");
+      }
+
       logger.info(
         {
           open: this.openPositions.size,
