@@ -991,25 +991,6 @@ class GraduationSniperService {
     }
   }
 
-  // ── Jupiter Price API — real-time, on-chain price (no lag) ─────────────────
-  // Used as primary source for open-position SL/TP checks — much faster than DexScreener.
-  // Falls back to null on any error so DexScreener can take over.
-  private async fetchPriceJupiter(mint: string): Promise<number | null> {
-    try {
-      type JupPriceResp = { data: Record<string, { price: string } | null> };
-      const res = await axios.get<JupPriceResp>(
-        `https://lite-api.jup.ag/price/v2?ids=${mint}`,
-        { timeout: 4_000 },
-      );
-      const entry = res.data?.data?.[mint];
-      if (!entry) return null;
-      const p = parseFloat(entry.price);
-      return p > 0 ? p : null;
-    } catch {
-      return null;
-    }
-  }
-
   private async fetchPrice(mint: string): Promise<{ price: number; symbol: string; name: string; liquidityUsd: number } | null> {
     try {
       type DexPair = {
@@ -1049,24 +1030,17 @@ class GraduationSniperService {
     }
   }
 
-  // ── Fast price fetch for position monitoring ──────────────────────────────
-  // Tries Jupiter first (real-time, ~100ms), falls back to DexScreener.
-  // DexScreener is still used for liquidity data and symbol metadata.
+  // ── Price fetch for position monitoring ───────────────────────────────────
+  // Uses DexScreener ONLY — it is a dedicated price-data API with a high rate
+  // limit (~300 req/min) and is perfectly accurate for SL/TP monitoring.
+  //
+  // Jupiter's lite-api.jup.ag is intentionally NOT used here anymore.
+  // Root cause of 429 errors: the old code polled Jupiter price/v2 every 3s per
+  // position (e.g. 5 positions × 20 ticks/min = 100 req/min) which exceeded
+  // Jupiter Lite's 60 req/min limit. Swap requests (buy/sell) then hit the same
+  // rate limit bucket, causing 429 on actual trades.
+  // Jupiter is now ONLY called for swap transactions (buy/sell) — never for polling.
   private async fetchPositionPrice(mint: string): Promise<{ price: number; symbol: string; name: string; liquidityUsd: number } | null> {
-    // Try Jupiter first — it's real-time and much faster than DexScreener
-    const jupPrice = await this.fetchPriceJupiter(mint);
-    if (jupPrice !== null) {
-      // We have a live price from Jupiter — get metadata from cached DexScreener if available,
-      // otherwise use what we already have in the position record
-      const pos = this.openPositions.get(mint);
-      return {
-        price:        jupPrice,
-        symbol:       pos?.symbol ?? mint.slice(0, 8),
-        name:         pos?.name   ?? mint.slice(0, 8),
-        liquidityUsd: 0, // not available from Jupiter price endpoint
-      };
-    }
-    // Fall back to DexScreener (has liquidity data, needed for rug detection)
     return this.fetchPrice(mint);
   }
 
@@ -1686,10 +1660,15 @@ class GraduationSniperService {
 
     if (due.length === 0) return;
 
-    await Promise.allSettled(due.map((mint) => {
+    // Process positions sequentially with a small stagger (200ms between each).
+    // The old Promise.allSettled fired all checks simultaneously — with 5 positions
+    // that created a burst of 5 concurrent DexScreener requests every 3s.
+    // Sequential processing spreads the load and prevents any API from seeing bursts.
+    for (const mint of due) {
       this.lastPositionCheckAt.set(mint, now);
-      return this.checkPositionPrice(mint);
-    }));
+      await this.checkPositionPrice(mint);
+      if (due.length > 1) await new Promise(r => setTimeout(r, 200));
+    }
   }
 
   private async checkPositionPrice(mint: string): Promise<void> {

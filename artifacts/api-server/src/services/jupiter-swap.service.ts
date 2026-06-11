@@ -9,6 +9,47 @@ const JUPITER_SWAP_URL  = "https://lite-api.jup.ag/swap/v1/swap";
 const SOL_MINT          = "So11111111111111111111111111111111111111112";
 const LAMPORTS_PER_SOL  = 1_000_000_000;
 
+// ── Jupiter request rate limiter ──────────────────────────────────────────────
+// Jupiter Lite has a rate limit of ~60 req/min on lite-api.jup.ag.
+// This limiter enforces a minimum gap between consecutive requests so we never
+// exceed ~40 req/min (well under the limit), even during multi-position activity.
+// A paused flag is set when a 429 is detected, blocking all requests until the
+// cool-off period expires (respects Retry-After header or defaults to 15s).
+//
+// NOTE: This only throttles SWAP requests (quote + swap).
+// Price monitoring has been moved to DexScreener and no longer hits this API.
+class JupiterRateLimiter {
+  private lastRequestAt  = 0;
+  private pausedUntil    = 0;
+  private readonly minGapMs = 400; // max ~40 req/min (conservative under 60 limit)
+
+  async throttle(): Promise<void> {
+    // If we are paused due to a recent 429, wait out the pause window
+    const now = Date.now();
+    if (now < this.pausedUntil) {
+      const wait = this.pausedUntil - now;
+      logger.warn({ wait }, "Jupiter rate limiter: paused — waiting out cool-off");
+      await new Promise(r => setTimeout(r, wait));
+    }
+
+    // Enforce minimum gap between consecutive requests
+    const gap = Date.now() - this.lastRequestAt;
+    if (gap < this.minGapMs) {
+      await new Promise(r => setTimeout(r, this.minGapMs - gap));
+    }
+    this.lastRequestAt = Date.now();
+  }
+
+  // Call this when a 429 is received to pause all subsequent requests
+  pause429(retryAfterSeconds?: number): void {
+    const pauseMs = retryAfterSeconds ? retryAfterSeconds * 1000 : 15_000;
+    this.pausedUntil = Date.now() + pauseMs;
+    logger.warn({ pauseMs }, "Jupiter rate limiter: 429 received — all requests paused");
+  }
+}
+
+const jupiterRateLimiter = new JupiterRateLimiter();
+
 export interface BuyResult {
   txSignature: string;
   tokenAmount: number;
@@ -48,8 +89,9 @@ async function withRetry<T>(
       if (attempt < maxAttempts) {
         let delay: number;
         if (status === 429) {
-          // Rate limited — respect Retry-After header if present, else use long exponential wait
+          // Rate limited — tell the global limiter to pause all future requests too
           const retryAfter = Number(axErr.response?.headers?.["retry-after"] ?? 0);
+          jupiterRateLimiter.pause429(retryAfter > 0 ? retryAfter : undefined);
           delay = retryAfter > 0
             ? retryAfter * 1000
             : Math.min(baseDelayMs * Math.pow(2, attempt - 1), 30_000); // 2s, 4s, 8s, 16s … capped at 30s
@@ -73,6 +115,7 @@ class JupiterSwapService {
     amount: number,
     slippageBps: number,
   ): Promise<unknown> {
+    await jupiterRateLimiter.throttle();
     const res = await axios.get(JUPITER_QUOTE_URL, {
       params: { inputMint, outputMint, amount, slippageBps },
       timeout: 10_000,
@@ -84,6 +127,7 @@ class JupiterSwapService {
     quoteResponse: unknown,
     priorityFeeLamports: number,
   ): Promise<string> {
+    await jupiterRateLimiter.throttle();
     const res = await axios.post(JUPITER_SWAP_URL, {
       quoteResponse,
       userPublicKey:            solanaWalletService.publicKey,
