@@ -623,23 +623,27 @@ class GraduationSniperService {
     if (this.started) return;
     this.started = true;
 
-    const apiKey = process.env["HELIUS_API_KEY"];
-    if (!apiKey) {
-      logger.warn("Graduation sniper: HELIUS_API_KEY not set — WebSocket disabled");
-      return;
-    }
-
-    this.connect(apiKey);
+    // ── Position monitoring — starts ALWAYS, regardless of Helius ────────────
+    // CRITICAL: Price monitoring (SL / TP / trailing stop) must run even without
+    // HELIUS_API_KEY. The old code gated ALL intervals behind the Helius check,
+    // so without the key, no SL, TP, or external-sell detection ever ran.
+    // Helius is only needed for the WebSocket graduation detector (new buys).
     this.priceIntervalId     = setInterval(() => {
       void this.refreshWalletBalance();
       void this.checkAllPrices();
     }, PRICE_LOOP_MS);
-    // FIX 2: liquidity rug detection — poll every 30 s independent of price loop
     this.liquidityIntervalId = setInterval(() => void this.checkAllLiquidity(), LIQUIDITY_CHECK_MS);
-    // FIX 5: external sell detector — poll wallet token balances every 60 s
-    // Catches positions sold via Phantom wallet that the bot doesn't know about
     this.externalSellCheckId = setInterval(() => void this.checkExternalSells(), 60_000);
-    logger.info("Graduation sniper: started — WebSocket connecting");
+
+    // ── WebSocket — only needed for detecting new graduations ────────────────
+    const apiKey = process.env["HELIUS_API_KEY"];
+    if (!apiKey) {
+      logger.warn("Graduation sniper: HELIUS_API_KEY not set — WebSocket disabled (new graduation detection off). Position monitoring (SL/TP/trailing) is ACTIVE.");
+      return;
+    }
+
+    this.connect(apiKey);
+    logger.info("Graduation sniper: started — WebSocket connecting, all monitoring active");
   }
 
   stop(): void {
@@ -1699,32 +1703,43 @@ class GraduationSniperService {
 
   // ── Price checking loop (adaptive intervals) ─────────────────────────────
 
+  // Prevent concurrent checkAllPrices runs — if a previous cycle is still in-flight
+  // (e.g. a Jupiter sell is taking 10s), the setInterval fires again. Without this
+  // guard the second run starts processing the same positions concurrently.
+  private checkingPrices = false;
+
   private async checkAllPrices(): Promise<void> {
-    if (this.openPositions.size === 0) return;
+    if (this.checkingPrices) return;
+    this.checkingPrices = true;
+    try {
+      if (this.openPositions.size === 0) return;
 
-    const now = Date.now();
+      const now = Date.now();
 
-    // Only check positions whose adaptive interval has elapsed
-    const due = Array.from(this.openPositions.keys()).filter((mint) => {
-      const pos      = this.openPositions.get(mint)!;
-      const ageMs    = now - pos.entryAt;
-      const interval = ageMs < FAST_WINDOW_MS ? FAST_INTERVAL_MS
-                     : ageMs < MED_WINDOW_MS  ? MED_INTERVAL_MS
-                     : SLOW_INTERVAL_MS;
-      const last = this.lastPositionCheckAt.get(mint) ?? 0;
-      return (now - last) >= interval;
-    });
+      // Only check positions whose adaptive interval has elapsed
+      const due = Array.from(this.openPositions.keys()).filter((mint) => {
+        const pos      = this.openPositions.get(mint)!;
+        const ageMs    = now - pos.entryAt;
+        const interval = ageMs < FAST_WINDOW_MS ? FAST_INTERVAL_MS
+                       : ageMs < MED_WINDOW_MS  ? MED_INTERVAL_MS
+                       : SLOW_INTERVAL_MS;
+        const last = this.lastPositionCheckAt.get(mint) ?? 0;
+        return (now - last) >= interval;
+      });
 
-    if (due.length === 0) return;
+      if (due.length === 0) return;
 
-    // Process positions sequentially with a small stagger (200ms between each).
-    // The old Promise.allSettled fired all checks simultaneously — with 5 positions
-    // that created a burst of 5 concurrent DexScreener requests every 3s.
-    // Sequential processing spreads the load and prevents any API from seeing bursts.
-    for (const mint of due) {
-      this.lastPositionCheckAt.set(mint, now);
-      await this.checkPositionPrice(mint);
-      if (due.length > 1) await new Promise(r => setTimeout(r, 200));
+      // Process positions sequentially with a small stagger (200ms between each).
+      // The old Promise.allSettled fired all checks simultaneously — with 5 positions
+      // that created a burst of 5 concurrent DexScreener requests every 3s.
+      // Sequential processing spreads the load and prevents any API from seeing bursts.
+      for (const mint of due) {
+        this.lastPositionCheckAt.set(mint, now);
+        await this.checkPositionPrice(mint);
+        if (due.length > 1) await new Promise(r => setTimeout(r, 200));
+      }
+    } finally {
+      this.checkingPrices = false;
     }
   }
 
@@ -1798,8 +1813,11 @@ class GraduationSniperService {
 
     // ── TP2 ───────────────────────────────────────────────────────────────────
     if (pos.tp1Hit && !pos.tp2Hit && price >= tp2Price) {
-      pos.tp2Hit       = true;
-      pos.trailingHigh = price;
+      pos.tp2Hit = true;
+      // Use Math.max — if the token retraced back to TP2 after already being higher,
+      // keep the real peak so the trailing stop is measured from the actual high,
+      // not the (lower) TP2 trigger price.
+      pos.trailingHigh = Math.max(pos.trailingHigh, price);
       try {
         await this.partialClose(pos, tp2Frac, `TP2 +${cfg.tp2Pct}% — sell ${cfg.tp2ClosePct}%`, price, "tp2");
       } catch (err) {
@@ -1808,6 +1826,23 @@ class GraduationSniperService {
         logger.error({ mint, symbol: pos.symbol, err: (err as Error).message }, "Graduation sniper: TP2 sell FAILED ❌ — reverted, will retry next tick");
         return;
       }
+
+      // Atomic persist with retry — matches TP1 pattern. Without this, a crash between
+      // TP2 sell confirmation and DB write causes TP2 to double-execute on restart.
+      let tp2Persisted = false;
+      for (let attempt = 0; attempt < 10 && !tp2Persisted; attempt++) {
+        try {
+          await this.persistPosition(pos);
+          tp2Persisted = true;
+        } catch (err) {
+          logger.warn({ mint, attempt, err: (err as Error).message }, "Graduation sniper: TP2 atomic persist retry");
+          await new Promise((r) => setTimeout(r, 3_000));
+        }
+      }
+      if (!tp2Persisted) {
+        logger.error({ mint }, "Graduation sniper: TP2 persist failed after all retries ⚠️");
+      }
+
       logger.info({ mint, symbol: pos.symbol, price }, "Graduation sniper: TP2 hit — runner active");
       if (isTelegramConfigured()) {
         const partialPnl = (price / pos.entryPrice - 1) * pos.sizeSol * tp2Frac;
