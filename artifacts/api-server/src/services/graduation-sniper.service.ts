@@ -196,6 +196,9 @@ class GraduationSniperService {
   private lastPositionCheckAt: Map<string, number> = new Map();
   // Concurrency guard — prevents duplicate TP/SL executions during async gaps
   private processingMints: Set<string> = new Set();
+  // Closing guard — mints whose sell is in-flight; position stays in openPositions
+  // so the frontend never sees it disappear, but no second close can start.
+  private closingMints: Set<string> = new Set();
   // Concurrency guard — prevents duplicate graduation processing for same mint
   private processingGraduations: Set<string> = new Set();
   // FIX 2: Liquidity monitoring — tracks last known liquidity per position
@@ -950,8 +953,14 @@ class GraduationSniperService {
       return;
     }
 
-    // Remove from open positions immediately so no concurrent close fires
-    this.openPositions.delete(pos.mint);
+    // Guard: if a close is already in-flight for this mint, skip.
+    // Position stays in openPositions so the frontend keeps showing it.
+    if (this.closingMints.has(pos.mint)) {
+      logger.warn({ mint: pos.mint, symbol: pos.symbol }, "Graduation sniper: close already in-flight — skipping duplicate");
+      return;
+    }
+    // Mark as closing WITHOUT removing from openPositions — prevents frontend flicker
+    this.closingMints.add(pos.mint);
 
     const remaining   = pos.sizeSol * pos.remainingFraction;
     const tokensLeft  = Math.floor(pos.tokenAmount * pos.remainingFraction);
@@ -965,15 +974,20 @@ class GraduationSniperService {
         exitTxSig     = result.txSignature;
       }
     } catch (err) {
-      // CRITICAL: Sell failed — tokens are still in wallet. Re-open the position so the
-      // next price loop will retry. Do NOT mark as closed or record fake PnL.
+      // CRITICAL: Sell failed — tokens are still in wallet.
+      // Release the closing guard so the next price tick will retry.
+      // Do NOT mark as closed or record fake PnL.
+      this.closingMints.delete(pos.mint);
       logger.error(
         { mint: pos.mint, symbol: pos.symbol, reason, err: (err as Error).message },
-        "Graduation sniper: Jupiter sell (close) FAILED ❌ — position re-opened, will retry next price tick",
+        "Graduation sniper: Jupiter sell (close) FAILED ❌ — will retry next price tick",
       );
-      this.openPositions.set(pos.mint, pos);
       return;
     }
+
+    // Sell confirmed — now remove from open positions
+    this.openPositions.delete(pos.mint);
+    this.closingMints.delete(pos.mint);
 
     // Only register the fingerprint AFTER a confirmed sell — prevents marking
     // a position as "already closed" when the sell hadn't actually executed.
@@ -1124,18 +1138,14 @@ class GraduationSniperService {
     // After TP2: runner is managed by the trailing stop in the main loop
     if (pos.tp2Hit) return false;
 
+    // NOTE: Telegram notifications are intentionally sent INSIDE closePosition
+    // (after on-chain confirmation) — NOT here. Sending before the sell caused
+    // false "SL triggered" messages when Jupiter sell failed.
+
     if (pos.tp1Hit) {
       if (dropFromPeak >= STAGED_SL_AFTER_TP1) {
         const loss = dropFromPeak.toFixed(0);
         logger.warn({ mint: pos.mint, symbol: pos.symbol, dropFromPeak: loss }, "Graduation sniper: staged SL — after TP1");
-        if (isTelegramConfigured()) {
-          void sendTelegram(
-            `🛑 <b>SNIPER STAGED SL</b>\n──────────────────────\n` +
-            `🪙 Token: <b>${pos.symbol}</b>\n📋 CA: <code>${pos.mint}</code>\n` +
-            `📉 -${loss}% from TP1 peak (35% threshold)\n` +
-            `💵 Entry: $${fmtTgPrice(pos.entryPrice)} → Exit: $${fmtTgPrice(price)}\n🕐 ${toIST(new Date())}`,
-          );
-        }
         await this.closePosition(pos, `Staged SL: -${loss}% from TP1 peak`, price);
         return true;
       }
@@ -1146,14 +1156,6 @@ class GraduationSniperService {
       if (dropFromEntry >= STAGED_SL_PHASE1_PCT) {
         const loss = dropFromEntry.toFixed(0);
         logger.warn({ mint: pos.mint, symbol: pos.symbol, dropFromEntry: loss }, "Graduation sniper: staged SL phase 1 (0-2m)");
-        if (isTelegramConfigured()) {
-          void sendTelegram(
-            `⚡ <b>SNIPER INSTANT RUG PROTECTION</b>\n──────────────────────\n` +
-            `🪙 Token: <b>${pos.symbol}</b>\n📋 CA: <code>${pos.mint}</code>\n` +
-            `📉 -${loss}% from entry in first 2m\n` +
-            `💵 Entry: $${fmtTgPrice(pos.entryPrice)} → Exit: $${fmtTgPrice(price)}\n🕐 ${toIST(new Date())}`,
-          );
-        }
         await this.closePosition(pos, `Staged SL: -${loss}% in first 2m`, price);
         return true;
       }
@@ -1161,14 +1163,6 @@ class GraduationSniperService {
       if (dropFromPeak >= STAGED_SL_PHASE2_PCT) {
         const loss = dropFromPeak.toFixed(0);
         logger.warn({ mint: pos.mint, symbol: pos.symbol, dropFromPeak: loss }, "Graduation sniper: staged SL phase 2 (2-10m)");
-        if (isTelegramConfigured()) {
-          void sendTelegram(
-            `🛑 <b>SNIPER STAGED SL</b>\n──────────────────────\n` +
-            `🪙 Token: <b>${pos.symbol}</b>\n📋 CA: <code>${pos.mint}</code>\n` +
-            `📉 -${loss}% from peak (2-10m window)\n` +
-            `💵 Entry: $${fmtTgPrice(pos.entryPrice)} → Exit: $${fmtTgPrice(price)}\n🕐 ${toIST(new Date())}`,
-          );
-        }
         await this.closePosition(pos, `Staged SL: -${loss}% from peak (2-10m)`, price);
         return true;
       }
@@ -1176,14 +1170,6 @@ class GraduationSniperService {
       if (dropFromPeak >= STAGED_SL_PHASE3_PCT) {
         const loss = dropFromPeak.toFixed(0);
         logger.warn({ mint: pos.mint, symbol: pos.symbol, dropFromPeak: loss }, "Graduation sniper: staged SL phase 3 (>10m)");
-        if (isTelegramConfigured()) {
-          void sendTelegram(
-            `🛑 <b>SNIPER STAGED SL</b>\n──────────────────────\n` +
-            `🪙 Token: <b>${pos.symbol}</b>\n📋 CA: <code>${pos.mint}</code>\n` +
-            `📉 -${loss}% from peak (>10m, established move)\n` +
-            `💵 Entry: $${fmtTgPrice(pos.entryPrice)} → Exit: $${fmtTgPrice(price)}\n🕐 ${toIST(new Date())}`,
-          );
-        }
         await this.closePosition(pos, `Staged SL: -${loss}% from peak (>10m)`, price);
         return true;
       }
@@ -1280,7 +1266,8 @@ class GraduationSniperService {
 
   private async _checkPositionPriceInner(mint: string): Promise<void> {
     const pos = this.openPositions.get(mint);
-    if (!pos) return;
+    // Skip positions already mid-close (sell in-flight) to avoid double-close
+    if (!pos || this.closingMints.has(mint)) return;
 
     const priceData = await this.fetchPrice(mint);
     if (!priceData) return;
@@ -1310,14 +1297,7 @@ class GraduationSniperService {
           { mint, symbol: pos.symbol, ageH: (ageMs / 3_600_000).toFixed(1), movePct: movePct.toFixed(2) },
           "Graduation sniper: dead position exit — no momentum",
         );
-        if (isTelegramConfigured()) {
-          void sendTelegram(
-            `💤 <b>SNIPER DEAD EXIT</b>\n──────────────────────\n` +
-            `🪙 Token: <b>${pos.symbol}</b>\n📋 CA: <code>${pos.mint}</code>\n` +
-            `⏱️ Held: ${(ageMs / 3_600_000).toFixed(1)}h with only ${movePct.toFixed(1)}% movement\n` +
-            `🔄 Freeing slot for fresh opportunities\n🕐 ${toIST(new Date())}`,
-          );
-        }
+        // Telegram sent inside closePosition after confirmed sell (not before)
         await this.closePosition(pos, "Dead — No Momentum", price);
         return;
       }
@@ -1602,6 +1582,72 @@ class GraduationSniperService {
     if (idx === -1) return false;
     this.events.splice(idx, 1);
     return true;
+  }
+
+  /**
+   * Re-inject a position that was lost due to a server restart or missed entry.
+   * No on-chain buy is executed — the tokens are assumed to already be in the wallet.
+   * Jupiter price is fetched once to populate currentPrice; entryPrice is user-provided.
+   */
+  async injectPosition(
+    mint: string,
+    symbol: string,
+    entryPrice: number,
+    sizeSol: number,
+    entryAtMs?: number,
+  ): Promise<SniperPosition> {
+    const cfg = this.config;
+    const id  = uid();
+
+    // Try to get live price; fall back to entryPrice
+    let currentPrice = entryPrice;
+    try {
+      const pd = await this.fetchPrice(mint);
+      if (pd && pd.price > 0) currentPrice = pd.price;
+    } catch { /* ignore */ }
+
+    // Estimate token amount from size and entry price (best-effort)
+    const estimatedTokens = entryPrice > 0 ? Math.floor(sizeSol / entryPrice) : 0;
+
+    const pos: SniperPosition = {
+      id,
+      mint,
+      symbol,
+      name:              symbol,
+      detectedAt:        entryAtMs ?? Date.now(),
+      entryAt:           entryAtMs ?? Date.now(),
+      entryPrice,
+      currentPrice,
+      sizeSol,
+      tp1Hit:            false,
+      tp2Hit:            false,
+      remainingFraction: 1.0,
+      effectiveSlPrice:  entryPrice * (1 - cfg.slPct / 100),
+      trailingHigh:      Math.max(entryPrice, currentPrice),
+      status:            "open",
+      realizedPnlSol:    0,
+      unrealizedPnlSol:  0,
+      totalPnlSol:       0,
+      pnlPct:            0,
+      txSignature:       "",
+      tokenAmount:       estimatedTokens,
+      tp1RealizedSol:    0,
+      tp2RealizedSol:    0,
+      runnerRealizedSol: 0,
+    };
+
+    this.openPositions.set(mint, pos);
+    this.seenMints.add(mint);
+    void this.persistPosition(pos);
+    void this.refreshWalletBalance();
+    this.broadcast();
+
+    logger.info(
+      { mint, symbol, entryPrice, currentPrice, sizeSol, tokenAmount: estimatedTokens },
+      "Graduation sniper: position INJECTED (manual re-entry, no on-chain buy)",
+    );
+
+    return { ...pos };
   }
 
   // ── Getters ────────────────────────────────────────────────────────────────

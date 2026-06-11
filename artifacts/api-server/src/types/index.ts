@@ -221,6 +221,7 @@ export interface WsMessage {
     | "position_update"
     | "alert"
     | "portfolio_update"
+    | "sniper_update"
     | "ping";
   data: unknown;
   timestamp: number;
