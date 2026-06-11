@@ -57,11 +57,33 @@ class SolanaWalletService {
    * Used for BUY orders — confirmation is tracked in the background.
    * outAmount from Jupiter quote is used for P&L; actual confirmation is async.
    */
+  /**
+   * Safely decode a Jupiter-returned base64 transaction.
+   * Jupiter Lite sometimes embeds whitespace / newlines or uses URL-safe chars
+   * (-/_) instead of standard (+/=). Stripping whitespace and normalising the
+   * alphabet before decoding prevents the "encoding overruns Uint8Array" error
+   * thrown by VersionedTransaction.deserialize on malformed buffers.
+   */
+  private decodeTxBase64(txBase64: string): VersionedTransaction {
+    // Strip all whitespace (newlines, spaces, tabs that sneak in from HTTP bodies)
+    const clean = txBase64.replace(/\s+/g, "");
+    // Normalise URL-safe base64 → standard base64
+    const std   = clean.replace(/-/g, "+").replace(/_/g, "/");
+    // Add padding if stripped
+    const padded = std.padEnd(std.length + (4 - (std.length % 4)) % 4, "=");
+    const txBuf = Buffer.from(padded, "base64");
+    try {
+      return VersionedTransaction.deserialize(txBuf);
+    } catch (err) {
+      // Surface a clear message so the caller's withRetry re-fetches a fresh quote
+      throw new Error(`Jupiter TX deserialization failed (${(err as Error).message}) — will retry with fresh quote`);
+    }
+  }
+
   async signAndSend(txBase64: string): Promise<string> {
     if (!this.keypair) throw new Error("Wallet not ready — SOLANA_PRIVATE_KEY not set");
 
-    const txBuf = Buffer.from(txBase64, "base64");
-    const tx = VersionedTransaction.deserialize(txBuf);
+    const tx = this.decodeTxBase64(txBase64);
     tx.sign([this.keypair]);
 
     const signature = await this.connection.sendRawTransaction(tx.serialize(), {
@@ -86,8 +108,7 @@ class SolanaWalletService {
   async signAndSendAndConfirm(txBase64: string): Promise<string> {
     if (!this.keypair) throw new Error("Wallet not ready — SOLANA_PRIVATE_KEY not set");
 
-    const txBuf = Buffer.from(txBase64, "base64");
-    const tx = VersionedTransaction.deserialize(txBuf);
+    const tx = this.decodeTxBase64(txBase64);
     tx.sign([this.keypair]);
 
     const latest = await this.connection.getLatestBlockhash("confirmed");
