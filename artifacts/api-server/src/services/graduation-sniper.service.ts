@@ -18,12 +18,12 @@ const MAX_CLOSED         = 100_000; // effectively unlimited — all trades kept
 const CONFIG_KEY         = "sniper_config";
 
 // ── Adaptive price-check intervals ───────────────────────────────────────────
-const PRICE_LOOP_MS         = 10_000;         // main loop tick — 10 s
-const FAST_WINDOW_MS        = 30 * 60_000;    // first 30 min  → check every 10 s
-const MED_WINDOW_MS         = 2 * 60 * 60_000;// 30 min–2 h    → check every 30 s
-const FAST_INTERVAL_MS      = 10_000;
-const MED_INTERVAL_MS       = 30_000;
-const SLOW_INTERVAL_MS      = 60_000;
+const PRICE_LOOP_MS         = 3_000;          // main loop tick — 3 s (was 10s — faster SL/TP)
+const FAST_WINDOW_MS        = 30 * 60_000;    // first 30 min  → check every 3 s
+const MED_WINDOW_MS         = 2 * 60 * 60_000;// 30 min–2 h    → check every 10 s
+const FAST_INTERVAL_MS      = 3_000;          // was 10s — tightened for faster SL/TP execution
+const MED_INTERVAL_MS       = 10_000;         // was 30s
+const SLOW_INTERVAL_MS      = 30_000;         // was 60s
 
 // ── Dead-position threshold ───────────────────────────────────────────────────
 const DEAD_POSITION_MS      = 2 * 60 * 60_000;// 2 h open with no movement
@@ -262,6 +262,7 @@ class GraduationSniperService {
 
   private async refreshWalletBalance(): Promise<void> {
     this.walletBalanceSol = await solanaWalletService.getBalance();
+    this.broadcast(); // push wallet balance to frontend immediately after every refresh
   }
 
   // ── On-chain actual fill price (most accurate, matches GMGN/Solscan) ─────
@@ -984,6 +985,25 @@ class GraduationSniperService {
     }
   }
 
+  // ── Jupiter Price API — real-time, on-chain price (no lag) ─────────────────
+  // Used as primary source for open-position SL/TP checks — much faster than DexScreener.
+  // Falls back to null on any error so DexScreener can take over.
+  private async fetchPriceJupiter(mint: string): Promise<number | null> {
+    try {
+      type JupPriceResp = { data: Record<string, { price: string } | null> };
+      const res = await axios.get<JupPriceResp>(
+        `https://lite-api.jup.ag/price/v2?ids=${mint}`,
+        { timeout: 4_000 },
+      );
+      const entry = res.data?.data?.[mint];
+      if (!entry) return null;
+      const p = parseFloat(entry.price);
+      return p > 0 ? p : null;
+    } catch {
+      return null;
+    }
+  }
+
   private async fetchPrice(mint: string): Promise<{ price: number; symbol: string; name: string; liquidityUsd: number } | null> {
     try {
       type DexPair = {
@@ -1021,6 +1041,27 @@ class GraduationSniperService {
     } catch {
       return null;
     }
+  }
+
+  // ── Fast price fetch for position monitoring ──────────────────────────────
+  // Tries Jupiter first (real-time, ~100ms), falls back to DexScreener.
+  // DexScreener is still used for liquidity data and symbol metadata.
+  private async fetchPositionPrice(mint: string): Promise<{ price: number; symbol: string; name: string; liquidityUsd: number } | null> {
+    // Try Jupiter first — it's real-time and much faster than DexScreener
+    const jupPrice = await this.fetchPriceJupiter(mint);
+    if (jupPrice !== null) {
+      // We have a live price from Jupiter — get metadata from cached DexScreener if available,
+      // otherwise use what we already have in the position record
+      const pos = this.openPositions.get(mint);
+      return {
+        price:        jupPrice,
+        symbol:       pos?.symbol ?? mint.slice(0, 8),
+        name:         pos?.name   ?? mint.slice(0, 8),
+        liquidityUsd: 0, // not available from Jupiter price endpoint
+      };
+    }
+    // Fall back to DexScreener (has liquidity data, needed for rug detection)
+    return this.fetchPrice(mint);
   }
 
   // ── Position management ────────────────────────────────────────────────────
@@ -1545,7 +1586,8 @@ class GraduationSniperService {
     // Skip positions already mid-close (sell in-flight) to avoid double-close
     if (!pos || this.closingMints.has(mint)) return;
 
-    const priceData = await this.fetchPrice(mint);
+    // Use fetchPositionPrice — tries Jupiter first (real-time), falls back to DexScreener
+    const priceData = await this.fetchPositionPrice(mint);
     if (!priceData) return;
 
     const { price } = priceData;

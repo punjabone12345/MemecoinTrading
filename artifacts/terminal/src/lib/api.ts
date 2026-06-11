@@ -35,6 +35,7 @@ export function useWebSocket() {
             queryClient.invalidateQueries({ queryKey: ["sniper-positions"] });
             queryClient.invalidateQueries({ queryKey: ["sniper-status"] });
             queryClient.invalidateQueries({ queryKey: ["sniper-history"] });
+            queryClient.invalidateQueries({ queryKey: ["sniper-wallet"] });
           }
         } catch (_) {}
       };
@@ -73,7 +74,7 @@ export function useWalletBalance() {
       const json = await res.json() as { data: WalletInfo };
       return json.data;
     },
-    refetchInterval: 15000,
+    refetchInterval: 5000,
   });
 }
 
