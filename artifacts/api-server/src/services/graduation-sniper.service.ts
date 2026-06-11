@@ -327,7 +327,11 @@ class GraduationSniperService {
       const postEntry = postBals.find((b) => b.mint === tokenMint);
       const preEntry  = preBals.find( (b) => b.mint === tokenMint);
       const tokensReceivedRaw = Number(postEntry?.uiTokenAmount.amount ?? 0) - Number(preEntry?.uiTokenAmount.amount ?? 0);
-      const tokensReceivedUi  = (postEntry?.uiTokenAmount.uiAmount ?? 0) - (preEntry?.uiTokenAmount.uiAmount ?? 0);
+      // uiAmount can be null for very small balances — compute it from raw + decimals as fallback
+      const decimals = postEntry?.uiTokenAmount.decimals ?? 6;
+      const postUi   = postEntry?.uiTokenAmount.uiAmount ?? (Number(postEntry?.uiTokenAmount.amount ?? 0) / Math.pow(10, decimals));
+      const preUi    = preEntry?.uiTokenAmount.uiAmount  ?? (Number(preEntry?.uiTokenAmount.amount  ?? 0) / Math.pow(10, decimals));
+      const tokensReceivedUi = postUi - preUi;
 
       if (solSpentUi <= 0 || tokensReceivedRaw <= 0 || tokensReceivedUi <= 0) return null;
 
@@ -1124,15 +1128,46 @@ class GraduationSniperService {
       }
     } catch { /* non-fatal */ }
 
-    // Fallback: if on-chain approach failed, use post-buy DexScreener price
+    // Priority 2: Jupiter quote data — always available, no external API needed.
+    // Uses the exact SOL spent + tokens received from the confirmed swap to compute
+    // true fill price. This catches the case where Helius is not configured OR
+    // fetchSolUsdPrice failed inside the Helius block. 2.5x errors happen when the
+    // token pumps during buy execution and we fall back to the pre-buy detection price.
     if (actualEntryPrice === price) {
       try {
-        const postBuyData = await this.fetchPrice(mint);
-        if (postBuyData && postBuyData.price > 0) {
-          logger.info({ mint, symbol, dexPrice: postBuyData.price }, "Graduation sniper: using post-buy DexScreener fallback price");
-          actualEntryPrice = postBuyData.price;
+        const solUsdPrice = await this.fetchSolUsdPrice();
+        if (solUsdPrice && solUsdPrice > 0 && sizeSol > 0 && tokenAmount > 0) {
+          // tokenAmount is raw units (e.g. 1_000_000_000_000 for 1M tokens at 6 decimals).
+          // Pumpfun tokens always have 6 decimals.
+          const TOKEN_DECIMALS = 6;
+          const tokensUi = tokenAmount / Math.pow(10, TOKEN_DECIMALS);
+          const jupiterPrice = (sizeSol * solUsdPrice) / tokensUi;
+          if (jupiterPrice > 0) {
+            const delta = ((jupiterPrice / price - 1) * 100).toFixed(1);
+            logger.info({ mint, symbol, jupiterPrice, preBuyPrice: price, delta: `${delta}%`, solUsdPrice, sizeSol, tokensUi }, "Graduation sniper: using Jupiter-quote entry price ✅");
+            actualEntryPrice = jupiterPrice;
+          }
         }
       } catch { /* non-fatal */ }
+    }
+
+    // Priority 3: post-buy DexScreener price (may not be indexed yet for new graduations)
+    if (actualEntryPrice === price) {
+      try {
+        // Retry up to 5× with 3s gap — new graduation pairs take ~15s to appear on DexScreener
+        for (let attempt = 0; attempt < 5 && actualEntryPrice === price; attempt++) {
+          if (attempt > 0) await new Promise(r => setTimeout(r, 3_000));
+          const postBuyData = await this.fetchPrice(mint);
+          if (postBuyData && postBuyData.price > 0) {
+            logger.info({ mint, symbol, dexPrice: postBuyData.price, attempt }, "Graduation sniper: using post-buy DexScreener fallback price");
+            actualEntryPrice = postBuyData.price;
+          }
+        }
+      } catch { /* non-fatal */ }
+    }
+
+    if (actualEntryPrice === price) {
+      logger.warn({ mint, symbol, preBuyPrice: price }, "Graduation sniper: all entry price methods failed — using pre-buy detection price ⚠️ (entry price will be inaccurate)");
     }
 
     const pos: SniperPosition = {

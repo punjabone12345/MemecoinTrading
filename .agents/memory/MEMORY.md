@@ -3,3 +3,4 @@
 - [On-chain bonding curve reader](onchain-bonding-curve.md) — pure-Node.js PDA derivation + getMultipleAccounts; no Solana SDK needed; confirmed working
 - [Real trading architecture](real-trading-arch.md) — Jupiter v6 + Solana web3.js swaps; @solana/web3.js externalized in esbuild; closePosition/partialClose/checkStagedSL all async
 - [Sniper trade verification](sniper-trade-verification.md) — entrySig/exitSig fields distinguish verified vs fake trades; purgeUnverifiedHistory() cleans old buggy data
+- [Critical sniper bugs fixed](sniper-critical-bugs.md) — isDuplicateTrade blocks ALL closes; trailingHigh=0 kills SL; entry price uses pre-buy price without Jupiter fallback
