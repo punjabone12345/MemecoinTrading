@@ -189,15 +189,19 @@ class JupiterSwapService {
     slippageBps?: number,
   ): Promise<string> {
     await jupiterRateLimiter.throttle();
-    // slippageBps is passed explicitly so Jupiter's /swap endpoint uses it to
-    // recompute otherAmountThreshold from the WIDENED value, not from whatever
-    // is baked into the quoteResponse or a server-side default.
+    // dynamicSlippage lets Jupiter calculate the exact slippage needed for the
+    // pool (based on real-time price impact), up to maxBps. This is the primary
+    // defence against Custom:1 (Raydium CPMM ExceededSlippage) on thin pools —
+    // Jupiter sets otherAmountThreshold exactly right instead of us guessing.
+    // slippageBps is kept as a fallback so manual retry widening still applies
+    // if dynamicSlippage isn't supported by the API version in use.
     const body: Record<string, unknown> = {
       quoteResponse,
       userPublicKey:             solanaWalletService.publicKey,
       wrapAndUnwrapSol:          true,
       dynamicComputeUnitLimit:   true,
       prioritizationFeeLamports: priorityFeeLamports,
+      dynamicSlippage: { minBps: 50, maxBps: 5000 },
     };
     if (slippageBps !== undefined) {
       body["slippageBps"] = slippageBps;
@@ -207,7 +211,7 @@ class JupiterSwapService {
   }
 
   // ── BUY ───────────────────────────────────────────────────────────────────
-  // Retries quote+build up to 3 times (fresh graduates take 2-5s to appear in Jupiter).
+  // Retries quote+build up to 5 times (fresh graduates take 2-5s to appear in Jupiter).
   // Uses signAndSendAndConfirm so the position is ONLY recorded after the TX lands on-chain.
   async buy(
     tokenMint: string,
@@ -225,12 +229,16 @@ class JupiterSwapService {
     const amountLamports = Math.round(solAmount * LAMPORTS_PER_SOL);
 
     return withRetry(`buy:${tokenMint.slice(0, 8)}`, async (attempt) => {
-      // Widen slippage on each retry: +1000 bps per attempt for buys.
-      // Custom:1 on Raydium CPMM = ExceededSlippage (buy-side), same fix as
-      // Custom:6024 on sells — pass widened slippage to BOTH quote and swap so
-      // the on-chain minimum-output threshold is recomputed from the wider value.
-      //   attempt 1 = base, attempt 2 = base+1000, attempt 3 = min(base+2000, 5000)
-      const wideningBps     = (attempt - 1) * 1000;
+      // Widen slippage aggressively on each retry: +1500 bps per attempt.
+      // pump.fun graduates land on thin Raydium CPMM pools (Custom:1 error).
+      // dynamicSlippage in getSwapTx handles this automatically on attempt 1,
+      // but if that's not enough we escalate hard:
+      //   attempt 1 = base (dynamicSlippage active)
+      //   attempt 2 = base + 1500
+      //   attempt 3 = base + 3000
+      //   attempt 4 = base + 4500  (capped at 5000)
+      //   attempt 5 = 5000         (max — emergency)
+      const wideningBps     = (attempt - 1) * 1500;
       const effectiveSlippage = Math.min(slippageBps + wideningBps, 5000);
       logger.info({
         tokenMint, solAmount,
@@ -259,7 +267,7 @@ class JupiterSwapService {
 
       logger.info({ tokenMint, solSpent, tokenAmount, txSignature, attempt, effectiveSlippage }, "Jupiter: buy confirmed on-chain ✅");
       return { txSignature, tokenAmount, solSpent, attempt };
-    }, 3, 2000);
+    }, 5, 1500);
   }
 
   // ── SELL ──────────────────────────────────────────────────────────────────
