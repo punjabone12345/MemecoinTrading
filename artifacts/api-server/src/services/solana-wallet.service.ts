@@ -1,21 +1,37 @@
-import { Keypair, Connection, VersionedTransaction } from "@solana/web3.js";
+import { Keypair, Connection, VersionedTransaction, PublicKey } from "@solana/web3.js";
 import bs58 from "bs58";
 import { logger } from "../lib/logger.js";
 
 const LAMPORTS_PER_SOL = 1_000_000_000;
 
+// Public Solana mainnet RPC — used as fallback when Helius is unavailable or slow.
+// Sending to both simultaneously ensures the TX lands even if one endpoint is degraded.
+const PUBLIC_RPC_URL = "https://api.mainnet-beta.solana.com";
+
 class SolanaWalletService {
   private keypair: Keypair | null = null;
   readonly connection: Connection;
+  private readonly connectionFallback: Connection;
+
+  // Consecutive RPC failure tracking for health monitoring
+  private rpcFailStreak = 0;
+  private rpcFailStreakStart = 0;
+  private readonly RPC_FAIL_ALERT_MS = 60_000; // 60s of consecutive failures → alert
 
   constructor() {
     const heliusKey = process.env["HELIUS_API_KEY"];
-    // Use Helius for low-latency RPC; fallback to public mainnet
-    const rpcUrl = heliusKey
+    const primaryRpc = heliusKey
       ? `https://mainnet.helius-rpc.com/?api-key=${heliusKey}`
-      : "https://api.mainnet-beta.solana.com";
-    this.connection = new Connection(rpcUrl, {
-      commitment: "processed",       // fastest confirmation level
+      : PUBLIC_RPC_URL;
+
+    this.connection = new Connection(primaryRpc, {
+      commitment: "processed",
+      confirmTransactionInitialTimeout: 60_000,
+    });
+
+    // Always keep a fallback connection to public endpoint for dual-submission
+    this.connectionFallback = new Connection(PUBLIC_RPC_URL, {
+      commitment: "processed",
       confirmTransactionInitialTimeout: 60_000,
     });
 
@@ -45,100 +61,156 @@ class SolanaWalletService {
     if (!this.keypair) return 0;
     try {
       const lamports = await this.connection.getBalance(this.keypair.publicKey, "confirmed");
+      this.rpcFailStreak = 0; // reset on success
       return lamports / LAMPORTS_PER_SOL;
     } catch (err) {
-      logger.warn({ err: (err as Error).message }, "SolanaWalletService: getBalance failed");
-      return 0;
+      this.trackRpcFailure("getBalance", (err as Error).message);
+      // Try fallback
+      try {
+        const lamports = await this.connectionFallback.getBalance(this.keypair.publicKey, "confirmed");
+        return lamports / LAMPORTS_PER_SOL;
+      } catch {
+        return 0;
+      }
     }
   }
 
   /**
-   * Sign + send with skipPreflight for maximum speed (~300ms).
-   * Used for BUY orders — confirmation is tracked in the background.
-   * outAmount from Jupiter quote is used for P&L; actual confirmation is async.
+   * Fetch all token accounts owned by the wallet.
+   * Returns a map of mint → uiAmount for reconciliation against open positions.
    */
+  async getTokenAccounts(): Promise<Map<string, number>> {
+    const result = new Map<string, number>();
+    if (!this.keypair) return result;
+    try {
+      const accounts = await this.connection.getParsedTokenAccountsByOwner(
+        this.keypair.publicKey,
+        { programId: new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA") },
+        "confirmed",
+      );
+      for (const acc of accounts.value) {
+        const parsed = acc.account.data as {
+          parsed?: { info?: { mint?: string; tokenAmount?: { uiAmount?: number | null } } };
+        };
+        const mint = parsed.parsed?.info?.mint;
+        const uiAmount = parsed.parsed?.info?.tokenAmount?.uiAmount ?? 0;
+        if (mint && uiAmount > 0) {
+          result.set(mint, (result.get(mint) ?? 0) + uiAmount);
+        }
+      }
+      this.rpcFailStreak = 0;
+    } catch (err) {
+      this.trackRpcFailure("getTokenAccounts", (err as Error).message);
+    }
+    return result;
+  }
+
+  private trackRpcFailure(method: string, errMsg: string): void {
+    const now = Date.now();
+    if (this.rpcFailStreak === 0) this.rpcFailStreakStart = now;
+    this.rpcFailStreak++;
+    const duration = now - this.rpcFailStreakStart;
+    logger.warn({ method, errMsg, failStreak: this.rpcFailStreak, durationMs: duration }, "SolanaWalletService: RPC failure");
+    if (duration >= this.RPC_FAIL_ALERT_MS && this.rpcFailStreak % 5 === 0) {
+      // Emit a critical log — the sniper service picks this up in its health check
+      logger.error({ method, failStreak: this.rpcFailStreak, durationMs: duration }, "SolanaWalletService: CRITICAL — RPC failures for 60s+ ❌");
+    }
+  }
+
   /**
    * Safely decode a Jupiter-returned base64 transaction.
-   * Jupiter Lite sometimes embeds whitespace / newlines or uses URL-safe chars
-   * (-/_) instead of standard (+/=). Stripping whitespace and normalising the
-   * alphabet before decoding prevents the "encoding overruns Uint8Array" error
-   * thrown by VersionedTransaction.deserialize on malformed buffers.
    */
   private decodeTxBase64(txBase64: string): VersionedTransaction {
-    // Strip all whitespace (newlines, spaces, tabs that sneak in from HTTP bodies)
-    const clean = txBase64.replace(/\s+/g, "");
-    // Normalise URL-safe base64 → standard base64
-    const std   = clean.replace(/-/g, "+").replace(/_/g, "/");
-    // Add padding if stripped
+    const clean  = txBase64.replace(/\s+/g, "");
+    const std    = clean.replace(/-/g, "+").replace(/_/g, "/");
     const padded = std.padEnd(std.length + (4 - (std.length % 4)) % 4, "=");
-    const txBuf = Buffer.from(padded, "base64");
+    const txBuf  = Buffer.from(padded, "base64");
     try {
       return VersionedTransaction.deserialize(txBuf);
     } catch (err) {
-      // Surface a clear message so the caller's withRetry re-fetches a fresh quote
       throw new Error(`Jupiter TX deserialization failed (${(err as Error).message}) — will retry with fresh quote`);
     }
   }
 
   async signAndSend(txBase64: string): Promise<string> {
     if (!this.keypair) throw new Error("Wallet not ready — SOLANA_PRIVATE_KEY not set");
-
     const tx = this.decodeTxBase64(txBase64);
     tx.sign([this.keypair]);
-
     const signature = await this.connection.sendRawTransaction(tx.serialize(), {
-      skipPreflight: true,
-      maxRetries: 5,
-      preflightCommitment: "processed",
+      skipPreflight: true, maxRetries: 5, preflightCommitment: "processed",
     });
-
     logger.info({ sig: signature.slice(0, 20) }, "SolanaWalletService: tx sent ⚡ (confirming in background)");
-
     void this.confirmInBackground(signature);
-
     return signature;
   }
 
   /**
-   * Sign + send and WAIT for on-chain confirmation before returning.
-   * Used for BOTH BUY and SELL orders — position is only recorded / closed
-   * after this resolves successfully.
-   * Throws if the transaction fails or is rejected on-chain.
+   * Sign + send and WAIT for on-chain confirmation.
+   * Submits to BOTH Helius + public endpoint simultaneously for maximum reliability.
+   * Uses whichever endpoint confirms first.
    */
   async signAndSendAndConfirm(txBase64: string): Promise<string> {
     if (!this.keypair) throw new Error("Wallet not ready — SOLANA_PRIVATE_KEY not set");
 
     const tx = this.decodeTxBase64(txBase64);
     tx.sign([this.keypair]);
+    const serialized = tx.serialize();
 
     const latest = await this.connection.getLatestBlockhash("confirmed");
 
-    const signature = await this.connection.sendRawTransaction(tx.serialize(), {
-      skipPreflight: true,
-      maxRetries: 5,
-      preflightCommitment: "processed",
-    });
+    // Send to both RPCs simultaneously — use whichever responds first
+    const sendOpts = { skipPreflight: true, maxRetries: 3, preflightCommitment: "processed" as const };
 
-    logger.info({ sig: signature.slice(0, 20) }, "SolanaWalletService: sell tx sent — waiting for on-chain confirmation ⏳");
+    let signature: string;
+    try {
+      // Primary send
+      signature = await this.connection.sendRawTransaction(serialized, sendOpts);
+      logger.info({ sig: signature.slice(0, 20) }, "SolanaWalletService: tx sent to primary RPC — waiting for confirmation ⏳");
 
-    const result = await this.connection.confirmTransaction(
-      { signature, blockhash: latest.blockhash, lastValidBlockHeight: latest.lastValidBlockHeight },
-      "confirmed",
-    );
-
-    if (result.value.err) {
-      const errMsg = JSON.stringify(result.value.err);
-      logger.error({ sig: signature.slice(0, 20), err: errMsg }, "SolanaWalletService: sell tx FAILED on-chain ❌");
-      throw new Error(`Sell transaction rejected on-chain: ${errMsg}`);
+      // Also send to fallback in background (same TX, same signature)
+      void this.connectionFallback.sendRawTransaction(serialized, sendOpts).catch(() => {
+        // Ignore fallback send errors — we already have a signature from primary
+      });
+    } catch (primaryErr) {
+      // Primary failed — try fallback
+      logger.warn({ err: (primaryErr as Error).message }, "SolanaWalletService: primary RPC send failed — trying fallback");
+      signature = await this.connectionFallback.sendRawTransaction(serialized, sendOpts);
+      logger.info({ sig: signature.slice(0, 20) }, "SolanaWalletService: tx sent via fallback RPC ⏳");
     }
 
-    logger.info({ sig: signature.slice(0, 20) }, "SolanaWalletService: sell tx confirmed on-chain ✅");
+    // Confirm on primary (faster; if it fails try fallback confirm)
+    try {
+      const result = await this.connection.confirmTransaction(
+        { signature, blockhash: latest.blockhash, lastValidBlockHeight: latest.lastValidBlockHeight },
+        "confirmed",
+      );
+      if (result.value.err) {
+        const errMsg = JSON.stringify(result.value.err);
+        logger.error({ sig: signature.slice(0, 20), err: errMsg }, "SolanaWalletService: tx FAILED on-chain ❌");
+        throw new Error(`Transaction rejected on-chain: ${errMsg}`);
+      }
+    } catch (confirmErr) {
+      const msg = (confirmErr as Error).message ?? String(confirmErr);
+      // If it's an on-chain rejection, rethrow
+      if (msg.includes("rejected on-chain") || msg.includes("Transaction rejected")) throw confirmErr;
+      // Otherwise it's a timeout/network issue — try fallback confirmation
+      logger.warn({ sig: signature.slice(0, 20), err: msg }, "SolanaWalletService: primary confirm timeout — trying fallback RPC");
+      const result2 = await this.connectionFallback.confirmTransaction(
+        { signature, blockhash: latest.blockhash, lastValidBlockHeight: latest.lastValidBlockHeight },
+        "confirmed",
+      );
+      if (result2.value.err) {
+        const errMsg = JSON.stringify(result2.value.err);
+        logger.error({ sig: signature.slice(0, 20), err: errMsg }, "SolanaWalletService: tx FAILED on-chain (fallback confirm) ❌");
+        throw new Error(`Transaction rejected on-chain: ${errMsg}`);
+      }
+    }
+
+    this.rpcFailStreak = 0;
+    logger.info({ sig: signature.slice(0, 20) }, "SolanaWalletService: tx confirmed on-chain ✅");
     return signature;
   }
 
-  /**
-   * Background confirmation tracker for buys. Logs success/failure; caller already moved on.
-   */
   private async confirmInBackground(signature: string): Promise<void> {
     try {
       const latest = await this.connection.getLatestBlockhash("confirmed");

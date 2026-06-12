@@ -375,12 +375,16 @@ export interface SniperPosition {
   closedAt?: number;
   exitPrice?: number;
   txSignature: string;
-  entrySig: string;   // buy tx — confirmed on-chain entry
-  exitSig?: string;   // sell tx — only present for confirmed on-chain sells
-  // P&L breakdown per stage
+  entrySig: string;
+  exitSig?: string;
   tp1RealizedSol: number;
   tp2RealizedSol: number;
   runnerRealizedSol: number;
+  // Runtime-only fields (not persisted to DB) — populated by getOpenPositions()
+  closingAttempt?: number;  // 0 = not closing, 1–N = attempt number
+  isStuck?: boolean;        // true when sell has failed MAX_SELL_FAILS times
+  lastError?: string;       // last sell error message for UI display
+  lastPriceAt?: number;     // timestamp of last successful price update
 }
 
 export interface SniperEvent {
@@ -412,3 +416,24 @@ export interface SniperStatus {
   config: SniperConfig;
 }
 
+// ── Stuck tokens — tokens in wallet not tracked as open positions ──────────────
+export interface StuckToken {
+  mint: string;
+  symbol: string;         // from open-position record (if found) or "UNKNOWN"
+  uiAmount: number;       // human-readable token balance (e.g. 1,234.56)
+  rawAmount: number;      // raw token units (used for sell)
+  raydiumUrl: string;     // quick-sell link
+}
+
+// ── Sniper health metrics — rate counters + connection status ─────────────────
+export interface SniperHealthMetrics {
+  jupiterCallsThisMinute: number;
+  dexscreenerCallsThisMinute: number;
+  jupiterCallsTotal: number;
+  dexscreenerCallsTotal: number;
+  wsConnected: boolean;
+  isLowLiquidityHour: boolean;
+  openPositions: number;
+  walletBalance: number;
+  uptimeMs: number;
+}

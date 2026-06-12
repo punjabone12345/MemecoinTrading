@@ -24,15 +24,12 @@ class JupiterRateLimiter {
   private readonly minGapMs = 400; // max ~40 req/min (conservative under 60 limit)
 
   async throttle(): Promise<void> {
-    // If we are paused due to a recent 429, wait out the pause window
     const now = Date.now();
     if (now < this.pausedUntil) {
       const wait = this.pausedUntil - now;
       logger.warn({ wait }, "Jupiter rate limiter: paused — waiting out cool-off");
       await new Promise(r => setTimeout(r, wait));
     }
-
-    // Enforce minimum gap between consecutive requests
     const gap = Date.now() - this.lastRequestAt;
     if (gap < this.minGapMs) {
       await new Promise(r => setTimeout(r, this.minGapMs - gap));
@@ -40,7 +37,6 @@ class JupiterRateLimiter {
     this.lastRequestAt = Date.now();
   }
 
-  // Call this when a 429 is received to pause all subsequent requests
   pause429(retryAfterSeconds?: number): void {
     const pauseMs = retryAfterSeconds ? retryAfterSeconds * 1000 : 15_000;
     this.pausedUntil = Date.now() + pauseMs;
@@ -63,11 +59,55 @@ export interface SellResult {
   attempt: number;
 }
 
+// ── Pre-flight validation ─────────────────────────────────────────────────────
+// Catches invalid params BEFORE hitting the Jupiter API, preventing confusing
+// "amount too small" or "NaN" errors that waste retries.
+function validateBuyParams(tokenMint: string, solAmount: number, slippageBps: number, priorityFeeLamports: number): void {
+  if (!tokenMint || tokenMint.length < 32) {
+    throw new Error(`Pre-flight: invalid tokenMint "${tokenMint}"`);
+  }
+  if (!Number.isFinite(solAmount) || solAmount <= 0) {
+    throw new Error(`Pre-flight: invalid solAmount ${solAmount} — must be a positive number`);
+  }
+  if (solAmount < 0.0001) {
+    throw new Error(`Pre-flight: solAmount ${solAmount} SOL is below minimum (0.0001 SOL)`);
+  }
+  if (!Number.isFinite(slippageBps) || slippageBps < 50 || slippageBps > 5000) {
+    throw new Error(`Pre-flight: slippageBps ${slippageBps} out of range [50, 5000]`);
+  }
+  if (!Number.isFinite(priorityFeeLamports) || priorityFeeLamports < 0) {
+    throw new Error(`Pre-flight: invalid priorityFeeLamports ${priorityFeeLamports}`);
+  }
+}
+
+function validateSellParams(tokenMint: string, tokenAmount: number, slippageBps: number, priorityFeeLamports: number): void {
+  if (!tokenMint || tokenMint.length < 32) {
+    throw new Error(`Pre-flight: invalid tokenMint "${tokenMint}"`);
+  }
+  if (!Number.isFinite(tokenAmount) || tokenAmount <= 0) {
+    throw new Error(`Pre-flight: invalid tokenAmount ${tokenAmount} — must be a positive number`);
+  }
+  if (!Number.isFinite(slippageBps) || slippageBps < 50 || slippageBps > 10000) {
+    throw new Error(`Pre-flight: slippageBps ${slippageBps} out of range [50, 10000]`);
+  }
+  if (!Number.isFinite(priorityFeeLamports) || priorityFeeLamports < 0) {
+    throw new Error(`Pre-flight: invalid priorityFeeLamports ${priorityFeeLamports}`);
+  }
+}
+
+// ── Custom:6024 detection ─────────────────────────────────────────────────────
+// Custom program error 6024 on Raydium = "ExceededSlippage" — the swap failed
+// because the market moved beyond the slippage tolerance. This is recoverable by
+// widening slippage on retry (which withRetry does). We surface it clearly.
+function classifyError(err: unknown): { isSlippageError: boolean; isDeadPool: boolean; msg: string } {
+  const msg = String((err as Error).message ?? err ?? "unknown");
+  const isSlippageError = msg.includes("Custom:6024") || msg.includes("ExceededSlippage") || msg.includes("6024");
+  // Dead pool = slippage + multiple fails + "insufficient liquidity" hints
+  const isDeadPool = isSlippageError && (msg.includes("liquidity") || msg.includes("pool"));
+  return { isSlippageError, isDeadPool, msg };
+}
+
 // ── Retry helper ──────────────────────────────────────────────────────────────
-// Retries any async fn up to maxAttempts times with exponential back-off.
-// For buy: fresh graduates may take 2-5s to appear in Jupiter routing — retries fix that.
-// For sell: escalating slippage is passed in; caller controls it per attempt.
-// Special handling for 429 (rate limit): waits longer and respects Retry-After header.
 async function withRetry<T>(
   label: string,
   fn: (attempt: number) => Promise<T>,
@@ -82,24 +122,28 @@ async function withRetry<T>(
       lastErr = err;
       const axErr = err as AxiosError;
       const status = axErr.response?.status ?? 0;
-      const msg    = axErr.message ?? String(err);
-      logger.warn({ label, attempt, maxAttempts, status, msg },
-        `Jupiter: attempt ${attempt}/${maxAttempts} failed — ${msg}`);
+      const { isSlippageError, msg } = classifyError(err);
+
+      if (isSlippageError) {
+        logger.warn({ label, attempt, maxAttempts, msg },
+          `Jupiter: Custom:6024 ExceededSlippage — attempt ${attempt}/${maxAttempts} (widening slippage on retry)`);
+      } else {
+        logger.warn({ label, attempt, maxAttempts, status, msg },
+          `Jupiter: attempt ${attempt}/${maxAttempts} failed — ${msg}`);
+      }
 
       if (attempt < maxAttempts) {
         let delay: number;
         if (status === 429) {
-          // Rate limited — tell the global limiter to pause all future requests too
           const retryAfter = Number(axErr.response?.headers?.["retry-after"] ?? 0);
           jupiterRateLimiter.pause429(retryAfter > 0 ? retryAfter : undefined);
           delay = retryAfter > 0
             ? retryAfter * 1000
-            : Math.min(baseDelayMs * Math.pow(2, attempt - 1), 30_000); // 2s, 4s, 8s, 16s … capped at 30s
+            : Math.min(baseDelayMs * Math.pow(2, attempt - 1), 30_000);
           logger.warn({ label, delay, retryAfter }, `Jupiter: 429 rate limit — waiting ${delay}ms`);
         } else {
-          // Other errors: exponential back-off capped at 15s
           delay = Math.min(baseDelayMs * Math.pow(2, attempt - 1), 15_000);
-          logger.info({ label, delay }, `Jupiter: waiting ${delay}ms before retry`);
+          logger.info({ label, delay, isSlippageError }, `Jupiter: waiting ${delay}ms before retry`);
         }
         await new Promise(r => setTimeout(r, delay));
       }
@@ -133,7 +177,6 @@ class JupiterSwapService {
       userPublicKey:            solanaWalletService.publicKey,
       wrapAndUnwrapSol:         true,
       dynamicComputeUnitLimit:  true,
-      // Lite API: plain number (NOT the nested v6 priorityLevelWithMaxLamports object)
       prioritizationFeeLamports: priorityFeeLamports,
     }, { timeout: 15_000 });
     return res.data.swapTransaction as string;
@@ -142,7 +185,6 @@ class JupiterSwapService {
   // ── BUY ───────────────────────────────────────────────────────────────────
   // Retries quote+build up to 3 times (fresh graduates take 2-5s to appear in Jupiter).
   // Uses signAndSendAndConfirm so the position is ONLY recorded after the TX lands on-chain.
-  // This prevents phantom positions caused by failed buys being recorded as real entries.
   async buy(
     tokenMint: string,
     solAmount: number,
@@ -153,17 +195,17 @@ class JupiterSwapService {
       throw new Error("Wallet not configured — set SOLANA_PRIVATE_KEY env var");
     }
 
+    // Pre-flight: validate all params before touching Jupiter API
+    validateBuyParams(tokenMint, solAmount, slippageBps, priorityFeeLamports);
+
     const amountLamports = Math.round(solAmount * LAMPORTS_PER_SOL);
 
     return withRetry(`buy:${tokenMint.slice(0, 8)}`, async (attempt) => {
       logger.info({ tokenMint, solAmount, slippageBps, attempt }, "Jupiter: getting buy quote");
 
-      const quote = await this.getQuote(SOL_MINT, tokenMint, amountLamports, slippageBps);
+      const quote       = await this.getQuote(SOL_MINT, tokenMint, amountLamports, slippageBps);
       const swapTx      = await this.getSwapTx(quote, priorityFeeLamports);
-      // CRITICAL: use signAndSendAndConfirm (not fire-and-forget signAndSend).
-      // We must confirm the buy TX landed on-chain before recording the position.
-      // signAndSend was the root cause of phantom positions and unmatched buy/no-sell losses.
-      const txSignature  = await solanaWalletService.signAndSendAndConfirm(swapTx);
+      const txSignature = await solanaWalletService.signAndSendAndConfirm(swapTx);
 
       const q = quote as Record<string, string>;
       const tokenAmount = Number(q["outAmount"]);
@@ -175,8 +217,8 @@ class JupiterSwapService {
   }
 
   // ── SELL ──────────────────────────────────────────────────────────────────
-  // Retries up to 3 times. Each retry adds 500 bps of slippage (tokens are volatile;
-  // if the first quote slippage-fails on execution, a wider band will succeed).
+  // Retries up to 3 times with escalating slippage.
+  // Custom:6024 (ExceededSlippage) is handled specifically — each retry adds 500 bps.
   async sell(
     tokenMint: string,
     tokenAmount: number,
@@ -190,17 +232,18 @@ class JupiterSwapService {
     const amountRaw = Math.floor(tokenAmount);
     if (amountRaw <= 0) throw new Error("Nothing to sell — token amount is zero");
 
+    // Pre-flight: validate sell params
+    validateSellParams(tokenMint, amountRaw, slippageBps, priorityFeeLamports);
+
     return withRetry(`sell:${tokenMint.slice(0, 8)}`, async (attempt) => {
-      // Widen slippage on each retry so a volatile exit still lands
-      const effectiveSlippage = slippageBps + (attempt - 1) * 500;
+      // Widen slippage on each retry so a volatile exit still lands.
+      // Custom:6024 (ExceededSlippage) is the most common sell failure.
+      const effectiveSlippage = Math.min(slippageBps + (attempt - 1) * 500, 5000);
       logger.info({ tokenMint, tokenAmount: amountRaw, effectiveSlippage, attempt }, "Jupiter: getting sell quote");
 
-      const quote = await this.getQuote(tokenMint, SOL_MINT, amountRaw, effectiveSlippage);
+      const quote       = await this.getQuote(tokenMint, SOL_MINT, amountRaw, effectiveSlippage);
       const swapTx      = await this.getSwapTx(quote, priorityFeeLamports);
-      // Use signAndSendAndConfirm for sells — we MUST verify the tx landed on-chain
-      // before the caller marks the position as closed. signAndSend (fire-and-forget)
-      // would let a failed tx silently close the position while tokens stay in wallet.
-      const txSignature  = await solanaWalletService.signAndSendAndConfirm(swapTx);
+      const txSignature = await solanaWalletService.signAndSendAndConfirm(swapTx);
 
       const q = quote as Record<string, string>;
       const solReceived = Number(q["outAmount"]) / LAMPORTS_PER_SOL;
@@ -208,6 +251,40 @@ class JupiterSwapService {
       logger.info({ tokenMint, tokenAmount: amountRaw, solReceived, txSignature, attempt }, "Jupiter: sell ✅");
       return { txSignature, solReceived, attempt };
     }, 3, 1500);
+  }
+
+  // ── EMERGENCY SELL ────────────────────────────────────────────────────────
+  // Used for stuck positions — forces max slippage (5000 bps = 50%).
+  // Higher priority fee to ensure the TX lands in congested conditions.
+  async emergencySell(
+    tokenMint: string,
+    tokenAmount: number,
+    priorityFeeLamports: number,
+  ): Promise<SellResult> {
+    if (!solanaWalletService.isReady) {
+      throw new Error("Wallet not configured — set SOLANA_PRIVATE_KEY env var");
+    }
+
+    const amountRaw = Math.floor(tokenAmount);
+    if (amountRaw <= 0) throw new Error("Nothing to sell — token amount is zero");
+
+    // Emergency: use max slippage 50% (5000 bps) and higher priority fee
+    const emergencySlippage    = 5000;
+    const emergencyPriorityFee = Math.max(priorityFeeLamports, 2_000_000); // min 0.002 SOL for emergency
+
+    logger.warn({ tokenMint, amountRaw, emergencySlippage, emergencyPriorityFee }, "Jupiter: EMERGENCY SELL — max slippage 50%");
+
+    return withRetry(`emergency-sell:${tokenMint.slice(0, 8)}`, async (attempt) => {
+      const quote       = await this.getQuote(tokenMint, SOL_MINT, amountRaw, emergencySlippage);
+      const swapTx      = await this.getSwapTx(quote, emergencyPriorityFee);
+      const txSignature = await solanaWalletService.signAndSendAndConfirm(swapTx);
+
+      const q = quote as Record<string, string>;
+      const solReceived = Number(q["outAmount"]) / LAMPORTS_PER_SOL;
+
+      logger.info({ tokenMint, amountRaw, solReceived, txSignature, attempt }, "Jupiter: emergency sell confirmed ✅");
+      return { txSignature, solReceived, attempt };
+    }, 2, 3000);
   }
 }
 

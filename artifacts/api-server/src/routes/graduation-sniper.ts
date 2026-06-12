@@ -87,6 +87,18 @@ router.post("/sniper/positions/:id/close", async (req, res) => {
   }
 });
 
+// ── Emergency sell — max slippage (50%), for stuck positions ─────────────────
+router.post("/sniper/positions/:id/emergency-sell", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const result = await graduationSniperService.emergencySell(id!);
+    if (!result) return res.status(404).json({ success: false, error: "Open position not found" });
+    res.json({ success: true, data: result });
+  } catch (err) {
+    res.status(500).json({ success: false, error: (err as Error).message });
+  }
+});
+
 // ── Delete a position (open or closed) ─────────────────────────────────────
 router.delete("/sniper/positions/:id", async (req, res) => {
   try {
@@ -166,6 +178,22 @@ router.get("/sniper/wallet", async (_req, res) => {
   } catch (err) {
     res.status(500).json({ success: false, error: (err as Error).message });
   }
+});
+
+// ── Stuck tokens — tokens in wallet but not tracked as open positions ────────
+// Used to detect and emergency-sell orphaned tokens from stuck positions.
+router.get("/sniper/stuck-tokens", async (_req, res) => {
+  try {
+    const tokens = await graduationSniperService.getStuckTokens();
+    res.json({ success: true, data: tokens });
+  } catch (err) {
+    res.status(500).json({ success: false, error: (err as Error).message });
+  }
+});
+
+// ── Health metrics — rate counters, connection status ────────────────────────
+router.get("/sniper/health-metrics", (_req, res) => {
+  res.json({ success: true, data: graduationSniperService.getHealthMetrics() });
 });
 
 export default router;

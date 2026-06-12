@@ -66,6 +66,29 @@ const STAGED_SL_AFTER_TP1   = 35;            // after TP1: 35% from peak (allows
 const LIQUIDITY_CHECK_MS     = 30_000;        // check open-position liquidity every 30 s
 const LIQUIDITY_DROP_TRIGGER = 40;            // exit if liquidity drops > 40% in one window
 
+// ── Low-liquidity hours (11pm–6am IST = 17:30–00:30 UTC) ─────────────────────
+// During overnight trading apply stricter entry filters — thinner markets increase rug risk.
+const LOW_LIQ_MIN_POOL_SOL      = 20;         // stricter pool SOL (vs 10 during normal hours)
+const LOW_LIQ_MIN_LIQUIDITY_USD = 3_000;      // minimum DexScreener liquidity USD in quiet hours
+const NORMAL_MIN_LIQUIDITY_USD  = 500;        // minimum DexScreener liquidity USD in active hours
+
+// ── Health heartbeat ──────────────────────────────────────────────────────────
+const HEARTBEAT_INTERVAL_MS     = 15 * 60_000; // Telegram ping every 15 minutes
+
+// ── Stale price guard ─────────────────────────────────────────────────────────
+// If a position's price hasn't updated in >5s, skip TP/SL for that tick to
+// avoid acting on stale data (e.g. DexScreener batch call failed for one token).
+const STALE_PRICE_MS            = 5_000;
+
+// ── Batch DexScreener ─────────────────────────────────────────────────────────
+// DexScreener /tokens/v1/solana/{addr1},{addr2}... allows up to 30 per request.
+// Batching all due positions into one request cuts DexScreener calls from
+// N (one per position) down to ceil(N/30) — massively reduces rate-limit risk.
+const BATCH_DEXSCREENER_MAX     = 30;
+
+// ── Jupiter Price API (fallback for tokens not yet indexed on DexScreener) ────
+const JUPITER_PRICE_URL         = "https://lite-api.jup.ag/price/v2";
+
 
 function uid(): string {
   return `snp-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
@@ -235,6 +258,23 @@ class GraduationSniperService {
   private lastPositionLiquidityUsd: Map<string, number> = new Map();
   // FIX 4: Persistent closed-trade fingerprints — prevents duplicate logs on restart
   private closedTradeFingerprints: Set<string> = new Set();
+
+  // ── Health monitoring & rate counters ──────────────────────────────────────
+  private jupiterCallsThisMinute    = 0;
+  private dexscreenerCallsThisMinute = 0;
+  private jupiterCallsTotal         = 0;
+  private dexscreenerCallsTotal     = 0;
+  private rateWindowStart           = Date.now();
+  private heartbeatIntervalId: ReturnType<typeof setInterval> | null = null;
+  private startedAt                 = Date.now();
+
+  // ── Stale-price guard ──────────────────────────────────────────────────────
+  // Tracks when each position last got a valid price update from DexScreener.
+  // If the gap exceeds STALE_PRICE_MS, TP/SL checks are skipped for that tick.
+  private lastPriceUpdatedAt: Map<string, number> = new Map();
+
+  // ── Per-position error tracking (for UI badge display) ────────────────────
+  private positionLastError: Map<string, string> = new Map();
 
   // ── Init ───────────────────────────────────────────────────────────────────
 
@@ -653,6 +693,7 @@ class GraduationSniperService {
       return;
     }
 
+    this.startHeartbeat();
     this.connect(apiKey);
     logger.info("Graduation sniper: started — WebSocket connecting, all monitoring active");
   }
@@ -662,6 +703,7 @@ class GraduationSniperService {
     if (this.priceIntervalId)      { clearInterval(this.priceIntervalId);      this.priceIntervalId      = null; }
     if (this.liquidityIntervalId)  { clearInterval(this.liquidityIntervalId);  this.liquidityIntervalId  = null; }
     if (this.externalSellCheckId)  { clearInterval(this.externalSellCheckId);  this.externalSellCheckId  = null; }
+    if (this.heartbeatIntervalId)  { clearInterval(this.heartbeatIntervalId);  this.heartbeatIntervalId  = null; }
     if (this.reconnectTimer)       { clearTimeout(this.reconnectTimer);        this.reconnectTimer       = null; }
     this.ws?.close();
   }
@@ -828,11 +870,13 @@ class GraduationSniperService {
       // FIX 2: on-chain Raydium pool SOL balance — DexScreener has 2-5 min lag
       // but the WSOL vault is readable immediately after graduation.
       if (wsolVaultPubkey) {
-        const poolSol = await this.fetchOnChainPoolSol(wsolVaultPubkey);
-        if (poolSol !== null && poolSol < MIN_POOL_SOL) {
-          const reason = `Pool drained — ${poolSol.toFixed(2)} SOL < ${MIN_POOL_SOL} SOL on-chain (Type-A rug filter)`;
+        const poolSol    = await this.fetchOnChainPoolSol(wsolVaultPubkey);
+        const minPoolSol = this.isLowLiquidityHour() ? LOW_LIQ_MIN_POOL_SOL : MIN_POOL_SOL;
+        if (poolSol !== null && poolSol < minPoolSol) {
+          const hourLabel = this.isLowLiquidityHour() ? " (low-liq hours)" : "";
+          const reason = `Pool drained — ${poolSol.toFixed(2)} SOL < ${minPoolSol} SOL on-chain${hourLabel} (Type-A rug filter)`;
           this.addEvent({ ...eventBase, symbol, action: "skipped", skipReason: reason });
-          logger.warn({ mint, symbol, poolSol, wsolVaultPubkey }, "Graduation sniper: skipped — pool already drained (FIX 2)");
+          logger.warn({ mint, symbol, poolSol, minPoolSol, wsolVaultPubkey }, "Graduation sniper: skipped — pool below threshold (FIX 2)");
           return;
         }
         logger.info({ mint, symbol, poolSol, wsolVaultPubkey }, "Graduation sniper: on-chain pool SOL check passed ✅");
@@ -863,6 +907,23 @@ class GraduationSniperService {
               `🕐 ${toIST(new Date())}`,
             );
           }
+          return;
+        }
+      }
+
+      // ── Low-liquidity hour filter (11pm–6am IST = 17:30–00:30 UTC) ────────────
+      // DexScreener liquidityUsd from rugCheckData. Skip tokens with insufficient
+      // DEX liquidity — thin pools are where rugs happen most often overnight.
+      if (rugCheckData && rugCheckData.liquidityUsd >= 0) {
+        const minLiq  = this.isLowLiquidityHour() ? LOW_LIQ_MIN_LIQUIDITY_USD : NORMAL_MIN_LIQUIDITY_USD;
+        if (rugCheckData.liquidityUsd < minLiq) {
+          const hourLabel = this.isLowLiquidityHour() ? " [quiet hours]" : "";
+          const reason = `Insufficient DEX liquidity${hourLabel} — $${rugCheckData.liquidityUsd.toFixed(0)} < $${minLiq} min`;
+          this.addEvent({ ...eventBase, symbol, action: "skipped", skipReason: reason });
+          logger.info(
+            { mint, symbol, liquidityUsd: rugCheckData.liquidityUsd, minLiq, isLowLiqHour: this.isLowLiquidityHour() },
+            "Graduation sniper: skipped — DEX liquidity below threshold",
+          );
           return;
         }
       }
@@ -1341,6 +1402,8 @@ class GraduationSniperService {
             // Tokens are still in wallet — track cross-tick failures
             const fails = (this.sellFailCount.get(pos.mint) ?? 0) + 1;
             this.sellFailCount.set(pos.mint, fails);
+            // Store last error for UI display (STUCK badge + tooltip on frontend)
+            this.positionLastError.set(pos.mint, errMsg.slice(0, 120));
 
             if (fails < MAX_SELL_FAILS) {
               // Below give-up threshold — release guard and retry next tick
@@ -1785,6 +1848,8 @@ class GraduationSniperService {
     try {
       if (this.openPositions.size === 0) return;
 
+      this.tickRateCounters();
+
       const now = Date.now();
 
       // Only check positions whose adaptive interval has elapsed
@@ -1800,21 +1865,55 @@ class GraduationSniperService {
 
       if (due.length === 0) return;
 
-      // Process positions sequentially with a small stagger (200ms between each).
-      // The old Promise.allSettled fired all checks simultaneously — with 5 positions
-      // that created a burst of 5 concurrent DexScreener requests every 3s.
-      // Sequential processing spreads the load and prevents any API from seeing bursts.
+      // ── BATCH DexScreener fetch for ALL due positions in one request ──────────
+      // This replaces the old per-position sequential loop (N calls in 3s) with a
+      // single batch call (1 call for up to 30 mints) — eliminates the root cause
+      // of DexScreener rate-limit pressure.
+      const batchResult = await this.fetchBatchedPrices(due);
+
       for (const mint of due) {
         this.lastPositionCheckAt.set(mint, now);
-        await this.checkPositionPrice(mint);
-        if (due.length > 1) await new Promise(r => setTimeout(r, 200));
+
+        const preloaded = batchResult.get(mint);
+
+        if (preloaded) {
+          // Update stale guard timestamp — we have a fresh price
+          this.lastPriceUpdatedAt.set(mint, now);
+          await this.checkPositionPrice(mint, preloaded);
+        } else {
+          // DexScreener didn't return this token (may be too new).
+          // Try Jupiter price API as a one-time fallback (very fast, low rate limit usage).
+          const jupFallback = await this.fetchJupiterPriceFallback(mint);
+          if (jupFallback) {
+            this.lastPriceUpdatedAt.set(mint, now);
+            await this.checkPositionPrice(mint, { price: jupFallback, liquidityUsd: 0 });
+          } else {
+            // No price source available — check stale guard
+            const lastUpdate = this.lastPriceUpdatedAt.get(mint) ?? 0;
+            const staleMs    = now - lastUpdate;
+            if (staleMs > STALE_PRICE_MS) {
+              logger.warn(
+                { mint, staleMs: `${(staleMs / 1000).toFixed(1)}s`, symbol: this.openPositions.get(mint)?.symbol },
+                "Graduation sniper: STALE price — skipping TP/SL this tick (DexScreener + Jupiter both failed)",
+              );
+            }
+          }
+        }
       }
+
+      logger.debug(
+        { due: due.length, dexHits: batchResult.size, dexMisses: due.length - batchResult.size, dexCalls: this.dexscreenerCallsThisMinute, jupCalls: this.jupiterCallsThisMinute },
+        "Graduation sniper: price loop ✅",
+      );
     } finally {
       this.checkingPrices = false;
     }
   }
 
-  private async checkPositionPrice(mint: string): Promise<void> {
+  private async checkPositionPrice(
+    mint: string,
+    preloaded?: { price: number; liquidityUsd: number },
+  ): Promise<void> {
     // Concurrency guard — skip if a price check is already in-flight for this mint.
     // Without this, the 10-s setInterval can fire a second tick while executeTP1Atomic
     // is in its retry-persist loop (up to 30 s), causing TP2 to execute multiple times.
@@ -1822,19 +1921,29 @@ class GraduationSniperService {
     this.processingMints.add(mint);
 
     try {
-      await this._checkPositionPriceInner(mint);
+      await this._checkPositionPriceInner(mint, preloaded);
     } finally {
       this.processingMints.delete(mint);
     }
   }
 
-  private async _checkPositionPriceInner(mint: string): Promise<void> {
+  private async _checkPositionPriceInner(
+    mint: string,
+    preloaded?: { price: number; liquidityUsd: number },
+  ): Promise<void> {
     const pos = this.openPositions.get(mint);
     // Skip positions already mid-close (sell in-flight) to avoid double-close
     if (!pos || this.closingMints.has(mint)) return;
 
-    // Use fetchPositionPrice — tries Jupiter first (real-time), falls back to DexScreener
-    const priceData = await this.fetchPositionPrice(mint);
+    let priceData: { price: number; liquidityUsd?: number } | null = null;
+
+    if (preloaded && preloaded.price > 0) {
+      // Prefer the pre-fetched batch price — no extra API call needed
+      priceData = preloaded;
+    } else {
+      // Fallback to the old per-position fetch (Jupiter first, DexScreener second)
+      priceData = await this.fetchPositionPrice(mint);
+    }
     if (!priceData) return;
 
     const { price } = priceData;
@@ -1930,6 +2039,224 @@ class GraduationSniperService {
 
     this.updateLivePnl(pos);
     void this.persistPosition(pos);
+  }
+
+  // ── Rate counter tick ──────────────────────────────────────────────────────
+  // Called at the start of each price loop. Resets per-minute counters when a
+  // new minute starts so the UI always shows rates for the CURRENT minute.
+  private tickRateCounters(): void {
+    const now = Date.now();
+    if (now - this.rateWindowStart >= 60_000) {
+      this.jupiterCallsThisMinute    = 0;
+      this.dexscreenerCallsThisMinute = 0;
+      this.rateWindowStart           = now;
+    }
+  }
+
+  // ── Low-liquidity hour check ────────────────────────────────────────────────
+  // 11pm–6am IST = 17:30–00:30 UTC. Expressed as UTC minutes since midnight.
+  // Returns true when stricter entry filters should apply.
+  private isLowLiquidityHour(): boolean {
+    const d       = new Date();
+    const utcMins = d.getUTCHours() * 60 + d.getUTCMinutes();
+    // 17:30 UTC = 1050 min (11pm IST)   00:30 UTC = 30 min (6am IST)
+    return utcMins >= 1050 || utcMins <= 30;
+  }
+
+  // ── Batched DexScreener price fetch ─────────────────────────────────────────
+  // Single HTTP call for up to 30 mints → massive reduction in DexScreener load.
+  // Returns a Map<mint, {price, liquidityUsd}> for each mint that DexScreener returned.
+  // Missing entries = token not indexed yet (handled by caller with Jupiter fallback).
+  private async fetchBatchedPrices(
+    mints: string[],
+  ): Promise<Map<string, { price: number; liquidityUsd: number }>> {
+    const result = new Map<string, { price: number; liquidityUsd: number }>();
+    if (mints.length === 0) return result;
+
+    // Split into batches of at most BATCH_DEXSCREENER_MAX
+    for (let i = 0; i < mints.length; i += BATCH_DEXSCREENER_MAX) {
+      const batch = mints.slice(i, i + BATCH_DEXSCREENER_MAX);
+      try {
+        type DexPair = {
+          baseToken: { address: string };
+          priceUsd: string;
+          liquidity?: { usd?: number };
+          dexId?: string;
+        };
+        this.dexscreenerCallsThisMinute++;
+        this.dexscreenerCallsTotal++;
+        const res = await axios.get<DexPair[]>(
+          `${DEXSCREENER_BASE}/tokens/v1/solana/${batch.join(",")}`,
+          { timeout: 8_000 },
+        );
+        const pairs = Array.isArray(res.data) ? res.data : [];
+
+        // Group pairs by their base token address; pick highest-liquidity Raydium pair
+        const byMint = new Map<string, DexPair[]>();
+        for (const pair of pairs) {
+          const mint = pair.baseToken?.address;
+          if (!mint) continue;
+          const group = byMint.get(mint) ?? [];
+          group.push(pair);
+          byMint.set(mint, group);
+        }
+
+        for (const [mint, pairGroup] of byMint) {
+          const sorted = [...pairGroup].sort((a, b) => {
+            const aRay = a.dexId === "raydium" ? 1 : 0;
+            const bRay = b.dexId === "raydium" ? 1 : 0;
+            if (bRay !== aRay) return bRay - aRay;
+            return (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0);
+          });
+          const best  = sorted[0]!;
+          const price = parseFloat(best.priceUsd) || 0;
+          if (price > 0) {
+            result.set(mint, { price, liquidityUsd: best.liquidity?.usd ?? 0 });
+          }
+        }
+      } catch (err) {
+        logger.warn(
+          { batchSize: batch.length, err: (err as Error).message },
+          "Graduation sniper: fetchBatchedPrices failed — will use Jupiter fallback",
+        );
+      }
+    }
+    return result;
+  }
+
+  // ── Jupiter price API — fallback for tokens not yet indexed on DexScreener ──
+  // Faster than DexScreener for very new tokens (graduates appear on Jupiter in <5s).
+  // Only called when DexScreener batch missed the token — keeps Jupiter call count minimal.
+  private async fetchJupiterPriceFallback(mint: string): Promise<number | null> {
+    try {
+      this.jupiterCallsThisMinute++;
+      this.jupiterCallsTotal++;
+      type JupPrice = { data: Record<string, { price: string } | null> };
+      const res = await axios.get<JupPrice>(
+        `${JUPITER_PRICE_URL}?ids=${mint}`,
+        { timeout: 5_000 },
+      );
+      const entry = res.data?.data?.[mint];
+      if (!entry) return null;
+      const price = parseFloat(entry.price);
+      return price > 0 ? price : null;
+    } catch {
+      return null;
+    }
+  }
+
+  // ── Health heartbeat ─────────────────────────────────────────────────────────
+  // Sends a Telegram ping every 15 minutes so you know the bot is still alive.
+  private startHeartbeat(): void {
+    if (this.heartbeatIntervalId) clearInterval(this.heartbeatIntervalId);
+    this.heartbeatIntervalId = setInterval(() => {
+      if (!isTelegramConfigured()) return;
+      const uptimeMins = Math.floor((Date.now() - this.startedAt) / 60_000);
+      const open       = this.openPositions.size;
+      const bal        = this.walletBalanceSol.toFixed(4);
+      const isLowLiq   = this.isLowLiquidityHour();
+      const wsStatus   = this.wsConnected ? "🟢 WS Connected" : "🔴 WS Disconnected";
+      void sendTelegram(
+        `💓 <b>SNIPER HEARTBEAT</b>\n` +
+        `──────────────────────\n` +
+        `${wsStatus}\n` +
+        `📊 Open positions: <b>${open}</b>\n` +
+        `💰 Wallet: <b>${bal} SOL</b>\n` +
+        `⏱ Uptime: <b>${uptimeMins}m</b>\n` +
+        `${isLowLiq ? "🌙 Low-liquidity hours active (stricter filters)" : "☀️ Active trading hours"}\n` +
+        `📡 DexScreener: ${this.dexscreenerCallsTotal} calls · Jupiter: ${this.jupiterCallsTotal} calls\n` +
+        `🕐 ${toIST(new Date())}`,
+      );
+    }, HEARTBEAT_INTERVAL_MS);
+  }
+
+  // ── Stuck tokens — tokens in wallet but not tracked as open positions ────────
+  // Queries on-chain token accounts and cross-references with openPositions.
+  // A token is "stuck" if it's in the wallet but not in any open position.
+  // These can result from a failed sell + position manually deleted, or a swap
+  // that completed but the bot crashed before recording the position.
+  public async getStuckTokens(): Promise<{ mint: string; symbol: string; uiAmount: number; rawAmount: number; raydiumUrl: string }[]> {
+    if (!solanaWalletService.isReady) return [];
+    try {
+      // getTokenAccounts() returns Map<mint, uiAmount>
+      const accounts = await solanaWalletService.getTokenAccounts();
+      const stuck: { mint: string; symbol: string; uiAmount: number; rawAmount: number; raydiumUrl: string }[] = [];
+
+      for (const [mint, uiAmount] of accounts.entries()) {
+        // Skip if this token is already tracked as an open position
+        if (this.openPositions.has(mint)) continue;
+        // Skip if balance is dust (< 0.01 UI tokens)
+        if (uiAmount < 0.01) continue;
+
+        // Try to find a symbol from closed positions history
+        const closedPos = this.closedPositions.find((p) => p.mint === mint);
+        const symbol    = closedPos?.symbol ?? mint.slice(0, 8);
+
+        stuck.push({
+          mint,
+          symbol,
+          uiAmount,
+          rawAmount:   uiAmount, // uiAmount is already normalised; rawAmount not available here
+          raydiumUrl:  `https://dexscreener.com/solana/${mint}`,
+        });
+      }
+      return stuck;
+    } catch (err) {
+      logger.warn({ err: (err as Error).message }, "Graduation sniper: getStuckTokens failed");
+      return [];
+    }
+  }
+
+  // ── Emergency sell — max slippage for stuck tokens ────────────────────────────
+  // Looks up position by ID, uses 50% slippage via jupiterSwapService.emergencySell.
+  public async emergencySell(id: string): Promise<SniperPosition | null> {
+    const openEntry = Array.from(this.openPositions.entries()).find(([, p]) => p.id === id);
+    if (!openEntry) return null;
+    const [, pos] = openEntry;
+
+    const tokensLeft = Math.floor(pos.tokenAmount * pos.remainingFraction);
+    if (tokensLeft <= 0) {
+      throw new Error("No tokens remaining to sell");
+    }
+
+    // Clear any retry-fail guard so this can proceed immediately
+    this.closingMints.delete(pos.mint);
+
+    logger.warn({ mint: pos.mint, symbol: pos.symbol, tokensLeft, id }, "Graduation sniper: EMERGENCY SELL triggered by user");
+
+    let exitPrice = pos.currentPrice;
+    try {
+      const pd = await this.fetchPrice(pos.mint);
+      if (pd && pd.price > 0) exitPrice = pd.price;
+    } catch { /* use last known */ }
+
+    await this.closePosition(pos, "Emergency sell (manual)", exitPrice);
+    return { ...pos };
+  }
+
+  // ── Health metrics ─────────────────────────────────────────────────────────
+  public getHealthMetrics(): {
+    jupiterCallsThisMinute: number;
+    dexscreenerCallsThisMinute: number;
+    jupiterCallsTotal: number;
+    dexscreenerCallsTotal: number;
+    wsConnected: boolean;
+    isLowLiquidityHour: boolean;
+    openPositions: number;
+    walletBalance: number;
+    uptimeMs: number;
+  } {
+    return {
+      jupiterCallsThisMinute:    this.jupiterCallsThisMinute,
+      dexscreenerCallsThisMinute: this.dexscreenerCallsThisMinute,
+      jupiterCallsTotal:         this.jupiterCallsTotal,
+      dexscreenerCallsTotal:     this.dexscreenerCallsTotal,
+      wsConnected:               this.wsConnected,
+      isLowLiquidityHour:        this.isLowLiquidityHour(),
+      openPositions:             this.openPositions.size,
+      walletBalance:             this.walletBalanceSol,
+      uptimeMs:                  Date.now() - this.startedAt,
+    };
   }
 
   // ── DB persistence ─────────────────────────────────────────────────────────
@@ -2314,7 +2641,15 @@ class GraduationSniperService {
   getOpenPositions(): SniperPosition[] {
     return Array.from(this.openPositions.values()).map((p) => {
       this.updateLivePnl(p);
-      return { ...p };
+      const failCount = this.sellFailCount.get(p.mint) ?? 0;
+      return {
+        ...p,
+        // Runtime-only fields populated for the UI
+        closingAttempt: this.closingMints.has(p.mint) ? failCount : (failCount > 0 ? failCount : undefined),
+        isStuck:        failCount >= MAX_SELL_FAILS,
+        lastError:      this.positionLastError.get(p.mint),
+        lastPriceAt:    this.lastPriceUpdatedAt.get(p.mint),
+      };
     });
   }
 

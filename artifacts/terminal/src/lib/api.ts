@@ -1,6 +1,6 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { SniperStatus, SniperPosition, SniperEvent, SniperConfig } from "./types";
+import { SniperStatus, SniperPosition, SniperEvent, SniperConfig, StuckToken, SniperHealthMetrics } from "./types";
 import { useToast } from "@/hooks/use-toast";
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, "") ?? "";
@@ -36,6 +36,7 @@ export function useWebSocket() {
             queryClient.invalidateQueries({ queryKey: ["sniper-status"] });
             queryClient.invalidateQueries({ queryKey: ["sniper-history"] });
             queryClient.invalidateQueries({ queryKey: ["sniper-wallet"] });
+            queryClient.invalidateQueries({ queryKey: ["sniper-stuck-tokens"] });
           }
         } catch (_) {}
       };
@@ -137,6 +138,33 @@ export function useSniperConfig() {
   });
 }
 
+// ── Stuck tokens — tokens in wallet but not tracked as open positions ──────────
+export function useStuckTokens() {
+  return useQuery<StuckToken[]>({
+    queryKey: ["sniper-stuck-tokens"],
+    queryFn: async () => {
+      const res = await fetch(apiUrl("/api/sniper/stuck-tokens"));
+      if (!res.ok) return [];
+      const json = await res.json() as { data: StuckToken[] };
+      return json.data ?? [];
+    },
+    refetchInterval: 30_000,
+  });
+}
+
+// ── Sniper health metrics — rate counters + connection status ─────────────────
+export function useSniperHealthMetrics() {
+  return useQuery<SniperHealthMetrics>({
+    queryKey: ["sniper-health-metrics"],
+    queryFn: async () => {
+      const res = await fetch(apiUrl("/api/sniper/health-metrics"));
+      const json = await res.json() as { data: SniperHealthMetrics };
+      return json.data;
+    },
+    refetchInterval: 15_000,
+  });
+}
+
 // ── Sniper mutations ───────────────────────────────────────────────────────────
 
 export function useUpdateSniperConfig() {
@@ -163,22 +191,69 @@ export function useUpdateSniperConfig() {
   });
 }
 
+// Track per-position close status for live UI feedback
+export type CloseStatus = "idle" | "pending" | "success" | "failed";
+
 export function useCloseSniperPosition() {
+  const queryClient = useQueryClient();
+  const { toast } = useToast();
+  const [closeStatuses, setCloseStatuses] = useState<Record<string, CloseStatus>>({});
+  const [closeErrors, setCloseErrors]     = useState<Record<string, string>>({});
+
+  const mutation = useMutation({
+    mutationFn: async (id: string) => {
+      setCloseStatuses(prev => ({ ...prev, [id]: "pending" }));
+      const res = await fetch(apiUrl(`/api/sniper/positions/${id}/close`), { method: "POST" });
+      if (!res.ok) {
+        const j = await res.json() as { error?: string };
+        throw new Error(j.error ?? "Close failed");
+      }
+      return { id, ...(await res.json() as object) };
+    },
+    onSuccess: (data: { id: string }) => {
+      setCloseStatuses(prev => ({ ...prev, [data.id]: "success" }));
+      setCloseErrors(prev => { const n = { ...prev }; delete n[data.id]; return n; });
+      queryClient.invalidateQueries({ queryKey: ["sniper-positions"] });
+      queryClient.invalidateQueries({ queryKey: ["sniper-history"] });
+      queryClient.invalidateQueries({ queryKey: ["sniper-status"] });
+      toast({ title: "Position closed", description: "Sell confirmed on-chain ✅" });
+      // Clear success status after 3s
+      setTimeout(() => setCloseStatuses(prev => {
+        if (prev[data.id] === "success") { const n = { ...prev }; delete n[data.id]; return n; }
+        return prev;
+      }), 3000);
+    },
+    onError: (e: Error, id: string) => {
+      setCloseStatuses(prev => ({ ...prev, [id]: "failed" }));
+      setCloseErrors(prev => ({ ...prev, [id]: e.message }));
+      toast({ title: "Close failed", description: e.message, variant: "destructive" });
+    },
+  });
+
+  return { ...mutation, closeStatuses, closeErrors };
+}
+
+// ── Emergency sell — max slippage (50%), for stuck/unsellable positions ────────
+export function useEmergencySell() {
   const queryClient = useQueryClient();
   const { toast } = useToast();
   return useMutation({
     mutationFn: async (id: string) => {
-      const res = await fetch(apiUrl(`/api/sniper/positions/${id}/close`), { method: "POST" });
-      if (!res.ok) { const j = await res.json(); throw new Error(j.error ?? "Close failed"); }
+      const res = await fetch(apiUrl(`/api/sniper/positions/${id}/emergency-sell`), { method: "POST" });
+      if (!res.ok) {
+        const j = await res.json() as { error?: string };
+        throw new Error(j.error ?? "Emergency sell failed");
+      }
       return res.json();
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["sniper-positions"] });
       queryClient.invalidateQueries({ queryKey: ["sniper-history"] });
       queryClient.invalidateQueries({ queryKey: ["sniper-status"] });
-      toast({ title: "Position closed at market price" });
+      queryClient.invalidateQueries({ queryKey: ["sniper-stuck-tokens"] });
+      toast({ title: "Emergency sell executed ✅", description: "Sold with 50% max slippage" });
     },
-    onError: (e: Error) => toast({ title: "Close failed", description: e.message, variant: "destructive" }),
+    onError: (e: Error) => toast({ title: "Emergency sell failed", description: e.message, variant: "destructive" }),
   });
 }
 
@@ -188,7 +263,7 @@ export function useDeleteSniperPosition() {
   return useMutation({
     mutationFn: async (id: string) => {
       const res = await fetch(apiUrl(`/api/sniper/positions/${id}`), { method: "DELETE" });
-      if (!res.ok) { const j = await res.json(); throw new Error(j.error ?? "Delete failed"); }
+      if (!res.ok) { const j = await res.json() as { error?: string }; throw new Error(j.error ?? "Delete failed"); }
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["sniper-positions"] });
@@ -218,7 +293,7 @@ export function useEditSniperPosition() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
-      if (!res.ok) { const j = await res.json(); throw new Error(j.error ?? "Edit failed"); }
+      if (!res.ok) { const j = await res.json() as { error?: string }; throw new Error(j.error ?? "Edit failed"); }
       return res.json();
     },
     onSuccess: () => {
@@ -237,7 +312,7 @@ export function useRecalculateSniperPnl() {
   return useMutation({
     mutationFn: async (id: string) => {
       const res = await fetch(apiUrl(`/api/sniper/positions/${id}/recalculate`), { method: "POST" });
-      if (!res.ok) { const j = await res.json(); throw new Error(j.error ?? "Recalculate failed"); }
+      if (!res.ok) { const j = await res.json() as { error?: string }; throw new Error(j.error ?? "Recalculate failed"); }
       return res.json();
     },
     onSuccess: () => {
@@ -265,7 +340,7 @@ export function useInjectSniperPosition() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      if (!res.ok) { const j = await res.json(); throw new Error(j.error ?? "Inject failed"); }
+      if (!res.ok) { const j = await res.json() as { error?: string }; throw new Error(j.error ?? "Inject failed"); }
       return res.json();
     },
     onSuccess: () => {
@@ -304,7 +379,7 @@ export function useDeleteSniperEvent() {
   return useMutation({
     mutationFn: async (id: string) => {
       const res = await fetch(apiUrl(`/api/sniper/events/${id}`), { method: "DELETE" });
-      if (!res.ok) { const j = await res.json(); throw new Error(j.error ?? "Delete failed"); }
+      if (!res.ok) { const j = await res.json() as { error?: string }; throw new Error(j.error ?? "Delete failed"); }
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["sniper-events"] });

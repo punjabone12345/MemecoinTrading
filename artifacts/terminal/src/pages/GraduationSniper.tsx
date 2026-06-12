@@ -7,8 +7,9 @@ import {
   useSniperStatus, useSniperPositions, useSniperHistory, useSniperEvents, useUpdateSniperConfig,
   useDeleteSniperPosition, useEditSniperPosition, useDeleteSniperEvent, useResetSniperAccount,
   useRecalculateSniperPnl, useCloseSniperPosition, useWalletBalance, usePurgeUnverifiedHistory,
+  useStuckTokens, useEmergencySell, useWebSocket,
 } from "@/lib/api";
-import { SniperPosition, SniperEvent, SniperConfig } from "@/lib/types";
+import { SniperPosition, SniperEvent, SniperConfig, StuckToken } from "@/lib/types";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -259,13 +260,17 @@ function ResetConfirmModal({ onClose }: { onClose: () => void }) {
 // ── Position row (open) ───────────────────────────────────────────────────────
 
 function PositionRow({ pos }: { pos: SniperPosition }) {
-  const [showEdit,    setShowEdit]    = useState(false);
-  const [confirmDel,  setConfirmDel]  = useState(false);
-  const [confirmClose, setConfirmClose] = useState(false);
-  const deletePos = useDeleteSniperPosition();
-  const closePos  = useCloseSniperPosition();
+  const [showEdit,      setShowEdit]      = useState(false);
+  const [confirmDel,    setConfirmDel]    = useState(false);
+  const [confirmClose,  setConfirmClose]  = useState(false);
+  const deletePos     = useDeleteSniperPosition();
+  const closePos      = useCloseSniperPosition();
+  const emergencySell = useEmergencySell();
   const pct  = pos.pnlPct;
   const pos_ = pct >= 0;
+
+  const isStuck   = pos.isStuck === true;
+  const isClosing = (pos.closingAttempt ?? 0) > 0 && !isStuck;
 
   const stage = pos.tp2Hit
     ? <Badge className="bg-amber-500/20 text-amber-400 border-amber-500/30 text-[9px] px-1 py-0">Runner</Badge>
@@ -282,6 +287,12 @@ function PositionRow({ pos }: { pos: SniperPosition }) {
               <a href={solscanUrl(pos.mint)} target="_blank" rel="noreferrer"
                 className="text-sm font-bold text-violet-300 hover:text-violet-200 leading-none">{pos.symbol}</a>
               {stage}
+              {isStuck && (
+                <Badge className="bg-red-500/20 text-red-400 border-red-500/30 text-[9px] px-1 py-0">⚠ STUCK</Badge>
+              )}
+              {isClosing && (
+                <Badge className="bg-amber-500/20 text-amber-400 border-amber-500/30 text-[9px] px-1 py-0">Selling… #{pos.closingAttempt}</Badge>
+              )}
             </div>
             <div className="text-[10px] text-white/35 mt-0.5 font-mono">{mintShort(pos.mint)}</div>
             <div className="text-[10px] text-white/40 mt-1">
@@ -378,9 +389,68 @@ function PositionRow({ pos }: { pos: SniperPosition }) {
             <button onClick={() => setConfirmDel(false)} className="text-[10px] text-white/40 hover:text-white">Cancel</button>
           </div>
         )}
+        {isStuck && (
+          <div className="mt-2 flex items-center gap-2 rounded-lg bg-red-500/10 border border-red-500/20 px-3 py-2">
+            <AlertTriangle className="w-3 h-3 text-red-400 shrink-0" />
+            <span className="text-[10px] text-red-300 flex-1 min-w-0 truncate">
+              Auto-sell failed{pos.lastError ? `: ${pos.lastError.slice(0, 60)}` : " — max retries hit"}
+            </span>
+            <button onClick={() => emergencySell.mutate(pos.id)}
+              disabled={emergencySell.isPending}
+              className="text-[10px] font-bold text-red-400 hover:text-red-300 px-2 py-0.5 rounded bg-red-500/20 border border-red-500/30 shrink-0">
+              {emergencySell.isPending ? "…" : "Emergency Sell"}
+            </button>
+          </div>
+        )}
+        {isClosing && pos.lastError && (
+          <div className="mt-1.5 flex items-center gap-1 text-[9px] text-amber-400/60">
+            <AlertTriangle className="w-2.5 h-2.5 shrink-0" />
+            <span className="truncate">Retry {pos.closingAttempt}: {pos.lastError.slice(0, 60)}</span>
+          </div>
+        )}
       </div>
       {showEdit && <EditPositionModal pos={pos} onClose={() => setShowEdit(false)} />}
     </>
+  );
+}
+
+// ── Stuck tokens panel ────────────────────────────────────────────────────────
+
+function StuckTokensPanel() {
+  const { data: stuckTokens = [] } = useStuckTokens();
+  const emergencySell = useEmergencySell();
+  if (stuckTokens.length === 0) return null;
+  return (
+    <div className="rounded-xl border border-amber-500/25 bg-amber-500/5 overflow-hidden">
+      <div className="flex items-center gap-2 px-4 py-2.5 border-b border-amber-500/15">
+        <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
+        <span className="text-[11px] font-bold text-amber-400 uppercase tracking-wider">
+          Stuck Tokens ({stuckTokens.length})
+        </span>
+        <span className="text-[10px] text-white/25 ml-auto">tokens in wallet not tracked as positions</span>
+      </div>
+      {stuckTokens.map((token: StuckToken) => (
+        <div key={token.mint} className="flex items-center gap-3 px-4 py-3 border-b border-white/5 last:border-0">
+          <div className="min-w-0 flex-1">
+            <div className="text-xs font-bold text-white/80">{token.symbol}</div>
+            <div className="text-[10px] text-white/35 font-mono">{mintShort(token.mint)}</div>
+            <div className="text-[10px] text-amber-400/70 mt-0.5">{token.uiAmount.toFixed(2)} tokens</div>
+          </div>
+          <div className="flex items-center gap-2">
+            <a href={token.raydiumUrl} target="_blank" rel="noreferrer"
+              className="text-[10px] text-violet-400/60 hover:text-violet-400 transition-colors flex items-center gap-1">
+              <ExternalLink className="w-3 h-3" /> DEX
+            </a>
+            <button
+              disabled={emergencySell.isPending}
+              onClick={() => emergencySell.mutate(token.mint)}
+              className="text-[10px] font-bold text-red-400 hover:text-red-300 px-2 py-1 rounded bg-red-500/15 border border-red-500/25 hover:bg-red-500/25 transition-colors disabled:opacity-40">
+              {emergencySell.isPending ? "…" : "Emergency Sell"}
+            </button>
+          </div>
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -641,6 +711,7 @@ export default function GraduationSniper() {
   const { data: positions = [] } = useSniperPositions();
   const { data: history = []   } = useSniperHistory();
   const { data: events = []    } = useSniperEvents();
+  useWebSocket(); // keep query caches warm via server-sent events
 
   const config        = status?.config;
   const totalPnl      = status?.totalRealizedPnlSol ?? 0;
@@ -803,6 +874,9 @@ export default function GraduationSniper() {
           <StatCard label="Total Trades" value={String(status?.tradesTotal ?? 0)} sub="all time"
             icon={<Clock className="w-3.5 h-3.5 text-white/40" />} accent="default" />
         </div>
+
+        {/* ── Stuck tokens (wallet tokens not tracked as positions) ── */}
+        <StuckTokensPanel />
 
         {/* ── Active positions ── */}
         <Section title="Active Positions" count={positions.length} emptyMsg="No open sniper positions">
