@@ -914,7 +914,14 @@ class GraduationSniperService {
       // ── Low-liquidity hour filter (11pm–6am IST = 17:30–00:30 UTC) ────────────
       // DexScreener liquidityUsd from rugCheckData. Skip tokens with insufficient
       // DEX liquidity — thin pools are where rugs happen most often overnight.
-      if (rugCheckData && rugCheckData.liquidityUsd >= 0) {
+      //
+      // IMPORTANT: only apply this filter when liquidityUsd > 0.
+      // DexScreener has a 2–5 minute indexing lag after graduation, so for the
+      // first few minutes the API returns pairs with liquidity: null / $0 even
+      // when the pool actually has $10K+. Checking >= 0 caused valid tokens to
+      // be falsely skipped. When liquidityUsd === 0, real liquidity was already
+      // validated by the on-chain pool SOL check above — trust that instead.
+      if (rugCheckData && rugCheckData.liquidityUsd > 0) {
         const minLiq  = this.isLowLiquidityHour() ? LOW_LIQ_MIN_LIQUIDITY_USD : NORMAL_MIN_LIQUIDITY_USD;
         if (rugCheckData.liquidityUsd < minLiq) {
           const hourLabel = this.isLowLiquidityHour() ? " [quiet hours]" : "";
@@ -926,6 +933,14 @@ class GraduationSniperService {
           );
           return;
         }
+      } else if (rugCheckData && rugCheckData.liquidityUsd === 0) {
+        // DexScreener returned pairs but liquidity is null/0 — not yet indexed.
+        // The on-chain pool SOL check already validated liquidity is real.
+        // Log and proceed; do not skip based on stale/missing DexScreener data.
+        logger.info(
+          { mint, symbol },
+          "Graduation sniper: DexScreener liquidity not yet indexed ($0) — skipping DEX liquidity filter, trusting on-chain pool check",
+        );
       }
 
       await this.enterPosition(mint, symbol, name, entryPrice, signature);

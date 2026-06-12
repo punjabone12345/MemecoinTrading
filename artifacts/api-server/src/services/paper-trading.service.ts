@@ -7,7 +7,7 @@ import { alertsService } from "./alerts.service.js";
 import { lossJournalService } from "./loss-journal.service.js";
 import { blacklistService } from "./blacklist.service.js";
 import { sendTelegram, toIST } from "../lib/telegram.js";
-import type { Position, Portfolio, CloseReason, ScannedToken } from "../types/index.js";
+import type { Position, Portfolio, CloseReason, ScannedToken, DexScreenerPair } from "../types/index.js";
 import type { LlmAnalysis } from "./ai-analysis.service.js";
 
 const INITIAL_BALANCE_SOL = 100;
@@ -45,7 +45,7 @@ function rowToPosition(r: DbRow): Position {
   return {
     positionId: r.position_id as string,
     symbol: r.symbol as string,
-    tokenName: r.token_name as string | undefined,
+    tokenName: (r.token_name as string) ?? "",
     pairAddress: r.pair_address as string,
     contractAddress: r.contract_address as string,
     entryPrice: Number(r.entry_price),
@@ -71,8 +71,8 @@ function rowToPosition(r: DbRow): Position {
     holdTimeMs: r.hold_time_ms !== null ? Number(r.hold_time_ms) : undefined,
     closeReason: r.close_reason as CloseReason | undefined,
     note: r.note as string | undefined,
-    llmVerdict: r.llm_verdict as string | undefined,
-    llmProvider: r.llm_provider as string | undefined,
+    llmVerdict: r.llm_verdict as "TRADE" | "SKIP" | "RISKY" | undefined,
+    llmProvider: r.llm_provider as "gemini" | "groq" | "heuristic" | "none" | undefined,
     llmConfidence: r.llm_confidence !== null ? Number(r.llm_confidence) : undefined,
     llmReasoning: r.llm_reasoning as string | undefined,
     llmRisks: r.llm_risks as string[] | undefined,
@@ -710,7 +710,9 @@ class PaperTradingService {
       if (!this.openPositions.has(pos.positionId)) continue;
 
       try {
-        const dexPair = pairFetches[i].status === "fulfilled" ? pairFetches[i].value : null;
+        const dexPair = pairFetches[i].status === "fulfilled"
+          ? (pairFetches[i] as PromiseFulfilledResult<DexScreenerPair | null>).value
+          : null;
         let price: number | null = null;
         const dexPrice = parseFloat(dexPair?.priceUsd ?? "0");
         if (dexPrice > 0) {
@@ -1003,6 +1005,10 @@ class PaperTradingService {
 
   getClosedTrades(): Position[] {
     return [...this.closedTrades];
+  }
+
+  getAllTrades(): Position[] {
+    return [...Array.from(this.openPositions.values()), ...this.closedTrades];
   }
 
   getPositionById(positionId: string): Position | undefined {

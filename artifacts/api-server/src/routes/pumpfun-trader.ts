@@ -47,14 +47,15 @@ router.patch("/pumpfun/config", async (req, res) => {
 });
 
 // Inject a token manually for testing / external discovery
-router.post("/pumpfun/inject", (req, res) => {
+router.post("/pumpfun/inject", (req, res): void => {
   try {
     const { mint, symbol, name, mcap, priceUsd, pairAddress } = req.body as {
       mint: string; symbol: string; name: string;
       mcap: number; priceUsd: number; pairAddress: string;
     };
     if (!mint || !symbol) {
-      return res.status(400).json({ success: false, error: "mint and symbol required" });
+      res.status(400).json({ success: false, error: "mint and symbol required" });
+      return;
     }
     pumpfunTraderService.injectToken(mint, symbol, name ?? symbol, mcap ?? 0, priceUsd ?? 0, pairAddress ?? "");
     res.json({ success: true });

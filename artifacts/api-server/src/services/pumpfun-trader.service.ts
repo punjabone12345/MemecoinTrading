@@ -178,6 +178,9 @@ export interface PumpfunEvent {
 export interface PumpfunStatus {
   wsConnected: boolean;
   wsReconnects: number;
+  ppConnected: boolean;
+  ppReconnects: number;
+  solPriceUsd: number;
   enabled: boolean;
   trackedCount: number;
   candidateCount: number;
@@ -1464,7 +1467,8 @@ class PumpfunTraderService {
       }
 
       // Clean up rejected/graduated old tokens
-      if ((token.status === "rejected" || token.status === "graduated") &&
+      const tokenStatus = token.status as TokenStatus;
+      if ((tokenStatus === "rejected" || tokenStatus === "graduated") &&
           Date.now() - token.lastUpdated > 30 * 60_000) {
         this.trackedTokens.delete(mint);
       }

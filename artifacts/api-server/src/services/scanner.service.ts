@@ -546,7 +546,7 @@ class ScannerService {
       liquidity: { usd: liq, base: 0, quote: 0 },
       fdv,
       marketCap: mcap,
-      pairCreatedAt: createdAt,
+      pairCreatedAt: createdAt ?? 0,
       info: {},
     };
   }
@@ -880,7 +880,7 @@ class ScannerService {
           liquidity: { usd: liq, base: 0, quote: 0 },
           fdv: mcap,
           marketCap: mcap,
-          pairCreatedAt: attr.pool_created_at ? new Date(attr.pool_created_at).getTime() : undefined,
+          pairCreatedAt: attr.pool_created_at ? new Date(attr.pool_created_at).getTime() : 0,
           info: {},
         };
       });

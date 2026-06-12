@@ -1306,6 +1306,10 @@ class AutoTraderService {
 
         // ── Layer 7: LLM pre-trade analysis (Gemini → Groq fallback) ──────────
         const contractAddress = mintAddress;
+        if (!c.pair) {
+          decisions.push({ ...c, action: "filtered", reason: "No pair data available for LLM analysis" });
+          continue;
+        }
         const analysisInput = buildAnalysisInput(c.pair, c.symbol, c.tokenName, c.aiScore, c.confidence, contractAddress);
         const llm = await analyseTokenWithAi(analysisInput);
 
@@ -1345,7 +1349,7 @@ class AutoTraderService {
             { symbol: c.symbol, aiScore: c.aiScore, threshold: SCORE_SKIP_THRESHOLD },
             "Auto-trader: SCORE PARADOX — ≥96 score signals manipulation, skipping"
           );
-          decisions.push({ ...c, action: "skipped", reason: `Score paradox skip — AI score ${c.aiScore} ≥ ${SCORE_SKIP_THRESHOLD} (manipulation signal)` });
+          decisions.push({ ...c, action: "filtered", reason: `Score paradox skip — AI score ${c.aiScore} ≥ ${SCORE_SKIP_THRESHOLD} (manipulation signal)` });
           continue;
         }
 
