@@ -5,24 +5,27 @@ description: Root causes and fixes for InstructionError Custom:1 errors on all b
 
 ## Root causes of Custom:1 (ExceededSlippage) errors
 
-1. **`slippageBps` + `dynamicSlippage` conflict** — passing both `slippageBps` and `dynamicSlippage` to Jupiter's `/swap` endpoint causes Jupiter to use the static `slippageBps` override instead of the dynamic calculation. The static value (500–1000 bps) was always too tight for fresh CPMM pools. **Fix:** remove `slippageBps` from `getSwapTx` entirely; let `dynamicSlippage` handle minimum-output enforcement.
+1. **`slippageBps` + `dynamicSlippage` conflict (original bug)** — passing both caused Jupiter to ignore dynamicSlippage and use the static 1000 bps (10%) floor, which new CPMM pools exceeded constantly.
 
-2. **`dynamicSlippage.maxBps` too low** — was 5000 (50%). Fresh graduation pools have wild price impact. **Fix:** raised to 3000 (30%) for normal buys/sells; 5000 (50%) for emergency sells only. Do NOT go higher — dynamicSlippage will execute at whatever it calculates up to the cap, so 90% means you could receive almost nothing on a dump.
+2. **`dynamicSlippage` alone is WRONG for sniping** — dynamicSlippage simulates at call time and picks a tight value (e.g. 5%). When concurrent bots buy between simulation and our TX landing, that 5% is breached → Custom:1. This was our "fix" that still failed.
 
-3. **Priority fee too low** — was 50,000 lamports (0.00005 SOL). Graduation sniping on congested slots requires competitive fees. **Fix:** default raised to 500,000 lamports; Helius p75 estimation used at runtime.
+3. **CORRECT fix: high fixed `slippageBps` in the swap body (no `dynamicSlippage`)** — `slippageBps: 5000` sets `otherAmountThreshold = quoteOutput * 0.50`. In practice, fills are always much closer to quote price (0.13% impact on a 79 SOL pool). The 50% floor just means bot race conditions can't cause Custom:1.
 
-4. **`maxAccounts: 50` constraint** — forced Jupiter to pick suboptimal routes. **Fix:** removed entirely.
+4. **`skipUserAccountsRpcCalls: true` caused `encoding overruns Uint8Array`** — skips ATA creation for tokens the wallet has never held; Jupiter builds a malformed transaction. Must be removed.
 
-5. **`skipUserAccountsRpcCalls: true`** — added to reduce RPC overhead during swap construction.
+5. **Priority fee too low** — was 50,000 lamports. Raised to 500,000 lamports floor + Helius p75 estimation.
+
+6. **`maxAccounts: 50`** — removed; was forcing bad routes on new pools.
 
 ## What getSwapTx does now
 
 ```
-getSwapTx(quoteResponse, priorityFeeLamports)
+getSwapTx(quoteResponse, priorityFeeLamports, swapSlippageBps = SWAP_SLIPPAGE_BPS)
 ```
-- Always uses `dynamicSlippage: { minBps: 50, maxBps: 9000 }` — NO `slippageBps` field
-- `wrapAndUnwrapSol: true`, `skipUserAccountsRpcCalls: true`
-- `prioritizationFeeLamports: { priorityLevelWithMaxLamports: { maxLamports: priorityFeeLamports, priorityLevel: "veryHigh" } }`
+- `slippageBps: swapSlippageBps` (5000 for normal, 7000 for emergency) — NO `dynamicSlippage`
+- NO `skipUserAccountsRpcCalls` — Jupiter creates ATAs as needed
+- `wrapAndUnwrapSol: true`, `dynamicComputeUnitLimit: true`
+- `prioritizationFeeLamports: <helius p75 or 500k floor>`
 
 ## Default config (graduation-sniper.service.ts)
 
