@@ -27,7 +27,7 @@ registerCommandHandler(async (command: string) => {
         return (
           `🎯 <b>Memecoin Sniper — No Open Positions</b>\n` +
           `──────────────────────\n` +
-          `💰 Balance: <b>${Number(status.virtualBalance).toFixed(4)} SOL</b>\n` +
+          `💰 Balance: <b>${Number(status.walletBalance).toFixed(4)} SOL</b>\n` +
           `📊 Realized PNL: <b>${fmt(status.totalRealizedPnlSol)} SOL</b>\n` +
           `🏆 Wins: <b>${status.wins}</b> | 💀 Losses: <b>${status.losses}</b>\n` +
           `🕐 ${toIST(new Date())}`
@@ -47,7 +47,7 @@ registerCommandHandler(async (command: string) => {
           `──────────────────────\n`;
       }
       msg +=
-        `💰 Balance: <b>${Number(status.virtualBalance).toFixed(4)} SOL</b>\n` +
+        `💰 Balance: <b>${Number(status.walletBalance).toFixed(4)} SOL</b>\n` +
         `📊 Realized: <b>${fmt(status.totalRealizedPnlSol)} SOL</b>\n` +
         `🕐 ${toIST(new Date())}`;
       return msg;
@@ -74,7 +74,7 @@ registerCommandHandler(async (command: string) => {
         `💰 <b>P&L Summary</b>\n` +
         `├ Realized: <b>${fmt(status.totalRealizedPnlSol)} SOL</b>\n` +
         `├ Unrealized: <b>${fmt(status.totalUnrealizedPnlSol)} SOL</b>\n` +
-        `└ Balance: <b>${Number(status.virtualBalance).toFixed(4)} SOL</b>\n` +
+        `└ Balance: <b>${Number(status.walletBalance).toFixed(4)} SOL</b>\n` +
         `\n🕐 ${toIST(new Date())}`
       );
     }
@@ -89,7 +89,7 @@ registerCommandHandler(async (command: string) => {
         `🎯 Sniping: <b>${status.enabled ? "✅ ENABLED" : "⏸️ PAUSED"}</b>\n` +
         `📍 Open Positions: <b>${status.openCount}/${status.config.maxOpenPositions}</b>\n` +
         `🌅 Grads Today: <b>${status.graduationsToday}</b>\n` +
-        `💰 Balance: <b>${Number(status.virtualBalance).toFixed(4)} SOL</b>\n` +
+        `💰 Balance: <b>${Number(status.walletBalance).toFixed(4)} SOL</b>\n` +
         `🕐 ${toIST(new Date())}`
       );
     }

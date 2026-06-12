@@ -57,7 +57,7 @@ router.patch("/sniper/positions/:id", async (req, res) => {
     if (typeof body["realizedPnlSol"] === "number") patch.realizedPnlSol = body["realizedPnlSol"] as number;
 
     const updated = await graduationSniperService.editPosition(id!, patch);
-    if (!updated) return res.status(404).json({ success: false, error: "Position not found" });
+    if (!updated) { res.status(404).json({ success: false, error: "Position not found" }); return; }
     res.json({ success: true, data: updated });
   } catch (err) {
     res.status(500).json({ success: false, error: (err as Error).message });
@@ -68,7 +68,7 @@ router.patch("/sniper/positions/:id", async (req, res) => {
 router.post("/sniper/positions/:id/recalculate", async (req, res) => {
   try {
     const updated = await graduationSniperService.recalculatePnl(req.params.id!);
-    if (!updated) return res.status(404).json({ success: false, error: "Closed position not found or missing exit price" });
+    if (!updated) { res.status(404).json({ success: false, error: "Closed position not found or missing exit price" }); return; }
     res.json({ success: true, data: updated });
   } catch (err) {
     res.status(500).json({ success: false, error: (err as Error).message });
@@ -80,7 +80,7 @@ router.post("/sniper/positions/:id/close", async (req, res) => {
   try {
     const { id } = req.params;
     const pos = await graduationSniperService.manualClosePosition(id!);
-    if (!pos) return res.status(404).json({ success: false, error: "Open position not found" });
+    if (!pos) { res.status(404).json({ success: false, error: "Open position not found" }); return; }
     res.json({ success: true, data: pos });
   } catch (err) {
     res.status(500).json({ success: false, error: (err as Error).message });
@@ -92,7 +92,7 @@ router.post("/sniper/positions/:id/emergency-sell", async (req, res) => {
   try {
     const { id } = req.params;
     const result = await graduationSniperService.emergencySell(id!);
-    if (!result) return res.status(404).json({ success: false, error: "Open position not found" });
+    if (!result) { res.status(404).json({ success: false, error: "Open position not found" }); return; }
     res.json({ success: true, data: result });
   } catch (err) {
     res.status(500).json({ success: false, error: (err as Error).message });
@@ -104,7 +104,7 @@ router.delete("/sniper/positions/:id", async (req, res) => {
   try {
     const { id } = req.params;
     const ok = await graduationSniperService.deletePosition(id!);
-    if (!ok) return res.status(404).json({ success: false, error: "Position not found" });
+    if (!ok) { res.status(404).json({ success: false, error: "Position not found" }); return; }
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ success: false, error: (err as Error).message });
@@ -122,7 +122,7 @@ router.post("/sniper/positions/inject", async (req, res) => {
     const entryAtMs  = typeof body["entryAtMs"]  === "number" ? body["entryAtMs"]         : undefined;
 
     if (!mint || entryPrice <= 0) {
-      return res.status(400).json({ success: false, error: "mint and entryPrice are required" });
+      res.status(400).json({ success: false, error: "mint and entryPrice are required" }); return;
     }
 
     const pos = await graduationSniperService.injectPosition(mint, symbol, entryPrice, sizeSol, entryAtMs);
@@ -146,7 +146,7 @@ router.post("/sniper/history/purge-unverified", async (_req, res) => {
 router.delete("/sniper/events/:id", (req, res) => {
   const { id } = req.params;
   const ok = graduationSniperService.deleteEvent(id!);
-  if (!ok) return res.status(404).json({ success: false, error: "Event not found" });
+  if (!ok) { res.status(404).json({ success: false, error: "Event not found" }); return; }
   res.json({ success: true });
 });
 
