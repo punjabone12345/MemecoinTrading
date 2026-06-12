@@ -95,13 +95,18 @@ function validateSellParams(tokenMint: string, tokenAmount: number, slippageBps:
   }
 }
 
-// ── Custom:6024 detection ─────────────────────────────────────────────────────
-// Custom program error 6024 on Raydium = "ExceededSlippage" — the swap failed
-// because the market moved beyond the slippage tolerance. This is recoverable by
-// widening slippage on retry (which withRetry does). We surface it clearly.
+// ── Slippage error detection ──────────────────────────────────────────────────
+// Two different Raydium programs surface ExceededSlippage under different codes:
+//   Custom:6024 — Raydium AMM v4 (sell-side, most common on established pools)
+//   Custom:1    — Raydium CPMM (buy AND sell; pump.fun graduates use CPMM)
+// Both are recoverable by widening slippage on retry.
 function classifyError(err: unknown): { isSlippageError: boolean; isDeadPool: boolean; msg: string } {
   const msg = String((err as Error).message ?? err ?? "unknown");
-  const isSlippageError = msg.includes("Custom:6024") || msg.includes("ExceededSlippage") || msg.includes("6024");
+  // Custom:6024 = Raydium AMM v4 ExceededSlippage
+  // Custom:1 in a Raydium CPMM instruction = ExceededSlippage (buy or sell)
+  // Match {"Custom":1} or {"Custom":1, ...} but NOT Custom:10/100/1000/6024 etc.
+  const hasCustom1 = /"Custom"\s*:\s*1[^0-9]/.test(msg) || /\bCustom:1\b/.test(msg);
+  const isSlippageError = msg.includes("Custom:6024") || msg.includes("ExceededSlippage") || msg.includes("6024") || hasCustom1;
   // Dead pool = slippage + multiple fails + "insufficient liquidity" hints
   const isDeadPool = isSlippageError && (msg.includes("liquidity") || msg.includes("pool"));
   return { isSlippageError, isDeadPool, msg };
@@ -209,24 +214,39 @@ class JupiterSwapService {
     const amountLamports = Math.round(solAmount * LAMPORTS_PER_SOL);
 
     return withRetry(`buy:${tokenMint.slice(0, 8)}`, async (attempt) => {
-      logger.info({ tokenMint, solAmount, slippageBps, attempt }, "Jupiter: getting buy quote");
+      // Widen slippage on each retry: +1000 bps per attempt for buys.
+      // Custom:1 on Raydium CPMM = ExceededSlippage (buy-side), same fix as
+      // Custom:6024 on sells — pass widened slippage to BOTH quote and swap so
+      // the on-chain minimum-output threshold is recomputed from the wider value.
+      //   attempt 1 = base, attempt 2 = base+1000, attempt 3 = min(base+2000, 5000)
+      const wideningBps     = (attempt - 1) * 1000;
+      const effectiveSlippage = Math.min(slippageBps + wideningBps, 5000);
+      logger.info({
+        tokenMint, solAmount,
+        baseSlippageBps:     slippageBps,
+        effectiveSlippageBps: effectiveSlippage,
+        attempt,
+        wideningApplied:     wideningBps,
+      }, `Jupiter: buy attempt ${attempt} — slippage ${slippageBps} + ${wideningBps} = ${effectiveSlippage} bps`);
 
-      const quote       = await this.getQuote(SOL_MINT, tokenMint, amountLamports, slippageBps);
+      const quote = await this.getQuote(SOL_MINT, tokenMint, amountLamports, effectiveSlippage);
       const q = quote as Record<string, string | number>;
       logger.info({
-        tokenMint, attempt, slippageBps,
-        priceImpactPct:       q["priceImpactPct"],
-        otherAmountThreshold: q["otherAmountThreshold"],
-        outAmount:            q["outAmount"],
+        tokenMint, attempt,
+        effectiveSlippageBps:   effectiveSlippage,
+        priceImpactPct:         q["priceImpactPct"],
+        otherAmountThreshold:   q["otherAmountThreshold"],
+        outAmount:              q["outAmount"],
+        slippageBpsInQuote:     q["slippageBps"],
       }, "Jupiter: buy quote received");
 
-      const swapTx      = await this.getSwapTx(quote, priorityFeeLamports, slippageBps);
+      const swapTx      = await this.getSwapTx(quote, priorityFeeLamports, effectiveSlippage);
       const txSignature = await solanaWalletService.signAndSendAndConfirm(swapTx);
 
       const tokenAmount = Number(q["outAmount"]);
       const solSpent    = Number(q["inAmount"]) / LAMPORTS_PER_SOL;
 
-      logger.info({ tokenMint, solSpent, tokenAmount, txSignature, attempt }, "Jupiter: buy confirmed on-chain ✅");
+      logger.info({ tokenMint, solSpent, tokenAmount, txSignature, attempt, effectiveSlippage }, "Jupiter: buy confirmed on-chain ✅");
       return { txSignature, tokenAmount, solSpent, attempt };
     }, 3, 2000);
   }
