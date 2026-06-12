@@ -121,7 +121,7 @@ export interface SniperConfig {
 
 const DEFAULT_CONFIG: SniperConfig = {
   enabled:              true,
-  positionSizeSol:      0.1,
+  positionSizeSol:      0.002,   // small default — safe for wallets starting with 0.06 SOL (needs positionSize + 0.003 overhead)
   maxOpenPositions:     5,
   slPct:                40,
   tp1Pct:               150,
@@ -129,9 +129,9 @@ const DEFAULT_CONFIG: SniperConfig = {
   tp2Pct:               400,
   tp2ClosePct:          40,
   trailingStopPct:      30,
-  waitBeforeEntryMs:    5000,    // 5s — gives Jupiter more time to index the new CPMM pool
-  slippageBps:          3000,    // 30% quote slippage — dynamicSlippage handles actual minimum (up to 90%)
-  priorityFeeLamports:  500_000, // 0.0005 SOL — competitive priority for graduation sniping (old 50k was too low)
+  waitBeforeEntryMs:    5000,    // 5s — gives Jupiter time to index the new CPMM pool before buying
+  slippageBps:          3000,    // quote slippage for route-finding only; swap uses fixed SWAP_SLIPPAGE_BPS (5000 = 50% floor)
+  priorityFeeLamports:  500_000, // 0.0005 SOL floor — Helius p75 used at runtime (old 50k was too low)
 };
 
 export interface SniperPosition {
