@@ -251,19 +251,23 @@ class JupiterSwapService {
     validateSellParams(tokenMint, amountRaw, slippageBps, priorityFeeLamports);
 
     return withRetry(`sell:${tokenMint.slice(0, 8)}`, async (attempt) => {
-      // Widen slippage on each retry so a volatile exit still lands.
-      // Custom:6024 (ExceededSlippage) is the most common sell failure.
+      // Widen slippage aggressively on each retry: +1500 bps per attempt.
+      // This reaches the 5000 bps (50%) cap within 3 attempts regardless of base:
+      //   attempt 1 = base, attempt 2 = base+1500, attempt 3 = min(base+3000, 5000)
+      // e.g. base 3000 → 3000 → 4500 → 5000
+      // Custom:6024 (ExceededSlippage) is the most common sell failure on illiquid pools.
       // effectiveSlippage is passed explicitly to BOTH getQuote AND getSwapTx so
-      // Jupiter's /swap endpoint uses it to recompute otherAmountThreshold from
-      // the WIDENED value — not from whatever is baked into the quoteResponse.
-      const effectiveSlippage = Math.min(slippageBps + (attempt - 1) * 500, 5000);
+      // Jupiter's /swap endpoint recomputes otherAmountThreshold from the WIDENED
+      // value, not whatever is baked into the quoteResponse or a server default.
+      const wideningBps = (attempt - 1) * 1500;
+      const effectiveSlippage = Math.min(slippageBps + wideningBps, 5000);
       logger.info({
         tokenMint, tokenAmount: amountRaw,
         baseSlippageBps: slippageBps,
         effectiveSlippageBps: effectiveSlippage,
         attempt,
-        wideningApplied: (attempt - 1) * 500,
-      }, `Jupiter: sell attempt ${attempt} — slippage ${slippageBps} + ${(attempt - 1) * 500} = ${effectiveSlippage} bps`);
+        wideningApplied: wideningBps,
+      }, `Jupiter: sell attempt ${attempt} — slippage ${slippageBps} + ${wideningBps} = ${effectiveSlippage} bps`);
 
       const quote = await this.getQuote(tokenMint, SOL_MINT, amountRaw, effectiveSlippage);
       const q = quote as Record<string, string | number>;

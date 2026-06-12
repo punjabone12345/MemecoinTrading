@@ -1366,7 +1366,29 @@ class GraduationSniperService {
     const walletReady = solanaWalletService.isReady;
     try {
       if (tokensLeft > 0 && walletReady) {
-        const result  = await jupiterSwapService.sell(pos.mint, tokensLeft, this.config.slippageBps, this.config.priorityFeeLamports);
+        // Escalate slippage across outer retries so persistent 6024 errors get
+        // progressively wider tolerance — every 3 outer failures adds 1000 bps.
+        // After 6 outer failures switch straight to emergencySell (5000 bps +
+        // higher priority fee) instead of burning 9 more retries at low slippage.
+        const prevFails = this.sellFailCount.get(pos.mint) ?? 0;
+        const escalatedSlippage = Math.min(
+          this.config.slippageBps + Math.floor(prevFails / 3) * 1000,
+          5000,
+        );
+        let result;
+        if (prevFails >= 6) {
+          logger.warn(
+            { mint: pos.mint, symbol: pos.symbol, prevFails, escalatedSlippage: 5000 },
+            "Graduation sniper: 6+ outer sell failures — switching to emergencySell (5000 bps + high priority fee)",
+          );
+          result = await jupiterSwapService.emergencySell(pos.mint, tokensLeft, this.config.priorityFeeLamports);
+        } else {
+          logger.info(
+            { mint: pos.mint, symbol: pos.symbol, prevFails, escalatedSlippage, baseSlippage: this.config.slippageBps },
+            `Graduation sniper: sell with escalated slippage ${this.config.slippageBps} + ${Math.floor(prevFails / 3) * 1000} = ${escalatedSlippage} bps`,
+          );
+          result = await jupiterSwapService.sell(pos.mint, tokensLeft, escalatedSlippage, this.config.priorityFeeLamports);
+        }
         solReceived   = result.solReceived;
         exitTxSig     = result.txSignature;
       } else if (tokensLeft > 0 && !walletReady) {
