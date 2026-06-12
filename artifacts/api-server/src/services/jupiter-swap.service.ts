@@ -285,8 +285,23 @@ class JupiterSwapService {
   }
 
   // ── SELL ──────────────────────────────────────────────────────────────────
-  // Retries up to 3 times with widening quote slippage for route-finding.
-  // Swap body uses SWAP_SLIPPAGE_BPS (50%) fixed floor — no dynamicSlippage.
+  // KEY FIX — two bugs caused consistent Custom:6024 failures:
+  //
+  // BUG 1 — Quote slippage < swap slippage:
+  //   Quote used config.slippageBps (30%) but swap body used SWAP_SLIPPAGE_BPS
+  //   (50%). Jupiter Lite API may use the QUOTE's embedded otherAmountThreshold
+  //   instead of the swap-body override, so the effective floor was 30% not 50%.
+  //   Fix: quote slippage is now MAX(config.slippageBps, SWAP_SLIPPAGE_BPS) so
+  //   the embedded threshold in the quote is never stricter than our swap floor.
+  //
+  // BUG 2 — Stored tokenAmount may not match actual wallet balance:
+  //   On buy, tokenAmount is set from Jupiter's quoted outAmount (not the actual
+  //   on-chain amount received after slippage). If the buy had any slippage the
+  //   wallet has FEWER tokens than recorded. Trying to sell more than the wallet
+  //   holds causes the Raydium contract to reject with "insufficient balance" or
+  //   push the actual price impact beyond the threshold → Custom:6024.
+  //   Fix: always fetch the real raw balance from chain before building the sell
+  //   tx and use min(storedAmount, actualBalance) as the sell quantity.
   async sell(
     tokenMint: string,
     tokenAmount: number,
@@ -304,36 +319,88 @@ class JupiterSwapService {
 
     const optimalFee = await solanaWalletService.getOptimalPriorityFee(priorityFeeLamports);
 
+    // ── Pre-sell diagnostics: actual on-chain balance + token decimals ────────
+    // Fetch both in parallel — don't let either failure block the sell.
+    const [actualRawBalance, tokenDecimals] = await Promise.all([
+      solanaWalletService.getRawTokenBalance(tokenMint),
+      solanaWalletService.getTokenDecimals(tokenMint),
+    ]);
+
+    // Use the actual wallet balance if it's valid and LESS than the stored amount.
+    // Selling more than the wallet holds = incorrect price impact → Custom:6024.
+    let sellAmount = amountRaw;
+    if (actualRawBalance !== null) {
+      if (actualRawBalance <= 0) {
+        throw new Error(`Nothing to sell — on-chain token balance is 0 (stored amount was ${amountRaw})`);
+      }
+      if (actualRawBalance < amountRaw) {
+        logger.warn({
+          tokenMint, storedAmount: amountRaw, actualRawBalance,
+          diff: amountRaw - actualRawBalance,
+          diffPct: (((amountRaw - actualRawBalance) / amountRaw) * 100).toFixed(2) + "%",
+          tokenDecimals,
+        }, "Jupiter: ⚠️ AMOUNT MISMATCH — stored > actual balance; using on-chain balance to avoid Custom:6024");
+        sellAmount = Math.floor(actualRawBalance);
+      }
+    }
+
+    logger.info({
+      tokenMint,
+      tokenDecimals,              // 1. token decimals from mint account
+      actualRawBalance,           // 2. on-chain raw balance
+      storedAmount: amountRaw,    // stored pos.tokenAmount
+      sellAmount,                 // 3. amount being sent to /quote
+      slippageBps,
+      quoteSlippageBps: Math.max(slippageBps, SWAP_SLIPPAGE_BPS),
+      swapSlippageBps: SWAP_SLIPPAGE_BPS,
+      optimalFee,
+    }, "Jupiter: sell pre-flight — diagnostics");
+
     return withRetry(`sell:${tokenMint.slice(0, 8)}`, async (attempt) => {
+      // BUG 1 FIX: quote slippage must be >= SWAP_SLIPPAGE_BPS.
+      // Jupiter Lite API may use the quote's embedded otherAmountThreshold
+      // directly, ignoring the swap body's slippageBps override. If the quote
+      // is built with 30% tolerance but the swap body says 50%, the contract
+      // enforces 30% (the stricter embedded value) → Custom:6024 on any >30% move.
       const wideningBps       = (attempt - 1) * 1500;
-      const effectiveSlippage = Math.min(slippageBps + wideningBps, 9000);
+      const effectiveSlippage = Math.min(
+        Math.max(slippageBps, SWAP_SLIPPAGE_BPS) + wideningBps, // start at max(cfg, 50%)
+        9000,
+      );
+
       logger.info({
-        tokenMint, tokenAmount: amountRaw,
+        tokenMint, sellAmount,
         quoteSlippageBps: effectiveSlippage,
         swapSlippageBps:  SWAP_SLIPPAGE_BPS,
-        optimalFee,
-        attempt,
-      }, `Jupiter: sell attempt ${attempt} — quoting at ${effectiveSlippage} bps, swap threshold at ${SWAP_SLIPPAGE_BPS} bps`);
+        optimalFee, attempt,
+      }, `Jupiter: sell attempt ${attempt} — quoting ${sellAmount} raw at ${effectiveSlippage} bps`);
 
-      const quote = await this.getQuote(tokenMint, SOL_MINT, amountRaw, effectiveSlippage);
+      const quote = await this.getQuote(tokenMint, SOL_MINT, sellAmount, effectiveSlippage);
       const q     = quote as Record<string, string | number>;
+
+      // ── Quote diagnostic log (all values user requested) ─────────────────
       logger.info({
         tokenMint, attempt,
-        priceImpactPct: q["priceImpactPct"],
-        outAmount:      q["outAmount"],
+        quoteInAmount:         q["inAmount"],           // 4. amount IN the quote (should === sellAmount)
+        quoteOutAmount:        q["outAmount"],           // 5a. expected SOL back
+        otherAmountThreshold:  q["otherAmountThreshold"],// 5b. minimum SOL contract will accept
+        priceImpactPct:        q["priceImpactPct"],     // 5c. price impact
+        sellAmount,                                      // 3. what we asked for
+        inAmountMatch: String(q["inAmount"]) === String(sellAmount), // must be true
       }, "Jupiter: sell quote received");
 
       const swapTx      = await this.getSwapTx(quote, optimalFee);
       const txSignature = await solanaWalletService.signAndSendAndConfirm(swapTx);
 
       const solReceived = Number(q["outAmount"]) / LAMPORTS_PER_SOL;
-      logger.info({ tokenMint, tokenAmount: amountRaw, solReceived, txSignature, attempt, optimalFee }, "Jupiter: sell ✅");
+      logger.info({ tokenMint, sellAmount, solReceived, txSignature, attempt, optimalFee }, "Jupiter: sell ✅");
       return { txSignature, solReceived, attempt };
     }, 3, 1000);
   }
 
   // ── EMERGENCY SELL ────────────────────────────────────────────────────────
   // Used for stuck positions — EMERGENCY_SWAP_SLIPPAGE_BPS (70%) floor + elevated priority fee.
+  // Same balance-check fix as sell(): always use actual on-chain balance.
   async emergencySell(
     tokenMint: string,
     tokenAmount: number,
@@ -346,19 +413,52 @@ class JupiterSwapService {
     const amountRaw = Math.floor(tokenAmount);
     if (amountRaw <= 0) throw new Error("Nothing to sell — token amount is zero");
 
-    const emergencyQuoteSlippage = 9000; // wide quote slippage so Jupiter finds ANY route
+    const emergencyQuoteSlippage = 9000; // wide quote so Jupiter finds ANY route
     const emergencyPriorityFee   = Math.max(priorityFeeLamports, 2_000_000); // min 0.002 SOL
 
-    logger.warn({ tokenMint, amountRaw, emergencyQuoteSlippage, emergencyPriorityFee, swapSlippageBps: EMERGENCY_SWAP_SLIPPAGE_BPS }, "Jupiter: EMERGENCY SELL — 70% swap threshold floor");
+    // Always fetch actual on-chain balance before emergency sell
+    const [actualRawBalance, tokenDecimals] = await Promise.all([
+      solanaWalletService.getRawTokenBalance(tokenMint),
+      solanaWalletService.getTokenDecimals(tokenMint),
+    ]);
+
+    let sellAmount = amountRaw;
+    if (actualRawBalance !== null) {
+      if (actualRawBalance <= 0) {
+        throw new Error(`Nothing to sell — on-chain token balance is 0 (stored amount was ${amountRaw})`);
+      }
+      if (actualRawBalance < amountRaw) {
+        logger.warn({
+          tokenMint, storedAmount: amountRaw, actualRawBalance,
+          diff: amountRaw - actualRawBalance,
+          tokenDecimals,
+        }, "Jupiter: ⚠️ EMERGENCY SELL amount mismatch — using on-chain balance");
+        sellAmount = Math.floor(actualRawBalance);
+      }
+    }
+
+    logger.warn({
+      tokenMint, tokenDecimals, actualRawBalance,
+      storedAmount: amountRaw, sellAmount,
+      emergencyQuoteSlippage, emergencyPriorityFee,
+      swapSlippageBps: EMERGENCY_SWAP_SLIPPAGE_BPS,
+    }, "Jupiter: EMERGENCY SELL — 70% swap threshold floor");
 
     return withRetry(`emergency-sell:${tokenMint.slice(0, 8)}`, async (attempt) => {
-      const quote       = await this.getQuote(tokenMint, SOL_MINT, amountRaw, emergencyQuoteSlippage);
-      const swapTx      = await this.getSwapTx(quote, emergencyPriorityFee, EMERGENCY_SWAP_SLIPPAGE_BPS);
+      const quote  = await this.getQuote(tokenMint, SOL_MINT, sellAmount, emergencyQuoteSlippage);
+      const swapTx = await this.getSwapTx(quote, emergencyPriorityFee, EMERGENCY_SWAP_SLIPPAGE_BPS);
       const txSignature = await solanaWalletService.signAndSendAndConfirm(swapTx);
 
       const q           = quote as Record<string, string>;
       const solReceived = Number(q["outAmount"]) / LAMPORTS_PER_SOL;
-      logger.info({ tokenMint, amountRaw, solReceived, txSignature, attempt }, "Jupiter: emergency sell confirmed ✅");
+      logger.info({
+        tokenMint, sellAmount,
+        quoteInAmount: q["inAmount"],
+        quoteOutAmount: q["outAmount"],
+        otherAmountThreshold: q["otherAmountThreshold"],
+        priceImpactPct: q["priceImpactPct"],
+        solReceived, txSignature, attempt,
+      }, "Jupiter: emergency sell confirmed ✅");
       return { txSignature, solReceived, attempt };
     }, 2, 3000);
   }

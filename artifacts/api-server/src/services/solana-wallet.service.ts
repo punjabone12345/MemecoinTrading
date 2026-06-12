@@ -121,6 +121,56 @@ class SolanaWalletService {
   }
 
   /**
+   * Fetch the exact raw (smallest-unit) token balance for a specific mint.
+   * Uses `uiTokenAmount.amount` (the integer string), NOT uiAmount (float).
+   * Returns null on failure — callers should fall back to stored value.
+   */
+  async getRawTokenBalance(mint: string): Promise<number | null> {
+    if (!this.keypair) return null;
+    try {
+      const mintPubkey = new PublicKey(mint);
+      const accounts = await this.connection.getParsedTokenAccountsByOwner(
+        this.keypair.publicKey,
+        { mint: mintPubkey },
+        "confirmed",
+      );
+      let total = 0;
+      for (const acc of accounts.value) {
+        const parsed = acc.account.data as {
+          parsed?: { info?: { tokenAmount?: { amount?: string } } };
+        };
+        const rawStr = parsed.parsed?.info?.tokenAmount?.amount;
+        if (rawStr) total += Number(rawStr);
+      }
+      return total;
+    } catch (err) {
+      logger.warn({ mint, err: (err as Error).message }, "SolanaWalletService: getRawTokenBalance failed");
+      return null;
+    }
+  }
+
+  /**
+   * Fetch token decimals directly from the mint account.
+   * Never assumes — always reads from chain so the value is exact.
+   * Returns null on failure.
+   */
+  async getTokenDecimals(mint: string): Promise<number | null> {
+    try {
+      const mintPubkey = new PublicKey(mint);
+      const info = await this.connection.getParsedAccountInfo(mintPubkey, "confirmed");
+      if (info.value && "parsed" in info.value.data) {
+        const data = info.value.data as { parsed?: { info?: { decimals?: number } } };
+        const decimals = data.parsed?.info?.decimals;
+        if (typeof decimals === "number") return decimals;
+      }
+      return null;
+    } catch (err) {
+      logger.warn({ mint, err: (err as Error).message }, "SolanaWalletService: getTokenDecimals failed");
+      return null;
+    }
+  }
+
+  /**
    * Fetch all token accounts owned by the wallet.
    * Returns a map of mint → uiAmount for reconciliation against open positions.
    */
