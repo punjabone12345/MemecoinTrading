@@ -170,15 +170,23 @@ class JupiterSwapService {
   private async getSwapTx(
     quoteResponse: unknown,
     priorityFeeLamports: number,
+    slippageBps?: number,
   ): Promise<string> {
     await jupiterRateLimiter.throttle();
-    const res = await axios.post(JUPITER_SWAP_URL, {
+    // slippageBps is passed explicitly so Jupiter's /swap endpoint uses it to
+    // recompute otherAmountThreshold from the WIDENED value, not from whatever
+    // is baked into the quoteResponse or a server-side default.
+    const body: Record<string, unknown> = {
       quoteResponse,
-      userPublicKey:            solanaWalletService.publicKey,
-      wrapAndUnwrapSol:         true,
-      dynamicComputeUnitLimit:  true,
+      userPublicKey:             solanaWalletService.publicKey,
+      wrapAndUnwrapSol:          true,
+      dynamicComputeUnitLimit:   true,
       prioritizationFeeLamports: priorityFeeLamports,
-    }, { timeout: 15_000 });
+    };
+    if (slippageBps !== undefined) {
+      body["slippageBps"] = slippageBps;
+    }
+    const res = await axios.post(JUPITER_SWAP_URL, body, { timeout: 15_000 });
     return res.data.swapTransaction as string;
   }
 
@@ -204,10 +212,17 @@ class JupiterSwapService {
       logger.info({ tokenMint, solAmount, slippageBps, attempt }, "Jupiter: getting buy quote");
 
       const quote       = await this.getQuote(SOL_MINT, tokenMint, amountLamports, slippageBps);
-      const swapTx      = await this.getSwapTx(quote, priorityFeeLamports);
+      const q = quote as Record<string, string | number>;
+      logger.info({
+        tokenMint, attempt, slippageBps,
+        priceImpactPct:       q["priceImpactPct"],
+        otherAmountThreshold: q["otherAmountThreshold"],
+        outAmount:            q["outAmount"],
+      }, "Jupiter: buy quote received");
+
+      const swapTx      = await this.getSwapTx(quote, priorityFeeLamports, slippageBps);
       const txSignature = await solanaWalletService.signAndSendAndConfirm(swapTx);
 
-      const q = quote as Record<string, string>;
       const tokenAmount = Number(q["outAmount"]);
       const solSpent    = Number(q["inAmount"]) / LAMPORTS_PER_SOL;
 
@@ -238,17 +253,40 @@ class JupiterSwapService {
     return withRetry(`sell:${tokenMint.slice(0, 8)}`, async (attempt) => {
       // Widen slippage on each retry so a volatile exit still lands.
       // Custom:6024 (ExceededSlippage) is the most common sell failure.
+      // effectiveSlippage is passed explicitly to BOTH getQuote AND getSwapTx so
+      // Jupiter's /swap endpoint uses it to recompute otherAmountThreshold from
+      // the WIDENED value — not from whatever is baked into the quoteResponse.
       const effectiveSlippage = Math.min(slippageBps + (attempt - 1) * 500, 5000);
-      logger.info({ tokenMint, tokenAmount: amountRaw, effectiveSlippage, attempt }, "Jupiter: getting sell quote");
+      logger.info({
+        tokenMint, tokenAmount: amountRaw,
+        baseSlippageBps: slippageBps,
+        effectiveSlippageBps: effectiveSlippage,
+        attempt,
+        wideningApplied: (attempt - 1) * 500,
+      }, `Jupiter: sell attempt ${attempt} — slippage ${slippageBps} + ${(attempt - 1) * 500} = ${effectiveSlippage} bps`);
 
-      const quote       = await this.getQuote(tokenMint, SOL_MINT, amountRaw, effectiveSlippage);
-      const swapTx      = await this.getSwapTx(quote, priorityFeeLamports);
+      const quote = await this.getQuote(tokenMint, SOL_MINT, amountRaw, effectiveSlippage);
+      const q = quote as Record<string, string | number>;
+
+      // Diagnostic: log quote details so we can verify priceImpactPct and
+      // confirm otherAmountThreshold reflects the widened slippage.
+      logger.info({
+        tokenMint, attempt,
+        effectiveSlippageBps:   effectiveSlippage,
+        priceImpactPct:         q["priceImpactPct"],
+        outAmount:              q["outAmount"],
+        otherAmountThreshold:   q["otherAmountThreshold"],
+        slippageBpsInQuote:     q["slippageBps"],
+      }, "Jupiter: sell quote received — verifying otherAmountThreshold uses widened slippage");
+
+      // Pass effectiveSlippage explicitly so /swap recomputes the minimum-output
+      // constraint from the widened value, not a stale or default one.
+      const swapTx      = await this.getSwapTx(quote, priorityFeeLamports, effectiveSlippage);
       const txSignature = await solanaWalletService.signAndSendAndConfirm(swapTx);
 
-      const q = quote as Record<string, string>;
       const solReceived = Number(q["outAmount"]) / LAMPORTS_PER_SOL;
 
-      logger.info({ tokenMint, tokenAmount: amountRaw, solReceived, txSignature, attempt }, "Jupiter: sell ✅");
+      logger.info({ tokenMint, tokenAmount: amountRaw, solReceived, txSignature, attempt, effectiveSlippage }, "Jupiter: sell ✅");
       return { txSignature, solReceived, attempt };
     }, 3, 1500);
   }
