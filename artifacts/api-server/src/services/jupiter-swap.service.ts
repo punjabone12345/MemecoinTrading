@@ -166,7 +166,18 @@ class JupiterSwapService {
   ): Promise<unknown> {
     await jupiterRateLimiter.throttle();
     const res = await axios.get(JUPITER_QUOTE_URL, {
-      params: { inputMint, outputMint, amount, slippageBps },
+      params: {
+        inputMint,
+        outputMint,
+        amount,
+        slippageBps,
+        // Cap the number of accounts Jupiter can use in the route.
+        // Solana's hard limit is 1232 raw bytes (1644 base64) per transaction.
+        // Complex multi-hop routes with many accounts blow past this limit and
+        // fail with "VersionedTransaction too large". maxAccounts=50 forces
+        // Jupiter to find the best route that fits in a single transaction.
+        maxAccounts: 50,
+      },
       timeout: 10_000,
     });
     return res.data;
