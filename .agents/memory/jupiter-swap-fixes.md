@@ -7,7 +7,7 @@ description: Root causes and fixes for InstructionError Custom:1 errors on all b
 
 1. **`slippageBps` + `dynamicSlippage` conflict** — passing both `slippageBps` and `dynamicSlippage` to Jupiter's `/swap` endpoint causes Jupiter to use the static `slippageBps` override instead of the dynamic calculation. The static value (500–1000 bps) was always too tight for fresh CPMM pools. **Fix:** remove `slippageBps` from `getSwapTx` entirely; let `dynamicSlippage` handle minimum-output enforcement.
 
-2. **`dynamicSlippage.maxBps` too low** — was 5000 (50%). Fresh graduation pools have wild price impact. **Fix:** raised to 9000 (90%).
+2. **`dynamicSlippage.maxBps` too low** — was 5000 (50%). Fresh graduation pools have wild price impact. **Fix:** raised to 3000 (30%) for normal buys/sells; 5000 (50%) for emergency sells only. Do NOT go higher — dynamicSlippage will execute at whatever it calculates up to the cap, so 90% means you could receive almost nothing on a dump.
 
 3. **Priority fee too low** — was 50,000 lamports (0.00005 SOL). Graduation sniping on congested slots requires competitive fees. **Fix:** default raised to 500,000 lamports; Helius p75 estimation used at runtime.
 
