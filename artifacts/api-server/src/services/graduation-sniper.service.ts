@@ -129,11 +129,9 @@ const DEFAULT_CONFIG: SniperConfig = {
   tp2Pct:               400,
   tp2ClosePct:          40,
   trailingStopPct:      30,
-  waitBeforeEntryMs:    3000,
-  slippageBps:          1000,    // 10% — memecoins need wide slippage
-  priorityFeeLamports:  50_000,  // 0.00005 SOL — sufficient priority without destroying small trades
-  // NOTE: 1_000_000 (0.001 SOL) was the old default — it was 20x the trade size for 0.0001 SOL trades.
-  // 50_000 lamports is still ~10x the Solana base fee and fast enough for graduation sniping.
+  waitBeforeEntryMs:    5000,    // 5s — gives Jupiter more time to index the new CPMM pool
+  slippageBps:          3000,    // 30% quote slippage — dynamicSlippage handles actual minimum (up to 90%)
+  priorityFeeLamports:  500_000, // 0.0005 SOL — competitive priority for graduation sniping (old 50k was too low)
 };
 
 export interface SniperPosition {

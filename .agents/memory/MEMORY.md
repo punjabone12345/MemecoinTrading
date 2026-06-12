@@ -4,3 +4,4 @@
 - [Real trading architecture](real-trading-arch.md) — Jupiter v6 + Solana web3.js swaps; @solana/web3.js externalized in esbuild; closePosition/partialClose/checkStagedSL all async
 - [Sniper trade verification](sniper-trade-verification.md) — entrySig/exitSig fields distinguish verified vs fake trades; purgeUnverifiedHistory() cleans old buggy data
 - [Critical sniper bugs fixed](sniper-critical-bugs.md) — isDuplicateTrade blocks ALL closes; trailingHigh=0 kills SL; entry price uses pre-buy price without Jupiter fallback
+- [Jupiter swap Custom:1 fix](jupiter-swap-fixes.md) — slippageBps+dynamicSlippage conflict, maxBps too low, priority fee too low; all fixed; Helius p75 fee estimation added

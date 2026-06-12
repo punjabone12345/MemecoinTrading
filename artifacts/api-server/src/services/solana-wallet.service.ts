@@ -61,17 +61,62 @@ class SolanaWalletService {
     if (!this.keypair) return 0;
     try {
       const lamports = await this.connection.getBalance(this.keypair.publicKey, "confirmed");
-      this.rpcFailStreak = 0; // reset on success
+      this.rpcFailStreak = 0;
       return lamports / LAMPORTS_PER_SOL;
     } catch (err) {
       this.trackRpcFailure("getBalance", (err as Error).message);
-      // Try fallback
       try {
         const lamports = await this.connectionFallback.getBalance(this.keypair.publicKey, "confirmed");
         return lamports / LAMPORTS_PER_SOL;
       } catch {
         return 0;
       }
+    }
+  }
+
+  /**
+   * Fetch a recommended priority fee from Helius's `getRecentPrioritizationFees`
+   * method, taking the 75th-percentile of the last 20 slots for competitive landing.
+   * Falls back to the provided `defaultLamports` if Helius is unavailable.
+   *
+   * Pass `accountKeys` of the programs involved in the swap (e.g. Raydium CPMM)
+   * to get fees scoped to that specific program instead of global slot averages.
+   */
+  async getOptimalPriorityFee(defaultLamports: number, accountKeys?: string[]): Promise<number> {
+    const heliusKey = process.env["HELIUS_API_KEY"];
+    if (!heliusKey) return defaultLamports;
+
+    try {
+      const axios = (await import("axios")).default;
+      const res = await axios.post(
+        `https://mainnet.helius-rpc.com/?api-key=${heliusKey}`,
+        {
+          jsonrpc: "2.0",
+          id: 1,
+          method: "getRecentPrioritizationFees",
+          params: accountKeys ? [accountKeys] : [],
+        },
+        { timeout: 4_000 },
+      );
+
+      const fees: Array<{ prioritizationFee: number }> = res.data?.result ?? [];
+      if (fees.length === 0) return defaultLamports;
+
+      // Sort ascending and take 75th percentile — aggressive enough to land quickly
+      // without wasting funds, better than a plain average which is dragged down by
+      // zero-fee slots.
+      const sorted   = [...fees].sort((a, b) => a.prioritizationFee - b.prioritizationFee);
+      const p75index = Math.floor(sorted.length * 0.75);
+      const p75fee   = sorted[p75index]?.prioritizationFee ?? defaultLamports;
+
+      // Never go below the caller's default (0.0005 SOL for graduation sniping)
+      // and cap at 5_000_000 lamports (0.005 SOL) to avoid runaway fees.
+      const optimal = Math.max(defaultLamports, Math.min(p75fee, 5_000_000));
+      logger.info({ p75fee, optimal, defaultLamports, sampleSize: fees.length }, "SolanaWalletService: Helius priority fee estimated ✅");
+      return optimal;
+    } catch (err) {
+      logger.warn({ err: (err as Error).message }, "SolanaWalletService: getRecentPrioritizationFees failed — using default priority fee");
+      return defaultLamports;
     }
   }
 

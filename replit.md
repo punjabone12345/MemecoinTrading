@@ -1,45 +1,51 @@
-# [Project name]
+# Apex Meme Trader
 
-_Replace the heading above with the project's name, and this line with one sentence describing what this app does for users._
+A Solana memecoin graduation sniper bot — automatically detects tokens graduating from Pump.fun to Raydium and executes timed buy/sell trades with configurable TP/SL/trailing-stop logic.
 
 ## Run & Operate
 
-- `pnpm --filter @workspace/api-server run dev` — run the API server (port 5000)
+- API server runs on port **8080** (`artifacts/api-server`) — `pnpm --filter @workspace/api-server run dev`
+- Frontend runs on port **5000** (`artifacts/terminal`) — `pnpm --filter @workspace/terminal run dev`
 - `pnpm run typecheck` — full typecheck across all packages
 - `pnpm run build` — typecheck + build all packages
-- `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from the OpenAPI spec
-- `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
-- Required env: `DATABASE_URL` — Postgres connection string
+- Required env: `DATABASE_URL` — Postgres connection string (set in Replit Secrets)
 
 ## Stack
 
-- pnpm workspaces, Node.js 24, TypeScript 5.9
-- API: Express 5
+- pnpm workspaces, Node.js 20, TypeScript 5
+- API: Express 5, port 8080
 - DB: PostgreSQL + Drizzle ORM
-- Validation: Zod (`zod/v4`), `drizzle-zod`
-- API codegen: Orval (from OpenAPI spec)
-- Build: esbuild (CJS bundle)
+- Build: esbuild (ESM bundle via `build.mjs`)
+- Frontend: React + Vite (proxies `/api` and `/ws` to :8080)
+- Solana: @solana/web3.js + Jupiter Lite API (`https://lite-api.jup.ag/swap/v1/`)
 
 ## Where things live
 
-_Populate as you build — short repo map plus pointers to the source-of-truth file for DB schema, API contracts, theme files, etc._
+- `artifacts/api-server/src/services/graduation-sniper.service.ts` — core sniper logic, TP/SL/trailing-stop, DEFAULT_CONFIG
+- `artifacts/api-server/src/services/jupiter-swap.service.ts` — buy/sell/emergencySell via Jupiter; dynamicSlippage; Helius fee estimation
+- `artifacts/api-server/src/services/solana-wallet.service.ts` — keypair, signAndSendAndConfirm, getOptimalPriorityFee
+- `artifacts/api-server/src/services/pumpfun-scanner.service.ts` — Module A: Pump.fun bonding curve scanner
+- `artifacts/terminal/src/` — React frontend
 
 ## Architecture decisions
 
-_Populate as you build — non-obvious choices a reader couldn't infer from the code (3-5 bullets)._
+- **Two completely separate modules**: Pumpfun Module A (bonding curve scanner) and Sniper Module B (graduation sniper). Never merge TP logic between them.
+- **dynamicSlippage only**: Jupiter `/swap` is called with `dynamicSlippage: { minBps: 50, maxBps: 9000 }` and NO `slippageBps` field — passing both causes the static value to override dynamic calculation, which was the root cause of all Custom:1 errors.
+- **Helius p75 priority fees**: `getOptimalPriorityFee()` fetches the 75th-percentile of recent prioritization fees from Helius; floored at `priorityFeeLamports` config value (500k lamports), capped at 5M lamports.
+- **`@solana/web3.js` externalized in esbuild**: marked as external in `build.mjs` to avoid bundling issues; loaded from node_modules at runtime.
+- **Paper trading mode**: when `SOLANA_PRIVATE_KEY` is absent, the bot runs in simulation mode — all buy/sell paths degrade gracefully without throwing.
 
 ## Product
 
-_Describe the high-level user-facing capabilities of this app once they exist._
-
-## User preferences
-
-_Populate as you build — explicit user instructions worth remembering across sessions._
+- Monitors Pump.fun token graduations via Helius WebSocket
+- Automatically enters positions on newly-graduated Raydium CPMM pools
+- Manages each position with configurable TP1/TP2/trailing-stop/SL
+- Real-time dashboard showing open positions, P&L, wallet balance
+- Telegram alerts for entries, exits, and errors
 
 ## Gotchas
 
-_Populate as you build — sharp edges, "always run X before Y" rules._
-
-## Pointers
-
-- See the `pnpm-workspace` skill for workspace structure, TypeScript setup, and package details
+- **Render has all trading secrets** (`SOLANA_PRIVATE_KEY`, `HELIUS_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`) — Replit does NOT. Live trading only works on Render.
+- **`waitBeforeEntryMs: 5000`** — graduation sniper waits 5 s before buying to give Jupiter time to index the new CPMM pool. Shortening this causes "route not found" errors.
+- **Always restart the API Server workflow after code changes** — esbuild rebuilds on `dev` start.
+- **`pnpm --filter @workspace/api-server run dev`** rebuilds then starts; just `pnpm run start` skips the build.

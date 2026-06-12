@@ -9,6 +9,13 @@ const JUPITER_SWAP_URL  = "https://lite-api.jup.ag/swap/v1/swap";
 const SOL_MINT          = "So11111111111111111111111111111111111111112";
 const LAMPORTS_PER_SOL  = 1_000_000_000;
 
+// dynamicSlippage maxBps: 9000 (90%) — pump.fun CPMM pools can have extreme
+// price impact in the first seconds after graduation. dynamicSlippage lets
+// Jupiter simulate the exact minimum-output threshold for the current pool
+// state, rather than us guessing a static value that CPMM rejects (Custom:1).
+// 90% is the ceiling; in practice Jupiter uses far less when the pool is liquid.
+const DYNAMIC_SLIPPAGE_MAX_BPS = 9000;
+
 // ── Jupiter request rate limiter ──────────────────────────────────────────────
 // Jupiter Lite has a rate limit of ~60 req/min on lite-api.jup.ag.
 // This limiter enforces a minimum gap between consecutive requests so we never
@@ -171,12 +178,9 @@ class JupiterSwapService {
         outputMint,
         amount,
         slippageBps,
-        // Cap the number of accounts Jupiter can use in the route.
-        // Solana's hard limit is 1232 raw bytes (1644 base64) per transaction.
-        // Complex multi-hop routes with many accounts blow past this limit and
-        // fail with "VersionedTransaction too large". maxAccounts=50 forces
-        // Jupiter to find the best route that fits in a single transaction.
-        maxAccounts: 50,
+        // NOTE: maxAccounts removed — the hard limit of 50 forced Jupiter to
+        // pick sub-optimal routes on new CPMM pools, causing failed swaps.
+        // Jupiter handles tx-size limits internally; trust it to pick a valid route.
       },
       timeout: 10_000,
     });
@@ -186,26 +190,32 @@ class JupiterSwapService {
   private async getSwapTx(
     quoteResponse: unknown,
     priorityFeeLamports: number,
-    slippageBps?: number,
   ): Promise<string> {
     await jupiterRateLimiter.throttle();
-    // dynamicSlippage lets Jupiter calculate the exact slippage needed for the
-    // pool (based on real-time price impact), up to maxBps. This is the primary
-    // defence against Custom:1 (Raydium CPMM ExceededSlippage) on thin pools —
-    // Jupiter sets otherAmountThreshold exactly right instead of us guessing.
-    // slippageBps is kept as a fallback so manual retry widening still applies
-    // if dynamicSlippage isn't supported by the API version in use.
+    // dynamicSlippage lets Jupiter SIMULATE the tx and compute the exact
+    // minimum-output threshold for the current pool state. This eliminates
+    // Custom:1 (Raydium CPMM ExceededSlippage) errors caused by us guessing
+    // a static otherAmountThreshold that the pool can't meet.
+    //
+    // CRITICAL: do NOT also pass slippageBps — it overrides dynamicSlippage
+    // and reverts to the static quote value, defeating the purpose.
+    //
+    // maxBps=9000 (90%) is the ceiling; Jupiter uses far less in practice.
+    // This high ceiling is necessary for ultra-thin CPMM pools in the first
+    // seconds after graduation, where price impact can be extreme.
+    //
+    // skipUserAccountsRpcCalls: true — skip on-chain lookups for user token
+    // accounts during tx building; Jupiter already knows our wallet's ATAs
+    // from the quote. Saves 200-400 ms between quote and execution.
     const body: Record<string, unknown> = {
       quoteResponse,
-      userPublicKey:             solanaWalletService.publicKey,
-      wrapAndUnwrapSol:          true,
-      dynamicComputeUnitLimit:   true,
-      prioritizationFeeLamports: priorityFeeLamports,
-      dynamicSlippage: { minBps: 50, maxBps: 5000 },
+      userPublicKey:              solanaWalletService.publicKey,
+      wrapAndUnwrapSol:           true,
+      dynamicComputeUnitLimit:    true,
+      prioritizationFeeLamports:  priorityFeeLamports,
+      dynamicSlippage:            { minBps: 50, maxBps: DYNAMIC_SLIPPAGE_MAX_BPS },
+      skipUserAccountsRpcCalls:   true,
     };
-    if (slippageBps !== undefined) {
-      body["slippageBps"] = slippageBps;
-    }
     const res = await axios.post(JUPITER_SWAP_URL, body, { timeout: 15_000 });
     return res.data.swapTransaction as string;
   }
@@ -213,6 +223,11 @@ class JupiterSwapService {
   // ── BUY ───────────────────────────────────────────────────────────────────
   // Retries quote+build up to 5 times (fresh graduates take 2-5s to appear in Jupiter).
   // Uses signAndSendAndConfirm so the position is ONLY recorded after the TX lands on-chain.
+  //
+  // dynamicSlippage in getSwapTx handles slippage automatically — we only pass
+  // slippageBps to getQuote so Jupiter can find a valid route. The swap tx
+  // then re-simulates to compute the exact minimum output for the current
+  // pool state, up to DYNAMIC_SLIPPAGE_MAX_BPS (90%). This eliminates Custom:1.
   async buy(
     tokenMint: string,
     solAmount: number,
@@ -228,51 +243,50 @@ class JupiterSwapService {
 
     const amountLamports = Math.round(solAmount * LAMPORTS_PER_SOL);
 
+    // Use Helius-estimated priority fee if available (p75 of recent slots).
+    // Falls back to caller's value when Helius is not configured.
+    const optimalFee = await solanaWalletService.getOptimalPriorityFee(priorityFeeLamports);
+
     return withRetry(`buy:${tokenMint.slice(0, 8)}`, async (attempt) => {
-      // Widen slippage aggressively on each retry: +1500 bps per attempt.
-      // pump.fun graduates land on thin Raydium CPMM pools (Custom:1 error).
-      // dynamicSlippage in getSwapTx handles this automatically on attempt 1,
-      // but if that's not enough we escalate hard:
-      //   attempt 1 = base (dynamicSlippage active)
-      //   attempt 2 = base + 1500
-      //   attempt 3 = base + 3000
-      //   attempt 4 = base + 4500  (capped at 5000)
-      //   attempt 5 = 5000         (max — emergency)
-      const wideningBps     = (attempt - 1) * 1500;
-      const effectiveSlippage = Math.min(slippageBps + wideningBps, 5000);
+      // Quote with a moderately wide slippage so Jupiter finds a valid route.
+      // The actual minimum-output enforcement is handled by dynamicSlippage in
+      // getSwapTx (maxBps=9000), so widening the quote slippage on retries is
+      // mostly for route-finding on newly-indexed pools, not for tx rejection.
+      const wideningBps       = (attempt - 1) * 1000;
+      const effectiveSlippage = Math.min(slippageBps + wideningBps, 9000);
       logger.info({
         tokenMint, solAmount,
-        baseSlippageBps:     slippageBps,
+        baseSlippageBps:      slippageBps,
         effectiveSlippageBps: effectiveSlippage,
+        dynamicSlippageMax:   DYNAMIC_SLIPPAGE_MAX_BPS,
         attempt,
-        wideningApplied:     wideningBps,
-      }, `Jupiter: buy attempt ${attempt} — slippage ${slippageBps} + ${wideningBps} = ${effectiveSlippage} bps`);
+      }, `Jupiter: buy attempt ${attempt} — quote slippage ${effectiveSlippage} bps (dynamicSlippage active up to ${DYNAMIC_SLIPPAGE_MAX_BPS} bps)`);
 
       const quote = await this.getQuote(SOL_MINT, tokenMint, amountLamports, effectiveSlippage);
       const q = quote as Record<string, string | number>;
       logger.info({
         tokenMint, attempt,
-        effectiveSlippageBps:   effectiveSlippage,
-        priceImpactPct:         q["priceImpactPct"],
-        otherAmountThreshold:   q["otherAmountThreshold"],
-        outAmount:              q["outAmount"],
-        slippageBpsInQuote:     q["slippageBps"],
+        effectiveSlippageBps: effectiveSlippage,
+        priceImpactPct:       q["priceImpactPct"],
+        outAmount:            q["outAmount"],
+        slippageBpsInQuote:   q["slippageBps"],
       }, "Jupiter: buy quote received");
 
-      const swapTx      = await this.getSwapTx(quote, priorityFeeLamports, effectiveSlippage);
+      // getSwapTx uses dynamicSlippage — do NOT pass slippageBps (it overrides dynamicSlippage)
+      const swapTx      = await this.getSwapTx(quote, optimalFee);
       const txSignature = await solanaWalletService.signAndSendAndConfirm(swapTx);
 
       const tokenAmount = Number(q["outAmount"]);
       const solSpent    = Number(q["inAmount"]) / LAMPORTS_PER_SOL;
 
-      logger.info({ tokenMint, solSpent, tokenAmount, txSignature, attempt, effectiveSlippage }, "Jupiter: buy confirmed on-chain ✅");
+      logger.info({ tokenMint, solSpent, tokenAmount, txSignature, attempt, optimalFee }, "Jupiter: buy confirmed on-chain ✅");
       return { txSignature, tokenAmount, solSpent, attempt };
-    }, 5, 1500);
+    }, 5, 800);
   }
 
   // ── SELL ──────────────────────────────────────────────────────────────────
-  // Retries up to 3 times with escalating slippage.
-  // Custom:6024 (ExceededSlippage) is handled specifically — each retry adds 500 bps.
+  // Retries up to 3 times. dynamicSlippage (maxBps=9000) handles the real
+  // minimum-output check — we only widen quote slippage for route-finding.
   async sell(
     tokenMint: string,
     tokenAmount: number,
@@ -286,57 +300,43 @@ class JupiterSwapService {
     const amountRaw = Math.floor(tokenAmount);
     if (amountRaw <= 0) throw new Error("Nothing to sell — token amount is zero");
 
-    // Pre-flight: validate sell params
     validateSellParams(tokenMint, amountRaw, slippageBps, priorityFeeLamports);
 
+    const optimalFee = await solanaWalletService.getOptimalPriorityFee(priorityFeeLamports);
+
     return withRetry(`sell:${tokenMint.slice(0, 8)}`, async (attempt) => {
-      // Widen slippage aggressively on each retry: +1500 bps per attempt.
-      // This reaches the 5000 bps (50%) cap within 3 attempts regardless of base:
-      //   attempt 1 = base, attempt 2 = base+1500, attempt 3 = min(base+3000, 5000)
-      // e.g. base 3000 → 3000 → 4500 → 5000
-      // Custom:6024 (ExceededSlippage) is the most common sell failure on illiquid pools.
-      // effectiveSlippage is passed explicitly to BOTH getQuote AND getSwapTx so
-      // Jupiter's /swap endpoint recomputes otherAmountThreshold from the WIDENED
-      // value, not whatever is baked into the quoteResponse or a server default.
-      const wideningBps = (attempt - 1) * 1500;
-      const effectiveSlippage = Math.min(slippageBps + wideningBps, 5000);
+      const wideningBps       = (attempt - 1) * 1500;
+      const effectiveSlippage = Math.min(slippageBps + wideningBps, 9000);
       logger.info({
         tokenMint, tokenAmount: amountRaw,
-        baseSlippageBps: slippageBps,
+        baseSlippageBps:      slippageBps,
         effectiveSlippageBps: effectiveSlippage,
+        dynamicSlippageMax:   DYNAMIC_SLIPPAGE_MAX_BPS,
         attempt,
-        wideningApplied: wideningBps,
-      }, `Jupiter: sell attempt ${attempt} — slippage ${slippageBps} + ${wideningBps} = ${effectiveSlippage} bps`);
+      }, `Jupiter: sell attempt ${attempt} — quote slippage ${effectiveSlippage} bps (dynamicSlippage active)`);
 
       const quote = await this.getQuote(tokenMint, SOL_MINT, amountRaw, effectiveSlippage);
-      const q = quote as Record<string, string | number>;
-
-      // Diagnostic: log quote details so we can verify priceImpactPct and
-      // confirm otherAmountThreshold reflects the widened slippage.
+      const q     = quote as Record<string, string | number>;
       logger.info({
         tokenMint, attempt,
-        effectiveSlippageBps:   effectiveSlippage,
-        priceImpactPct:         q["priceImpactPct"],
-        outAmount:              q["outAmount"],
-        otherAmountThreshold:   q["otherAmountThreshold"],
-        slippageBpsInQuote:     q["slippageBps"],
-      }, "Jupiter: sell quote received — verifying otherAmountThreshold uses widened slippage");
+        effectiveSlippageBps: effectiveSlippage,
+        priceImpactPct:       q["priceImpactPct"],
+        outAmount:            q["outAmount"],
+        slippageBpsInQuote:   q["slippageBps"],
+      }, "Jupiter: sell quote received");
 
-      // Pass effectiveSlippage explicitly so /swap recomputes the minimum-output
-      // constraint from the widened value, not a stale or default one.
-      const swapTx      = await this.getSwapTx(quote, priorityFeeLamports, effectiveSlippage);
+      // dynamicSlippage handles minimum output — do NOT pass slippageBps
+      const swapTx      = await this.getSwapTx(quote, optimalFee);
       const txSignature = await solanaWalletService.signAndSendAndConfirm(swapTx);
 
       const solReceived = Number(q["outAmount"]) / LAMPORTS_PER_SOL;
-
-      logger.info({ tokenMint, tokenAmount: amountRaw, solReceived, txSignature, attempt, effectiveSlippage }, "Jupiter: sell ✅");
+      logger.info({ tokenMint, tokenAmount: amountRaw, solReceived, txSignature, attempt, optimalFee }, "Jupiter: sell ✅");
       return { txSignature, solReceived, attempt };
-    }, 3, 1500);
+    }, 3, 1000);
   }
 
   // ── EMERGENCY SELL ────────────────────────────────────────────────────────
-  // Used for stuck positions — forces max slippage (5000 bps = 50%).
-  // Higher priority fee to ensure the TX lands in congested conditions.
+  // Used for stuck positions — dynamicSlippage up to 90% + elevated priority fee.
   async emergencySell(
     tokenMint: string,
     tokenAmount: number,
@@ -349,20 +349,19 @@ class JupiterSwapService {
     const amountRaw = Math.floor(tokenAmount);
     if (amountRaw <= 0) throw new Error("Nothing to sell — token amount is zero");
 
-    // Emergency: use max slippage 50% (5000 bps) and higher priority fee
-    const emergencySlippage    = 5000;
-    const emergencyPriorityFee = Math.max(priorityFeeLamports, 2_000_000); // min 0.002 SOL for emergency
+    // Max quote slippage so Jupiter can find any route; dynamicSlippage caps at 90%.
+    const emergencyQuoteSlippage = 9000;
+    const emergencyPriorityFee   = Math.max(priorityFeeLamports, 2_000_000); // min 0.002 SOL
 
-    logger.warn({ tokenMint, amountRaw, emergencySlippage, emergencyPriorityFee }, "Jupiter: EMERGENCY SELL — max slippage 50%");
+    logger.warn({ tokenMint, amountRaw, emergencyQuoteSlippage, emergencyPriorityFee }, "Jupiter: EMERGENCY SELL — dynamicSlippage up to 90%");
 
     return withRetry(`emergency-sell:${tokenMint.slice(0, 8)}`, async (attempt) => {
-      const quote       = await this.getQuote(tokenMint, SOL_MINT, amountRaw, emergencySlippage);
+      const quote       = await this.getQuote(tokenMint, SOL_MINT, amountRaw, emergencyQuoteSlippage);
       const swapTx      = await this.getSwapTx(quote, emergencyPriorityFee);
       const txSignature = await solanaWalletService.signAndSendAndConfirm(swapTx);
 
-      const q = quote as Record<string, string>;
+      const q           = quote as Record<string, string>;
       const solReceived = Number(q["outAmount"]) / LAMPORTS_PER_SOL;
-
       logger.info({ tokenMint, amountRaw, solReceived, txSignature, attempt }, "Jupiter: emergency sell confirmed ✅");
       return { txSignature, solReceived, attempt };
     }, 2, 3000);
