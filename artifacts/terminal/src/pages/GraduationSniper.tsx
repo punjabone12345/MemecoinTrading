@@ -389,23 +389,32 @@ function PositionRow({ pos }: { pos: SniperPosition }) {
             <button onClick={() => setConfirmDel(false)} className="text-[10px] text-white/40 hover:text-white">Cancel</button>
           </div>
         )}
-        {isStuck && (
-          <div className="mt-2 flex items-center gap-2 rounded-lg bg-red-500/10 border border-red-500/20 px-3 py-2">
-            <AlertTriangle className="w-3 h-3 text-red-400 shrink-0" />
-            <span className="text-[10px] text-red-300 flex-1 min-w-0 truncate">
-              Auto-sell failed{pos.lastError ? `: ${pos.lastError.slice(0, 60)}` : " — max retries hit"}
-            </span>
-            <button onClick={() => emergencySell.mutate(pos.id)}
-              disabled={emergencySell.isPending}
-              className="text-[10px] font-bold text-red-400 hover:text-red-300 px-2 py-0.5 rounded bg-red-500/20 border border-red-500/30 shrink-0">
-              {emergencySell.isPending ? "…" : "Emergency Sell"}
-            </button>
-          </div>
-        )}
-        {isClosing && pos.lastError && (
-          <div className="mt-1.5 flex items-center gap-1 text-[9px] text-amber-400/60">
-            <AlertTriangle className="w-2.5 h-2.5 shrink-0" />
-            <span className="truncate">Retry {pos.closingAttempt}: {pos.lastError.slice(0, 60)}</span>
+        {(isStuck || isClosing) && (
+          <div className={`mt-2 rounded-lg border px-3 py-2 ${isStuck ? "bg-red-500/10 border-red-500/20" : "bg-amber-500/10 border-amber-500/20"}`}>
+            <div className="flex items-center gap-2">
+              <AlertTriangle className={`w-3 h-3 shrink-0 ${isStuck ? "text-red-400" : "text-amber-400"}`} />
+              <span className={`text-[10px] flex-1 min-w-0 truncate ${isStuck ? "text-red-300" : "text-amber-300"}`}>
+                {isStuck
+                  ? `Sell failed — max retries hit${pos.lastError ? `: ${pos.lastError.slice(0, 50)}` : ""}`
+                  : `Sell attempt #${pos.closingAttempt} failed — retrying automatically${pos.lastError ? `: ${pos.lastError.slice(0, 40)}` : ""}`}
+              </span>
+              <button
+                onClick={() => emergencySell.mutate(pos.id)}
+                disabled={emergencySell.isPending}
+                className={`text-[10px] font-bold px-2.5 py-1 rounded border shrink-0 transition-colors ${
+                  isStuck
+                    ? "text-red-300 hover:text-white bg-red-500/25 hover:bg-red-500/40 border-red-500/40"
+                    : "text-amber-300 hover:text-white bg-amber-500/25 hover:bg-amber-500/40 border-amber-500/40"
+                }`}
+              >
+                {emergencySell.isPending ? "Selling…" : "⚡ Emergency Sell"}
+              </button>
+            </div>
+            {isStuck && (
+              <div className="mt-1.5 text-[9px] text-white/30">
+                Tokens still in your wallet. Emergency sell uses max slippage (70%) to force-exit.
+              </div>
+            )}
           </div>
         )}
       </div>
