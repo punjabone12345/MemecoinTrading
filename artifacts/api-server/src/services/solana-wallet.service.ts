@@ -192,7 +192,18 @@ class SolanaWalletService {
   /**
    * Sign + send and WAIT for on-chain confirmation.
    * Submits to BOTH Helius + public endpoint simultaneously for maximum reliability.
-   * Uses whichever endpoint confirms first.
+   *
+   * IMPORTANT: Uses signature-polling confirmation instead of blockhash-strategy.
+   *
+   * The old approach fetched a NEW blockhash AFTER Jupiter had already embedded
+   * its own blockhash in the transaction. When Jupiter's blockhash expired, the
+   * confirmation code was using the wrong `lastValidBlockHeight` and threw a
+   * timeout error — even though the sell TX had actually landed on-chain. This
+   * caused the bot to think the sell failed, retry, and accumulate duplicate
+   * pending TXs, eventually hitting MAX_SELL_FAILS on perfectly liquid tokens.
+   *
+   * Polling `getSignatureStatuses` is blockhash-agnostic: it confirms exactly
+   * when the signature appears on-chain regardless of which blockhash was used.
    */
   async signAndSendAndConfirm(txBase64: string): Promise<string> {
     if (!this.keypair) throw new Error("Wallet not ready — SOLANA_PRIVATE_KEY not set");
@@ -201,59 +212,60 @@ class SolanaWalletService {
     tx.sign([this.keypair]);
     const serialized = tx.serialize();
 
-    const latest = await this.connection.getLatestBlockhash("confirmed");
-
-    // Send to both RPCs simultaneously — use whichever responds first
-    const sendOpts = { skipPreflight: true, maxRetries: 3, preflightCommitment: "processed" as const };
+    const sendOpts = { skipPreflight: true, maxRetries: 5, preflightCommitment: "processed" as const };
 
     let signature: string;
     try {
-      // Primary send
       signature = await this.connection.sendRawTransaction(serialized, sendOpts);
-      logger.info({ sig: signature.slice(0, 20) }, "SolanaWalletService: tx sent to primary RPC — waiting for confirmation ⏳");
-
-      // Also send to fallback in background (same TX, same signature)
-      void this.connectionFallback.sendRawTransaction(serialized, sendOpts).catch(() => {
-        // Ignore fallback send errors — we already have a signature from primary
-      });
+      logger.info({ sig: signature.slice(0, 20) }, "SolanaWalletService: tx sent to primary RPC — polling for confirmation ⏳");
+      // Also blast to fallback in background — doubles landing probability
+      void this.connectionFallback.sendRawTransaction(serialized, sendOpts).catch(() => {});
     } catch (primaryErr) {
-      // Primary failed — try fallback
       logger.warn({ err: (primaryErr as Error).message }, "SolanaWalletService: primary RPC send failed — trying fallback");
       signature = await this.connectionFallback.sendRawTransaction(serialized, sendOpts);
-      logger.info({ sig: signature.slice(0, 20) }, "SolanaWalletService: tx sent via fallback RPC ⏳");
+      logger.info({ sig: signature.slice(0, 20) }, "SolanaWalletService: tx sent via fallback RPC — polling ⏳");
     }
 
-    // Confirm on primary (faster; if it fails try fallback confirm)
-    try {
-      const result = await this.connection.confirmTransaction(
-        { signature, blockhash: latest.blockhash, lastValidBlockHeight: latest.lastValidBlockHeight },
-        "confirmed",
-      );
-      if (result.value.err) {
-        const errMsg = JSON.stringify(result.value.err);
-        logger.error({ sig: signature.slice(0, 20), err: errMsg }, "SolanaWalletService: tx FAILED on-chain ❌");
-        throw new Error(`Transaction rejected on-chain: ${errMsg}`);
-      }
-    } catch (confirmErr) {
-      const msg = (confirmErr as Error).message ?? String(confirmErr);
-      // If it's an on-chain rejection, rethrow
-      if (msg.includes("rejected on-chain") || msg.includes("Transaction rejected")) throw confirmErr;
-      // Otherwise it's a timeout/network issue — try fallback confirmation
-      logger.warn({ sig: signature.slice(0, 20), err: msg }, "SolanaWalletService: primary confirm timeout — trying fallback RPC");
-      const result2 = await this.connectionFallback.confirmTransaction(
-        { signature, blockhash: latest.blockhash, lastValidBlockHeight: latest.lastValidBlockHeight },
-        "confirmed",
-      );
-      if (result2.value.err) {
-        const errMsg = JSON.stringify(result2.value.err);
-        logger.error({ sig: signature.slice(0, 20), err: errMsg }, "SolanaWalletService: tx FAILED on-chain (fallback confirm) ❌");
-        throw new Error(`Transaction rejected on-chain: ${errMsg}`);
+    // Poll getSignatureStatuses — no blockhash dependency, works regardless of
+    // which RPC submitted and which blockhash Jupiter embedded in the tx.
+    const deadline  = Date.now() + 90_000; // 90 s — covers slow slots and congestion
+    const pollMs    = 1_500;
+    let resubmitted = false;
+
+    while (Date.now() < deadline) {
+      await new Promise(r => setTimeout(r, pollMs));
+      try {
+        const res    = await this.connection.getSignatureStatuses([signature], { searchTransactionHistory: false });
+        const status = res.value[0];
+
+        if (status) {
+          if (status.err) {
+            const errMsg = JSON.stringify(status.err);
+            logger.error({ sig: signature.slice(0, 20), err: errMsg }, "SolanaWalletService: tx FAILED on-chain ❌");
+            throw new Error(`Transaction rejected on-chain: ${errMsg}`);
+          }
+          if (status.confirmationStatus === "confirmed" || status.confirmationStatus === "finalized") {
+            this.rpcFailStreak = 0;
+            logger.info({ sig: signature.slice(0, 20), status: status.confirmationStatus }, "SolanaWalletService: tx confirmed on-chain ✅");
+            return signature;
+          }
+          // status is "processed" — still propagating, keep polling
+        } else if (!resubmitted && Date.now() > deadline - 60_000) {
+          // Not found after 30 s — resubmit to both RPCs to recover from dropped TXs
+          resubmitted = true;
+          logger.warn({ sig: signature.slice(0, 20) }, "SolanaWalletService: tx not seen after 30s — resubmitting to both RPCs");
+          void this.connection.sendRawTransaction(serialized, sendOpts).catch(() => {});
+          void this.connectionFallback.sendRawTransaction(serialized, sendOpts).catch(() => {});
+        }
+      } catch (pollErr) {
+        const msg = (pollErr as Error).message ?? String(pollErr);
+        if (msg.includes("rejected on-chain") || msg.includes("Transaction rejected")) throw pollErr;
+        // Transient network error — log and continue polling
+        logger.warn({ sig: signature.slice(0, 20), err: msg }, "SolanaWalletService: status poll error — retrying");
       }
     }
 
-    this.rpcFailStreak = 0;
-    logger.info({ sig: signature.slice(0, 20) }, "SolanaWalletService: tx confirmed on-chain ✅");
-    return signature;
+    throw new Error(`Transaction confirmation timeout after 90s — tx may still land. Sig: ${signature.slice(0, 20)}`);
   }
 
   private async confirmInBackground(signature: string): Promise<void> {

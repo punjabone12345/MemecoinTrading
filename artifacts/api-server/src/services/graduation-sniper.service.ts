@@ -1389,10 +1389,10 @@ class GraduationSniperService {
           5000,
         );
         let result;
-        if (prevFails >= 6) {
+        if (prevFails >= 3) {
           logger.warn(
             { mint: pos.mint, symbol: pos.symbol, prevFails, escalatedSlippage: 5000 },
-            "Graduation sniper: 6+ outer sell failures — switching to emergencySell (5000 bps + high priority fee)",
+            "Graduation sniper: 3+ outer sell failures — switching to emergencySell (9000 bps quote + 70% swap floor + high priority fee)",
           );
           result = await jupiterSwapService.emergencySell(pos.mint, tokensLeft, this.config.priorityFeeLamports);
         } else {
