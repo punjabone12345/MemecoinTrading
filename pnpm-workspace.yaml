@@ -69,10 +69,14 @@ catalog:
 autoInstallPeers: false
 
 onlyBuiltDependencies:
+  - '@google/genai'
   - '@swc/core'
+  - bufferutil
   - esbuild
   - msw
+  - protobufjs
   - unrs-resolver
+  - utf-8-validate
 
 overrides:
   # replit uses linux-x64 only, we can exclude all other platforms
