@@ -815,9 +815,10 @@ class GraduationSniperService {
     const signature = value["signature"] as string | undefined;
     if (!signature) return;
 
-    this.resetDailyCounterIfNeeded();
-    this.graduationsToday++;
-
+    // NOTE: graduationsToday is incremented inside processGraduation (after mint
+    // extraction confirms this is a real graduation TX), NOT here.  Helius fires
+    // this handler for ANY transaction mentioning the migration wallet — including
+    // Pool:Create and other Raydium ops — so counting here over-inflates the stat.
     void this.processGraduation(signature);
   }
 
@@ -838,18 +839,15 @@ class GraduationSniperService {
     try {
       const extracted = await this.extractMintFromTx(signature);
       if (!extracted) {
-        logger.warn({ signature }, "Graduation sniper: could not extract mint after all retries — skipping");
-        this.addEvent({
-          id: uid(),
-          detectedAt,
-          mint: "unknown",
-          symbol: "???",
-          action: "skipped",
-          skipReason: "Could not extract mint from TX (check logs)",
-          txSignature: signature,
-        });
+        // Not a graduation TX (Pool:Create, AMM:Buy, etc. also mention migration wallet)
+        // Don't add to events or count as graduation — just silently discard.
+        logger.info({ signature }, "Graduation sniper: no mint extracted — non-graduation TX, ignoring");
         return;
       }
+
+      // Confirmed real graduation — count it now (not in handleMessage which fires for all TX types)
+      this.resetDailyCounterIfNeeded();
+      this.graduationsToday++;
 
       const { mint, wsolVaultPubkey } = extracted;
       const skipReason = this.checkSkipReason(mint);
@@ -929,27 +927,30 @@ class GraduationSniperService {
         return;
       }
 
-      // ── SPEED FIX: run rug-check timer, pool check, and Jupiter quote pre-fetch ALL in parallel ──
-      // Old flow: wait 8s → pool check (~0.5s) → price fetch (~0.5s) → getQuote (~0.5s) → getOptimalFee (~0.5s)
-      //         = ~10s before swap TX even starts.
-      // New flow: [wait 3s ∥ pool check ∥ Jupiter quote + Helius fee (~0.5s each)] → price fetch → swap TX
-      //         = ~3.5s before swap TX starts (saves ~6.5s on the hot path).
-      // If the pool isn't indexed yet the pre-fetch returns null and buy() retries normally.
+      // ── SPEED FIX: run rug-check timer and pool check in parallel ────────────
+      // Jupiter quote pre-fetch is fired as a BACKGROUND promise — it is NOT
+      // awaited inside Promise.all.  Reason: jupiterRateLimiter has a 400ms
+      // shared gap; when multiple graduations happen simultaneously, waiting for
+      // the pre-fetch inside Promise.all would stall the rug-check block beyond
+      // its 3s window and block the detection pipeline.  Instead we fire it, do
+      // the 3s wait + pool check, run all filters, then grab the result
+      // opportunistically — if it finished it's free, if not we skip it.
+      const preQuotePromise = jupiterSwapService.prefetchBuyQuoteAndFee(
+        mint,
+        cfg.positionSizeSol,
+        cfg.slippageBps,
+        cfg.priorityFeeLamports,
+      );
+
       const t2PoolStart = Date.now();
-      const [, poolSol, preQuote] = await Promise.all([
+      const [, poolSol] = await Promise.all([
         new Promise<void>((r) => setTimeout(r, RUG_CHECK_WAIT_MS)),
         wsolVaultPubkey
           ? this.fetchOnChainPoolSol(wsolVaultPubkey)
           : Promise.resolve<number | null>(null),
-        jupiterSwapService.prefetchBuyQuoteAndFee(
-          mint,
-          cfg.positionSizeSol,
-          cfg.slippageBps,
-          cfg.priorityFeeLamports,
-        ),
       ]);
-      logger.info({ mint, symbol, poolSol, preQuoteFetched: !!preQuote, fetchMs: Date.now() - t2PoolStart, elapsedMs: Date.now() - t0 },
-        "Sniper timing: T3+T4 — rugCheck wait + pool SOL check + Jupiter quote pre-fetch done in parallel");
+      logger.info({ mint, symbol, poolSol, fetchMs: Date.now() - t2PoolStart, elapsedMs: Date.now() - t0 },
+        "Sniper timing: T3+T4 — rugCheck wait + pool SOL check done in parallel (pre-fetch running in background)");
 
       // FIX 2: on-chain Raydium pool SOL balance check
       if (wsolVaultPubkey && poolSol !== null) {
@@ -1081,6 +1082,16 @@ class GraduationSniperService {
 
       logger.info({ mint, symbol, driftPct: driftPct.toFixed(2) + "%", elapsedMs: Date.now() - t0 },
         "Graduation sniper: drift check passed ✅ — proceeding to buy");
+
+      // Grab pre-fetch result opportunistically — it has been running in background
+      // for ~3-4s (rug wait + price fetch + drift check).  If it's ready, use it;
+      // if still pending/failed, race gives null within 50ms and buy() retries fresh.
+      const preQuote = await Promise.race([
+        preQuotePromise,
+        new Promise<null>((r) => setTimeout(() => r(null), 50)),
+      ]);
+      logger.info({ mint, symbol, preQuoteReady: !!preQuote, elapsedMs: Date.now() - t0 },
+        preQuote ? "Sniper timing: pre-fetch quote ready — skipping getQuote call ⚡" : "Sniper timing: pre-fetch not ready — buy() will fetch fresh quote");
 
       await this.enterPosition(mint, symbol, name, entryPrice, signature, baselinePrice, detectedAt, preQuote);
       this.addEvent({ ...eventBase, symbol, action: "entered" });
