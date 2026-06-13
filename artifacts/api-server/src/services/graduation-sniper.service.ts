@@ -784,18 +784,21 @@ class GraduationSniperService {
         ],
       }));
 
-      // ── WS-level keepalive ping ───────────────────────────────────────────
-      // Load balancers and NAT gateways kill idle TCP connections after ~60s.
-      // Sending a WS ping frame every 30s prevents silent drops without any
-      // application-level traffic.  The server responds with a pong frame
-      // automatically — if it doesn't, the socket will eventually error/close
-      // and the reconnect handler takes over.
+      // ── Two-layer keepalive — TCP + application-level JSON ───────────────
+      // Layer 1 (TCP): WS ping frame every 20s keeps NAT gateways alive.
+      // Layer 2 (JSON): A lightweight getHealth JSON-RPC call every 20s sends
+      // real application data through Render's proxy and Helius's load balancer.
+      // Render's proxy kills WebSocket connections that have no *application-level*
+      // traffic even when TCP pings are flowing — the JSON layer fixes that.
+      // Together these two layers prevent all known causes of premature close.
       if (this.wsPingIntervalId) clearInterval(this.wsPingIntervalId);
       this.wsPingIntervalId = setInterval(() => {
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.ping();
-        }
-      }, 30_000);
+        if (ws.readyState !== WebSocket.OPEN) return;
+        // TCP-level ping (handles NAT/firewall idle timeouts)
+        ws.ping();
+        // Application-level JSON ping (handles proxy/LB idle timeouts)
+        ws.send(JSON.stringify({ jsonrpc: "2.0", id: 0, method: "getHealth" }));
+      }, 20_000);
 
       // ── Backfill missed graduations after a reconnect ─────────────────────
       // When the WS drops and reconnects, any graduation events that fired
