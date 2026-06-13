@@ -1007,73 +1007,19 @@ class GraduationSniperService {
       this.resetDailyCounterIfNeeded();
       this.graduationsToday++;
 
-      // ── TIMING STEP 0: graduation detected ───────────────────────────────────
-      const t0 = detectedAt; // graduation WS event received
-      logger.info({ mint, t0 }, "Sniper timing: T0 — graduation detected");
+      // ── T0: fire ALL independent tasks simultaneously ─────────────────────────
+      // Pool check, pre-quote, and baseline price have no dependencies on each
+      // other — start all three at the exact same instant.  The rug-check price
+      // (second read) is the only task that must wait: we need (a) a baseline to
+      // compare against, and (b) at least RUG_CHECK_WAIT_MS of elapsed time so a
+      // real dump would already be visible in the price API.
+      const t0 = detectedAt;
+      logger.info({ mint, t0 }, "Sniper timing: T0 — all parallel tasks firing simultaneously ⚡");
 
-      // Wait before entry so DEX price feeds have time to populate
-      await new Promise((r) => setTimeout(r, this.config.waitBeforeEntryMs));
-      logger.info({ mint, elapsedMs: Date.now() - t0 }, "Sniper timing: T1 — waitBeforeEntry done");
+      const poolCheckPromise = wsolVaultPubkey
+        ? this.fetchOnChainPoolSol(wsolVaultPubkey)
+        : Promise.resolve<number | null>(null);
 
-      // ── TIMING STEP 1: first price fetch (detection baseline) ─────────────────
-      // fetchPriceFast fires Jupiter + DexScreener IN PARALLEL and resolves as
-      // soon as either source returns a valid price.  Jupiter indexes newly-
-      // graduated Raydium pools in <5s vs DexScreener's 15–60s, so this
-      // dramatically cuts the time-to-entry for most tokens.
-      // If the first parallel attempt returns null (both sources miss), we retry
-      // up to 4 more times with a 2s wait — total worst-case window is ~8s
-      // (down from the old 30s with 6×5s DexScreener-only retries).
-      const t1PriceFetchStart = Date.now();
-      let priceData = await this.fetchPriceFast(mint);
-      logger.info({ mint, found: !!priceData, fetchMs: Date.now() - t1PriceFetchStart, elapsedMs: Date.now() - t0 }, "Sniper timing: T2 — baseline price fetch (Jupiter+DexScreener parallel)");
-
-      if (!priceData) {
-        const MAX_PRICE_RETRIES = 4;
-        const PRICE_RETRY_MS    = 2_000;
-        for (let attempt = 1; attempt <= MAX_PRICE_RETRIES; attempt++) {
-          logger.info({ mint, attempt, elapsedMs: Date.now() - t0 },
-            `Graduation sniper: price not found yet — retry ${attempt}/${MAX_PRICE_RETRIES} in ${PRICE_RETRY_MS / 1000}s (Jupiter+DexScreener)`);
-          await new Promise(r => setTimeout(r, PRICE_RETRY_MS));
-          priceData = await this.fetchPriceFast(mint);
-          if (priceData) {
-            logger.info({ mint, attempt, waitedMs: attempt * PRICE_RETRY_MS, elapsedMs: Date.now() - t0 },
-              "Graduation sniper: price appeared after retry ✅");
-            break;
-          }
-        }
-      }
-
-      if (!priceData) {
-        this.addEvent({ ...eventBase, action: "skipped", skipReason: "Price not found (Jupiter + DexScreener, 8s window)" });
-        logger.info({ mint }, "Graduation sniper: skipped — price not found after 8s of Jupiter+DexScreener retries");
-        return;
-      }
-
-      const { price: baselinePrice, symbol, name } = priceData;
-
-      // ── FIX 1: Minimum entry price — skip sub-$0.00001 micro-cap pre-rugs ──────
-      if (baselinePrice < MIN_ENTRY_PRICE_USD) {
-        const reason = `Price too low — $${baselinePrice.toExponential(3)} < $${MIN_ENTRY_PRICE_USD} (Type-A rug filter)`;
-        this.addEvent({ ...eventBase, symbol, action: "skipped", skipReason: reason });
-        logger.info({ mint, symbol, price: baselinePrice }, "Graduation sniper: skipped — price below minimum (FIX 1)");
-        return;
-      }
-
-      // Double-check skip after price fetch (race condition guard)
-      const skipAfterWait = this.checkSkipReason(mint);
-      if (skipAfterWait) {
-        this.addEvent({ ...eventBase, symbol, action: "skipped", skipReason: skipAfterWait });
-        return;
-      }
-
-      // ── SPEED FIX: run rug-check timer and pool check in parallel ────────────
-      // Jupiter quote pre-fetch is fired as a BACKGROUND promise — it is NOT
-      // awaited inside Promise.all.  Reason: jupiterRateLimiter has a 400ms
-      // shared gap; when multiple graduations happen simultaneously, waiting for
-      // the pre-fetch inside Promise.all would stall the rug-check block beyond
-      // its 3s window and block the detection pipeline.  Instead we fire it, do
-      // the 3s wait + pool check, run all filters, then grab the result
-      // opportunistically — if it finished it's free, if not we skip it.
       const preQuotePromise = jupiterSwapService.prefetchBuyQuoteAndFee(
         mint,
         this.config.positionSizeSol,
@@ -1081,21 +1027,68 @@ class GraduationSniperService {
         this.config.priorityFeeLamports,
       );
 
-      // ── SPEED FIX: rug-check price fetch runs IN PARALLEL with the timed wait ──
-      // Old flow: wait 3s → then fetch DexScreener (3-8s sequential) = 6-11s
-      // New flow: start fetchPriceFast + pool check + 1.5s timer all at once = 1.5s
-      // Jupiter price API typically responds in <1s, so it's ready before the timer.
-      const t2PoolStart = Date.now();
-      const [, poolSol, rugCheckData] = await Promise.all([
+      // ── T1: baseline price + enforce minimum rug-gap ─────────────────────────
+      // Wait for BOTH: baseline price (for rug comparison) AND the minimum gap
+      // (so a real dump is actually visible in the price feed).
+      // Using Promise.all means: if Jupiter responds in 0.8s, we still wait the
+      // remaining 0.7s of the 1.5s rug gap before fetching the second price.
+      let priceData: Awaited<ReturnType<typeof this.fetchPriceFast>> = null;
+      await Promise.all([
+        (async () => {
+          priceData = await this.fetchPriceFast(mint);
+          if (!priceData) {
+            const MAX_PRICE_RETRIES = 3;
+            const PRICE_RETRY_MS    = 1_000;
+            for (let attempt = 1; attempt <= MAX_PRICE_RETRIES; attempt++) {
+              logger.info({ mint, attempt, elapsedMs: Date.now() - t0 },
+                `Graduation sniper: price not found — retry ${attempt}/${MAX_PRICE_RETRIES}`);
+              await new Promise(r => setTimeout(r, PRICE_RETRY_MS));
+              priceData = await this.fetchPriceFast(mint);
+              if (priceData) break;
+            }
+          }
+        })(),
         new Promise<void>((r) => setTimeout(r, RUG_CHECK_WAIT_MS)),
-        wsolVaultPubkey
-          ? this.fetchOnChainPoolSol(wsolVaultPubkey)
-          : Promise.resolve<number | null>(null),
+      ]);
+      logger.info({ mint, found: !!priceData, elapsedMs: Date.now() - t0 },
+        "Sniper timing: T1 — baseline price ready + rug gap enforced");
+
+      if (!priceData) {
+        this.addEvent({ ...eventBase, action: "skipped", skipReason: "Price not found (Jupiter + DexScreener, ~5s window)" });
+        logger.info({ mint }, "Graduation sniper: skipped — price not found after parallel retries");
+        return;
+      }
+
+      const { price: baselinePrice, symbol, name } = priceData;
+      catchEventBase = { ...eventBase, symbol }; // update with known symbol for catch block
+
+      // ── FIX 1: Minimum entry price ────────────────────────────────────────────
+      if (baselinePrice < MIN_ENTRY_PRICE_USD) {
+        const reason = `Price too low — $${baselinePrice.toExponential(3)} < $${MIN_ENTRY_PRICE_USD} (Type-A rug filter)`;
+        this.addEvent({ ...eventBase, symbol, action: "skipped", skipReason: reason });
+        logger.info({ mint, symbol, price: baselinePrice }, "Graduation sniper: skipped — price below minimum (FIX 1)");
+        return;
+      }
+
+      // Race-condition guard: re-check wallet/positions state with symbol known
+      const skipAfterPrice = this.checkSkipReason(mint);
+      if (skipAfterPrice) {
+        this.addEvent({ ...eventBase, symbol, action: "skipped", skipReason: skipAfterPrice });
+        return;
+      }
+
+      // ── T2: rug-check price + pool check (pool may already be done) ───────────
+      // The 1.5s rug gap was already enforced in T1's Promise.all, so we fire
+      // the second price read NOW and wait for it + the pool check together.
+      const t2Start = Date.now();
+      const [rugCheckData, poolSol] = await Promise.all([
         this.fetchPriceFast(mint),
+        poolCheckPromise,
       ]);
       const entryPrice = rugCheckData?.price ?? baselinePrice;
-      logger.info({ mint, symbol, poolSol, rugPrice: rugCheckData?.price ?? null, fetchMs: Date.now() - t2PoolStart, elapsedMs: Date.now() - t0 },
-        "Sniper timing: T3+T4+T5 — rugCheck wait + pool SOL + rug price all in parallel ⚡");
+      logger.info({ mint, symbol, poolSol, rugPrice: rugCheckData?.price ?? null,
+        parallelMs: Date.now() - t2Start, elapsedMs: Date.now() - t0 },
+        "Sniper timing: T2 — rug price + pool check done ⚡ (pre-quote running in background)");
 
       // FIX 2: on-chain Raydium pool SOL balance check
       if (wsolVaultPubkey && poolSol !== null) {
