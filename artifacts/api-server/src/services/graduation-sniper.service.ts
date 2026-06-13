@@ -1072,9 +1072,9 @@ class GraduationSniperService {
       // opportunistically — if it finished it's free, if not we skip it.
       const preQuotePromise = jupiterSwapService.prefetchBuyQuoteAndFee(
         mint,
-        cfg.positionSizeSol,
-        cfg.slippageBps,
-        cfg.priorityFeeLamports,
+        this.config.positionSizeSol,
+        this.config.slippageBps,
+        this.config.priorityFeeLamports,
       );
 
       const t2PoolStart = Date.now();
