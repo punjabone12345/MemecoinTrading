@@ -914,9 +914,15 @@ class GraduationSniperService {
       // Without this, two simultaneous graduation events for the same mint both
       // pass checkSkipReason (seenMints only gets the mint inside enterPosition,
       // which is AFTER all the awaits below), creating two DB rows.
+      //
+      // NOTE: do NOT call addEvent here — this is pure internal dedup noise.
+      // Helius fires multiple different TX signatures for the same mint (Pool:Create,
+      // AMM:Buy, etc. all mention the migration wallet) so several processGraduation
+      // calls race through extractMintFromTx in parallel and all arrive here with
+      // the same mint.  Showing each as a "skipped" event in the UI is misleading —
+      // the first one is already being processed correctly; these are silent discards.
       if (this.processingGraduations.has(mint)) {
-        this.addEvent({ ...eventBase, action: "skipped", skipReason: "Graduation already in progress for this mint" });
-        logger.info({ mint }, "Graduation sniper: duplicate graduation event suppressed");
+        logger.debug({ mint, signature }, "Graduation sniper: duplicate mint in-flight — silently discarded");
         return;
       }
       this.processingGraduations.add(mint);
