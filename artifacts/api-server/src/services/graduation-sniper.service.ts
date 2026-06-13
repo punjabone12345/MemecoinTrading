@@ -74,8 +74,12 @@ const RUG_DROP_ABORT_PCT    = 20;             // abort entry if price drops ≥ 
 //
 // MOMENTUM_SKIP_PCT: if price rose > this % we explicitly label it "Missed entry"
 //   (separate label helps distinguish "pumping too fast" from "drift + filters").
-const ENTRY_DRIFT_ABORT_PCT = 8;              // abort buy if price rose > 8% from baseline
-const MOMENTUM_SKIP_PCT     = 15;             // label as "Missed entry" if > 15% from baseline
+const ENTRY_DRIFT_ABORT_PCT  = 8;              // abort buy if price rose > 8% from baseline
+const MOMENTUM_SKIP_PCT      = 15;             // label as "Missed entry" if > 15% from baseline
+// POST-FILL circuit breaker: if the actual Jupiter fill price is > this % above the
+// detection baseline, the buy chased the pump too hard. Emergency-sell immediately and
+// release seenMints so the token can be reconsidered on the next graduation event.
+const MAX_FILL_DRIFT_PCT     = 15;             // emergency-sell if fill > 15% above detection price
 
 // ── Type-A rug filters (pre-entry) ───────────────────────────────────────────
 const MIN_ENTRY_PRICE_USD   = 0.00001;        // skip tokens priced below $0.00001
@@ -1595,6 +1599,38 @@ class GraduationSniperService {
       msDetectionToFill:  msDetectionToFill ?? null,
       msDetectionToFillLabel: msDetectionToFill ? `${(msDetectionToFill / 1000).toFixed(1)}s` : "n/a",
     }, "Sniper timing: T9 — detection→fill drift summary 📊");
+
+    // ── POST-FILL DRIFT CIRCUIT BREAKER ───────────────────────────────────────
+    // DexScreener lags 30-60s on new pairs, so the pre-buy drift check (8%)
+    // can pass while Jupiter fills at +20-40% above detection.  If we detect
+    // that here, emergency-sell immediately before recording the position.
+    if (entryDriftPct !== undefined && entryDriftPct > MAX_FILL_DRIFT_PCT) {
+      logger.warn(
+        { mint, symbol, entryDriftPct: entryDriftPct.toFixed(1), MAX_FILL_DRIFT_PCT, actualEntryPrice, detectionPrice },
+        "Graduation sniper: FILL DRIFT TOO HIGH — emergency-selling immediately 🚨",
+      );
+      try {
+        await jupiterSwapService.emergencySell(mint, actualTokenAmount, cfg.priorityFeeLamports);
+        logger.info({ mint, symbol }, "Graduation sniper: fill-drift emergency sell confirmed — position never opened");
+      } catch (sellErr) {
+        logger.error({ mint, symbol, err: (sellErr as Error).message }, "Graduation sniper: fill-drift emergency sell FAILED — position left open for manual close");
+      }
+      if (isTelegramConfigured()) {
+        void sendTelegram(
+          `🚨 <b>FILL DRIFT ABORT</b>\n` +
+          `──────────────────────\n` +
+          `🪙 Token: <b>${symbol}</b>\n` +
+          `📋 CA: <code>${mint}</code>\n` +
+          `📈 Fill drifted: <b>+${entryDriftPct.toFixed(1)}%</b> above detection price\n` +
+          `🔄 Emergency sold — position never recorded\n` +
+          `🕐 ${toIST(new Date())}`,
+        );
+      }
+      // Release the mint lock so we don't permanently block this token
+      this.seenMints.delete(mint);
+      void this.refreshWalletBalance();
+      return;
+    }
 
     const pos: SniperPosition = {
       id,
