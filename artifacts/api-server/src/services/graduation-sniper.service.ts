@@ -17,7 +17,9 @@ const RECONNECT_DELAY_MS  = 1_000;
 // have arrived in this window, Helius has silently dropped the subscription.
 // Force-reconnect to restore it.  Set conservatively vs graduation frequency
 // (~1–5 min during active hours) so quiet periods don't cause false triggers.
-const SILENT_DEATH_MS     = 2 * 60_000; // 2 minutes
+// 5 min avoids false-reconnects during normal low-activity windows (2 min was
+// too aggressive — it caused 9+ reconnects per session during quiet hours).
+const SILENT_DEATH_MS     = 5 * 60_000; // 5 minutes (was 2 — too many false reconnects)
 const DETECTION_WATCHDOG_MS = 60_000;   // check / log every 60 s
 const MAX_EVENTS         = 50;
 const MAX_CLOSED         = 100_000; // effectively unlimited — all trades kept in memory
@@ -287,6 +289,14 @@ class GraduationSniperService {
   private closingMints: Set<string> = new Set();
   // Concurrency guard — prevents duplicate graduation processing for same mint
   private processingGraduations: Set<string> = new Set();
+  // Signature-level dedup — Helius fires multiple logsNotification events for
+  // the same TX (one per log entry mentioning the migration wallet).  Without
+  // this guard every duplicate fires a separate extractMintFromTx RPC call,
+  // burns Helius rate-limit budget, and all but the first show "already in
+  // progress" in the UI.  We track at the signature level so only ONE RPC
+  // call is ever made per graduation TX.  Capped at 500 entries (FIFO evict)
+  // to avoid unbounded memory growth across long-running sessions.
+  private seenSignatures: Set<string> = new Set();
   // Cross-tick sell failure counter — incremented each time a close is retried.
   // When it hits MAX_SELL_FAILS the position is force-closed virtually so the
   // infinite fee-draining retry loop is broken (Custom: 6024 dead-pool errors).
@@ -839,6 +849,23 @@ class GraduationSniperService {
     const signature = value["signature"] as string | undefined;
     if (!signature) return;
 
+    // ── Signature-level dedup ─────────────────────────────────────────────────
+    // Helius fires multiple logsNotification events for the same TX (one per log
+    // entry that mentions the migration wallet).  Without this guard every
+    // duplicate triggers a separate Helius RPC call inside extractMintFromTx,
+    // burns rate-limit budget, and shows ghost "already in progress" skips in
+    // the UI.  Only the FIRST event for each signature spawns processGraduation.
+    if (this.seenSignatures.has(signature)) {
+      logger.debug({ signature }, "Graduation sniper: duplicate WS signature — suppressed");
+      return;
+    }
+    this.seenSignatures.add(signature);
+    // FIFO evict — keep set bounded to 500 entries so long sessions don't leak memory
+    if (this.seenSignatures.size > 500) {
+      const oldest = this.seenSignatures.values().next().value;
+      if (oldest) this.seenSignatures.delete(oldest);
+    }
+
     // NOTE: graduationsToday is incremented inside processGraduation (after mint
     // extraction confirms this is a real graduation TX), NOT here.  Helius fires
     // this handler for ANY transaction mentioning the migration wallet — including
@@ -1151,11 +1178,13 @@ class GraduationSniperService {
     const SOL_MINT = "So11111111111111111111111111111111111111112";
 
     // Helius REST indexer lags behind the WebSocket by several seconds.
-    // Retry up to 5 times with increasing delays: 2s, 4s, 6s, 8s, 10s (30s total).
-    const delays = [2_000, 4_000, 6_000, 8_000, 10_000];
+    // Attempt 0 is immediate (no wait) — fast path for when the TX is already
+    // indexed.  Retries back off: 1s, 3s, 5s, 8s so total window is ~17s vs
+    // the old 30s (2+4+6+8+10) while catching up faster on the first try.
+    const delays = [0, 1_000, 3_000, 5_000, 8_000];
 
     for (let attempt = 0; attempt < delays.length; attempt++) {
-      await new Promise((r) => setTimeout(r, delays[attempt]!));
+      if (delays[attempt]! > 0) await new Promise((r) => setTimeout(r, delays[attempt]!));
 
       try {
         type TokenBalance = { mint: string; accountIndex: number; uiTokenAmount?: { uiAmount?: number | null } };
