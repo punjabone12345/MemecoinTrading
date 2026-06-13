@@ -815,9 +815,22 @@ export default function GraduationSniper() {
             )}
           </div>
         </div>
-        <div className="flex items-center gap-3 mt-2 text-[10px] text-white/30">
+        <div className="flex items-center gap-3 mt-2 text-[10px] text-white/30 flex-wrap">
           <span>{(status?.wsReconnects ?? 0) > 0 ? `${status!.wsReconnects} reconnect${status!.wsReconnects > 1 ? "s" : ""}` : "Stable connection"}</span>
           <span>·</span>
+          {/* Detection listener health — shows "last event Xs ago" or warns if silent */}
+          {status?.wsConnected && (() => {
+            const t = status.lastWsMessageAt;
+            if (!t) return <span className="text-amber-400/70">⚠ No messages yet</span>;
+            const secAgo = Math.round((Date.now() - t) / 1000);
+            const isStale = secAgo > 120;
+            return (
+              <span className={isStale ? "text-red-400 font-bold" : "text-white/30"}>
+                {isStale ? "⚠ " : ""}last event {secAgo < 60 ? `${secAgo}s` : `${Math.round(secAgo / 60)}m`} ago
+              </span>
+            );
+          })()}
+          {status?.wsConnected && <span>·</span>}
           <span>{status?.enabled ? "Sniping enabled" : "Sniping paused"}</span>
           <span>·</span>
           <span className="text-amber-400/60">TP1 +{config?.tp1Pct ?? 150}% ({config?.tp1ClosePct ?? 40}%) · TP2 +{config?.tp2Pct ?? 400}% ({config?.tp2ClosePct ?? 40}%) · Runner 20%</span>

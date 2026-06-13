@@ -12,7 +12,13 @@ import { jupiterSwapService } from "./jupiter-swap.service.js";
 const MIGRATION_WALLET   = "39azUYFWPz3VHgKCf3VChUwbpURdCHRxjWVowf5jUJjg";
 const PUMPFUN_PROGRAM_ID = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
 const DEXSCREENER_BASE   = "https://api.dexscreener.com";
-const RECONNECT_DELAY_MS = 1_000;
+const RECONNECT_DELAY_MS  = 1_000;
+// If the WS is "connected" (TCP ping keeps it alive) but no JSON messages
+// have arrived in this window, Helius has silently dropped the subscription.
+// Force-reconnect to restore it.  Set conservatively vs graduation frequency
+// (~1–5 min during active hours) so quiet periods don't cause false triggers.
+const SILENT_DEATH_MS     = 2 * 60_000; // 2 minutes
+const DETECTION_WATCHDOG_MS = 60_000;   // check / log every 60 s
 const MAX_EVENTS         = 50;
 const MAX_CLOSED         = 100_000; // effectively unlimited — all trades kept in memory
 const CONFIG_KEY         = "sniper_config";
@@ -204,6 +210,7 @@ export interface SniperEvent {
 export interface SniperStatus {
   wsConnected: boolean;
   wsReconnects: number;
+  lastWsMessageAt: number;     // ms epoch; 0 = never received a message this session
   enabled: boolean;
   graduationsToday: number;
   tradesTotal: number;
@@ -230,6 +237,16 @@ class GraduationSniperService {
   private priceIntervalId: ReturnType<typeof setInterval> | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private started = false;
+  // Stored so the silent-death watchdog can trigger reconnects without having
+  // the apiKey passed via closure.
+  private heliusApiKey: string | null = null;
+  // Timestamp of the last JSON message received from Helius (subscription
+  // confirmation counts).  0 = never received a message this session.
+  private lastWsMessageAt = 0;
+  // Watchdog that logs a 60s heartbeat and force-reconnects if the subscription
+  // goes silent for > SILENT_DEATH_MS (the TCP layer stays up due to pings, so
+  // wsConnected stays true even when Helius has silently dropped the subscription).
+  private detectionWatchdogId: ReturnType<typeof setInterval> | null = null;
 
   // WebSocket broadcaster — set by the WS server after init so the sniper
   // can push real-time updates to all connected frontend clients.
@@ -716,23 +733,27 @@ class GraduationSniperService {
     }
 
     this.startHeartbeat();
+    this.startDetectionWatchdog();
     this.connect(apiKey);
     logger.info("Graduation sniper: started — WebSocket connecting, all monitoring active");
   }
 
   stop(): void {
     this.started = false;
-    if (this.priceIntervalId)      { clearInterval(this.priceIntervalId);      this.priceIntervalId      = null; }
-    if (this.liquidityIntervalId)  { clearInterval(this.liquidityIntervalId);  this.liquidityIntervalId  = null; }
-    if (this.externalSellCheckId)  { clearInterval(this.externalSellCheckId);  this.externalSellCheckId  = null; }
-    if (this.heartbeatIntervalId)  { clearInterval(this.heartbeatIntervalId);  this.heartbeatIntervalId  = null; }
-    if (this.wsPingIntervalId)     { clearInterval(this.wsPingIntervalId);     this.wsPingIntervalId     = null; }
-    if (this.reconnectTimer)       { clearTimeout(this.reconnectTimer);        this.reconnectTimer       = null; }
+    if (this.priceIntervalId)        { clearInterval(this.priceIntervalId);        this.priceIntervalId        = null; }
+    if (this.liquidityIntervalId)    { clearInterval(this.liquidityIntervalId);    this.liquidityIntervalId    = null; }
+    if (this.externalSellCheckId)    { clearInterval(this.externalSellCheckId);    this.externalSellCheckId    = null; }
+    if (this.heartbeatIntervalId)    { clearInterval(this.heartbeatIntervalId);    this.heartbeatIntervalId    = null; }
+    if (this.wsPingIntervalId)       { clearInterval(this.wsPingIntervalId);       this.wsPingIntervalId       = null; }
+    if (this.detectionWatchdogId)    { clearInterval(this.detectionWatchdogId);    this.detectionWatchdogId    = null; }
+    if (this.reconnectTimer)         { clearTimeout(this.reconnectTimer);          this.reconnectTimer         = null; }
     this.ws?.close();
   }
 
   private connect(apiKey: string): void {
     if (!this.started) return;
+    // Store for watchdog-triggered reconnects
+    this.heliusApiKey = apiKey;
 
     const url = `wss://mainnet.helius-rpc.com/?api-key=${apiKey}`;
     const ws  = new WebSocket(url);
@@ -767,6 +788,9 @@ class GraduationSniperService {
     });
 
     ws.on("message", (data: WebSocket.RawData) => {
+      // Track every JSON message (subscription confirm, graduation events, etc.)
+      // The watchdog uses this to detect a silently-dead subscription.
+      this.lastWsMessageAt = Date.now();
       try {
         const msg = JSON.parse(data.toString()) as Record<string, unknown>;
         this.handleMessage(msg);
@@ -2379,6 +2403,46 @@ class GraduationSniperService {
 
   // ── Health heartbeat ─────────────────────────────────────────────────────────
   // Sends a Telegram ping every 15 minutes so you know the bot is still alive.
+  // ── Detection watchdog — catches silently-dead Helius subscriptions ─────────
+  // The WS-level ping keeps the TCP connection open so wsConnected stays true,
+  // but Helius can silently drop the logsSubscribe subscription.  This watchdog
+  // runs every 60 s and:
+  //   1. Logs a "Detection listener" heartbeat line (always useful in Render logs)
+  //   2. Forces a full reconnect if we're "connected" but no messages for >2 min
+  private startDetectionWatchdog(): void {
+    if (this.detectionWatchdogId) clearInterval(this.detectionWatchdogId);
+    this.detectionWatchdogId = setInterval(() => {
+      const now      = Date.now();
+      const sinceMs  = this.lastWsMessageAt > 0 ? now - this.lastWsMessageAt : -1;
+      const sinceStr = sinceMs < 0 ? "never" : `${Math.round(sinceMs / 1000)}s ago`;
+
+      logger.info(
+        {
+          wsConnected:   this.wsConnected,
+          subscriptionId: this.subscriptionId,
+          lastMsgAt:     this.lastWsMessageAt,
+          lastMsg:       sinceStr,
+          wsReconnects:  this.wsReconnects,
+          graduationsToday: this.graduationsToday,
+        },
+        `Detection listener: ${this.wsConnected ? "connected" : "DISCONNECTED"}, last message ${sinceStr}`,
+      );
+
+      // Silent-death detection: TCP alive but subscription dead
+      const isSilent = this.wsConnected && sinceMs > SILENT_DEATH_MS;
+      const neverHeard = this.wsConnected && sinceMs < 0 && (now - this.startedAt) > SILENT_DEATH_MS;
+      if (isSilent || neverHeard) {
+        logger.warn(
+          { sinceMs, wsConnected: this.wsConnected },
+          "Detection listener: SILENT DEATH detected — WS connected but no messages received; force-reconnecting",
+        );
+        // Close the current socket — the close handler will scheduleReconnect
+        this.lastWsMessageAt = 0;
+        this.ws?.terminate();
+      }
+    }, DETECTION_WATCHDOG_MS);
+  }
+
   private startHeartbeat(): void {
     if (this.heartbeatIntervalId) clearInterval(this.heartbeatIntervalId);
     this.heartbeatIntervalId = setInterval(() => {
@@ -2853,6 +2917,7 @@ class GraduationSniperService {
     return {
       wsConnected:            this.wsConnected,
       wsReconnects:           this.wsReconnects,
+      lastWsMessageAt:        this.lastWsMessageAt,
       enabled:                this.config.enabled,
       graduationsToday:       this.graduationsToday,
       tradesTotal:            this.seenMints.size,

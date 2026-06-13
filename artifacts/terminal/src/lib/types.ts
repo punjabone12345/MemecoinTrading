@@ -404,6 +404,7 @@ export interface SniperEvent {
 export interface SniperStatus {
   wsConnected: boolean;
   wsReconnects: number;
+  lastWsMessageAt: number;     // ms epoch; 0 = never received a message this session
   enabled: boolean;
   graduationsToday: number;
   tradesTotal: number;
