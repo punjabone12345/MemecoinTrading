@@ -238,11 +238,16 @@ class JupiterSwapService {
   ): Promise<{ quote: unknown; fee: number; fetchedAt: number } | null> {
     try {
       const amountLamports = Math.round(solAmount * LAMPORTS_PER_SOL);
+      // BUG FIX (same as sell BUG 1): quote slippage must be >= SWAP_SLIPPAGE_BPS.
+      // Jupiter uses the quote's embedded otherAmountThreshold, not the swap-body
+      // slippageBps override. If the quote was fetched at 30% but the swap body
+      // says 50%, the effective floor is still 30% → Custom:6005 on volatile pools.
+      const quoteSlippageBps = Math.max(slippageBps, SWAP_SLIPPAGE_BPS);
       const [quote, fee] = await Promise.all([
-        this.getQuote(SOL_MINT, tokenMint, amountLamports, slippageBps),
+        this.getQuote(SOL_MINT, tokenMint, amountLamports, quoteSlippageBps),
         solanaWalletService.getOptimalPriorityFee(priorityFeeLamports),
       ]);
-      logger.info({ tokenMint, fee }, "Jupiter: pre-fetched buy quote + fee during rug-check window ✅");
+      logger.info({ tokenMint, fee, quoteSlippageBps }, "Jupiter: pre-fetched buy quote + fee during rug-check window ✅");
       return { quote, fee, fetchedAt: Date.now() };
     } catch (err) {
       // Route may not be indexed yet — normal for fresh graduates.
@@ -303,9 +308,14 @@ class JupiterSwapService {
           swapSlippageBps: SWAP_SLIPPAGE_BPS,
         }, "Jupiter: buy attempt 1 — using PRE-FETCHED quote (0 HTTP calls for quote) ⚡");
       } else {
-        // Fresh quote — either first attempt without pre-fetch, or retry after failure
+        // Fresh quote — either first attempt without pre-fetch, or retry after failure.
+        // BUG FIX: start at max(config, SWAP_SLIPPAGE_BPS) so the quote's embedded
+        // otherAmountThreshold matches the swap body's 50% floor. If the quote is
+        // fetched at 30% but swap body says 50%, Jupiter uses the quote's 30% →
+        // Custom:6005 on volatile graduation pools. Widen by 1000 bps per retry.
+        const base              = Math.max(slippageBps, SWAP_SLIPPAGE_BPS);
         const wideningBps       = (attempt - (usedPreQuote ? 2 : 1)) * 1000;
-        const effectiveSlippage = Math.min(slippageBps + wideningBps, 9000);
+        const effectiveSlippage = Math.min(base + wideningBps, 9000);
         logger.info({
           tokenMint, solAmount,
           quoteSlippageBps:  effectiveSlippage,
