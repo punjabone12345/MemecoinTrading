@@ -287,6 +287,7 @@ class GraduationSniperService {
   private dexscreenerCallsTotal     = 0;
   private rateWindowStart           = Date.now();
   private heartbeatIntervalId: ReturnType<typeof setInterval> | null = null;
+  private wsPingIntervalId: ReturnType<typeof setInterval> | null = null;  // WS-level ping keepalive
   private startedAt                 = Date.now();
 
   // ── Stale-price guard ──────────────────────────────────────────────────────
@@ -725,6 +726,7 @@ class GraduationSniperService {
     if (this.liquidityIntervalId)  { clearInterval(this.liquidityIntervalId);  this.liquidityIntervalId  = null; }
     if (this.externalSellCheckId)  { clearInterval(this.externalSellCheckId);  this.externalSellCheckId  = null; }
     if (this.heartbeatIntervalId)  { clearInterval(this.heartbeatIntervalId);  this.heartbeatIntervalId  = null; }
+    if (this.wsPingIntervalId)     { clearInterval(this.wsPingIntervalId);     this.wsPingIntervalId     = null; }
     if (this.reconnectTimer)       { clearTimeout(this.reconnectTimer);        this.reconnectTimer       = null; }
     this.ws?.close();
   }
@@ -749,6 +751,19 @@ class GraduationSniperService {
           { commitment: "confirmed" },
         ],
       }));
+
+      // ── WS-level keepalive ping ───────────────────────────────────────────
+      // Load balancers and NAT gateways kill idle TCP connections after ~60s.
+      // Sending a WS ping frame every 30s prevents silent drops without any
+      // application-level traffic.  The server responds with a pong frame
+      // automatically — if it doesn't, the socket will eventually error/close
+      // and the reconnect handler takes over.
+      if (this.wsPingIntervalId) clearInterval(this.wsPingIntervalId);
+      this.wsPingIntervalId = setInterval(() => {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.ping();
+        }
+      }, 30_000);
     });
 
     ws.on("message", (data: WebSocket.RawData) => {
@@ -761,6 +776,7 @@ class GraduationSniperService {
     ws.on("close", () => {
       this.wsConnected    = false;
       this.subscriptionId = null;
+      if (this.wsPingIntervalId) { clearInterval(this.wsPingIntervalId); this.wsPingIntervalId = null; }
       logger.warn({ reconnects: this.wsReconnects }, "Graduation sniper: WebSocket disconnected — reconnecting");
       this.scheduleReconnect(apiKey);
     });
@@ -866,13 +882,33 @@ class GraduationSniperService {
       logger.info({ mint, elapsedMs: Date.now() - t0 }, "Sniper timing: T1 — waitBeforeEntry done");
 
       // ── TIMING STEP 1: first price fetch (detection baseline) ─────────────────
+      // DexScreener takes 15-60s to index a new Raydium pool after graduation.
+      // Retry up to 6 times (5s apart = 30s window) so we don't silently miss
+      // tokens that simply haven't propagated to DexScreener yet.
+      // The drift + momentum filters protect against buying already-pumped tokens.
       const t1PriceFetchStart = Date.now();
-      const priceData = await this.fetchPrice(mint);
-      logger.info({ mint, fetchMs: Date.now() - t1PriceFetchStart, elapsedMs: Date.now() - t0 }, "Sniper timing: T2 — baseline price fetched");
+      let priceData = await this.fetchPrice(mint);
+      logger.info({ mint, found: !!priceData, fetchMs: Date.now() - t1PriceFetchStart, elapsedMs: Date.now() - t0 }, "Sniper timing: T2 — baseline price fetch");
 
       if (!priceData) {
-        this.addEvent({ ...eventBase, action: "skipped", skipReason: "Price not yet on DexScreener" });
-        logger.info({ mint }, "Graduation sniper: skipped — price not on DexScreener");
+        const MAX_PRICE_RETRIES = 6;
+        const PRICE_RETRY_MS    = 5_000;
+        for (let attempt = 1; attempt <= MAX_PRICE_RETRIES; attempt++) {
+          logger.info({ mint, attempt, elapsedMs: Date.now() - t0 },
+            `Graduation sniper: price not on DexScreener yet — retry ${attempt}/${MAX_PRICE_RETRIES} in ${PRICE_RETRY_MS / 1000}s`);
+          await new Promise(r => setTimeout(r, PRICE_RETRY_MS));
+          priceData = await this.fetchPrice(mint);
+          if (priceData) {
+            logger.info({ mint, attempt, waitedMs: attempt * PRICE_RETRY_MS, elapsedMs: Date.now() - t0 },
+              "Graduation sniper: DexScreener price appeared after retry ✅");
+            break;
+          }
+        }
+      }
+
+      if (!priceData) {
+        this.addEvent({ ...eventBase, action: "skipped", skipReason: "Price not yet on DexScreener (after 30s)" });
+        logger.info({ mint }, "Graduation sniper: skipped — price not on DexScreener after 30s of retries");
         return;
       }
 
