@@ -325,12 +325,15 @@ class JupiterSwapService {
       }, "Jupiter: buy quote ready");
 
       const swapTx      = await this.getSwapTx(quote, optimalFee);
-      const txSignature = await solanaWalletService.signAndSendAndConfirm(swapTx);
+      // acceptProcessed=true: return as soon as TX is "processed" (~2-5s) instead
+      // of waiting for "confirmed" (30-40s on congested RPC). The background upgrade
+      // check in SolanaWalletService polls for "confirmed" without blocking the entry.
+      const txSignature = await solanaWalletService.signAndSendAndConfirm(swapTx, true);
 
       const tokenAmount = Number(q["outAmount"]);
       const solSpent    = Number(q["inAmount"]) / LAMPORTS_PER_SOL;
 
-      logger.info({ tokenMint, solSpent, tokenAmount, txSignature, attempt, optimalFee }, "Jupiter: buy confirmed on-chain ✅");
+      logger.info({ tokenMint, solSpent, tokenAmount, txSignature, attempt, optimalFee }, "Jupiter: buy processed on-chain ✅ (confirmed upgrading in background)");
       return { txSignature, tokenAmount, solSpent, attempt };
     }, 5, 800);
   }

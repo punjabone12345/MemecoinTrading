@@ -245,17 +245,18 @@ class SolanaWalletService {
    *
    * IMPORTANT: Uses signature-polling confirmation instead of blockhash-strategy.
    *
-   * The old approach fetched a NEW blockhash AFTER Jupiter had already embedded
-   * its own blockhash in the transaction. When Jupiter's blockhash expired, the
-   * confirmation code was using the wrong `lastValidBlockHeight` and threw a
-   * timeout error — even though the sell TX had actually landed on-chain. This
-   * caused the bot to think the sell failed, retry, and accumulate duplicate
-   * pending TXs, eventually hitting MAX_SELL_FAILS on perfectly liquid tokens.
+   * @param acceptProcessed  When true (buy path): return as soon as the TX reaches
+   *   "processed" status (~2-5s) and upgrade to "confirmed" in the background.
+   *   When false (sell path, default): wait for full "confirmed" status before
+   *   returning — critical for sells where we must know tokens left the wallet.
    *
-   * Polling `getSignatureStatuses` is blockhash-agnostic: it confirms exactly
-   * when the signature appears on-chain regardless of which blockhash was used.
+   * WHY acceptProcessed for buys:
+   *   "confirmed" can take 30-40s on a congested RPC.  The TX is effectively
+   *   on-chain at "processed" (<5s) and <0.1% of processed TXs are ever rolled
+   *   back.  Recording the position at "processed" cuts msDetectionToFill from
+   *   ~40s to ~5s.  The background upgrade check catches the rare failure.
    */
-  async signAndSendAndConfirm(txBase64: string): Promise<string> {
+  async signAndSendAndConfirm(txBase64: string, acceptProcessed = false): Promise<string> {
     if (!this.keypair) throw new Error("Wallet not ready — SOLANA_PRIVATE_KEY not set");
 
     const tx = this.decodeTxBase64(txBase64);
@@ -267,7 +268,7 @@ class SolanaWalletService {
     let signature: string;
     try {
       signature = await this.connection.sendRawTransaction(serialized, sendOpts);
-      logger.info({ sig: signature.slice(0, 20) }, "SolanaWalletService: tx sent to primary RPC — polling for confirmation ⏳");
+      logger.info({ sig: signature.slice(0, 20), acceptProcessed }, "SolanaWalletService: tx sent to primary RPC — polling ⏳");
       // Also blast to fallback in background — doubles landing probability
       void this.connectionFallback.sendRawTransaction(serialized, sendOpts).catch(() => {});
     } catch (primaryErr) {
@@ -279,7 +280,7 @@ class SolanaWalletService {
     // Poll getSignatureStatuses — no blockhash dependency, works regardless of
     // which RPC submitted and which blockhash Jupiter embedded in the tx.
     const deadline  = Date.now() + 90_000; // 90 s — covers slow slots and congestion
-    const pollMs    = 500;   // was 1500 — tighter poll saves ~1s avg on confirmation
+    const pollMs    = 400;
     let resubmitted = false;
 
     while (Date.now() < deadline) {
@@ -294,12 +295,25 @@ class SolanaWalletService {
             logger.error({ sig: signature.slice(0, 20), err: errMsg }, "SolanaWalletService: tx FAILED on-chain ❌");
             throw new Error(`Transaction rejected on-chain: ${errMsg}`);
           }
-          if (status.confirmationStatus === "confirmed" || status.confirmationStatus === "finalized") {
+
+          const lvl = status.confirmationStatus;
+
+          // Fast path for buys: "processed" means the TX is in a block.
+          // Return immediately and upgrade to "confirmed" in the background.
+          if (acceptProcessed && (lvl === "processed" || lvl === "confirmed" || lvl === "finalized")) {
             this.rpcFailStreak = 0;
-            logger.info({ sig: signature.slice(0, 20), status: status.confirmationStatus }, "SolanaWalletService: tx confirmed on-chain ✅");
+            logger.info({ sig: signature.slice(0, 20), status: lvl },
+              "SolanaWalletService: tx processed on-chain ✅ (buy recorded — upgrading to confirmed in background)");
+            void this.upgradeToConfirmedInBackground(signature);
             return signature;
           }
-          // status is "processed" — still propagating, keep polling
+
+          if (lvl === "confirmed" || lvl === "finalized") {
+            this.rpcFailStreak = 0;
+            logger.info({ sig: signature.slice(0, 20), status: lvl }, "SolanaWalletService: tx confirmed on-chain ✅");
+            return signature;
+          }
+          // status is "processed" and we need "confirmed" — keep polling
         } else if (!resubmitted && Date.now() > deadline - 60_000) {
           // Not found after 30 s — resubmit to both RPCs to recover from dropped TXs
           resubmitted = true;
@@ -316,6 +330,33 @@ class SolanaWalletService {
     }
 
     throw new Error(`Transaction confirmation timeout after 90s — tx may still land. Sig: ${signature.slice(0, 20)}`);
+  }
+
+  /**
+   * Background upgrade: poll until "processed" TX reaches "confirmed".
+   * Called after a fast-path buy so we know the TX fully settled.
+   * Does not block the entry pipeline — runs entirely in the background.
+   */
+  private async upgradeToConfirmedInBackground(signature: string): Promise<void> {
+    const deadline = Date.now() + 60_000;
+    while (Date.now() < deadline) {
+      await new Promise(r => setTimeout(r, 800));
+      try {
+        const res    = await this.connection.getSignatureStatuses([signature], { searchTransactionHistory: false });
+        const status = res.value[0];
+        if (!status) continue;
+        if (status.err) {
+          logger.error({ sig: signature.slice(0, 20), err: JSON.stringify(status.err) },
+            "SolanaWalletService: buy TX FAILED at confirmed level ❌ (position may be invalid — check wallet)");
+          return;
+        }
+        if (status.confirmationStatus === "confirmed" || status.confirmationStatus === "finalized") {
+          logger.info({ sig: signature.slice(0, 20) }, "SolanaWalletService: buy TX upgraded to confirmed ✅");
+          return;
+        }
+      } catch { /* transient — keep polling */ }
+    }
+    logger.warn({ sig: signature.slice(0, 20) }, "SolanaWalletService: buy TX upgrade-to-confirmed timed out (tx likely confirmed, RPC slow)");
   }
 
   private async confirmInBackground(signature: string): Promise<void> {
