@@ -47,7 +47,13 @@ const TX_OVERHEAD_SOL = 0.003;
 const MAX_SELL_FAILS = 15;
 
 // ── Instant-rug detection constants (pre-entry) ───────────────────────────────
-const RUG_CHECK_WAIT_MS     = 8_000;          // monitor for 8 s after baseline price
+// SPEED: reduced from 8s → 3s.  The rug-check window only needs to be long enough
+// to see a post-graduation dump; 3s catches the sharp rugs while saving 5s of
+// latency on every valid entry.  Jupiter buy retries cover the smaller waitBeforeEntry
+// reduction (5s → 2s) — if the route isn't indexed in 2s the first quote attempt
+// will fail and withRetry will reattempt after 800ms, effectively acting as a
+// dynamic wait rather than a hard sleep.
+const RUG_CHECK_WAIT_MS     = 3_000;          // monitor for 3 s after baseline price (was 8s)
 const RUG_DROP_ABORT_PCT    = 20;             // abort entry if price drops ≥ 20% in that window
 
 // ── Entry drift / momentum filters ────────────────────────────────────────────
@@ -142,7 +148,7 @@ const DEFAULT_CONFIG: SniperConfig = {
   tp2Pct:               400,
   tp2ClosePct:          40,
   trailingStopPct:      30,
-  waitBeforeEntryMs:    5000,    // 5s — gives Jupiter time to index the new CPMM pool before buying
+  waitBeforeEntryMs:    2000,    // 2s — Jupiter usually indexes the pool in ~2s; buy withRetry handles route-not-found
   slippageBps:          3000,    // quote slippage for route-finding only; swap uses fixed SWAP_SLIPPAGE_BPS (5000 = 50% floor)
   priorityFeeLamports:  500_000, // 0.0005 SOL floor — Helius p75 used at runtime (old 50k was too low)
 };
@@ -887,19 +893,24 @@ class GraduationSniperService {
         return;
       }
 
-      // ── FIX 2 + FIX 3: wait 8 s, then check on-chain pool SOL + price drop ────
-      // Same window handles both checks — no extra delay.
-      await new Promise((r) => setTimeout(r, RUG_CHECK_WAIT_MS));
-      logger.info({ mint, symbol, elapsedMs: Date.now() - t0 }, "Sniper timing: T3 — rugCheck wait done");
-
-      // FIX 2: on-chain Raydium pool SOL balance — DexScreener has 2-5 min lag
-      // but the WSOL vault is readable immediately after graduation.
+      // ── SPEED FIX: run rug-check timer AND on-chain pool check in parallel ───────
+      // Old flow: wait 8s → pool check (~0.5s) → price fetch (~0.5s) = 9s sequential.
+      // New flow: [wait 3s ∥ pool check (~0.5s)] → price fetch = 3.5s total (saves ~5.5s).
+      // The pool check starts immediately; by the time the 3s timer fires it is done.
       const t2PoolStart = Date.now();
-      if (wsolVaultPubkey) {
-        const poolSol    = await this.fetchOnChainPoolSol(wsolVaultPubkey);
+      const [, poolSol] = await Promise.all([
+        new Promise<void>((r) => setTimeout(r, RUG_CHECK_WAIT_MS)),
+        wsolVaultPubkey
+          ? this.fetchOnChainPoolSol(wsolVaultPubkey)
+          : Promise.resolve<number | null>(null),
+      ]);
+      logger.info({ mint, symbol, poolSol, fetchMs: Date.now() - t2PoolStart, elapsedMs: Date.now() - t0 },
+        "Sniper timing: T3+T4 — rugCheck wait + pool SOL check done in parallel");
+
+      // FIX 2: on-chain Raydium pool SOL balance check
+      if (wsolVaultPubkey && poolSol !== null) {
         const minPoolSol = this.isLowLiquidityHour() ? LOW_LIQ_MIN_POOL_SOL : MIN_POOL_SOL;
-        logger.info({ mint, symbol, poolSol, fetchMs: Date.now() - t2PoolStart, elapsedMs: Date.now() - t0 }, "Sniper timing: T4 — on-chain pool SOL fetched");
-        if (poolSol !== null && poolSol < minPoolSol) {
+        if (poolSol < minPoolSol) {
           const hourLabel = this.isLowLiquidityHour() ? " (low-liq hours)" : "";
           const reason = `Pool drained — ${poolSol.toFixed(2)} SOL < ${minPoolSol} SOL on-chain${hourLabel} (Type-A rug filter)`;
           this.addEvent({ ...eventBase, symbol, action: "skipped", skipReason: reason });
@@ -907,7 +918,7 @@ class GraduationSniperService {
           return;
         }
         logger.info({ mint, symbol, poolSol, wsolVaultPubkey }, "Graduation sniper: on-chain pool SOL check passed ✅");
-      } else {
+      } else if (!wsolVaultPubkey) {
         logger.info({ mint, symbol }, "Graduation sniper: no WSOL vault found in TX — skipping pool SOL check");
       }
 
