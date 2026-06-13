@@ -135,7 +135,7 @@ async function withRetry<T>(
   label: string,
   fn: (attempt: number) => Promise<T>,
   maxAttempts = 5,
-  baseDelayMs = 2000,
+  baseDelayMs = 800,
 ): Promise<T> {
   let lastErr: unknown;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {

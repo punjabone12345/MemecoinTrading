@@ -61,7 +61,7 @@ const MAX_SELL_FAILS = 15;
 // reduction (5s → 2s) — if the route isn't indexed in 2s the first quote attempt
 // will fail and withRetry will reattempt after 800ms, effectively acting as a
 // dynamic wait rather than a hard sleep.
-const RUG_CHECK_WAIT_MS     = 3_000;          // monitor for 3 s after baseline price (was 8s)
+const RUG_CHECK_WAIT_MS     = 1_500;          // monitor for 1.5s after baseline price (was 3s → 8s)
 const RUG_DROP_ABORT_PCT    = 20;             // abort entry if price drops ≥ 20% in that window
 
 // ── Entry drift / momentum filters ────────────────────────────────────────────
@@ -160,7 +160,7 @@ const DEFAULT_CONFIG: SniperConfig = {
   tp2Pct:               400,
   tp2ClosePct:          40,
   trailingStopPct:      30,
-  waitBeforeEntryMs:    2000,    // 2s — Jupiter usually indexes the pool in ~2s; buy withRetry handles route-not-found
+  waitBeforeEntryMs:    0,       // 0s — Jupiter pre-quote fires immediately; buy withRetry handles route-not-found on first attempt
   slippageBps:          3000,    // quote slippage for route-finding only; swap uses fixed SWAP_SLIPPAGE_BPS (5000 = 50% floor)
   priorityFeeLamports:  500_000, // 0.0005 SOL floor — Helius p75 used at runtime (old 50k was too low)
 };
@@ -1081,15 +1081,21 @@ class GraduationSniperService {
         this.config.priorityFeeLamports,
       );
 
+      // ── SPEED FIX: rug-check price fetch runs IN PARALLEL with the timed wait ──
+      // Old flow: wait 3s → then fetch DexScreener (3-8s sequential) = 6-11s
+      // New flow: start fetchPriceFast + pool check + 1.5s timer all at once = 1.5s
+      // Jupiter price API typically responds in <1s, so it's ready before the timer.
       const t2PoolStart = Date.now();
-      const [, poolSol] = await Promise.all([
+      const [, poolSol, rugCheckData] = await Promise.all([
         new Promise<void>((r) => setTimeout(r, RUG_CHECK_WAIT_MS)),
         wsolVaultPubkey
           ? this.fetchOnChainPoolSol(wsolVaultPubkey)
           : Promise.resolve<number | null>(null),
+        this.fetchPriceFast(mint),
       ]);
-      logger.info({ mint, symbol, poolSol, fetchMs: Date.now() - t2PoolStart, elapsedMs: Date.now() - t0 },
-        "Sniper timing: T3+T4 — rugCheck wait + pool SOL check done in parallel (pre-fetch running in background)");
+      const entryPrice = rugCheckData?.price ?? baselinePrice;
+      logger.info({ mint, symbol, poolSol, rugPrice: rugCheckData?.price ?? null, fetchMs: Date.now() - t2PoolStart, elapsedMs: Date.now() - t0 },
+        "Sniper timing: T3+T4+T5 — rugCheck wait + pool SOL + rug price all in parallel ⚡");
 
       // FIX 2: on-chain Raydium pool SOL balance check
       if (wsolVaultPubkey && poolSol !== null) {
@@ -1105,18 +1111,6 @@ class GraduationSniperService {
       } else if (!wsolVaultPubkey) {
         logger.info({ mint, symbol }, "Graduation sniper: no WSOL vault found in TX — skipping pool SOL check");
       }
-
-      // ── TIMING STEP 2: second price fetch (rug check + drift reference) ────────
-      const t3PriceFetchStart = Date.now();
-      const rugCheckData = await this.fetchPrice(mint);
-      const entryPrice   = rugCheckData?.price ?? baselinePrice;
-      logger.info({
-        mint, symbol,
-        fetchMs: Date.now() - t3PriceFetchStart,
-        elapsedMs: Date.now() - t0,
-        baselinePrice,
-        rugCheckPrice: rugCheckData?.price ?? null,
-      }, "Sniper timing: T5 — rug-check price fetched");
 
       if (rugCheckData) {
         const dropPct = (1 - rugCheckData.price / baselinePrice) * 100;
