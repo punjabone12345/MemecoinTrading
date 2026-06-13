@@ -50,6 +50,19 @@ const MAX_SELL_FAILS = 15;
 const RUG_CHECK_WAIT_MS     = 8_000;          // monitor for 8 s after baseline price
 const RUG_DROP_ABORT_PCT    = 20;             // abort entry if price drops ≥ 20% in that window
 
+// ── Entry drift / momentum filters ────────────────────────────────────────────
+// After the 5s+8s pre-entry wait the token may have already spiked significantly.
+// Buying into the tail of a spike is the root cause of instant SL hits (we enter
+// at 2× the graduation price, SL is set from there, first pullback kills us).
+//
+// ENTRY_DRIFT_ABORT_PCT: if price rose > this % from the baseline reading, abort.
+//   8% means we'll skip tokens that already ran +8% during our 13s of checks.
+//
+// MOMENTUM_SKIP_PCT: if price rose > this % we explicitly label it "Missed entry"
+//   (separate label helps distinguish "pumping too fast" from "drift + filters").
+const ENTRY_DRIFT_ABORT_PCT = 8;              // abort buy if price rose > 8% from baseline
+const MOMENTUM_SKIP_PCT     = 15;             // label as "Missed entry" if > 15% from baseline
+
 // ── Type-A rug filters (pre-entry) ───────────────────────────────────────────
 const MIN_ENTRY_PRICE_USD   = 0.00001;        // skip tokens priced below $0.00001
 const MIN_POOL_SOL          = 10;             // skip if Raydium pool holds < 10 SOL on-chain
@@ -166,6 +179,10 @@ export interface SniperPosition {
   tp1RealizedSol: number;
   tp2RealizedSol: number;
   runnerRealizedSol: number;
+  // Entry drift / latency analysis
+  detectionPrice?: number;   // first DexScreener price after 5s wait — baseline for drift%
+  entryDriftPct?: number;    // (fillPrice - detectionPrice) / detectionPrice × 100
+  msDetectionToFill?: number; // ms from graduation detected → buy confirmed on-chain
 }
 
 export interface SniperEvent {
@@ -834,10 +851,19 @@ class GraduationSniperService {
       this.processingGraduations.add(mint);
       reservedMint = mint;
 
+      // ── TIMING STEP 0: graduation detected ───────────────────────────────────
+      const t0 = detectedAt; // graduation WS event received
+      logger.info({ mint, t0 }, "Sniper timing: T0 — graduation detected");
+
       // Wait before entry so DEX price feeds have time to populate
       await new Promise((r) => setTimeout(r, this.config.waitBeforeEntryMs));
+      logger.info({ mint, elapsedMs: Date.now() - t0 }, "Sniper timing: T1 — waitBeforeEntry done");
 
+      // ── TIMING STEP 1: first price fetch (detection baseline) ─────────────────
+      const t1PriceFetchStart = Date.now();
       const priceData = await this.fetchPrice(mint);
+      logger.info({ mint, fetchMs: Date.now() - t1PriceFetchStart, elapsedMs: Date.now() - t0 }, "Sniper timing: T2 — baseline price fetched");
+
       if (!priceData) {
         this.addEvent({ ...eventBase, action: "skipped", skipReason: "Price not yet on DexScreener" });
         logger.info({ mint }, "Graduation sniper: skipped — price not on DexScreener");
@@ -864,12 +890,15 @@ class GraduationSniperService {
       // ── FIX 2 + FIX 3: wait 8 s, then check on-chain pool SOL + price drop ────
       // Same window handles both checks — no extra delay.
       await new Promise((r) => setTimeout(r, RUG_CHECK_WAIT_MS));
+      logger.info({ mint, symbol, elapsedMs: Date.now() - t0 }, "Sniper timing: T3 — rugCheck wait done");
 
       // FIX 2: on-chain Raydium pool SOL balance — DexScreener has 2-5 min lag
       // but the WSOL vault is readable immediately after graduation.
+      const t2PoolStart = Date.now();
       if (wsolVaultPubkey) {
         const poolSol    = await this.fetchOnChainPoolSol(wsolVaultPubkey);
         const minPoolSol = this.isLowLiquidityHour() ? LOW_LIQ_MIN_POOL_SOL : MIN_POOL_SOL;
+        logger.info({ mint, symbol, poolSol, fetchMs: Date.now() - t2PoolStart, elapsedMs: Date.now() - t0 }, "Sniper timing: T4 — on-chain pool SOL fetched");
         if (poolSol !== null && poolSol < minPoolSol) {
           const hourLabel = this.isLowLiquidityHour() ? " (low-liq hours)" : "";
           const reason = `Pool drained — ${poolSol.toFixed(2)} SOL < ${minPoolSol} SOL on-chain${hourLabel} (Type-A rug filter)`;
@@ -882,8 +911,17 @@ class GraduationSniperService {
         logger.info({ mint, symbol }, "Graduation sniper: no WSOL vault found in TX — skipping pool SOL check");
       }
 
+      // ── TIMING STEP 2: second price fetch (rug check + drift reference) ────────
+      const t3PriceFetchStart = Date.now();
       const rugCheckData = await this.fetchPrice(mint);
       const entryPrice   = rugCheckData?.price ?? baselinePrice;
+      logger.info({
+        mint, symbol,
+        fetchMs: Date.now() - t3PriceFetchStart,
+        elapsedMs: Date.now() - t0,
+        baselinePrice,
+        rugCheckPrice: rugCheckData?.price ?? null,
+      }, "Sniper timing: T5 — rug-check price fetched");
 
       if (rugCheckData) {
         const dropPct = (1 - rugCheckData.price / baselinePrice) * 100;
@@ -941,7 +979,55 @@ class GraduationSniperService {
         );
       }
 
-      await this.enterPosition(mint, symbol, name, entryPrice, signature);
+      // ── PRICE DRIFT / MOMENTUM FILTER ─────────────────────────────────────────
+      // Compare current pre-buy price (entryPrice) to baseline (baselinePrice).
+      // If the token has already run significantly in our ~13s of checks, the buy
+      // would enter at a pumped price — SL is then set from that inflated level
+      // and the first natural pullback triggers an instant loss.
+      const driftPct = baselinePrice > 0 ? ((entryPrice / baselinePrice) - 1) * 100 : 0;
+      logger.info({
+        mint, symbol,
+        baselinePrice,
+        entryPrice,
+        driftPct: driftPct.toFixed(2) + "%",
+        elapsedMs: Date.now() - t0,
+        ENTRY_DRIFT_ABORT_PCT,
+        MOMENTUM_SKIP_PCT,
+      }, "Sniper timing: T6 — pre-buy drift check");
+
+      if (driftPct >= MOMENTUM_SKIP_PCT) {
+        // Token pumped ≥15% from baseline — "missed entry" (ran before we got there)
+        const reason = `Missed entry — price already +${driftPct.toFixed(1)}% from detection (>${MOMENTUM_SKIP_PCT}% threshold)`;
+        this.addEvent({ ...eventBase, symbol, action: "skipped", skipReason: reason });
+        logger.warn({ mint, symbol, baselinePrice, entryPrice, driftPct: driftPct.toFixed(1), elapsedMs: Date.now() - t0 },
+          "Graduation sniper: MISSED ENTRY — token pumped too fast, skipping buy");
+        if (isTelegramConfigured()) {
+          void sendTelegram(
+            `⏩ <b>SNIPER MISSED ENTRY</b>\n` +
+            `──────────────────────\n` +
+            `🪙 Token: <b>${symbol}</b>\n` +
+            `📋 CA: <code>${mint}</code>\n` +
+            `📈 Already pumped: <b>+${driftPct.toFixed(1)}%</b> during entry checks\n` +
+            `❌ Buy skipped — would be chasing\n` +
+            `🕐 ${toIST(new Date())}`,
+          );
+        }
+        return;
+      }
+
+      if (driftPct >= ENTRY_DRIFT_ABORT_PCT) {
+        // Token rose 8–14% from baseline — abort but don't label as "missed"
+        const reason = `Entry drift abort — price +${driftPct.toFixed(1)}% from detection (>${ENTRY_DRIFT_ABORT_PCT}% threshold)`;
+        this.addEvent({ ...eventBase, symbol, action: "skipped", skipReason: reason });
+        logger.warn({ mint, symbol, baselinePrice, entryPrice, driftPct: driftPct.toFixed(1) },
+          "Graduation sniper: entry drift too high — buy aborted");
+        return;
+      }
+
+      logger.info({ mint, symbol, driftPct: driftPct.toFixed(2) + "%", elapsedMs: Date.now() - t0 },
+        "Graduation sniper: drift check passed ✅ — proceeding to buy");
+
+      await this.enterPosition(mint, symbol, name, entryPrice, signature, baselinePrice, detectedAt);
       this.addEvent({ ...eventBase, symbol, action: "entered" });
 
     } catch (err) {
@@ -1158,9 +1244,25 @@ class GraduationSniperService {
 
   // ── Position management ────────────────────────────────────────────────────
 
-  private async enterPosition(mint: string, symbol: string, name: string, price: number, _detectedTxSig: string): Promise<void> {
+  private async enterPosition(
+    mint: string,
+    symbol: string,
+    name: string,
+    price: number,
+    _detectedTxSig: string,
+    detectionPrice?: number,     // baselinePrice (first DexScreener fetch ~5s after grad)
+    graduationDetectedAt?: number, // Date.now() at graduation WS event
+  ): Promise<void> {
     const cfg = this.config;
     const id  = uid();
+    const buyStart = Date.now();
+
+    logger.info({
+      mint, symbol,
+      preBuyPrice: price,
+      detectionPrice: detectionPrice ?? null,
+      msSinceDetection: graduationDetectedAt ? buyStart - graduationDetectedAt : null,
+    }, "Sniper timing: T7 — enterPosition called, Jupiter buy starting");
 
     // Execute real on-chain buy via Jupiter — confirmed before recording position
     let txSignature: string;
@@ -1171,6 +1273,11 @@ class GraduationSniperService {
       txSignature = result.txSignature;
       tokenAmount = result.tokenAmount;
       sizeSol     = result.solSpent;
+      logger.info({
+        mint, symbol,
+        buyMs: Date.now() - buyStart,
+        msSinceDetection: graduationDetectedAt ? Date.now() - graduationDetectedAt : null,
+      }, "Sniper timing: T8 — Jupiter buy confirmed on-chain");
     } catch (err) {
       logger.error({ mint, symbol, err: (err as Error).message }, "Graduation sniper: Jupiter buy FAILED — entry aborted");
       if (isTelegramConfigured()) {
@@ -1259,13 +1366,31 @@ class GraduationSniperService {
       logger.warn({ mint, symbol, preBuyPrice: price }, "Graduation sniper: all entry price methods failed — using pre-buy detection price ⚠️ (entry price will be inaccurate)");
     }
 
+    // ── Detection→fill drift analysis ─────────────────────────────────────────
+    // How much did the price move from the moment we first detected the token
+    // to the moment the buy was confirmed on-chain?
+    const nowMs = Date.now();
+    const msDetectionToFill = graduationDetectedAt ? nowMs - graduationDetectedAt : undefined;
+    const entryDriftPct = (detectionPrice && detectionPrice > 0)
+      ? ((actualEntryPrice / detectionPrice) - 1) * 100
+      : undefined;
+    logger.info({
+      mint, symbol,
+      detectionPrice:     detectionPrice ?? null,
+      preBuyPrice:        price,
+      actualFillPrice:    actualEntryPrice,
+      entryDriftPct:      entryDriftPct !== undefined ? entryDriftPct.toFixed(2) + "%" : "n/a",
+      msDetectionToFill:  msDetectionToFill ?? null,
+      msDetectionToFillLabel: msDetectionToFill ? `${(msDetectionToFill / 1000).toFixed(1)}s` : "n/a",
+    }, "Sniper timing: T9 — detection→fill drift summary 📊");
+
     const pos: SniperPosition = {
       id,
       mint,
       symbol,
       name,
-      detectedAt:        Date.now(),
-      entryAt:           Date.now(),
+      detectedAt:        graduationDetectedAt ?? nowMs,
+      entryAt:           nowMs,
       entryPrice:        actualEntryPrice,
       currentPrice:      actualEntryPrice,
       sizeSol,
@@ -1286,6 +1411,10 @@ class GraduationSniperService {
       tp1RealizedSol:    0,
       tp2RealizedSol:    0,
       runnerRealizedSol: 0,
+      // Entry drift / latency fields
+      detectionPrice,
+      entryDriftPct,
+      msDetectionToFill,
     };
 
     this.openPositions.set(mint, pos);
