@@ -771,6 +771,7 @@ class GraduationSniperService {
 
     ws.on("open", () => {
       this.wsConnected = true;
+      const isReconnect = this.wsReconnects > 0;
       logger.info({ reconnects: this.wsReconnects }, "Graduation sniper: WebSocket connected");
 
       ws.send(JSON.stringify({
@@ -795,6 +796,16 @@ class GraduationSniperService {
           ws.ping();
         }
       }, 30_000);
+
+      // ── Backfill missed graduations after a reconnect ─────────────────────
+      // When the WS drops and reconnects, any graduation events that fired
+      // during the gap are permanently lost unless we actively poll for them.
+      // On every reconnect, query the last 25 signatures on the migration wallet
+      // and process any we haven't seen yet.  This ensures 100% graduation
+      // coverage even with 10+ reconnects per session.
+      if (isReconnect) {
+        void this.backfillMissedGraduations();
+      }
     });
 
     ws.on("message", (data: WebSocket.RawData) => {
@@ -824,6 +835,62 @@ class GraduationSniperService {
     if (!this.started) return;
     this.wsReconnects++;
     this.reconnectTimer = setTimeout(() => this.connect(apiKey), RECONNECT_DELAY_MS);
+  }
+
+  // ── Backfill missed graduations after reconnect ───────────────────────────
+  // Each reconnect creates a gap where Helius WS events are not received.
+  // This method queries the last 25 confirmed signatures on the migration wallet
+  // via REST and processes any that aren't already in seenSignatures.
+  // Called on every reconnect (but NOT the first connect) so no graduation ever
+  // slips through a reconnect window.
+  private async backfillMissedGraduations(): Promise<void> {
+    const apiKey = this.heliusApiKey;
+    if (!apiKey) return;
+
+    try {
+      type SigInfo = { signature: string; err: unknown | null };
+      const res = await axios.post<{ result: SigInfo[] }>(
+        `https://mainnet.helius-rpc.com/?api-key=${apiKey}`,
+        {
+          jsonrpc: "2.0",
+          id:      1,
+          method:  "getSignaturesForAddress",
+          params:  [MIGRATION_WALLET, { limit: 25, commitment: "confirmed" }],
+        },
+        { timeout: 10_000 },
+      );
+
+      const sigs = res.data?.result ?? [];
+      let queued = 0;
+
+      for (const { signature, err } of sigs) {
+        if (err) continue;                            // failed TX on-chain — skip
+        if (!signature) continue;
+        if (this.seenSignatures.has(signature)) continue; // already processed
+
+        // Mark seen BEFORE spawning so parallel backfills don't double-fire
+        this.seenSignatures.add(signature);
+        if (this.seenSignatures.size > 500) {
+          const oldest = this.seenSignatures.values().next().value;
+          if (oldest) this.seenSignatures.delete(oldest);
+        }
+
+        void this.processGraduation(signature);
+        queued++;
+      }
+
+      logger.info(
+        { checked: sigs.length, queued, reconnects: this.wsReconnects },
+        queued > 0
+          ? "Graduation sniper: backfill — queued missed graduations ✅"
+          : "Graduation sniper: backfill — no missed graduations (all already seen)",
+      );
+    } catch (err) {
+      logger.warn(
+        { err: (err as Error).message },
+        "Graduation sniper: backfill failed (non-critical — WS will catch new ones)",
+      );
+    }
   }
 
   private handleMessage(msg: Record<string, unknown>): void {
@@ -896,10 +963,6 @@ class GraduationSniperService {
         return;
       }
 
-      // Confirmed real graduation — count it now (not in handleMessage which fires for all TX types)
-      this.resetDailyCounterIfNeeded();
-      this.graduationsToday++;
-
       const { mint, wsolVaultPubkey } = extracted;
       const skipReason = this.checkSkipReason(mint);
       const eventBase  = { id: uid(), detectedAt, mint, symbol: mint.slice(0, 8), txSignature: signature };
@@ -927,6 +990,11 @@ class GraduationSniperService {
       }
       this.processingGraduations.add(mint);
       reservedMint = mint;
+
+      // Confirmed unique graduation — count it now (after dedup guards so each
+      // mint is counted exactly once, not once per TX signature from Helius).
+      this.resetDailyCounterIfNeeded();
+      this.graduationsToday++;
 
       // ── TIMING STEP 0: graduation detected ───────────────────────────────────
       const t0 = detectedAt; // graduation WS event received
