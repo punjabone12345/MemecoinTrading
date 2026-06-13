@@ -45,7 +45,8 @@ function toIST(ts: number): string {
 function downloadSniperCsv(history: SniperPosition[]) {
   const headers = [
     "Symbol", "Mint", "Entry Time (IST)", "Close Time (IST)", "Hold Time",
-    "Entry Price ($)", "Exit Price ($)", "Size (SOL)", "Realized PNL (SOL)",
+    "Detection Price ($)", "Fill Price ($)", "Entry Drift %", "Detection→Fill (s)",
+    "Exit Price ($)", "Size (SOL)", "Realized PNL (SOL)",
     "PNL %", "TP1 Hit", "TP2 Hit", "Close Reason", "TX Signature",
   ];
   const rows = history.map((p) => {
@@ -57,7 +58,10 @@ function downloadSniperCsv(history: SniperPosition[]) {
       p.entryAt   ? toIST(p.entryAt)   : "",
       p.closedAt  ? toIST(p.closedAt)  : "",
       holdMs ? holdTime(holdMs) : "",
+      p.detectionPrice != null ? p.detectionPrice.toString() : "",
       p.entryPrice.toString(),
+      p.entryDriftPct != null ? p.entryDriftPct.toFixed(2) : "",
+      p.msDetectionToFill != null ? (p.msDetectionToFill / 1000).toFixed(1) : "",
       p.exitPrice  ? p.exitPrice.toString() : "",
       p.sizeSol.toString(),
       p.realizedPnlSol.toFixed(6),
@@ -298,6 +302,21 @@ function PositionRow({ pos }: { pos: SniperPosition }) {
             <div className="text-[10px] text-white/40 mt-1">
               Detected {timeAgo(pos.detectedAt)} · Entry ${fmtPrice(pos.entryPrice)}
             </div>
+            {pos.detectionPrice != null && (
+              <div className="text-[10px] mt-0.5 flex items-center gap-1 flex-wrap">
+                <span className="text-white/30">Detect ${fmtPrice(pos.detectionPrice)}</span>
+                <span className="text-white/20">→</span>
+                <span className="text-white/30">Fill ${fmtPrice(pos.entryPrice)}</span>
+                {pos.entryDriftPct != null && (
+                  <span className={`font-semibold ${pos.entryDriftPct > 5 ? "text-amber-400/70" : pos.entryDriftPct < -2 ? "text-emerald-400/70" : "text-white/40"}`}>
+                    ({pos.entryDriftPct >= 0 ? "+" : ""}{pos.entryDriftPct.toFixed(1)}% drift)
+                  </span>
+                )}
+                {pos.msDetectionToFill != null && (
+                  <span className="text-white/25">{(pos.msDetectionToFill / 1000).toFixed(1)}s</span>
+                )}
+              </div>
+            )}
             <div className="text-[10px] text-white/40">
               SL ${fmtPrice(pos.effectiveSlPrice)}{pos.tp1Hit && " (breakeven)"}
               {pos.tp2Hit && ` · Peak $${fmtPrice(pos.trailingHigh)}`}
@@ -616,13 +635,31 @@ function HistoryRow({ pos }: { pos: SniperPosition }) {
         {/* Detail grid */}
         <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[10px] mb-2">
           <div className="flex justify-between">
-            <span className="text-white/35">Entry</span>
+            <span className="text-white/35">Entry (fill)</span>
             <span className="text-white/70 font-mono">${fmtPrice(pos.entryPrice)}</span>
           </div>
           <div className="flex justify-between">
             <span className="text-white/35">Exit</span>
             <span className="text-white/70 font-mono">{pos.exitPrice ? `$${fmtPrice(pos.exitPrice)}` : "—"}</span>
           </div>
+          {pos.detectionPrice != null && (
+            <div className="flex justify-between col-span-2">
+              <span className="text-white/35">Detect → Fill drift</span>
+              <span className="font-mono flex items-center gap-1.5">
+                <span className="text-white/50">${fmtPrice(pos.detectionPrice)}</span>
+                <span className="text-white/25">→</span>
+                <span className="text-white/50">${fmtPrice(pos.entryPrice)}</span>
+                {pos.entryDriftPct != null && (
+                  <span className={`font-bold ${pos.entryDriftPct > 5 ? "text-amber-400" : pos.entryDriftPct < -2 ? "text-emerald-400" : "text-white/50"}`}>
+                    ({pos.entryDriftPct >= 0 ? "+" : ""}{pos.entryDriftPct.toFixed(1)}%)
+                  </span>
+                )}
+                {pos.msDetectionToFill != null && (
+                  <span className="text-white/25">{(pos.msDetectionToFill / 1000).toFixed(1)}s</span>
+                )}
+              </span>
+            </div>
+          )}
           <div className="flex justify-between">
             <span className="text-white/35">Hold Time</span>
             <span className="text-white/60">{holdMs ? holdTime(holdMs) : "—"}</span>

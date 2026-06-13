@@ -385,6 +385,10 @@ export interface SniperPosition {
   isStuck?: boolean;        // true when sell has failed MAX_SELL_FAILS times
   lastError?: string;       // last sell error message for UI display
   lastPriceAt?: number;     // timestamp of last successful price update
+  // Entry drift / latency analysis
+  detectionPrice?: number;   // first DexScreener price ~5s after graduation
+  entryDriftPct?: number;    // (fillPrice - detectionPrice) / detectionPrice × 100
+  msDetectionToFill?: number; // ms from graduation WS event → buy confirmed
 }
 
 export interface SniperEvent {
