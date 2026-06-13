@@ -957,6 +957,9 @@ class GraduationSniperService {
     const detectedAt = Date.now();
     // Track which mint we reserved in processingGraduations so finally can clean it up
     let reservedMint: string | null = null;
+    // Hoisted so the catch block can emit a visible event even when the exception
+    // fires after mint extraction but before any addEvent call inside the try.
+    let catchEventBase: { id: string; detectedAt: number; mint: string; symbol: string; txSignature: string } | null = null;
     try {
       const extracted = await this.extractMintFromTx(signature);
       if (!extracted) {
@@ -969,6 +972,7 @@ class GraduationSniperService {
       const { mint, wsolVaultPubkey } = extracted;
       const skipReason = this.checkSkipReason(mint);
       const eventBase  = { id: uid(), detectedAt, mint, symbol: mint.slice(0, 8), txSignature: signature };
+      catchEventBase   = eventBase; // expose to catch block
 
       if (skipReason) {
         this.addEvent({ ...eventBase, action: "skipped", skipReason });
@@ -1228,7 +1232,14 @@ class GraduationSniperService {
       this.addEvent({ ...eventBase, symbol, action: "entered" });
 
     } catch (err) {
-      logger.warn({ signature, err: (err as Error).message }, "Graduation sniper: error processing graduation");
+      const errMsg = (err as Error).message ?? String(err);
+      logger.warn({ signature, err: errMsg }, "Graduation sniper: error processing graduation");
+      // Always emit a visible UI event so no graduation silently disappears.
+      // Without this, any exception after graduationsToday++ leaves the counter
+      // incremented but the "Recent Graduations Detected" list empty.
+      if (catchEventBase) {
+        this.addEvent({ ...catchEventBase, action: "skipped", skipReason: `Internal error — ${errMsg}` });
+      }
     } finally {
       // Release the mint reservation so future graduation events for the same
       // token aren't permanently blocked. seenMints is the permanent gate;
@@ -2513,10 +2524,10 @@ class GraduationSniperService {
         if (price) {
           settle({ price, liquidityUsd: 0, symbol: mint.slice(0, 8), name: mint.slice(0, 8) });
         }
-      });
+      }).catch(() => { /* network failure — DexScreener or timeout will resolve */ });
 
       // DexScreener — complete metadata but 15–60s lag for new tokens; runs in parallel
-      void this.fetchPrice(mint).then(settle);
+      void this.fetchPrice(mint).then(settle).catch(() => { /* network failure — Jupiter or timeout will resolve */ });
 
       // Safety timeout: if both sources fail within 9s, resolve null
       // (DexScreener's own HTTP timeout is 8s, so this fires only if both hung)
