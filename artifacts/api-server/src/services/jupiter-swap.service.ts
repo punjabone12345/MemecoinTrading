@@ -273,6 +273,7 @@ class JupiterSwapService {
     slippageBps: number,
     priorityFeeLamports: number,
     preQuote?: { quote: unknown; fee: number; fetchedAt: number } | null,
+    jitoTipLamports = 0,
   ): Promise<BuyResult> {
     if (!solanaWalletService.isReady) {
       throw new Error("Wallet not configured — set SOLANA_PRIVATE_KEY env var");
@@ -334,16 +335,28 @@ class JupiterSwapService {
         outAmount:      q["outAmount"],
       }, "Jupiter: buy quote ready");
 
-      const swapTx      = await this.getSwapTx(quote, optimalFee);
-      // acceptProcessed=true: return as soon as TX is "processed" (~2-5s) instead
-      // of waiting for "confirmed" (30-40s on congested RPC). The background upgrade
-      // check in SolanaWalletService polls for "confirmed" without blocking the entry.
-      const txSignature = await solanaWalletService.signAndSendAndConfirm(swapTx, true);
+      const tSwapBuild = Date.now();
+      const swapTx     = await this.getSwapTx(quote, optimalFee);
+      const tSend      = Date.now();
+      logger.info({ tokenMint, attempt, tSwapBuildMs: tSend - tSwapBuild },
+        "Jupiter: buy swap TX built — sending via Jito/fallback ⚡");
+
+      // Use Jito bundle when jitoTipLamports > 0 — lands in 1-2 slots (~400-800ms).
+      // Falls back to standard send+acceptProcessed automatically if Jito fails.
+      const txSignature = await solanaWalletService.sendAsJitoBundleOrFallback(
+        swapTx, jitoTipLamports, "buy",
+      );
+      const tDone = Date.now();
 
       const tokenAmount = Number(q["outAmount"]);
       const solSpent    = Number(q["inAmount"]) / LAMPORTS_PER_SOL;
 
-      logger.info({ tokenMint, solSpent, tokenAmount, txSignature, attempt, optimalFee }, "Jupiter: buy processed on-chain ✅ (confirmed upgrading in background)");
+      logger.info({
+        tokenMint, solSpent, tokenAmount, txSignature, attempt, optimalFee,
+        jitoTipLamports, jitoTipSol: (jitoTipLamports / 1e9).toFixed(6),
+        tSendMs:  tDone - tSend,
+        tTotalMs: tDone - tSwapBuild,
+      }, "Jupiter: buy sent ✅ — position recording now (confirmed in background)");
       return { txSignature, tokenAmount, solSpent, attempt };
     }, 5, 800);
   }
@@ -371,6 +384,7 @@ class JupiterSwapService {
     tokenAmount: number,
     slippageBps: number,
     priorityFeeLamports: number,
+    jitoTipLamports = 0,
   ): Promise<SellResult> {
     if (!solanaWalletService.isReady) {
       throw new Error("Wallet not configured — set SOLANA_PRIVATE_KEY env var");
@@ -453,11 +467,16 @@ class JupiterSwapService {
         inAmountMatch: String(q["inAmount"]) === String(sellAmount), // must be true
       }, "Jupiter: sell quote received");
 
-      const swapTx      = await this.getSwapTx(quote, optimalFee);
-      const txSignature = await solanaWalletService.signAndSendAndConfirm(swapTx);
+      const tSend      = Date.now();
+      const swapTx     = await this.getSwapTx(quote, optimalFee);
+      const txSignature = await solanaWalletService.sendAsJitoBundleOrFallback(swapTx, jitoTipLamports, "sell");
+      const tDone      = Date.now();
 
       const solReceived = Number(q["outAmount"]) / LAMPORTS_PER_SOL;
-      logger.info({ tokenMint, sellAmount, solReceived, txSignature, attempt, optimalFee }, "Jupiter: sell ✅");
+      logger.info({
+        tokenMint, sellAmount, solReceived, txSignature, attempt, optimalFee,
+        jitoTipLamports, tSendMs: tDone - tSend,
+      }, "Jupiter: sell sent ✅ — position closing now (confirmed in background)");
       return { txSignature, solReceived, attempt };
     }, 3, 1000);
   }
@@ -469,6 +488,7 @@ class JupiterSwapService {
     tokenMint: string,
     tokenAmount: number,
     priorityFeeLamports: number,
+    jitoTipLamports = 0,
   ): Promise<SellResult> {
     if (!solanaWalletService.isReady) {
       throw new Error("Wallet not configured — set SOLANA_PRIVATE_KEY env var");
@@ -511,7 +531,7 @@ class JupiterSwapService {
     return withRetry(`emergency-sell:${tokenMint.slice(0, 8)}`, async (attempt) => {
       const quote  = await this.getQuote(tokenMint, SOL_MINT, sellAmount, emergencyQuoteSlippage);
       const swapTx = await this.getSwapTx(quote, emergencyPriorityFee, EMERGENCY_SWAP_SLIPPAGE_BPS);
-      const txSignature = await solanaWalletService.signAndSendAndConfirm(swapTx);
+      const txSignature = await solanaWalletService.sendAsJitoBundleOrFallback(swapTx, jitoTipLamports, "emergency-sell");
 
       const q           = quote as Record<string, string>;
       const solReceived = Number(q["outAmount"]) / LAMPORTS_PER_SOL;

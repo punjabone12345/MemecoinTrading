@@ -349,6 +349,7 @@ export interface SniperConfig {
   waitBeforeEntryMs: number;
   slippageBps: number;
   priorityFeeLamports: number;
+  jitoTipLamports: number;
 }
 
 export interface SniperPosition {

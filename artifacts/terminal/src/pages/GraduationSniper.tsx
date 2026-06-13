@@ -105,6 +105,7 @@ const SETTINGS_FIELDS: SettingsField[] = [
   { key: "waitBeforeEntryMs",    label: "Entry Delay (ms)",       description: "Wait after detection before buying",   type: "number", min: 0,    max: 30000,  step: 500   },
   { key: "slippageBps",          label: "Slippage (bps)",         description: "Max slippage: 1000 = 10%, 500 = 5%",  type: "number", min: 100,  max: 5000,   step: 100   },
   { key: "priorityFeeLamports",  label: "Priority Fee (lamports)", description: "Tx priority fee: 1000000 = 0.001 SOL", type: "number", min: 0,   max: 10000000, step: 100000 },
+  { key: "jitoTipLamports",      label: "Jito Tip (lamports)",    description: "Jito bundle tip: 100000 = 0.0001 SOL. 0 = disabled (use standard RPC)", type: "number", min: 0, max: 5000000, step: 10000 },
 ];
 
 function SettingsPanel({ config, onClose }: { config: SniperConfig; onClose: () => void }) {

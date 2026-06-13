@@ -148,6 +148,7 @@ export interface SniperConfig {
   waitBeforeEntryMs: number;
   slippageBps: number;
   priorityFeeLamports: number;
+  jitoTipLamports: number;
 }
 
 const DEFAULT_CONFIG: SniperConfig = {
@@ -163,6 +164,7 @@ const DEFAULT_CONFIG: SniperConfig = {
   waitBeforeEntryMs:    0,       // 0s — Jupiter pre-quote fires immediately; buy withRetry handles route-not-found on first attempt
   slippageBps:          3000,    // quote slippage for route-finding only; swap uses fixed SWAP_SLIPPAGE_BPS (5000 = 50% floor)
   priorityFeeLamports:  500_000, // 0.0005 SOL floor — Helius p75 used at runtime (old 50k was too low)
+  jitoTipLamports:      100_000, // 0.0001 SOL Jito tip — bundles land in 1-2 slots (~400-800ms) vs 30-40s standard confirm
 };
 
 export interface SniperPosition {
@@ -1472,7 +1474,7 @@ class GraduationSniperService {
     let tokenAmount: number;
     let sizeSol: number;
     try {
-      const result = await jupiterSwapService.buy(mint, cfg.positionSizeSol, cfg.slippageBps, cfg.priorityFeeLamports, preQuote);
+      const result = await jupiterSwapService.buy(mint, cfg.positionSizeSol, cfg.slippageBps, cfg.priorityFeeLamports, preQuote, cfg.jitoTipLamports);
       txSignature = result.txSignature;
       tokenAmount = result.tokenAmount;
       sizeSol     = result.solSpent;
@@ -1597,7 +1599,7 @@ class GraduationSniperService {
         "Graduation sniper: FILL DRIFT TOO HIGH — emergency-selling immediately 🚨",
       );
       try {
-        await jupiterSwapService.emergencySell(mint, actualTokenAmount, cfg.priorityFeeLamports);
+        await jupiterSwapService.emergencySell(mint, actualTokenAmount, cfg.priorityFeeLamports, cfg.jitoTipLamports);
         logger.info({ mint, symbol }, "Graduation sniper: fill-drift emergency sell confirmed — position never opened");
       } catch (sellErr) {
         logger.error({ mint, symbol, err: (sellErr as Error).message }, "Graduation sniper: fill-drift emergency sell FAILED — position left open for manual close");
@@ -1758,13 +1760,13 @@ class GraduationSniperService {
             { mint: pos.mint, symbol: pos.symbol, prevFails, escalatedSlippage: 5000 },
             "Graduation sniper: 3+ outer sell failures — switching to emergencySell (9000 bps quote + 70% swap floor + high priority fee)",
           );
-          result = await jupiterSwapService.emergencySell(pos.mint, tokensLeft, this.config.priorityFeeLamports);
+          result = await jupiterSwapService.emergencySell(pos.mint, tokensLeft, this.config.priorityFeeLamports, this.config.jitoTipLamports);
         } else {
           logger.info(
             { mint: pos.mint, symbol: pos.symbol, prevFails, escalatedSlippage, baseSlippage: this.config.slippageBps },
             `Graduation sniper: sell with escalated slippage ${this.config.slippageBps} + ${Math.floor(prevFails / 3) * 1000} = ${escalatedSlippage} bps`,
           );
-          result = await jupiterSwapService.sell(pos.mint, tokensLeft, escalatedSlippage, this.config.priorityFeeLamports);
+          result = await jupiterSwapService.sell(pos.mint, tokensLeft, escalatedSlippage, this.config.priorityFeeLamports, this.config.jitoTipLamports);
         }
         solReceived   = result.solReceived;
         exitTxSig     = result.txSignature;
@@ -1972,7 +1974,7 @@ class GraduationSniperService {
       // CRITICAL: Do NOT catch sell failures here. If the sell throws, we let it
       // propagate so the caller (TP1/TP2 logic) knows the tokens are still in wallet.
       // Using a price-ratio fallback was the root cause of "sold in app, not on-chain".
-      const result  = await jupiterSwapService.sell(pos.mint, tokensToSell, this.config.slippageBps, this.config.priorityFeeLamports);
+      const result  = await jupiterSwapService.sell(pos.mint, tokensToSell, this.config.slippageBps, this.config.priorityFeeLamports, this.config.jitoTipLamports);
       solReceived   = result.solReceived;
       exitTxSig     = result.txSignature;
     } else if (tokensToSell > 0 && !solanaWalletService.isReady) {

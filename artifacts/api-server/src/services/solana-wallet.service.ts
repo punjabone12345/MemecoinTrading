@@ -1,6 +1,26 @@
-import { Keypair, Connection, VersionedTransaction, PublicKey } from "@solana/web3.js";
+import { Keypair, Connection, VersionedTransaction, PublicKey, Transaction, SystemProgram } from "@solana/web3.js";
 import bs58 from "bs58";
+import axios from "axios";
 import { logger } from "../lib/logger.js";
+
+// ── Jito Bundle Engine ─────────────────────────────────────────────────────────
+// Submitting as a Jito bundle skips the standard mempool and lands in the next
+// block the Jito validator produces — typically 1-2 slots (~400-800ms).
+// A tip transaction to a Jito tip account is required; the tip is the incentive
+// for Jito block-builders to include the bundle.
+const JITO_BUNDLE_URL = "https://mainnet.block-engine.jito.wtf/api/v1/bundles";
+
+// Well-known Jito tip accounts — pick one at random to distribute load.
+const JITO_TIP_ACCOUNTS = [
+  "96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5",
+  "HFqU5x63VTqvB6pKYRS27jkJMfK2vVjMooN4aZK5WX5K",
+  "Cw8CFyM9FkoMi7K7Crf6HNQqf4uEMzpKw6QNghXLvLkY",
+  "ADaUMid9gy7Mp2bfXPVtVNT8CkC4GWBzeXJDnFnFSXHt",
+  "DfXygSm4jCyNCybVYYK6DwvWqjKee8pbDmJGcLWNDXjh",
+  "ADuUkR4vqLUMWXxW9gh6D6L8pMSawimctcNZ5pGwDcEt",
+  "DttWaMuVvTiduZRnguLF7jNxTgiMBZ1hyAumKUiL2KRL",
+  "3AVi9Tg9Uo68tJfuvoKvqKNWKkC5wPdSSdeBnizKZ6jT",
+];
 
 const LAMPORTS_PER_SOL = 1_000_000_000;
 
@@ -357,6 +377,88 @@ class SolanaWalletService {
       } catch { /* transient — keep polling */ }
     }
     logger.warn({ sig: signature.slice(0, 20) }, "SolanaWalletService: buy TX upgrade-to-confirmed timed out (tx likely confirmed, RPC slow)");
+  }
+
+  /**
+   * Submit a signed Jupiter swap TX as a Jito bundle with a tip transaction.
+   * Returns the swap TX signature immediately after bundle acceptance (~200ms).
+   * Background verification polls for "confirmed" status without blocking.
+   *
+   * Falls back to standard signAndSendAndConfirm(acceptProcessed=true) if:
+   *   - tipLamports === 0 (Jito disabled)
+   *   - Jito endpoint returns an error or times out
+   *   - Building the tip TX fails
+   *
+   * @param label  "buy" or "sell" — used in log messages only
+   */
+  async sendAsJitoBundleOrFallback(
+    txBase64: string,
+    tipLamports: number,
+    label: string,
+  ): Promise<string> {
+    if (!this.keypair) throw new Error("Wallet not ready — SOLANA_PRIVATE_KEY not set");
+
+    // ── Jito disabled ──────────────────────────────────────────────────────────
+    if (tipLamports <= 0) {
+      return this.signAndSendAndConfirm(txBase64, true);
+    }
+
+    const tStart = Date.now();
+
+    try {
+      // ── 1. Sign the swap TX and extract its signature ──────────────────────
+      const swapTx = this.decodeTxBase64(txBase64);
+      swapTx.sign([this.keypair]);
+      const swapTxBase64 = Buffer.from(swapTx.serialize()).toString("base64");
+      const signature    = bs58.encode(swapTx.signatures[0]);
+
+      // ── 2. Build tip TX (legacy Transaction — simple SOL transfer) ──────────
+      const tipAccount = JITO_TIP_ACCOUNTS[Math.floor(Math.random() * JITO_TIP_ACCOUNTS.length)];
+      const { blockhash } = await this.connection.getLatestBlockhash("processed");
+
+      const tipTx     = new Transaction();
+      tipTx.add(SystemProgram.transfer({
+        fromPubkey: this.keypair.publicKey,
+        toPubkey:   new PublicKey(tipAccount),
+        lamports:   tipLamports,
+      }));
+      tipTx.recentBlockhash = blockhash;
+      tipTx.feePayer        = this.keypair.publicKey;
+      tipTx.sign(this.keypair);
+      const tipTxBase64 = tipTx.serialize().toString("base64");
+
+      const tBuildMs = Date.now() - tStart;
+
+      // ── 3. Submit bundle ─────────────────────────────────────────────────────
+      // Bundle order: [swap, tip] — tip last is fine for Jito.
+      const res = await axios.post(
+        JITO_BUNDLE_URL,
+        { jsonrpc: "2.0", id: 1, method: "sendBundle", params: [[swapTxBase64, tipTxBase64]] },
+        { timeout: 4_000 },
+      );
+
+      const bundleId   = (res.data?.result ?? "unknown") as string;
+      const tSubmitMs  = Date.now() - tStart;
+
+      logger.info({
+        label, sig: signature.slice(0, 20), bundleId: bundleId.slice(0, 16),
+        tipLamports, tipSol: (tipLamports / 1e9).toFixed(6),
+        tBuildMs, tSubmitMs,
+      }, `Jito: ${label} bundle submitted ⚡ — verifying in background`);
+
+      // ── 4. Background verify (does not block the caller) ────────────────────
+      void this.upgradeToConfirmedInBackground(signature);
+
+      return signature;
+
+    } catch (jitoErr) {
+      const msg = (jitoErr as Error).message ?? String(jitoErr);
+      logger.warn({ label, tipLamports, err: msg, tElapsedMs: Date.now() - tStart },
+        `Jito: ${label} bundle failed — falling back to standard send`);
+
+      // Fallback: standard send, acceptProcessed=true for speed
+      return this.signAndSendAndConfirm(txBase64, true);
+    }
   }
 
   private async confirmInBackground(signature: string): Promise<void> {
