@@ -242,6 +242,7 @@ class GraduationSniperService {
   private wsConnected = false;
   private wsReconnects = 0;
   private subscriptionId: number | null = null;
+  private programSubscriptionId: number | null = null;
   private priceIntervalId: ReturnType<typeof setInterval> | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private started = false;
@@ -790,6 +791,22 @@ class GraduationSniperService {
         ],
       }));
 
+      // ── Second subscription: Pump.fun program ID ──────────────────────────
+      // Pump.fun introduced "migrate_v2" which may use a different migration
+      // wallet than MIGRATION_WALLET.  Subscribing to the program ID catches
+      // ALL Pump.fun transactions (including migrate_v2) regardless of which
+      // authority wallet is used.  handleMessage filters these aggressively
+      // using value.logs so only genuine migration events reach processGraduation.
+      ws.send(JSON.stringify({
+        jsonrpc: "2.0",
+        id:      2,
+        method:  "logsSubscribe",
+        params:  [
+          { mentions: [PUMPFUN_PROGRAM_ID] },
+          { commitment: "confirmed" },
+        ],
+      }));
+
       // ── Two-layer keepalive — TCP + application-level JSON ───────────────
       // Layer 1 (TCP): WS ping frame every 20s keeps NAT gateways alive.
       // Layer 2 (JSON): A lightweight getHealth JSON-RPC call every 20s sends
@@ -903,10 +920,17 @@ class GraduationSniperService {
   }
 
   private handleMessage(msg: Record<string, unknown>): void {
-    // Subscription confirmation
+    // Subscription confirmation — migration wallet sub (id: 1)
     if (typeof msg["result"] === "number" && msg["id"] === 1) {
       this.subscriptionId = msg["result"] as number;
-      logger.info({ subscriptionId: this.subscriptionId }, "Graduation sniper: logsSubscribe confirmed");
+      logger.info({ subscriptionId: this.subscriptionId }, "Graduation sniper: migration wallet logsSubscribe confirmed");
+      return;
+    }
+
+    // Subscription confirmation — Pump.fun program sub (id: 2)
+    if (typeof msg["result"] === "number" && msg["id"] === 2) {
+      this.programSubscriptionId = msg["result"] as number;
+      logger.info({ programSubscriptionId: this.programSubscriptionId }, "Graduation sniper: pump.fun program logsSubscribe confirmed");
       return;
     }
 
@@ -925,12 +949,30 @@ class GraduationSniperService {
     const signature = value["signature"] as string | undefined;
     if (!signature) return;
 
+    // ── Log-based migration filter ────────────────────────────────────────────
+    // Helius fires logsNotification for EVERY transaction mentioning either the
+    // migration wallet or the Pump.fun program ID.  The program subscription is
+    // especially noisy (1000+ buy/sell TXes per minute).  Filter immediately
+    // using the embedded log strings — only graduation events contain "migrate"
+    // (covers Migrate, MigrateV2, migrate_v2 etc.).  If logs are absent (some
+    // old RPC nodes omit them) fall through so no event is ever silently lost.
+    const txLogs = value["logs"] as string[] | undefined;
+    if (txLogs && txLogs.length > 0) {
+      const isMigration = txLogs.some((l) => l.toLowerCase().includes("migrate"));
+      if (!isMigration) {
+        logger.debug({ signature }, "Graduation sniper: non-migration TX — suppressed");
+        return;
+      }
+      logger.info(
+        { signature, logCount: txLogs.length },
+        "Graduation sniper: migration logsNotification received ⚡",
+      );
+    }
+
     // ── Signature-level dedup ─────────────────────────────────────────────────
-    // Helius fires multiple logsNotification events for the same TX (one per log
-    // entry that mentions the migration wallet).  Without this guard every
-    // duplicate triggers a separate Helius RPC call inside extractMintFromTx,
-    // burns rate-limit budget, and shows ghost "already in progress" skips in
-    // the UI.  Only the FIRST event for each signature spawns processGraduation.
+    // Both subscriptions (migration wallet + program ID) can fire for the same
+    // TX.  Without this guard every duplicate triggers a separate extractMintFromTx
+    // RPC call and burns rate-limit budget.
     if (this.seenSignatures.has(signature)) {
       logger.debug({ signature }, "Graduation sniper: duplicate WS signature — suppressed");
       return;
@@ -943,9 +985,7 @@ class GraduationSniperService {
     }
 
     // NOTE: graduationsToday is incremented inside processGraduation (after mint
-    // extraction confirms this is a real graduation TX), NOT here.  Helius fires
-    // this handler for ANY transaction mentioning the migration wallet — including
-    // Pool:Create and other Raydium ops — so counting here over-inflates the stat.
+    // extraction confirms this is a real graduation TX), NOT here.
     void this.processGraduation(signature);
   }
 
@@ -1261,6 +1301,52 @@ class GraduationSniperService {
 
     const SOL_MINT = "So11111111111111111111111111111111111111112";
 
+    // ── Strategy 1: Helius Enhanced Transactions API ──────────────────────────
+    // Returns a fully-parsed transaction with explicit `tokenTransfers` array.
+    // Handles both old `migrate` (Raydium CPMM) and new `migrate_v2` (Pump.fun
+    // AMM / pumpswap) because it parses across inner instructions.  Significantly
+    // more reliable than raw getTransaction preTokenBalances/postTokenBalances.
+    try {
+      type EnhancedTransfer = { mint: string; tokenAmount?: number };
+      type EnhancedTx = {
+        signature: string;
+        type?: string;
+        source?: string;
+        tokenTransfers?: EnhancedTransfer[];
+      };
+
+      const enhRes = await axios.post<EnhancedTx[]>(
+        `https://api.helius.xyz/v0/transactions?api-key=${apiKey}`,
+        { transactions: [signature], commitment: "confirmed" },
+        { timeout: 10_000 },
+      );
+
+      const txData = enhRes.data?.[0];
+      if (txData) {
+        const transfers = txData.tokenTransfers ?? [];
+        const mint = transfers.find((t) => t.mint && t.mint !== SOL_MINT)?.mint;
+
+        logger.info(
+          { signature, mint: mint ?? "none", type: txData.type, source: txData.source, transferCount: transfers.length },
+          "Graduation sniper: enhanced API scan",
+        );
+
+        if (mint) {
+          logger.info({ signature, mint, method: "enhanced-api" }, "Graduation sniper: mint extracted via enhanced API ✅");
+          return { mint, wsolVaultPubkey: null };
+        }
+        // If enhanced API returned data but no non-SOL mint, this is likely
+        // not a graduation TX (e.g. pure SOL move).  Fall through to getTransaction
+        // which checks token balances and may disagree.
+      }
+    } catch (enhErr) {
+      logger.warn(
+        { signature, err: (enhErr as Error).message },
+        "Graduation sniper: enhanced API failed — falling back to getTransaction",
+      );
+    }
+
+    // ── Strategy 2: getTransaction with token balance scan ────────────────────
     // Helius REST indexer lags behind the WebSocket by a short window.
     // Attempt 0 is immediate — fast path for when the TX is already indexed.
     // Retries use tight backoffs: 400ms, 800ms, 1.5s, 2.5s — total budget 5.2s.
