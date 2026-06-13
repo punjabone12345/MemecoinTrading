@@ -279,7 +279,7 @@ class SolanaWalletService {
     // Poll getSignatureStatuses — no blockhash dependency, works regardless of
     // which RPC submitted and which blockhash Jupiter embedded in the tx.
     const deadline  = Date.now() + 90_000; // 90 s — covers slow slots and congestion
-    const pollMs    = 1_500;
+    const pollMs    = 500;   // was 1500 — tighter poll saves ~1s avg on confirmation
     let resubmitted = false;
 
     while (Date.now() < deadline) {

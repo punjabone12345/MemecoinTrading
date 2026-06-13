@@ -226,6 +226,32 @@ class JupiterSwapService {
     return res.data.swapTransaction as string;
   }
 
+  // ── PRE-FETCH ─────────────────────────────────────────────────────────────
+  // Called during the rug-check wait window so the quote + fee are READY when
+  // filters pass.  buy() accepts the cached result and skips those two API calls.
+  // Jupiter quotes are valid ~60s — pre-fetching 3-5s early is always safe.
+  async prefetchBuyQuoteAndFee(
+    tokenMint: string,
+    solAmount: number,
+    slippageBps: number,
+    priorityFeeLamports: number,
+  ): Promise<{ quote: unknown; fee: number; fetchedAt: number } | null> {
+    try {
+      const amountLamports = Math.round(solAmount * LAMPORTS_PER_SOL);
+      const [quote, fee] = await Promise.all([
+        this.getQuote(SOL_MINT, tokenMint, amountLamports, slippageBps),
+        solanaWalletService.getOptimalPriorityFee(priorityFeeLamports),
+      ]);
+      logger.info({ tokenMint, fee }, "Jupiter: pre-fetched buy quote + fee during rug-check window ✅");
+      return { quote, fee, fetchedAt: Date.now() };
+    } catch (err) {
+      // Route may not be indexed yet — normal for fresh graduates.
+      // buy() will fall back to fetching fresh quote when pre-fetch is null.
+      logger.info({ tokenMint, err: (err as Error).message }, "Jupiter: pre-fetch failed (pool not yet indexed) — buy() will retry");
+      return null;
+    }
+  }
+
   // ── BUY ───────────────────────────────────────────────────────────────────
   // Retries quote+build up to 5 times (fresh graduates take 2-5s to appear in Jupiter).
   // Uses signAndSendAndConfirm so the position is ONLY recorded after the TX lands on-chain.
@@ -233,11 +259,15 @@ class JupiterSwapService {
   // Quote slippageBps is only for route-finding (wider = more routes considered).
   // The swap body uses SWAP_SLIPPAGE_BPS (50%) as a fixed floor for
   // otherAmountThreshold — eliminates Custom:1 from bot race conditions.
+  //
+  // preQuote: result of prefetchBuyQuoteAndFee() — if provided and < 25s old,
+  // we skip getQuote() + getOptimalPriorityFee() and go straight to getSwapTx().
   async buy(
     tokenMint: string,
     solAmount: number,
     slippageBps: number,
     priorityFeeLamports: number,
+    preQuote?: { quote: unknown; fee: number; fetchedAt: number } | null,
   ): Promise<BuyResult> {
     if (!solanaWalletService.isReady) {
       throw new Error("Wallet not configured — set SOLANA_PRIVATE_KEY env var");
@@ -248,30 +278,51 @@ class JupiterSwapService {
 
     const amountLamports = Math.round(solAmount * LAMPORTS_PER_SOL);
 
-    // Use Helius-estimated priority fee if available (p75 of recent slots).
-    // Falls back to caller's value when Helius is not configured.
-    const optimalFee = await solanaWalletService.getOptimalPriorityFee(priorityFeeLamports);
+    // Use pre-fetched fee if available and fresh; otherwise fetch now.
+    const PRE_QUOTE_MAX_AGE_MS = 25_000;
+    const preQuoteFresh = preQuote && (Date.now() - preQuote.fetchedAt) < PRE_QUOTE_MAX_AGE_MS;
+
+    // Only fetch fee here when we don't have a pre-fetched one
+    const optimalFee = preQuoteFresh
+      ? preQuote.fee
+      : await solanaWalletService.getOptimalPriorityFee(priorityFeeLamports);
+
+    // Track whether we used the pre-fetched quote on attempt 1
+    let usedPreQuote = false;
 
     return withRetry(`buy:${tokenMint.slice(0, 8)}`, async (attempt) => {
-      // Quote slippage is only for route-finding — Jupiter finds more routes with
-      // wider values. The actual threshold is set in getSwapTx via SWAP_SLIPPAGE_BPS.
-      const wideningBps       = (attempt - 1) * 1000;
-      const effectiveSlippage = Math.min(slippageBps + wideningBps, 9000);
-      logger.info({
-        tokenMint, solAmount,
-        quoteSlippageBps:  effectiveSlippage,
-        swapSlippageBps:   SWAP_SLIPPAGE_BPS,
-        optimalFee,
-        attempt,
-      }, `Jupiter: buy attempt ${attempt} — quoting at ${effectiveSlippage} bps, swap threshold at ${SWAP_SLIPPAGE_BPS} bps`);
+      let quote: unknown;
 
-      const quote = await this.getQuote(SOL_MINT, tokenMint, amountLamports, effectiveSlippage);
+      // Attempt 1: use pre-fetched quote if it's still fresh (saves ~500ms HTTP call)
+      if (attempt === 1 && preQuoteFresh) {
+        quote = preQuote.quote;
+        usedPreQuote = true;
+        const ageMs = Date.now() - preQuote.fetchedAt;
+        logger.info({
+          tokenMint, solAmount, optimalFee, ageMs,
+          swapSlippageBps: SWAP_SLIPPAGE_BPS,
+        }, "Jupiter: buy attempt 1 — using PRE-FETCHED quote (0 HTTP calls for quote) ⚡");
+      } else {
+        // Fresh quote — either first attempt without pre-fetch, or retry after failure
+        const wideningBps       = (attempt - (usedPreQuote ? 2 : 1)) * 1000;
+        const effectiveSlippage = Math.min(slippageBps + wideningBps, 9000);
+        logger.info({
+          tokenMint, solAmount,
+          quoteSlippageBps:  effectiveSlippage,
+          swapSlippageBps:   SWAP_SLIPPAGE_BPS,
+          optimalFee,
+          attempt,
+          preQuoteExpired: !!preQuote && !preQuoteFresh,
+        }, `Jupiter: buy attempt ${attempt} — fetching fresh quote at ${effectiveSlippage} bps`);
+        quote = await this.getQuote(SOL_MINT, tokenMint, amountLamports, effectiveSlippage);
+      }
+
       const q = quote as Record<string, string | number>;
       logger.info({
         tokenMint, attempt,
         priceImpactPct: q["priceImpactPct"],
         outAmount:      q["outAmount"],
-      }, "Jupiter: buy quote received");
+      }, "Jupiter: buy quote ready");
 
       const swapTx      = await this.getSwapTx(quote, optimalFee);
       const txSignature = await solanaWalletService.signAndSendAndConfirm(swapTx);

@@ -893,19 +893,27 @@ class GraduationSniperService {
         return;
       }
 
-      // ── SPEED FIX: run rug-check timer AND on-chain pool check in parallel ───────
-      // Old flow: wait 8s → pool check (~0.5s) → price fetch (~0.5s) = 9s sequential.
-      // New flow: [wait 3s ∥ pool check (~0.5s)] → price fetch = 3.5s total (saves ~5.5s).
-      // The pool check starts immediately; by the time the 3s timer fires it is done.
+      // ── SPEED FIX: run rug-check timer, pool check, and Jupiter quote pre-fetch ALL in parallel ──
+      // Old flow: wait 8s → pool check (~0.5s) → price fetch (~0.5s) → getQuote (~0.5s) → getOptimalFee (~0.5s)
+      //         = ~10s before swap TX even starts.
+      // New flow: [wait 3s ∥ pool check ∥ Jupiter quote + Helius fee (~0.5s each)] → price fetch → swap TX
+      //         = ~3.5s before swap TX starts (saves ~6.5s on the hot path).
+      // If the pool isn't indexed yet the pre-fetch returns null and buy() retries normally.
       const t2PoolStart = Date.now();
-      const [, poolSol] = await Promise.all([
+      const [, poolSol, preQuote] = await Promise.all([
         new Promise<void>((r) => setTimeout(r, RUG_CHECK_WAIT_MS)),
         wsolVaultPubkey
           ? this.fetchOnChainPoolSol(wsolVaultPubkey)
           : Promise.resolve<number | null>(null),
+        jupiterSwapService.prefetchBuyQuoteAndFee(
+          mint,
+          cfg.positionSizeSol,
+          cfg.slippageBps,
+          cfg.priorityFeeLamports,
+        ),
       ]);
-      logger.info({ mint, symbol, poolSol, fetchMs: Date.now() - t2PoolStart, elapsedMs: Date.now() - t0 },
-        "Sniper timing: T3+T4 — rugCheck wait + pool SOL check done in parallel");
+      logger.info({ mint, symbol, poolSol, preQuoteFetched: !!preQuote, fetchMs: Date.now() - t2PoolStart, elapsedMs: Date.now() - t0 },
+        "Sniper timing: T3+T4 — rugCheck wait + pool SOL check + Jupiter quote pre-fetch done in parallel");
 
       // FIX 2: on-chain Raydium pool SOL balance check
       if (wsolVaultPubkey && poolSol !== null) {
@@ -1038,7 +1046,7 @@ class GraduationSniperService {
       logger.info({ mint, symbol, driftPct: driftPct.toFixed(2) + "%", elapsedMs: Date.now() - t0 },
         "Graduation sniper: drift check passed ✅ — proceeding to buy");
 
-      await this.enterPosition(mint, symbol, name, entryPrice, signature, baselinePrice, detectedAt);
+      await this.enterPosition(mint, symbol, name, entryPrice, signature, baselinePrice, detectedAt, preQuote);
       this.addEvent({ ...eventBase, symbol, action: "entered" });
 
     } catch (err) {
@@ -1263,6 +1271,7 @@ class GraduationSniperService {
     _detectedTxSig: string,
     detectionPrice?: number,     // baselinePrice (first DexScreener fetch ~5s after grad)
     graduationDetectedAt?: number, // Date.now() at graduation WS event
+    preQuote?: { quote: unknown; fee: number; fetchedAt: number } | null,
   ): Promise<void> {
     const cfg = this.config;
     const id  = uid();
@@ -1272,15 +1281,16 @@ class GraduationSniperService {
       mint, symbol,
       preBuyPrice: price,
       detectionPrice: detectionPrice ?? null,
+      preQuoteAgeMs: preQuote ? buyStart - preQuote.fetchedAt : null,
       msSinceDetection: graduationDetectedAt ? buyStart - graduationDetectedAt : null,
-    }, "Sniper timing: T7 — enterPosition called, Jupiter buy starting");
+    }, "Sniper timing: T7 — enterPosition called, Jupiter buy starting ⚡");
 
     // Execute real on-chain buy via Jupiter — confirmed before recording position
     let txSignature: string;
     let tokenAmount: number;
     let sizeSol: number;
     try {
-      const result = await jupiterSwapService.buy(mint, cfg.positionSizeSol, cfg.slippageBps, cfg.priorityFeeLamports);
+      const result = await jupiterSwapService.buy(mint, cfg.positionSizeSol, cfg.slippageBps, cfg.priorityFeeLamports, preQuote);
       txSignature = result.txSignature;
       tokenAmount = result.tokenAmount;
       sizeSol     = result.solSpent;
