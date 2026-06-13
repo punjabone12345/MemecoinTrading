@@ -1261,11 +1261,12 @@ class GraduationSniperService {
 
     const SOL_MINT = "So11111111111111111111111111111111111111112";
 
-    // Helius REST indexer lags behind the WebSocket by several seconds.
-    // Attempt 0 is immediate (no wait) — fast path for when the TX is already
-    // indexed.  Retries back off: 1s, 3s, 5s, 8s so total window is ~17s vs
-    // the old 30s (2+4+6+8+10) while catching up faster on the first try.
-    const delays = [0, 1_000, 3_000, 5_000, 8_000];
+    // Helius REST indexer lags behind the WebSocket by a short window.
+    // Attempt 0 is immediate — fast path for when the TX is already indexed.
+    // Retries use tight backoffs: 400ms, 800ms, 1.5s, 2.5s — total budget 5.2s.
+    // (Old delays [0,1s,3s,5s,8s] accumulated up to 17s and were the primary
+    // source of the 40s pre-execution latency.)
+    const delays = [0, 400, 800, 1_500, 2_500];
 
     for (let attempt = 0; attempt < delays.length; attempt++) {
       if (delays[attempt]! > 0) await new Promise((r) => setTimeout(r, delays[attempt]!));
@@ -1493,87 +1494,40 @@ class GraduationSniperService {
       return;
     }
 
-    // ── Derive actual fill price from on-chain TX data ────────────────────────
-    // Priority 1 (most accurate — matches GMGN/Solscan exactly):
-    //   Parse confirmed TX → actual SOL spent + actual tokens received → price in USD
-    // Priority 2 (fallback — DexScreener after buy, better than pre-buy price):
-    //   Re-fetch DexScreener price after confirmation
-    // Priority 3 (last resort):
-    //   Use the pre-buy DexScreener price passed in as `price`
+    // ── FAST entry price: Priority 2 first (Jupiter quote + SOL/USD) ────────────
+    // OLD order: P1 (on-chain parse, 2s sleep) → P2 (Jupiter quote) → P3 (DexScreener retries)
+    // NEW order: P2 first (no sleep, ~0.5-1s) → record position → P1 + P3 in background.
     //
-    // This is why app showed 29k while GMGN showed 35k: the old code used `price`
-    // which was fetched BEFORE the buy, before any slippage/movement applied.
+    // P2 uses sizeSol + tokenAmount already returned by the confirmed swap — no extra
+    // RPC needed. Only fetchSolUsdPrice() is awaited (~0.5-1s). This cuts the blocking
+    // post-buy wait from 2-15s down to ~1s, letting the position appear on the dashboard
+    // and Telegram immediately. P1 (on-chain parse) and P3 (DexScreener) run in the
+    // background and update the position's entryPrice + tokenAmount after they complete.
     let actualEntryPrice = price;
-    let actualTokenAmount = tokenAmount; // start with Jupiter quote's outAmount
+    const actualTokenAmount = tokenAmount; // will be refined in background by P1
 
+    let solUsdForEntry: number | null = null;
     try {
-      const txAmounts = await this.fetchActualBuyAmounts(txSignature, mint);
-      if (txAmounts) {
-        // Use actual on-chain token amount (more accurate than Jupiter quote estimate)
-        if (txAmounts.tokensReceivedRaw > 0) {
-          actualTokenAmount = txAmounts.tokensReceivedRaw;
-        }
-        // Compute price from on-chain data: (SOL spent × SOL/USD) ÷ tokens received
-        if (txAmounts.solSpentUi > 0 && txAmounts.tokensReceivedUi > 0) {
-          const solUsdPrice = await this.fetchSolUsdPrice();
-          if (solUsdPrice && solUsdPrice > 0) {
-            const onChainPrice = (txAmounts.solSpentUi * solUsdPrice) / txAmounts.tokensReceivedUi;
-            const delta = ((onChainPrice / price - 1) * 100).toFixed(1);
-            logger.info(
-              { mint, symbol, onChainPrice, preBuyPrice: price, delta: `${delta}%`, solUsdPrice, solSpent: txAmounts.solSpentUi, tokensUi: txAmounts.tokensReceivedUi },
-              "Graduation sniper: on-chain fill price computed ✅ (matches GMGN/Solscan)",
-            );
-            actualEntryPrice = onChainPrice;
-          }
+      solUsdForEntry = await this.fetchSolUsdPrice(); // ~0.5-1s — fast SOL/USD from DexScreener
+      if (solUsdForEntry && solUsdForEntry > 0 && sizeSol > 0 && tokenAmount > 0) {
+        const TOKEN_DECIMALS = 6;
+        const tokensUi = tokenAmount / Math.pow(10, TOKEN_DECIMALS);
+        const jupiterPrice = (sizeSol * solUsdForEntry) / tokensUi;
+        if (jupiterPrice > 0) {
+          const delta = ((jupiterPrice / price - 1) * 100).toFixed(1);
+          logger.info({ mint, symbol, jupiterPrice, preBuyPrice: price, delta: `${delta}%`, solUsdForEntry, sizeSol, tokensUi },
+            "Graduation sniper: fast P2 entry price (Jupiter-quote) ⚡");
+          actualEntryPrice = jupiterPrice;
         }
       }
-    } catch { /* non-fatal */ }
-
-    // Priority 2: Jupiter quote data — always available, no external API needed.
-    // Uses the exact SOL spent + tokens received from the confirmed swap to compute
-    // true fill price. This catches the case where Helius is not configured OR
-    // fetchSolUsdPrice failed inside the Helius block. 2.5x errors happen when the
-    // token pumps during buy execution and we fall back to the pre-buy detection price.
-    if (actualEntryPrice === price) {
-      try {
-        const solUsdPrice = await this.fetchSolUsdPrice();
-        if (solUsdPrice && solUsdPrice > 0 && sizeSol > 0 && tokenAmount > 0) {
-          // tokenAmount is raw units (e.g. 1_000_000_000_000 for 1M tokens at 6 decimals).
-          // Pumpfun tokens always have 6 decimals.
-          const TOKEN_DECIMALS = 6;
-          const tokensUi = tokenAmount / Math.pow(10, TOKEN_DECIMALS);
-          const jupiterPrice = (sizeSol * solUsdPrice) / tokensUi;
-          if (jupiterPrice > 0) {
-            const delta = ((jupiterPrice / price - 1) * 100).toFixed(1);
-            logger.info({ mint, symbol, jupiterPrice, preBuyPrice: price, delta: `${delta}%`, solUsdPrice, sizeSol, tokensUi }, "Graduation sniper: using Jupiter-quote entry price ✅");
-            actualEntryPrice = jupiterPrice;
-          }
-        }
-      } catch { /* non-fatal */ }
-    }
-
-    // Priority 3: post-buy DexScreener price (may not be indexed yet for new graduations)
-    if (actualEntryPrice === price) {
-      try {
-        // Retry up to 5× with 3s gap — new graduation pairs take ~15s to appear on DexScreener
-        for (let attempt = 0; attempt < 5 && actualEntryPrice === price; attempt++) {
-          if (attempt > 0) await new Promise(r => setTimeout(r, 3_000));
-          const postBuyData = await this.fetchPrice(mint);
-          if (postBuyData && postBuyData.price > 0) {
-            logger.info({ mint, symbol, dexPrice: postBuyData.price, attempt }, "Graduation sniper: using post-buy DexScreener fallback price");
-            actualEntryPrice = postBuyData.price;
-          }
-        }
-      } catch { /* non-fatal */ }
-    }
+    } catch { /* non-fatal — fall back to pre-buy price */ }
 
     if (actualEntryPrice === price) {
-      logger.warn({ mint, symbol, preBuyPrice: price }, "Graduation sniper: all entry price methods failed — using pre-buy detection price ⚠️ (entry price will be inaccurate)");
+      logger.warn({ mint, symbol, preBuyPrice: price },
+        "Graduation sniper: P2 price failed — using pre-buy price for now; P1 background will refine ⚠️");
     }
 
     // ── Detection→fill drift analysis ─────────────────────────────────────────
-    // How much did the price move from the moment we first detected the token
-    // to the moment the buy was confirmed on-chain?
     const nowMs = Date.now();
     const msDetectionToFill = graduationDetectedAt ? nowMs - graduationDetectedAt : undefined;
     const entryDriftPct = (detectionPrice && detectionPrice > 0)
@@ -1590,9 +1544,6 @@ class GraduationSniperService {
     }, "Sniper timing: T9 — detection→fill drift summary 📊");
 
     // ── POST-FILL DRIFT CIRCUIT BREAKER ───────────────────────────────────────
-    // DexScreener lags 30-60s on new pairs, so the pre-buy drift check (8%)
-    // can pass while Jupiter fills at +20-40% above detection.  If we detect
-    // that here, emergency-sell immediately before recording the position.
     if (entryDriftPct !== undefined && entryDriftPct > MAX_FILL_DRIFT_PCT) {
       logger.warn(
         { mint, symbol, entryDriftPct: entryDriftPct.toFixed(1), MAX_FILL_DRIFT_PCT, actualEntryPrice, detectionPrice },
@@ -1615,12 +1566,12 @@ class GraduationSniperService {
           `🕐 ${toIST(new Date())}`,
         );
       }
-      // Release the mint lock so we don't permanently block this token
       this.seenMints.delete(mint);
       void this.refreshWalletBalance();
       return;
     }
 
+    // ── Record position immediately with best available price ─────────────────
     const pos: SniperPosition = {
       id,
       mint,
@@ -1634,21 +1585,20 @@ class GraduationSniperService {
       tp1Hit:            false,
       tp2Hit:            false,
       remainingFraction: 1.0,
-      effectiveSlPrice:  actualEntryPrice * (1 - cfg.slPct / 100),  // SL based on actual fill price
-      trailingHigh:      actualEntryPrice,                          // trailing high starts at actual fill price
+      effectiveSlPrice:  actualEntryPrice * (1 - cfg.slPct / 100),
+      trailingHigh:      actualEntryPrice,
       status:            "open",
       realizedPnlSol:    0,
       unrealizedPnlSol:  0,
       totalPnlSol:       0,
       pnlPct:            0,
       txSignature,
-      tokenAmount:       actualTokenAmount,   // actual on-chain tokens (for accurate sells)
-      entrySig:          txSignature,         // buy tx — preserved forever
-      exitSig:           undefined,           // set only after confirmed on-chain sell
+      tokenAmount:       actualTokenAmount,
+      entrySig:          txSignature,
+      exitSig:           undefined,
       tp1RealizedSol:    0,
       tp2RealizedSol:    0,
       runnerRealizedSol: 0,
-      // Entry drift / latency fields
       detectionPrice,
       entryDriftPct,
       msDetectionToFill,
@@ -1657,12 +1607,12 @@ class GraduationSniperService {
     this.openPositions.set(mint, pos);
     this.seenMints.add(mint);
     void this.refreshWalletBalance();
-
     void this.persistPosition(pos);
 
     logger.info(
-      { mint, symbol, actualEntryPrice, preBuyPrice: price, sizeSol, actualTokenAmount, txSignature, sl: pos.effectiveSlPrice },
-      "Graduation sniper: LIVE position entered ✅",
+      { mint, symbol, actualEntryPrice, preBuyPrice: price, sizeSol, actualTokenAmount, txSignature, sl: pos.effectiveSlPrice,
+        msDetectionToFill: msDetectionToFill ?? null },
+      "Graduation sniper: LIVE position entered ✅ — refining entry price in background",
     );
 
     if (isTelegramConfigured()) {
@@ -1680,6 +1630,12 @@ class GraduationSniperService {
         `🕐 ${toIST(new Date())}`,
       );
     }
+
+    // ── Background: refine entry price with on-chain TX parse (P1) ───────────
+    // fetchActualBuyAmounts waits 2s for Helius to index the TX — running this in
+    // the background means the position is visible on the dashboard NOW, and the
+    // more accurate on-chain price (matching GMGN/Solscan) updates silently.
+    void this.refineEntryPriceInBackground(pos, txSignature, mint, symbol, price, solUsdForEntry, cfg.slPct);
   }
 
   // ── FIX 4: Duplicate trade fingerprint helpers ──────────────────────────────
@@ -1717,6 +1673,86 @@ class GraduationSniperService {
     } catch (err) {
       logger.warn({ err: (err as Error).message }, "Graduation sniper: failed to save closed trade fingerprints");
     }
+  }
+
+  // ── Background entry-price refinement ────────────────────────────────────
+  // Called after position is already recorded. Improves entryPrice accuracy:
+  //   P1: on-chain TX parse (fetchActualBuyAmounts — needs 2s Helius indexing delay)
+  //       → gives exact SOL spent + tokens received = most accurate price
+  //   P3: DexScreener polling (up to 5×3s) — only runs if P1 also fails
+  // Updates entryPrice, effectiveSlPrice, trailingHigh, tokenAmount in-place.
+  // Does NOT block the entry pipeline — runs entirely as a fire-and-forget void.
+  private async refineEntryPriceInBackground(
+    pos: SniperPosition,
+    txSignature: string,
+    mint: string,
+    symbol: string,
+    preBuyPrice: number,
+    solUsdPrice: number | null,
+    slPct: number,
+  ): Promise<void> {
+    try {
+      // P1: on-chain parse — fetches actual SOL spent + tokens received from Helius
+      // fetchActualBuyAmounts() has a 2s internal sleep to let Helius index the TX.
+      const txAmounts = await this.fetchActualBuyAmounts(txSignature, mint);
+
+      if (txAmounts) {
+        const openPos = this.openPositions.get(mint);
+        if (!openPos) return; // position already closed
+
+        // Refine tokenAmount — on-chain value accounts for actual slippage
+        if (txAmounts.tokensReceivedRaw > 0) {
+          openPos.tokenAmount = txAmounts.tokensReceivedRaw;
+        }
+
+        // Compute on-chain fill price from actual amounts
+        if (txAmounts.solSpentUi > 0 && txAmounts.tokensReceivedUi > 0) {
+          const solUsd = solUsdPrice ?? await this.fetchSolUsdPrice();
+          if (solUsd && solUsd > 0) {
+            const onChainPrice = (txAmounts.solSpentUi * solUsd) / txAmounts.tokensReceivedUi;
+            if (onChainPrice > 0) {
+              const delta = ((onChainPrice / openPos.entryPrice - 1) * 100).toFixed(1);
+              logger.info(
+                { mint, symbol, onChainPrice, prevEntryPrice: openPos.entryPrice, delta: `${delta}%`,
+                  solSpent: txAmounts.solSpentUi, tokensUi: txAmounts.tokensReceivedUi },
+                "Graduation sniper: on-chain P1 entry price refined in background ✅ (matches GMGN/Solscan)",
+              );
+              openPos.entryPrice       = onChainPrice;
+              openPos.currentPrice     = onChainPrice;
+              openPos.effectiveSlPrice = onChainPrice * (1 - slPct / 100);
+              openPos.trailingHigh     = Math.max(openPos.trailingHigh, onChainPrice);
+              void this.persistPosition(openPos);
+              this.broadcast();
+            }
+          }
+        }
+        return; // P1 succeeded — no need for P3
+      }
+
+      // P3: DexScreener polling — new graduation pairs take ~15s to appear
+      // Only runs when P1 returned null (Helius unavailable or TX parse failed)
+      for (let attempt = 0; attempt < 5; attempt++) {
+        const openPos = this.openPositions.get(mint);
+        if (!openPos) return;
+        if (openPos.entryPrice !== preBuyPrice) return; // P1 already updated it
+
+        if (attempt > 0) await new Promise(r => setTimeout(r, 3_000));
+        const postBuyData = await this.fetchPrice(mint);
+        if (postBuyData && postBuyData.price > 0) {
+          logger.info({ mint, symbol, dexPrice: postBuyData.price, attempt },
+            "Graduation sniper: P3 DexScreener entry price refined in background ✅");
+          openPos.entryPrice       = postBuyData.price;
+          openPos.effectiveSlPrice = postBuyData.price * (1 - slPct / 100);
+          openPos.trailingHigh     = Math.max(openPos.trailingHigh, postBuyData.price);
+          void this.persistPosition(openPos);
+          this.broadcast();
+          return;
+        }
+      }
+
+      logger.warn({ mint, symbol, preBuyPrice },
+        "Graduation sniper: background price refinement exhausted — entryPrice remains at pre-buy value ⚠️");
+    } catch { /* fully non-fatal — position is already recorded */ }
   }
 
   private async closePosition(pos: SniperPosition, reason: string, exitPrice: number): Promise<void> {
