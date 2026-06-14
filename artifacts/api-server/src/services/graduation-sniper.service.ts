@@ -1007,6 +1007,9 @@ class GraduationSniperService {
     // Hoisted so the catch block can emit a visible event even when the exception
     // fires after mint extraction but before any addEvent call inside the try.
     let catchEventBase: { id: string; detectedAt: number; mint: string; symbol: string; txSignature: string } | null = null;
+    // Set when the live sniper must skip (wallet/balance/positions) but we still
+    // want to run the full quality-filter pipeline so paper mode can trade.
+    let liveOnlySkip: string | null = null;
     try {
       const extracted = await this.extractMintFromTx(signature);
       if (!extracted) {
@@ -1024,7 +1027,11 @@ class GraduationSniperService {
       if (skipReason) {
         this.addEvent({ ...eventBase, action: "skipped", skipReason });
         logger.info({ mint, skipReason }, "Graduation sniper: skipped");
-        return;
+        // Blacklist = hard skip — paper also respects it. Everything else
+        // (wallet not configured, insufficient balance, max positions) is
+        // live-only: continue the pipeline so paper mode can still trade.
+        if (blacklistService.isBlacklisted(mint)) return;
+        liveOnlySkip = skipReason;
       }
 
       // ── Race-condition guard: reserve this mint before any async op ──────────
@@ -1116,8 +1123,12 @@ class GraduationSniperService {
       // Race-condition guard: re-check wallet/positions state with symbol known
       const skipAfterPrice = this.checkSkipReason(mint);
       if (skipAfterPrice) {
-        this.addEvent({ ...eventBase, symbol, action: "skipped", skipReason: skipAfterPrice });
-        return;
+        if (!liveOnlySkip) {
+          // Only emit a second event if the first check didn't already log it
+          this.addEvent({ ...eventBase, symbol, action: "skipped", skipReason: skipAfterPrice });
+        }
+        if (blacklistService.isBlacklisted(mint)) return;
+        liveOnlySkip = liveOnlySkip ?? skipAfterPrice;
       }
 
       // ── T2: rug-check price + pool check (pool may already be done) ───────────
@@ -1262,9 +1273,16 @@ class GraduationSniperService {
       logger.info({ mint, symbol, preQuoteReady: !!preQuote, elapsedMs: Date.now() - t0 },
         preQuote ? "Sniper timing: pre-fetch quote ready — skipping getQuote call ⚡" : "Sniper timing: pre-fetch not ready — buy() will fetch fresh quote");
 
-      // ── Paper sniper tap-in: all filters passed, fire simulation ─────────────
-      // Runs asynchronously — does NOT block the live entry pipeline.
+      // ── Paper sniper tap-in ───────────────────────────────────────────────────
+      // Always fires when quality filters pass — even if live must skip due to
+      // insufficient wallet balance. Paper has its own virtual balance & checks.
       this.paperCallback?.(mint, entryPrice, symbol, name, detectedAt, baselinePrice);
+
+      // Skip live entry if wallet can't support it (balance, not configured, etc.)
+      if (liveOnlySkip) {
+        logger.info({ mint, symbol, liveOnlySkip }, "Graduation sniper: live entry skipped — paper-only trade");
+        return;
+      }
 
       await this.enterPosition(mint, symbol, name, entryPrice, signature, baselinePrice, detectedAt, preQuote);
       this.addEvent({ ...eventBase, symbol, action: "entered" });
