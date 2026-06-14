@@ -2,6 +2,7 @@ import axios from "axios";
 import { logger } from "../lib/logger.js";
 import { query, execute } from "../lib/db.js";
 import { graduationSniperService } from "./graduation-sniper.service.js";
+import { sendTelegram, isTelegramConfigured, toIST } from "../lib/telegram.js";
 
 // ── Constants (mirror live sniper) ───────────────────────────────────────────
 const DEXSCREENER_BASE    = "https://api.dexscreener.com";
@@ -304,6 +305,22 @@ class PaperSniperService {
       "Paper sniper: PAPER position entered 📄",
     );
 
+    if (isTelegramConfigured()) {
+      void sendTelegram(
+        `📄 <b>PAPER ENTRY</b>\n` +
+        `──────────────────────\n` +
+        `🪙 Token: <b>${symbol}</b>\n` +
+        `📋 CA: <code>${mint}</code>\n` +
+        `💵 Entry: <b>$${entryPrice < 0.0001 ? entryPrice.toExponential(3) : entryPrice.toFixed(8)}</b>\n` +
+        `💰 Size: <b>${sizeSol.toFixed(4)} SOL</b> (virtual)\n` +
+        `📊 Balance after: <b>${this.virtualBalance.toFixed(4)} SOL</b>\n` +
+        `🛡️ Staged SL: -20% (2m) → -25% peak → -30% peak\n` +
+        `🎯 TP1: +${cfg.tp1Pct}% (sell ${cfg.tp1ClosePct}%)\n` +
+        `🎯 TP2: +${cfg.tp2Pct}% (sell ${cfg.tp2ClosePct}%)\n` +
+        `🕐 ${toIST(new Date())}`,
+      );
+    }
+
     this.broadcast();
   }
 
@@ -471,6 +488,31 @@ class PaperSniperService {
       { mint: pos.mint, symbol: pos.symbol, reason, pnlSol: pos.realizedPnlSol.toFixed(4), exitPrice },
       "Paper sniper: position closed 📄",
     );
+
+    if (isTelegramConfigured()) {
+      const isWin     = pos.realizedPnlSol >= 0;
+      const pnlSign   = isWin ? "+" : "";
+      const emoji     = isWin ? "✅" : "❌";
+      const pnlPctStr = ((exitPrice / pos.entryPrice - 1) * 100).toFixed(1);
+      const holdMs    = (pos.closedAt ?? Date.now()) - pos.entryAt;
+      const holdStr   = holdMs < 60_000
+        ? `${Math.floor(holdMs / 1000)}s`
+        : holdMs < 3_600_000
+          ? `${Math.floor(holdMs / 60_000)}m`
+          : `${Math.floor(holdMs / 3_600_000)}h`;
+      void sendTelegram(
+        `${emoji} <b>PAPER CLOSE</b>\n` +
+        `──────────────────────\n` +
+        `🪙 Token: <b>${pos.symbol}</b>\n` +
+        `📋 CA: <code>${pos.mint}</code>\n` +
+        `💵 Exit: <b>$${exitPrice < 0.0001 ? exitPrice.toExponential(3) : exitPrice.toFixed(8)}</b>\n` +
+        `📊 P&L: <b>${pnlSign}${pos.realizedPnlSol.toFixed(4)} SOL (${pnlSign}${pnlPctStr}%)</b>\n` +
+        `🏷️ Reason: ${reason}\n` +
+        `⏱️ Hold: ${holdStr}\n` +
+        `💰 Balance: <b>${this.virtualBalance.toFixed(4)} SOL</b>\n` +
+        `🕐 ${toIST(new Date())}`,
+      );
+    }
 
     this.broadcast();
   }
