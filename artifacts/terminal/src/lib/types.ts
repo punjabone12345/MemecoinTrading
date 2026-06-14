@@ -422,6 +422,65 @@ export interface SniperStatus {
   config: SniperConfig;
 }
 
+// ── Paper Sniper ─────────────────────────────────────────────────────────────
+
+export interface PaperPosition {
+  id: string;
+  mint: string;
+  symbol: string;
+  name: string;
+  detectedAt: number;
+  entryAt: number;
+  entryPrice: number;
+  currentPrice: number;
+  sizeSol: number;
+  tp1Hit: boolean;
+  tp2Hit: boolean;
+  remainingFraction: number;
+  effectiveSlPrice: number;
+  trailingHigh: number;
+  status: "open" | "closed";
+  realizedPnlSol: number;
+  unrealizedPnlSol: number;
+  totalPnlSol: number;
+  pnlPct: number;
+  closeReason?: string;
+  closedAt?: number;
+  exitPrice?: number;
+  tp1RealizedSol: number;
+  tp2RealizedSol: number;
+  runnerRealizedSol: number;
+  detectionPrice?: number;
+  entryDriftPct?: number;
+  lastPriceAt?: number;
+}
+
+export interface PaperSniperEvent {
+  id: string;
+  detectedAt: number;
+  mint: string;
+  symbol: string;
+  action: "entered" | "skipped" | "closed";
+  skipReason?: string;
+  closeReason?: string;
+  pnlSol?: number;
+}
+
+export interface PaperSniperStatus {
+  enabled: boolean;
+  virtualBalance: number;
+  startingBalance: number;
+  openCount: number;
+  tradesTotal: number;
+  wins: number;
+  losses: number;
+  totalRealizedPnlSol: number;
+  totalUnrealizedPnlSol: number;
+  totalCombinedPnlSol: number;
+  capitalInOpen: number;
+  config: SniperConfig;
+}
+
 // ── Stuck tokens — tokens in wallet not tracked as open positions ──────────────
 export interface StuckToken {
   mint: string;

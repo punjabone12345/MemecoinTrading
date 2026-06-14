@@ -243,6 +243,7 @@ class GraduationSniperService {
   private wsReconnects = 0;
   private subscriptionId: number | null = null;
   private programSubscriptionId: number | null = null;
+  private paperCallback: ((mint: string, entryPrice: number, symbol: string, name: string, detectedAt: number, detectionPrice: number) => void) | null = null;
   private priceIntervalId: ReturnType<typeof setInterval> | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private started = false;
@@ -1260,6 +1261,10 @@ class GraduationSniperService {
       ]);
       logger.info({ mint, symbol, preQuoteReady: !!preQuote, elapsedMs: Date.now() - t0 },
         preQuote ? "Sniper timing: pre-fetch quote ready — skipping getQuote call ⚡" : "Sniper timing: pre-fetch not ready — buy() will fetch fresh quote");
+
+      // ── Paper sniper tap-in: all filters passed, fire simulation ─────────────
+      // Runs asynchronously — does NOT block the live entry pipeline.
+      this.paperCallback?.(mint, entryPrice, symbol, name, detectedAt, baselinePrice);
 
       await this.enterPosition(mint, symbol, name, entryPrice, signature, baselinePrice, detectedAt, preQuote);
       this.addEvent({ ...eventBase, symbol, action: "entered" });
@@ -3264,6 +3269,12 @@ class GraduationSniperService {
 
   getConfig(): SniperConfig {
     return { ...this.config };
+  }
+
+  setPaperSniperCallback(
+    fn: (mint: string, entryPrice: number, symbol: string, name: string, detectedAt: number, detectionPrice: number) => void,
+  ): void {
+    this.paperCallback = fn;
   }
 }
 

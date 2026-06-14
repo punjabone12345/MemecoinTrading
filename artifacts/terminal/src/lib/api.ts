@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { SniperStatus, SniperPosition, SniperEvent, SniperConfig, StuckToken, SniperHealthMetrics } from "./types";
+import { SniperStatus, SniperPosition, SniperEvent, SniperConfig, StuckToken, SniperHealthMetrics, PaperSniperStatus, PaperPosition, PaperSniperEvent } from "./types";
 import { useToast } from "@/hooks/use-toast";
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, "") ?? "";
@@ -37,6 +37,12 @@ export function useWebSocket() {
             queryClient.invalidateQueries({ queryKey: ["sniper-history"] });
             queryClient.invalidateQueries({ queryKey: ["sniper-wallet"] });
             queryClient.invalidateQueries({ queryKey: ["sniper-stuck-tokens"] });
+          }
+          if (data.type === "paper_sniper_update") {
+            queryClient.invalidateQueries({ queryKey: ["paper-sniper-status"] });
+            queryClient.invalidateQueries({ queryKey: ["paper-sniper-positions"] });
+            queryClient.invalidateQueries({ queryKey: ["paper-sniper-history"] });
+            queryClient.invalidateQueries({ queryKey: ["paper-sniper-events"] });
           }
         } catch (_) {}
       };
@@ -384,6 +390,71 @@ export function useDeleteSniperEvent() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["sniper-events"] });
     },
+  });
+}
+
+// ── Paper Sniper queries ──────────────────────────────────────────────────────
+
+export function usePaperSniperStatus() {
+  return useQuery<PaperSniperStatus>({
+    queryKey: ["paper-sniper-status"],
+    queryFn: async () => {
+      const res = await fetch(apiUrl("/api/paper-sniper/status"));
+      return res.json() as Promise<PaperSniperStatus>;
+    },
+    refetchInterval: 5000,
+  });
+}
+
+export function usePaperSniperPositions() {
+  return useQuery<PaperPosition[]>({
+    queryKey: ["paper-sniper-positions"],
+    queryFn: async () => {
+      const res = await fetch(apiUrl("/api/paper-sniper/positions"));
+      return res.json() as Promise<PaperPosition[]>;
+    },
+    refetchInterval: 10000,
+  });
+}
+
+export function usePaperSniperHistory() {
+  return useQuery<PaperPosition[]>({
+    queryKey: ["paper-sniper-history"],
+    queryFn: async () => {
+      const res = await fetch(apiUrl("/api/paper-sniper/history"));
+      return res.json() as Promise<PaperPosition[]>;
+    },
+    refetchInterval: 30000,
+  });
+}
+
+export function usePaperSniperEvents() {
+  return useQuery<PaperSniperEvent[]>({
+    queryKey: ["paper-sniper-events"],
+    queryFn: async () => {
+      const res = await fetch(apiUrl("/api/paper-sniper/events"));
+      return res.json() as Promise<PaperSniperEvent[]>;
+    },
+    refetchInterval: 5000,
+  });
+}
+
+export function useResetPaperAccount() {
+  const queryClient = useQueryClient();
+  const { toast } = useToast();
+  return useMutation({
+    mutationFn: async () => {
+      const res = await fetch(apiUrl("/api/paper-sniper/reset"), { method: "POST" });
+      if (!res.ok) throw new Error("Reset failed");
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["paper-sniper-status"] });
+      queryClient.invalidateQueries({ queryKey: ["paper-sniper-positions"] });
+      queryClient.invalidateQueries({ queryKey: ["paper-sniper-history"] });
+      queryClient.invalidateQueries({ queryKey: ["paper-sniper-events"] });
+      toast({ title: "Paper account reset", description: "Virtual balance restored to 0.1 SOL." });
+    },
+    onError: () => toast({ title: "Reset failed", variant: "destructive" }),
   });
 }
 

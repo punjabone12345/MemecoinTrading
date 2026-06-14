@@ -5,6 +5,7 @@ import { scannerService } from "../services/scanner.service.js";
 import { paperTradingService } from "../services/paper-trading.service.js";
 import { alertsService } from "../services/alerts.service.js";
 import { graduationSniperService } from "../services/graduation-sniper.service.js";
+import { paperSniperService } from "../services/paper-sniper.service.js";
 import type { Alert, ScannedToken, WsMessage } from "../types/index.js";
 
 function send(ws: WebSocket, msg: WsMessage) {
@@ -63,6 +64,10 @@ export function initWebSocketServer(server: Server) {
 
   graduationSniperService.setBroadcaster(() => {
     broadcast(wss, { type: "sniper_update", data: null, timestamp: Date.now() });
+  });
+
+  paperSniperService.setBroadcaster(() => {
+    broadcast(wss, { type: "paper_sniper_update", data: null, timestamp: Date.now() });
   });
 
   logger.info("WebSocket server initialized at /ws");

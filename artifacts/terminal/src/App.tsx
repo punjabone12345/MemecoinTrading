@@ -4,6 +4,7 @@ import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Shell } from "@/components/layout/Shell";
 import GraduationSniper from "@/pages/GraduationSniper";
+import PaperMode from "@/pages/PaperMode";
 
 const queryClient = new QueryClient();
 
@@ -13,6 +14,7 @@ function Router() {
       <Switch>
         <Route path="/" component={GraduationSniper} />
         <Route path="/sniper" component={GraduationSniper} />
+        <Route path="/paper" component={PaperMode} />
       </Switch>
     </Shell>
   );

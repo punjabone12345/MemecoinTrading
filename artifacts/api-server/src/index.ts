@@ -4,6 +4,7 @@ import { logger } from "./lib/logger.js";
 import { initWebSocketServer } from "./websocket/server.js";
 import { startCommandPolling, registerCommandHandler, toIST, sendTelegram, isTelegramConfigured } from "./lib/telegram.js";
 import { graduationSniperService } from "./services/graduation-sniper.service.js";
+import { paperSniperService } from "./services/paper-sniper.service.js";
 
 const rawPort = process.env["PORT"] ?? "8080";
 const port = Number(rawPort);
@@ -166,6 +167,37 @@ if (process.env["DATABASE_URL"]) {
       // Positions with NULL exit_sig are "unverified" and may have fake P&L.
       await migClient.query(`ALTER TABLE sniper_positions ADD COLUMN IF NOT EXISTS entry_sig TEXT DEFAULT ''`);
       await migClient.query(`ALTER TABLE sniper_positions ADD COLUMN IF NOT EXISTS exit_sig TEXT`);
+      await migClient.query(`ALTER TABLE sniper_positions ADD COLUMN IF NOT EXISTS detection_price DOUBLE PRECISION`);
+      await migClient.query(`ALTER TABLE sniper_positions ADD COLUMN IF NOT EXISTS entry_drift_pct DOUBLE PRECISION`);
+      await migClient.query(`ALTER TABLE sniper_positions ADD COLUMN IF NOT EXISTS ms_detection_to_fill BIGINT`);
+      await migClient.query(`
+        CREATE TABLE IF NOT EXISTS paper_sniper_positions (
+          id TEXT PRIMARY KEY,
+          mint TEXT NOT NULL,
+          symbol TEXT,
+          name TEXT,
+          detected_at BIGINT,
+          entry_at BIGINT,
+          entry_price DOUBLE PRECISION,
+          current_price DOUBLE PRECISION,
+          size_sol DOUBLE PRECISION,
+          tp1_hit BOOLEAN DEFAULT FALSE,
+          tp2_hit BOOLEAN DEFAULT FALSE,
+          remaining_fraction DOUBLE PRECISION DEFAULT 1.0,
+          effective_sl_price DOUBLE PRECISION,
+          trailing_high DOUBLE PRECISION,
+          status TEXT DEFAULT 'open',
+          realized_pnl_sol DOUBLE PRECISION DEFAULT 0,
+          close_reason TEXT,
+          closed_at BIGINT,
+          exit_price DOUBLE PRECISION,
+          tp1_realized_sol DOUBLE PRECISION DEFAULT 0,
+          tp2_realized_sol DOUBLE PRECISION DEFAULT 0,
+          runner_realized_sol DOUBLE PRECISION DEFAULT 0,
+          detection_price DOUBLE PRECISION,
+          entry_drift_pct DOUBLE PRECISION
+        )
+      `);
       logger.info("DB migration: all tables ready");
     } finally {
       migClient.release();
@@ -178,6 +210,12 @@ if (process.env["DATABASE_URL"]) {
 // ── Start services ────────────────────────────────────────────────────────────
 await graduationSniperService.init();
 graduationSniperService.start();
+await paperSniperService.init();
+graduationSniperService.setPaperSniperCallback(
+  (mint, entryPrice, symbol, name, detectedAt, detectionPrice) => {
+    paperSniperService.onGraduation(mint, entryPrice, symbol, name, detectedAt, detectionPrice);
+  },
+);
 
 server.listen(port, () => {
   logger.info({ port }, "Memecoin Sniper — server listening");
