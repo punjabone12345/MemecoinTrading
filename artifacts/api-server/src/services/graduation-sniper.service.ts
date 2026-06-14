@@ -2755,23 +2755,24 @@ class GraduationSniperService {
   private startHeartbeat(): void {
     if (this.heartbeatIntervalId) clearInterval(this.heartbeatIntervalId);
     this.heartbeatIntervalId = setInterval(() => {
-      if (!isTelegramConfigured()) return;
-      const uptimeMins = Math.floor((Date.now() - this.startedAt) / 60_000);
-      const open       = this.openPositions.size;
-      const bal        = this.walletBalanceSol.toFixed(4);
-      const isLowLiq   = this.isLowLiquidityHour();
-      const wsStatus   = this.wsConnected ? "🟢 WS Connected" : "🔴 WS Disconnected";
-      void sendTelegram(
-        `💓 <b>SNIPER HEARTBEAT</b>\n` +
-        `──────────────────────\n` +
-        `${wsStatus}\n` +
-        `📊 Open positions: <b>${open}</b>\n` +
-        `💰 Wallet: <b>${bal} SOL</b>\n` +
-        `⏱ Uptime: <b>${uptimeMins}m</b>\n` +
-        `${isLowLiq ? "🌙 Low-liquidity hours active (stricter filters)" : "☀️ Active trading hours"}\n` +
-        `📡 DexScreener: ${this.dexscreenerCallsTotal} calls · Jupiter: ${this.jupiterCallsTotal} calls\n` +
-        `🕐 ${toIST(new Date())}`,
-      );
+      // Telegram heartbeat temporarily disabled
+      // if (!isTelegramConfigured()) return;
+      // const uptimeMins = Math.floor((Date.now() - this.startedAt) / 60_000);
+      // const open       = this.openPositions.size;
+      // const bal        = this.walletBalanceSol.toFixed(4);
+      // const isLowLiq   = this.isLowLiquidityHour();
+      // const wsStatus   = this.wsConnected ? "🟢 WS Connected" : "🔴 WS Disconnected";
+      // void sendTelegram(
+      //   `💓 <b>SNIPER HEARTBEAT</b>\n` +
+      //   `──────────────────────\n` +
+      //   `${wsStatus}\n` +
+      //   `📊 Open positions: <b>${open}</b>\n` +
+      //   `💰 Wallet: <b>${bal} SOL</b>\n` +
+      //   `⏱ Uptime: <b>${uptimeMins}m</b>\n` +
+      //   `${isLowLiq ? "🌙 Low-liquidity hours active (stricter filters)" : "☀️ Active trading hours"}\n` +
+      //   `📡 DexScreener: ${this.dexscreenerCallsTotal} calls · Jupiter: ${this.jupiterCallsTotal} calls\n` +
+      //   `🕐 ${toIST(new Date())}`,
+      // );
     }, HEARTBEAT_INTERVAL_MS);
   }
 
