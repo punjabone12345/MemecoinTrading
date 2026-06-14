@@ -472,6 +472,24 @@ export function useUpdatePaperSniperConfig() {
   });
 }
 
+export function useClosePaperPosition() {
+  const queryClient = useQueryClient();
+  const { toast } = useToast();
+  return useMutation({
+    mutationFn: async (id: string) => {
+      const res = await fetch(apiUrl(`/api/paper-sniper/positions/${id}/close`), { method: "POST" });
+      if (!res.ok) throw new Error("Close failed");
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["paper-sniper-positions"] });
+      queryClient.invalidateQueries({ queryKey: ["paper-sniper-history"] });
+      queryClient.invalidateQueries({ queryKey: ["paper-sniper-status"] });
+      toast({ title: "Position closed", description: "Manually closed at current price." });
+    },
+    onError: () => toast({ title: "Close failed", variant: "destructive" }),
+  });
+}
+
 export function useResetPaperAccount() {
   const queryClient = useQueryClient();
   const { toast } = useToast();

@@ -32,6 +32,15 @@ router.patch("/paper-sniper/config", async (req, res) => {
   }
 });
 
+router.post("/paper-sniper/positions/:id/close", (req, res) => {
+  const closed = paperSniperService.closePositionById(req.params.id);
+  if (closed) {
+    res.json({ success: true });
+  } else {
+    res.status(404).json({ error: "Position not found or already closed" });
+  }
+});
+
 router.post("/paper-sniper/reset", async (_req, res) => {
   await paperSniperService.reset();
   res.json({ success: true });

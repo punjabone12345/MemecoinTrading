@@ -468,17 +468,19 @@ export interface PaperSniperEvent {
 }
 
 export interface PaperConfig {
-  positionSizeSol:  number;
-  maxOpenPositions: number;
-  tp1Pct:           number;
-  tp1ClosePct:      number;
-  tp2Pct:           number;
-  tp2ClosePct:      number;
-  trailingStopPct:  number;
-  slPhase1Pct:      number;
-  slPhase2Pct:      number;
-  slPhase3Pct:      number;
-  slAfterTp1Pct:    number;
+  positionSizeSol:    number;
+  maxOpenPositions:   number;
+  tp1Pct:             number;
+  tp1ClosePct:        number;
+  tp2Pct:             number;
+  tp2ClosePct:        number;
+  trailingStopPct:    number;
+  slPhase1Pct:        number;
+  slPhase2Pct:        number;
+  slPhase3Pct:        number;
+  slAfterTp1Pct:      number;
+  deadCoinWindowMs:   number;
+  deadCoinMinMovePct: number;
 }
 
 export interface PaperSniperStatus {

@@ -8,7 +8,7 @@ import {
 import {
   usePaperSniperStatus, usePaperSniperPositions, usePaperSniperHistory,
   usePaperSniperEvents, useResetPaperAccount,
-  usePaperSniperConfig, useUpdatePaperSniperConfig,
+  usePaperSniperConfig, useUpdatePaperSniperConfig, useClosePaperPosition,
 } from "@/lib/api";
 import { PaperConfig, PaperPosition, PaperSniperEvent } from "@/lib/types";
 
@@ -120,13 +120,16 @@ const FIELDS: FieldDef[] = [
   { section: "Stop loss",      key: "slPhase1Pct",      label: "SL phase 1  (0–2 min)", description: "Max drawdown in the first 2 minutes",         suffix: "%",   min: 1,     max: 90,   step: 1 },
   { key: "slPhase2Pct",        label: "SL phase 2  (2–10 min)",description: "Max drawdown from peak, 2–10 min",           suffix: "%",   min: 1,     max: 90,   step: 1 },
   { key: "slPhase3Pct",        label: "SL phase 3  (10 min+)", description: "Max drawdown from peak after 10 min",        suffix: "%",   min: 1,     max: 90,   step: 1 },
-  { key: "slAfterTp1Pct",      label: "SL after TP1",          description: "Trailing SL % from peak once TP1 is hit",    suffix: "%",   min: 1,     max: 90,   step: 1 },
+  { key: "slAfterTp1Pct",        label: "SL after TP1",              description: "Trailing SL % from peak once TP1 is hit",       suffix: "%",   min: 1,      max: 90,     step: 1    },
+  { section: "Dead-coin filter", key: "deadCoinWindowMs",   label: "Dead-coin window",           description: "Auto-close if coin doesn't move enough within this window", suffix: "hrs", min: 0.5, max: 24, step: 0.5 },
+  { key: "deadCoinMinMovePct",   label: "Min movement required",     description: "Peak must exceed this % from entry or coin is dead", suffix: "%",   min: 1,  max: 50, step: 1 },
 ];
 
 const DEFAULT_CFG: PaperConfig = {
   positionSizeSol: 0.05, maxOpenPositions: 3,
   tp1Pct: 150, tp1ClosePct: 40, tp2Pct: 400, tp2ClosePct: 40,
   trailingStopPct: 30, slPhase1Pct: 20, slPhase2Pct: 25, slPhase3Pct: 30, slAfterTp1Pct: 35,
+  deadCoinWindowMs: 7_200_000, deadCoinMinMovePct: 5,
 };
 
 function SettingsModal({ onClose }: { onClose: () => void }) {
@@ -183,13 +186,22 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
                     <input
                       type="number"
                       className="w-20 bg-white/5 border border-white/10 rounded-xl px-2.5 py-1.5 text-xs font-black text-white text-right focus:outline-none focus:border-amber-500/50 focus:bg-amber-500/5 transition-colors tabular-nums"
-                      value={draft[f.key] ?? merged[f.key]}
+                      value={
+                        f.key === "deadCoinWindowMs"
+                          ? ((draft[f.key] ?? merged[f.key]) as number) / 3_600_000
+                          : (draft[f.key] ?? merged[f.key])
+                      }
                       min={f.min}
                       max={f.max}
                       step={f.step}
                       onChange={(e) => {
-                        const v = f.step < 1 ? parseFloat(e.target.value) : parseInt(e.target.value, 10);
-                        if (!isNaN(v)) setDraft((d) => ({ ...d, [f.key]: v }));
+                        const raw = parseFloat(e.target.value);
+                        if (!isNaN(raw)) {
+                          const v = f.key === "deadCoinWindowMs"
+                            ? Math.round(raw * 3_600_000)
+                            : f.step < 1 ? raw : parseInt(e.target.value, 10);
+                          setDraft((d) => ({ ...d, [f.key]: v }));
+                        }
                       }}
                     />
                     {f.suffix && <span className="text-[10px] text-white/35 font-medium w-6">{f.suffix}</span>}
@@ -234,6 +246,14 @@ function OpenPositionCard({ pos }: { pos: PaperPosition }) {
     : null;
   const remainPct = Math.round(pos.remainingFraction * 100);
   const totalPnl  = pos.unrealizedPnlSol + pos.realizedPnlSol;
+  const closePos  = useClosePaperPosition();
+  const [confirm, setConfirm] = useState(false);
+
+  function handleClose() {
+    if (!confirm) { setConfirm(true); setTimeout(() => setConfirm(false), 3000); return; }
+    closePos.mutate(pos.id);
+    setConfirm(false);
+  }
 
   return (
     <div className={`rounded-2xl border p-4 ${isPos ? "bg-emerald-950/20 border-emerald-500/15" : "bg-red-950/20 border-red-500/15"}`}>
@@ -255,11 +275,25 @@ function OpenPositionCard({ pos }: { pos: PaperPosition }) {
             </p>
           </div>
         </div>
-        <div className={`text-right ${isPos ? "text-emerald-400" : "text-red-400"}`}>
-          <p className="text-xl font-black leading-none">{fmtPct(pct)}</p>
-          <p className={`text-[11px] font-bold mt-0.5 ${totalPnl >= 0 ? "text-emerald-300/70" : "text-red-300/70"}`}>
-            {totalPnl >= 0 ? "+" : ""}{fmt(totalPnl)} SOL
-          </p>
+        <div className="flex flex-col items-end gap-1.5">
+          <div className={`text-right ${isPos ? "text-emerald-400" : "text-red-400"}`}>
+            <p className="text-xl font-black leading-none">{fmtPct(pct)}</p>
+            <p className={`text-[11px] font-bold mt-0.5 ${totalPnl >= 0 ? "text-emerald-300/70" : "text-red-300/70"}`}>
+              {totalPnl >= 0 ? "+" : ""}{fmt(totalPnl)} SOL
+            </p>
+          </div>
+          <button
+            onClick={handleClose}
+            disabled={closePos.isPending}
+            className={`flex items-center gap-1 px-2.5 py-1 rounded-lg text-[9px] font-bold transition-all border ${
+              confirm
+                ? "bg-red-500/20 border-red-500/40 text-red-300 animate-pulse"
+                : "bg-white/5 border-white/10 text-white/40 hover:bg-red-500/15 hover:border-red-500/25 hover:text-red-300"
+            }`}
+          >
+            <X size={9} />
+            {confirm ? "Confirm?" : "Close"}
+          </button>
         </div>
       </div>
 

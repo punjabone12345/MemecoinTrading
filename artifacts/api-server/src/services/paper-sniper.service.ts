@@ -6,31 +6,35 @@ import { sendTelegram, isTelegramConfigured, toIST } from "../lib/telegram.js";
 // ── Paper-specific config ──────────────────────────────────────────────────────
 
 export interface PaperConfig {
-  positionSizeSol:  number;
-  maxOpenPositions: number;
-  tp1Pct:           number;
-  tp1ClosePct:      number;
-  tp2Pct:           number;
-  tp2ClosePct:      number;
-  trailingStopPct:  number;
-  slPhase1Pct:      number;  // SL % during first 2 min
-  slPhase2Pct:      number;  // SL % from peak during 2–10 min
-  slPhase3Pct:      number;  // SL % from peak after 10 min
-  slAfterTp1Pct:    number;  // trailing SL % from peak after TP1
+  positionSizeSol:    number;
+  maxOpenPositions:   number;
+  tp1Pct:             number;
+  tp1ClosePct:        number;
+  tp2Pct:             number;
+  tp2ClosePct:        number;
+  trailingStopPct:    number;
+  slPhase1Pct:        number;  // SL % during first 2 min
+  slPhase2Pct:        number;  // SL % from peak during 2–10 min
+  slPhase3Pct:        number;  // SL % from peak after 10 min
+  slAfterTp1Pct:      number;  // trailing SL % from peak after TP1
+  deadCoinWindowMs:   number;  // ms to wait before dead-coin check (default 2h)
+  deadCoinMinMovePct: number;  // min peak move % required — if not reached, close as dead
 }
 
 const DEFAULT_PAPER_CONFIG: PaperConfig = {
-  positionSizeSol:  0.05,
-  maxOpenPositions: 3,
-  tp1Pct:           150,
-  tp1ClosePct:      40,
-  tp2Pct:           400,
-  tp2ClosePct:      40,
-  trailingStopPct:  30,
-  slPhase1Pct:      20,
-  slPhase2Pct:      25,
-  slPhase3Pct:      30,
-  slAfterTp1Pct:    35,
+  positionSizeSol:    0.05,
+  maxOpenPositions:   3,
+  tp1Pct:             150,
+  tp1ClosePct:        40,
+  tp2Pct:             400,
+  tp2ClosePct:        40,
+  trailingStopPct:    30,
+  slPhase1Pct:        20,
+  slPhase2Pct:        25,
+  slPhase3Pct:        30,
+  slAfterTp1Pct:      35,
+  deadCoinWindowMs:   2 * 60 * 60_000,  // 2 hours
+  deadCoinMinMovePct: 5,                 // must move >5% from entry
 };
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -463,6 +467,22 @@ class PaperSniperService {
       pos.effectiveSlPrice = Math.max(pos.effectiveSlPrice, trailPrice);
     }
 
+    // ── Dead-coin filter ──────────────────────────────────────────────────
+    if (!pos.tp1Hit) {
+      const peakMovePct = pos.trailingHigh > 0
+        ? ((pos.trailingHigh / pos.entryPrice) - 1) * 100
+        : 0;
+      if (ageMs >= cfg.deadCoinWindowMs && peakMovePct < cfg.deadCoinMinMovePct) {
+        const windowHrs = (cfg.deadCoinWindowMs / 3_600_000).toFixed(1);
+        this.closePaperPosition(
+          pos,
+          `Dead — No Momentum (peak +${peakMovePct.toFixed(1)}% in ${windowHrs}h)`,
+          price,
+        );
+        return;
+      }
+    }
+
     // ── Staged SL ─────────────────────────────────────────────────────────
     const slDropPct = pos.tp1Hit
       ? cfg.slAfterTp1Pct
@@ -616,6 +636,13 @@ class PaperSniperService {
   }
 
   // ── Public API ────────────────────────────────────────────────────────────
+
+  closePositionById(id: string): boolean {
+    const pos = this.openPositions.get(id);
+    if (!pos || pos.status !== "open") return false;
+    this.closePaperPosition(pos, "Manual close", pos.currentPrice);
+    return true;
+  }
 
   getConfig(): PaperConfig {
     return { ...this.paperConfig };
