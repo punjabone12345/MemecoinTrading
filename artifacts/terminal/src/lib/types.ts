@@ -481,6 +481,7 @@ export interface PaperConfig {
   slAfterTp1Pct:      number;
   deadCoinWindowMs:   number;
   deadCoinMinMovePct: number;
+  maxFillDriftPct:    number;
 }
 
 export interface PaperSniperStatus {

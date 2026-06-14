@@ -121,6 +121,7 @@ const FIELDS: FieldDef[] = [
   { key: "slPhase2Pct",        label: "SL phase 2  (2–10 min)",description: "Max drawdown from peak, 2–10 min",           suffix: "%",   min: 1,     max: 90,   step: 1 },
   { key: "slPhase3Pct",        label: "SL phase 3  (10 min+)", description: "Max drawdown from peak after 10 min",        suffix: "%",   min: 1,     max: 90,   step: 1 },
   { key: "slAfterTp1Pct",        label: "SL after TP1",              description: "Trailing SL % from peak once TP1 is hit",       suffix: "%",   min: 1,      max: 90,     step: 1    },
+  { section: "Entry drift filter", key: "maxFillDriftPct",    label: "Max fill drift",            description: "Skip entry if price moved more than this % from detection baseline", suffix: "%", min: 1, max: 50, step: 1 },
   { section: "Dead-coin filter", key: "deadCoinWindowMs",   label: "Dead-coin window",           description: "Auto-close if coin doesn't move enough within this window", suffix: "hrs", min: 0.5, max: 24, step: 0.5 },
   { key: "deadCoinMinMovePct",   label: "Min movement required",     description: "Peak must exceed this % from entry or coin is dead", suffix: "%",   min: 1,  max: 50, step: 1 },
 ];
@@ -129,6 +130,7 @@ const DEFAULT_CFG: PaperConfig = {
   positionSizeSol: 0.05, maxOpenPositions: 3,
   tp1Pct: 150, tp1ClosePct: 40, tp2Pct: 400, tp2ClosePct: 40,
   trailingStopPct: 30, slPhase1Pct: 20, slPhase2Pct: 25, slPhase3Pct: 30, slAfterTp1Pct: 35,
+  maxFillDriftPct: 15,
   deadCoinWindowMs: 7_200_000, deadCoinMinMovePct: 5,
 };
 

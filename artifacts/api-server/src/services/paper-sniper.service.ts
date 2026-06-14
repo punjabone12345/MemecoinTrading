@@ -19,6 +19,7 @@ export interface PaperConfig {
   slAfterTp1Pct:      number;  // trailing SL % from peak after TP1
   deadCoinWindowMs:   number;  // ms to wait before dead-coin check (default 2h)
   deadCoinMinMovePct: number;  // min peak move % required — if not reached, close as dead
+  maxFillDriftPct:    number;  // skip entry if price already moved > this % from detection baseline
 }
 
 const DEFAULT_PAPER_CONFIG: PaperConfig = {
@@ -35,6 +36,7 @@ const DEFAULT_PAPER_CONFIG: PaperConfig = {
   slAfterTp1Pct:      35,
   deadCoinWindowMs:   2 * 60 * 60_000,  // 2 hours
   deadCoinMinMovePct: 5,                 // must move >5% from entry
+  maxFillDriftPct:    15,                // skip if entry price > 15% above detection baseline
 };
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -317,6 +319,15 @@ class PaperSniperService {
     const driftPct = detectionPrice > 0
       ? ((entryPrice / detectionPrice) - 1) * 100
       : 0;
+
+    if (detectionPrice > 0 && driftPct > cfg.maxFillDriftPct) {
+      const reason = `Fill drift abort — price +${driftPct.toFixed(1)}% above detection baseline (>${cfg.maxFillDriftPct}% threshold)`;
+      this.addEvent({ id: uid(), detectedAt, mint, symbol, action: "skipped", skipReason: reason });
+      logger.info({ mint, symbol, driftPct: driftPct.toFixed(1), maxFillDriftPct: cfg.maxFillDriftPct }, "Paper sniper: skipped — fill drift too high");
+      this.seenMints.delete(mint);
+      this.broadcast();
+      return;
+    }
 
     const pos: PaperPosition = {
       id:                uid(),
