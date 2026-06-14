@@ -443,6 +443,19 @@ class PaperSniperService {
       logger.info({ mint: pos.mint, symbol: pos.symbol, pct: pct.toFixed(1), pnl },
         "Paper sniper: TP1 hit 🎯");
       void this.persistPosition(pos);
+      if (isTelegramConfigured()) {
+        void sendTelegram(
+          `🎯 <b>PAPER TP1 HIT</b>\n` +
+          `──────────────────────\n` +
+          `🪙 Token: <b>${pos.symbol}</b>\n` +
+          `📋 CA: <code>${pos.mint}</code>\n` +
+          `💵 Price: <b>$${price < 0.0001 ? price.toExponential(3) : price.toFixed(8)}</b>\n` +
+          `📈 Gain: <b>+${pct.toFixed(1)}%</b>\n` +
+          `💰 Banked: <b>+${pnl.toFixed(4)} SOL</b> (${cfg.tp1ClosePct}% of position)\n` +
+          `⚡ Runner: ${Math.round(pos.remainingFraction * 100)}% remaining\n` +
+          `🕐 ${toIST(new Date())}`,
+        );
+      }
       return;
     }
 
@@ -458,6 +471,19 @@ class PaperSniperService {
       logger.info({ mint: pos.mint, symbol: pos.symbol, pct: pct.toFixed(1), pnl },
         "Paper sniper: TP2 hit 🎯🎯");
       void this.persistPosition(pos);
+      if (isTelegramConfigured()) {
+        void sendTelegram(
+          `🎯🎯 <b>PAPER TP2 HIT</b>\n` +
+          `──────────────────────\n` +
+          `🪙 Token: <b>${pos.symbol}</b>\n` +
+          `📋 CA: <code>${pos.mint}</code>\n` +
+          `💵 Price: <b>$${price < 0.0001 ? price.toExponential(3) : price.toFixed(8)}</b>\n` +
+          `📈 Gain: <b>+${pct.toFixed(1)}%</b>\n` +
+          `💰 Banked: <b>+${pnl.toFixed(4)} SOL</b>\n` +
+          `⚡ Runner: ${Math.round(pos.remainingFraction * 100)}% remaining\n` +
+          `🕐 ${toIST(new Date())}`,
+        );
+      }
       return;
     }
 

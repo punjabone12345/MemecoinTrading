@@ -1658,6 +1658,17 @@ class GraduationSniperService {
         { mint, symbol, entryDriftPct: entryDriftPct.toFixed(1), MAX_FILL_DRIFT_PCT, actualEntryPrice, detectionPrice },
         "Graduation sniper: FILL DRIFT TOO HIGH — emergency-selling immediately 🚨",
       );
+      const fillDriftReason = `Fill drift abort — filled +${entryDriftPct.toFixed(1)}% above detection price (>${MAX_FILL_DRIFT_PCT}% threshold) — emergency sold`;
+      this.addEvent({
+        id:          uid(),
+        detectedAt:  graduationDetectedAt ?? nowMs,
+        mint,
+        symbol,
+        action:      "skipped",
+        skipReason:  fillDriftReason,
+        txSignature,
+      });
+      this.broadcast();
       try {
         await jupiterSwapService.emergencySell(mint, actualTokenAmount, cfg.priorityFeeLamports, cfg.jitoTipLamports);
         logger.info({ mint, symbol }, "Graduation sniper: fill-drift emergency sell confirmed — position never opened");
