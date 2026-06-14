@@ -466,6 +466,20 @@ export interface PaperSniperEvent {
   pnlSol?: number;
 }
 
+export interface PaperConfig {
+  positionSizeSol:  number;
+  maxOpenPositions: number;
+  tp1Pct:           number;
+  tp1ClosePct:      number;
+  tp2Pct:           number;
+  tp2ClosePct:      number;
+  trailingStopPct:  number;
+  slPhase1Pct:      number;
+  slPhase2Pct:      number;
+  slPhase3Pct:      number;
+  slAfterTp1Pct:    number;
+}
+
 export interface PaperSniperStatus {
   enabled: boolean;
   virtualBalance: number;
@@ -478,7 +492,7 @@ export interface PaperSniperStatus {
   totalUnrealizedPnlSol: number;
   totalCombinedPnlSol: number;
   capitalInOpen: number;
-  config: SniperConfig;
+  config: PaperConfig;
 }
 
 // ── Stuck tokens — tokens in wallet not tracked as open positions ──────────────

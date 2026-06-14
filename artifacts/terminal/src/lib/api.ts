@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { SniperStatus, SniperPosition, SniperEvent, SniperConfig, StuckToken, SniperHealthMetrics, PaperSniperStatus, PaperPosition, PaperSniperEvent } from "./types";
+import { SniperStatus, SniperPosition, SniperEvent, SniperConfig, StuckToken, SniperHealthMetrics, PaperSniperStatus, PaperPosition, PaperSniperEvent, PaperConfig } from "./types";
 import { useToast } from "@/hooks/use-toast";
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, "") ?? "";
@@ -436,6 +436,39 @@ export function usePaperSniperEvents() {
       return res.json() as Promise<PaperSniperEvent[]>;
     },
     refetchInterval: 5000,
+  });
+}
+
+export function usePaperSniperConfig() {
+  return useQuery<PaperConfig>({
+    queryKey: ["paper-sniper-config"],
+    queryFn: async () => {
+      const res = await fetch(apiUrl("/api/paper-sniper/config"));
+      return res.json() as Promise<PaperConfig>;
+    },
+    staleTime: 30_000,
+  });
+}
+
+export function useUpdatePaperSniperConfig() {
+  const queryClient = useQueryClient();
+  const { toast } = useToast();
+  return useMutation({
+    mutationFn: async (patch: Partial<PaperConfig>) => {
+      const res = await fetch(apiUrl("/api/paper-sniper/config"), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(patch),
+      });
+      if (!res.ok) throw new Error("Config update failed");
+      return res.json() as Promise<PaperConfig>;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["paper-sniper-config"] });
+      queryClient.invalidateQueries({ queryKey: ["paper-sniper-status"] });
+      toast({ title: "Paper settings saved", description: "New config is active immediately." });
+    },
+    onError: () => toast({ title: "Save failed", variant: "destructive" }),
   });
 }
 

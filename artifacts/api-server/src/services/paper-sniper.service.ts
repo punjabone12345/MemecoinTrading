@@ -1,26 +1,51 @@
 import axios from "axios";
 import { logger } from "../lib/logger.js";
 import { query, execute } from "../lib/db.js";
-import { graduationSniperService } from "./graduation-sniper.service.js";
 import { sendTelegram, isTelegramConfigured, toIST } from "../lib/telegram.js";
 
-// ── Constants (mirror live sniper) ───────────────────────────────────────────
+// ── Paper-specific config ──────────────────────────────────────────────────────
+
+export interface PaperConfig {
+  positionSizeSol:  number;
+  maxOpenPositions: number;
+  tp1Pct:           number;
+  tp1ClosePct:      number;
+  tp2Pct:           number;
+  tp2ClosePct:      number;
+  trailingStopPct:  number;
+  slPhase1Pct:      number;  // SL % during first 2 min
+  slPhase2Pct:      number;  // SL % from peak during 2–10 min
+  slPhase3Pct:      number;  // SL % from peak after 10 min
+  slAfterTp1Pct:    number;  // trailing SL % from peak after TP1
+}
+
+const DEFAULT_PAPER_CONFIG: PaperConfig = {
+  positionSizeSol:  0.05,
+  maxOpenPositions: 3,
+  tp1Pct:           150,
+  tp1ClosePct:      40,
+  tp2Pct:           400,
+  tp2ClosePct:      40,
+  trailingStopPct:  30,
+  slPhase1Pct:      20,
+  slPhase2Pct:      25,
+  slPhase3Pct:      30,
+  slAfterTp1Pct:    35,
+};
+
+// ── Constants ─────────────────────────────────────────────────────────────────
 const DEXSCREENER_BASE    = "https://api.dexscreener.com";
 const PRICE_LOOP_MS       = 3_000;
 const STALE_PRICE_MS      = 5_000;
 const BATCH_MAX           = 30;
-const STARTING_BALANCE    = 0.1;        // virtual SOL
+const STARTING_BALANCE    = 0.1;
 const MAX_EVENTS          = 100;
-
-const STAGED_SL_PHASE1_MS   = 2 * 60_000;
-const STAGED_SL_PHASE2_MS   = 10 * 60_000;
-const STAGED_SL_PHASE1_PCT  = 20;
-const STAGED_SL_PHASE2_PCT  = 25;
-const STAGED_SL_PHASE3_PCT  = 30;
-const STAGED_SL_AFTER_TP1   = 35;
+const STAGED_SL_PHASE1_MS = 2 * 60_000;
+const STAGED_SL_PHASE2_MS = 10 * 60_000;
 
 const KV_BALANCE_KEY = "paper_sniper_balance";
 const KV_STATS_KEY   = "paper_sniper_stats";
+const KV_CONFIG_KEY  = "paper_sniper_config";
 
 function uid(): string {
   return `pap-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
@@ -82,7 +107,7 @@ export interface PaperSniperStatus {
   totalUnrealizedPnlSol: number;
   totalCombinedPnlSol: number;
   capitalInOpen: number;
-  config: ReturnType<typeof graduationSniperService.getConfig>;
+  config: PaperConfig;
 }
 
 // ── Service ───────────────────────────────────────────────────────────────────
@@ -95,10 +120,11 @@ class PaperSniperService {
   private broadcaster: (() => void) | null = null;
   private priceIntervalId: ReturnType<typeof setInterval> | null = null;
 
+  private paperConfig: PaperConfig = { ...DEFAULT_PAPER_CONFIG };
   private virtualBalance = STARTING_BALANCE;
   private startingBalance = STARTING_BALANCE;
-  private wins    = 0;
-  private losses  = 0;
+  private wins = 0;
+  private losses = 0;
   private allTimeRealizedSol = 0;
 
   setBroadcaster(fn: () => void): void {
@@ -112,6 +138,7 @@ class PaperSniperService {
   // ── Init ──────────────────────────────────────────────────────────────────
 
   async init(): Promise<void> {
+    await this.loadConfig();
     await this.loadBalance();
     await this.loadStats();
     await this.loadPositions();
@@ -122,6 +149,29 @@ class PaperSniperService {
     );
   }
 
+  private async loadConfig(): Promise<void> {
+    try {
+      const rows = await query<{ value: string }>(
+        `SELECT value FROM kv_store WHERE key = $1`,
+        [KV_CONFIG_KEY],
+      );
+      if (rows.length > 0) {
+        const saved = JSON.parse(rows[0]!.value) as Partial<PaperConfig>;
+        this.paperConfig = { ...DEFAULT_PAPER_CONFIG, ...saved };
+      }
+    } catch { /* table may not exist yet */ }
+  }
+
+  private async persistConfig(): Promise<void> {
+    try {
+      await execute(
+        `INSERT INTO kv_store (key, value) VALUES ($1, $2)
+         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+        [KV_CONFIG_KEY, JSON.stringify(this.paperConfig)],
+      );
+    } catch { /* non-fatal */ }
+  }
+
   private async loadBalance(): Promise<void> {
     try {
       const rows = await query<{ value: string }>(
@@ -130,9 +180,18 @@ class PaperSniperService {
       );
       if (rows.length > 0) {
         this.virtualBalance = parseFloat(rows[0]!.value) || STARTING_BALANCE;
-        this.startingBalance = STARTING_BALANCE;
       }
     } catch { /* table may not exist yet */ }
+  }
+
+  private async persistBalance(): Promise<void> {
+    try {
+      await execute(
+        `INSERT INTO kv_store (key, value) VALUES ($1, $2)
+         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+        [KV_BALANCE_KEY, this.virtualBalance.toString()],
+      );
+    } catch { /* non-fatal */ }
   }
 
   private async loadStats(): Promise<void> {
@@ -148,16 +207,6 @@ class PaperSniperService {
         this.allTimeRealizedSol = s.realized ?? 0;
       }
     } catch { /* ignore */ }
-  }
-
-  private async persistBalance(): Promise<void> {
-    try {
-      await execute(
-        `INSERT INTO kv_store (key, value) VALUES ($1, $2)
-         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
-        [KV_BALANCE_KEY, this.virtualBalance.toString()],
-      );
-    } catch { /* non-fatal */ }
   }
 
   private async persistStats(): Promise<void> {
@@ -227,7 +276,7 @@ class PaperSniperService {
     };
   }
 
-  // ── Entry point — called by live sniper after all filters pass ────────────
+  // ── Entry point ───────────────────────────────────────────────────────────
 
   onGraduation(
     mint: string,
@@ -237,7 +286,7 @@ class PaperSniperService {
     detectedAt: number,
     detectionPrice: number,
   ): void {
-    const cfg = graduationSniperService.getConfig();
+    const cfg = this.paperConfig;
 
     if (this.seenMints.has(mint)) {
       logger.debug({ mint }, "Paper sniper: mint already seen — skip");
@@ -264,7 +313,6 @@ class PaperSniperService {
       ? ((entryPrice / detectionPrice) - 1) * 100
       : 0;
 
-    const slPct    = cfg.slPct;
     const pos: PaperPosition = {
       id:                uid(),
       mint,
@@ -278,7 +326,7 @@ class PaperSniperService {
       tp1Hit:            false,
       tp2Hit:            false,
       remainingFraction: 1.0,
-      effectiveSlPrice:  entryPrice * (1 - slPct / 100),
+      effectiveSlPrice:  entryPrice * (1 - cfg.slPhase1Pct / 100),
       trailingHigh:      entryPrice,
       status:            "open",
       realizedPnlSol:    0,
@@ -314,7 +362,7 @@ class PaperSniperService {
         `💵 Entry: <b>$${entryPrice < 0.0001 ? entryPrice.toExponential(3) : entryPrice.toFixed(8)}</b>\n` +
         `💰 Size: <b>${sizeSol.toFixed(4)} SOL</b> (virtual)\n` +
         `📊 Balance after: <b>${this.virtualBalance.toFixed(4)} SOL</b>\n` +
-        `🛡️ Staged SL: -20% (2m) → -25% peak → -30% peak\n` +
+        `🛡️ SL: -${cfg.slPhase1Pct}% (2m) → -${cfg.slPhase2Pct}% → -${cfg.slPhase3Pct}%\n` +
         `🎯 TP1: +${cfg.tp1Pct}% (sell ${cfg.tp1ClosePct}%)\n` +
         `🎯 TP2: +${cfg.tp2Pct}% (sell ${cfg.tp2ClosePct}%)\n` +
         `🕐 ${toIST(new Date())}`,
@@ -337,17 +385,13 @@ class PaperSniperService {
     const positions = [...this.openPositions.values()];
     if (positions.length === 0) return;
 
-    const cfg = graduationSniperService.getConfig();
+    const cfg = this.paperConfig;
 
-    // Batch DexScreener calls
     for (let i = 0; i < positions.length; i += BATCH_MAX) {
       const batch = positions.slice(i, i + BATCH_MAX);
       const mints = batch.map((p) => p.mint).join(",");
       try {
-        type DexPair = {
-          baseToken: { address: string };
-          priceUsd:  string;
-        };
+        type DexPair = { baseToken: { address: string }; priceUsd: string };
         const res = await axios.get<DexPair[]>(
           `${DEXSCREENER_BASE}/tokens/v1/solana/${mints}`,
           { timeout: 6_000 },
@@ -367,43 +411,40 @@ class PaperSniperService {
           if (price > pos.trailingHigh) pos.trailingHigh = price;
           this.checkTpSl(pos, cfg);
         }
-      } catch { /* non-fatal — skip this tick */ }
+      } catch { /* non-fatal */ }
     }
 
     this.updateUnrealizedPnl();
     this.broadcast();
   }
 
-  private checkTpSl(pos: PaperPosition, cfg: ReturnType<typeof graduationSniperService.getConfig>): void {
+  private checkTpSl(pos: PaperPosition, cfg: PaperConfig): void {
     if (pos.status !== "open") return;
     if (!pos.lastPriceAt || Date.now() - pos.lastPriceAt > STALE_PRICE_MS) return;
 
     const price = pos.currentPrice;
     const pct   = ((price / pos.entryPrice) - 1) * 100;
-    const now   = Date.now();
-    const ageMs = now - pos.entryAt;
+    const ageMs = Date.now() - pos.entryAt;
 
-    // ── TP1 ────────────────────────────────────────────────────────────────
+    // ── TP1 ───────────────────────────────────────────────────────────────
     if (!pos.tp1Hit && pct >= cfg.tp1Pct) {
       const closeFrac = cfg.tp1ClosePct / 100;
-      const solGained = pos.sizeSol * closeFrac * (price / pos.entryPrice);
-      const pnl       = solGained - pos.sizeSol * closeFrac;
+      const pnl = pos.sizeSol * closeFrac * (price / pos.entryPrice) - pos.sizeSol * closeFrac;
       pos.tp1Hit            = true;
       pos.realizedPnlSol   += pnl;
       pos.tp1RealizedSol    = pnl;
       pos.remainingFraction -= closeFrac;
-      pos.effectiveSlPrice  = price * (1 - STAGED_SL_AFTER_TP1 / 100);
+      pos.effectiveSlPrice  = price * (1 - cfg.slAfterTp1Pct / 100);
       logger.info({ mint: pos.mint, symbol: pos.symbol, pct: pct.toFixed(1), pnl },
         "Paper sniper: TP1 hit 🎯");
       void this.persistPosition(pos);
       return;
     }
 
-    // ── TP2 ────────────────────────────────────────────────────────────────
+    // ── TP2 ───────────────────────────────────────────────────────────────
     if (pos.tp1Hit && !pos.tp2Hit && pct >= cfg.tp2Pct) {
-      const closeFrac = cfg.tp2ClosePct / 100 * pos.remainingFraction;
-      const solGained = pos.sizeSol * closeFrac * (price / pos.entryPrice);
-      const pnl       = solGained - pos.sizeSol * closeFrac;
+      const closeFrac = (cfg.tp2ClosePct / 100) * pos.remainingFraction;
+      const pnl = pos.sizeSol * closeFrac * (price / pos.entryPrice) - pos.sizeSol * closeFrac;
       pos.tp2Hit            = true;
       pos.realizedPnlSol   += pnl;
       pos.tp2RealizedSol    = pnl;
@@ -415,23 +456,20 @@ class PaperSniperService {
       return;
     }
 
-    // ── Runner trailing stop (after TP1) ──────────────────────────────────
+    // ── Trailing stop (after TP1) ─────────────────────────────────────────
     if (pos.tp1Hit) {
-      const trailingSlPrice = pos.trailingHigh * (1 - cfg.trailingStopPct / 100);
-      pos.effectiveSlPrice = Math.max(pos.effectiveSlPrice, trailingSlPrice);
+      const trailPrice = pos.trailingHigh * (1 - cfg.trailingStopPct / 100);
+      pos.effectiveSlPrice = Math.max(pos.effectiveSlPrice, trailPrice);
     }
 
     // ── Staged SL ─────────────────────────────────────────────────────────
-    let slDropPct: number;
-    if (pos.tp1Hit) {
-      slDropPct = STAGED_SL_AFTER_TP1;
-    } else if (ageMs < STAGED_SL_PHASE1_MS) {
-      slDropPct = STAGED_SL_PHASE1_PCT;
-    } else if (ageMs < STAGED_SL_PHASE2_MS) {
-      slDropPct = STAGED_SL_PHASE2_PCT;
-    } else {
-      slDropPct = STAGED_SL_PHASE3_PCT;
-    }
+    const slDropPct = pos.tp1Hit
+      ? cfg.slAfterTp1Pct
+      : ageMs < STAGED_SL_PHASE1_MS
+        ? cfg.slPhase1Pct
+        : ageMs < STAGED_SL_PHASE2_MS
+          ? cfg.slPhase2Pct
+          : cfg.slPhase3Pct;
 
     const slThreshold = pos.tp1Hit
       ? pos.effectiveSlPrice
@@ -441,17 +479,17 @@ class PaperSniperService {
       const reason = pos.tp1Hit
         ? `Trailing SL (runner -${cfg.trailingStopPct}% from peak)`
         : ageMs < STAGED_SL_PHASE1_MS
-          ? `Staged SL Ph1 — -${STAGED_SL_PHASE1_PCT}% (${(ageMs / 60_000).toFixed(1)}m)`
+          ? `Staged SL Ph1 — -${cfg.slPhase1Pct}% (${(ageMs / 60_000).toFixed(1)}m)`
           : ageMs < STAGED_SL_PHASE2_MS
-            ? `Staged SL Ph2 — -${STAGED_SL_PHASE2_PCT}% from peak`
-            : `Staged SL Ph3 — -${STAGED_SL_PHASE3_PCT}% from peak`;
+            ? `Staged SL Ph2 — -${cfg.slPhase2Pct}% from peak`
+            : `Staged SL Ph3 — -${cfg.slPhase3Pct}% from peak`;
       this.closePaperPosition(pos, reason, price);
     }
   }
 
   private closePaperPosition(pos: PaperPosition, reason: string, exitPrice: number): void {
-    const solReturned = pos.sizeSol * pos.remainingFraction * (exitPrice / pos.entryPrice);
-    const runnerPnl   = solReturned - pos.sizeSol * pos.remainingFraction;
+    const solReturned     = pos.sizeSol * pos.remainingFraction * (exitPrice / pos.entryPrice);
+    const runnerPnl       = solReturned - pos.sizeSol * pos.remainingFraction;
     pos.runnerRealizedSol = runnerPnl;
     pos.realizedPnlSol   += runnerPnl;
     pos.status      = "closed";
@@ -465,15 +503,11 @@ class PaperSniperService {
     this.closedPositions.unshift(pos);
     if (this.closedPositions.length > 200) this.closedPositions.pop();
 
-    // Return remaining capital + P&L to virtual balance
-    this.virtualBalance += solReturned;
-    this.allTimeRealizedSol += pos.realizedPnlSol;
+    this.virtualBalance       += solReturned;
+    this.allTimeRealizedSol   += pos.realizedPnlSol;
 
-    if (pos.realizedPnlSol >= 0) {
-      this.wins++;
-    } else {
-      this.losses++;
-    }
+    if (pos.realizedPnlSol >= 0) this.wins++;
+    else this.losses++;
 
     void this.persistPosition(pos);
     void this.persistBalance();
@@ -521,12 +555,12 @@ class PaperSniperService {
     for (const pos of this.openPositions.values()) {
       const price = pos.currentPrice;
       if (!price || !pos.entryPrice) continue;
-      const fraction          = pos.remainingFraction;
-      const solAtEntry        = pos.sizeSol * fraction;
-      const solAtCurrent      = solAtEntry * (price / pos.entryPrice);
-      pos.unrealizedPnlSol    = solAtCurrent - solAtEntry;
-      pos.totalPnlSol         = pos.realizedPnlSol + pos.unrealizedPnlSol;
-      pos.pnlPct              = ((price / pos.entryPrice) - 1) * 100;
+      const fraction       = pos.remainingFraction;
+      const solAtEntry     = pos.sizeSol * fraction;
+      const solAtCurrent   = solAtEntry * (price / pos.entryPrice);
+      pos.unrealizedPnlSol = solAtCurrent - solAtEntry;
+      pos.totalPnlSol      = pos.realizedPnlSol + pos.unrealizedPnlSol;
+      pos.pnlPct           = ((price / pos.entryPrice) - 1) * 100;
     }
   }
 
@@ -582,6 +616,17 @@ class PaperSniperService {
 
   // ── Public API ────────────────────────────────────────────────────────────
 
+  getConfig(): PaperConfig {
+    return { ...this.paperConfig };
+  }
+
+  async updateConfig(patch: Partial<PaperConfig>): Promise<PaperConfig> {
+    this.paperConfig = { ...this.paperConfig, ...patch };
+    await this.persistConfig();
+    this.broadcast();
+    return this.getConfig();
+  }
+
   getStatus(): PaperSniperStatus {
     this.updateUnrealizedPnl();
     const open = [...this.openPositions.values()];
@@ -589,18 +634,18 @@ class PaperSniperService {
     const capitalInOpen   = open.reduce((s, p) => s + p.sizeSol * p.remainingFraction, 0);
 
     return {
-      enabled:              true,
-      virtualBalance:       this.virtualBalance,
-      startingBalance:      this.startingBalance,
-      openCount:            this.openPositions.size,
-      tradesTotal:          this.wins + this.losses,
-      wins:                 this.wins,
-      losses:               this.losses,
-      totalRealizedPnlSol:  this.allTimeRealizedSol,
+      enabled:               true,
+      virtualBalance:        this.virtualBalance,
+      startingBalance:       this.startingBalance,
+      openCount:             this.openPositions.size,
+      tradesTotal:           this.wins + this.losses,
+      wins:                  this.wins,
+      losses:                this.losses,
+      totalRealizedPnlSol:   this.allTimeRealizedSol,
       totalUnrealizedPnlSol: totalUnrealized,
-      totalCombinedPnlSol:  this.allTimeRealizedSol + totalUnrealized,
+      totalCombinedPnlSol:   this.allTimeRealizedSol + totalUnrealized,
       capitalInOpen,
-      config:               graduationSniperService.getConfig(),
+      config:                this.getConfig(),
     };
   }
 
@@ -618,27 +663,24 @@ class PaperSniperService {
   }
 
   async reset(): Promise<void> {
-    // Close all open positions at current price (or entry if no price)
     for (const pos of this.openPositions.values()) {
-      pos.status    = "closed";
+      pos.status      = "closed";
       pos.closeReason = "Paper account reset";
-      pos.closedAt  = Date.now();
-      pos.exitPrice = pos.currentPrice || pos.entryPrice;
+      pos.closedAt    = Date.now();
+      pos.exitPrice   = pos.currentPrice || pos.entryPrice;
       void this.persistPosition(pos);
     }
     this.openPositions.clear();
-    this.closedPositions = [];
+    this.closedPositions    = [];
     this.seenMints.clear();
-    this.events = [];
+    this.events             = [];
     this.virtualBalance     = STARTING_BALANCE;
     this.startingBalance    = STARTING_BALANCE;
     this.wins               = 0;
     this.losses             = 0;
     this.allTimeRealizedSol = 0;
 
-    try {
-      await execute(`DELETE FROM paper_sniper_positions`, []);
-    } catch { /* non-fatal */ }
+    try { await execute(`DELETE FROM paper_sniper_positions`, []); } catch { /* non-fatal */ }
 
     await this.persistBalance();
     await this.persistStats();

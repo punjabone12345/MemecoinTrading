@@ -1,424 +1,564 @@
 import { useState } from "react";
-import { useLocation } from "wouter";
-import { FileText, TrendingUp, TrendingDown, RotateCcw, CheckCircle2, XCircle, Clock, ExternalLink, Target, Activity } from "lucide-react";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { usePaperSniperStatus, usePaperSniperPositions, usePaperSniperHistory, usePaperSniperEvents, useResetPaperAccount } from "@/lib/api";
-import { PaperPosition, PaperSniperEvent } from "@/lib/types";
+import {
+  FileText, Settings, X, TrendingUp, TrendingDown, RotateCcw,
+  AlertTriangle, Wallet, ChevronRight, ExternalLink,
+  BarChart2, Clock, Target, Shield, Sliders, Check,
+} from "lucide-react";
+import {
+  usePaperSniperStatus, usePaperSniperPositions, usePaperSniperHistory,
+  usePaperSniperEvents, useResetPaperAccount,
+  usePaperSniperConfig, useUpdatePaperSniperConfig,
+} from "@/lib/api";
+import { PaperConfig, PaperPosition, PaperSniperEvent } from "@/lib/types";
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+// ── Helpers ────────────────────────────────────────────────────────────────────
 
-function fmt(n: number, d = 4): string { return n.toFixed(d); }
-function fmtSigned(n: number, d = 4): string { return (n >= 0 ? "+" : "") + n.toFixed(d); }
-function fmtPct(n: number): string { return (n >= 0 ? "+" : "") + n.toFixed(2) + "%"; }
-function fmtPrice(p: number): string { return p < 0.0001 ? p.toExponential(3) : p.toFixed(6); }
-function timeAgo(ts: number): string {
-  const s = Math.floor((Date.now() - ts) / 1000);
-  if (s < 60)   return `${s}s ago`;
-  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
-  return `${Math.floor(s / 3600)}h ago`;
+function fmt(v: number, d = 4) { return v.toFixed(d); }
+function fmtPct(v: number) { return `${v >= 0 ? "+" : ""}${v.toFixed(1)}%`; }
+function fmtPrice(p: number) {
+  if (!p) return "$0";
+  if (p < 0.000001) return `$${p.toExponential(2)}`;
+  if (p < 0.0001)   return `$${p.toExponential(3)}`;
+  return `$${p.toFixed(6)}`;
 }
-function holdTime(ms: number): string {
-  if (ms <= 0) return "—";
+function ageStr(ms: number) {
   const s = Math.floor(ms / 1000);
-  if (s < 60)   return `${s}s`;
-  const m = Math.floor(s / 60);
-  if (m < 60)   return `${m}m`;
-  const h = Math.floor(m / 60);
-  return `${h}h ${m % 60}m`;
-}
-function mintShort(mint: string): string { return `${mint.slice(0, 4)}…${mint.slice(-4)}`; }
-function solscanUrl(mint: string): string { return `https://solscan.io/token/${mint}`; }
-
-// ── Tab nav ───────────────────────────────────────────────────────────────────
-
-function TabNav() {
-  const [location, navigate] = useLocation();
-  return (
-    <div className="flex gap-1 bg-[#12121a] border border-[#1e1e2e] rounded-lg p-1">
-      <button
-        onClick={() => navigate("/sniper")}
-        className={`flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-colors ${
-          location === "/" || location === "/sniper"
-            ? "bg-violet-600 text-white"
-            : "text-gray-400 hover:text-white hover:bg-[#1e1e2e]"
-        }`}
-      >
-        <Target size={14} />
-        LIVE SNIPER
-      </button>
-      <button
-        onClick={() => navigate("/paper")}
-        className={`flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-colors ${
-          location === "/paper"
-            ? "bg-amber-500 text-black"
-            : "text-gray-400 hover:text-white hover:bg-[#1e1e2e]"
-        }`}
-      >
-        <FileText size={14} />
-        PAPER MODE
-      </button>
-    </div>
-  );
+  if (s < 60)    return `${s}s`;
+  if (s < 3600)  return `${Math.floor(s / 60)}m`;
+  return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
 }
 
-// ── Stat card ─────────────────────────────────────────────────────────────────
+// ── Settings modal ─────────────────────────────────────────────────────────────
 
-function StatCard({ label, value, sub, positive }: {
-  label: string; value: string; sub?: string; positive?: boolean;
-}) {
+type FieldDef = {
+  key: keyof PaperConfig;
+  label: string;
+  description: string;
+  suffix: string;
+  min: number;
+  max: number;
+  step: number;
+  section?: string;
+};
+
+const FIELDS: FieldDef[] = [
+  { section: "Position sizing", key: "positionSizeSol",  label: "Position size",         description: "SOL per virtual trade",                       suffix: "SOL", min: 0.001, max: 10,   step: 0.001 },
+  { key: "maxOpenPositions",   label: "Max open positions",    description: "Max concurrent paper trades",                 suffix: "",    min: 1,     max: 20,   step: 1 },
+  { section: "Take profit",    key: "tp1Pct",           label: "TP1 target",            description: "Sell % of position at this gain",             suffix: "%",   min: 10,    max: 2000, step: 10 },
+  { key: "tp1ClosePct",        label: "TP1 close %",           description: "Portion of position to sell at TP1",          suffix: "%",   min: 1,     max: 100,  step: 1 },
+  { key: "tp2Pct",             label: "TP2 target",            description: "Sell more at this gain",                      suffix: "%",   min: 50,    max: 5000, step: 10 },
+  { key: "tp2ClosePct",        label: "TP2 close %",           description: "Portion of remaining to sell at TP2",         suffix: "%",   min: 1,     max: 100,  step: 1 },
+  { key: "trailingStopPct",    label: "Trailing stop",         description: "Stop when price drops this % from peak",      suffix: "%",   min: 1,     max: 90,   step: 1 },
+  { section: "Stop loss",      key: "slPhase1Pct",      label: "SL phase 1  (0–2 min)", description: "Max drawdown in the first 2 minutes",         suffix: "%",   min: 1,     max: 90,   step: 1 },
+  { key: "slPhase2Pct",        label: "SL phase 2  (2–10 min)",description: "Max drawdown from peak, 2–10 min",           suffix: "%",   min: 1,     max: 90,   step: 1 },
+  { key: "slPhase3Pct",        label: "SL phase 3  (10 min+)", description: "Max drawdown from peak after 10 min",        suffix: "%",   min: 1,     max: 90,   step: 1 },
+  { key: "slAfterTp1Pct",      label: "SL after TP1",          description: "Trailing SL % from peak once TP1 is hit",    suffix: "%",   min: 1,     max: 90,   step: 1 },
+];
+
+const DEFAULT_CFG: PaperConfig = {
+  positionSizeSol: 0.05, maxOpenPositions: 3,
+  tp1Pct: 150, tp1ClosePct: 40, tp2Pct: 400, tp2ClosePct: 40,
+  trailingStopPct: 30, slPhase1Pct: 20, slPhase2Pct: 25, slPhase3Pct: 30, slAfterTp1Pct: 35,
+};
+
+function SettingsModal({ onClose }: { onClose: () => void }) {
+  const { data: cfg } = usePaperSniperConfig();
+  const update = useUpdatePaperSniperConfig();
+  const [draft, setDraft] = useState<Partial<PaperConfig>>({});
+  const merged = { ...DEFAULT_CFG, ...cfg, ...draft };
+  const isDirty = Object.keys(draft).length > 0;
+
+  function handleSave() {
+    update.mutate(draft, { onSuccess: () => { setDraft({}); onClose(); } });
+  }
+
+  const sections: string[] = [];
   return (
-    <div className="bg-[#12121a] border border-[#1e1e2e] rounded-xl p-4">
-      <div className="text-xs text-gray-500 uppercase tracking-wider mb-1">{label}</div>
-      <div className={`text-xl font-bold font-mono ${
-        positive === true ? "text-green-400" : positive === false ? "text-red-400" : "text-amber-400"
-      }`}>
-        {value}
+    <div className="fixed inset-0 z-[100] flex items-end sm:items-center justify-center">
+      <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" onClick={onClose} />
+      <div className="relative w-full max-w-lg mx-auto bg-[#111119] border border-amber-500/20 rounded-t-2xl sm:rounded-2xl shadow-2xl overflow-hidden">
+
+        {/* Header */}
+        <div className="flex items-center justify-between px-5 py-4 border-b border-white/6">
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-8 rounded-xl bg-amber-500/15 border border-amber-500/25 flex items-center justify-center">
+              <Sliders size={14} className="text-amber-400" />
+            </div>
+            <div>
+              <p className="text-sm font-black text-white">Paper Settings</p>
+              <p className="text-[10px] text-white/40 font-medium">Changes apply to new positions only</p>
+            </div>
+          </div>
+          <button onClick={onClose} className="w-7 h-7 rounded-lg bg-white/5 hover:bg-white/10 flex items-center justify-center transition-colors">
+            <X size={14} className="text-white/50" />
+          </button>
+        </div>
+
+        {/* Fields */}
+        <div className="overflow-y-auto max-h-[72vh] px-5 py-3 space-y-0.5">
+          {FIELDS.map((f) => {
+            const showSection = f.section && !sections.includes(f.section);
+            if (f.section && showSection) sections.push(f.section);
+            return (
+              <div key={f.key}>
+                {showSection && (
+                  <p className="text-[9px] font-black text-amber-400/60 uppercase tracking-[0.2em] pt-4 pb-2 border-b border-amber-500/10 mb-1">
+                    {f.section}
+                  </p>
+                )}
+                <div className="flex items-center justify-between py-3 border-b border-white/4 last:border-0">
+                  <div className="flex-1 mr-4">
+                    <p className="text-[11px] font-semibold text-white/75">{f.label}</p>
+                    <p className="text-[10px] text-white/30 mt-0.5">{f.description}</p>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <input
+                      type="number"
+                      className="w-20 bg-white/5 border border-white/10 rounded-xl px-2.5 py-1.5 text-xs font-black text-white text-right focus:outline-none focus:border-amber-500/50 focus:bg-amber-500/5 transition-colors tabular-nums"
+                      value={draft[f.key] ?? merged[f.key]}
+                      min={f.min}
+                      max={f.max}
+                      step={f.step}
+                      onChange={(e) => {
+                        const v = f.step < 1 ? parseFloat(e.target.value) : parseInt(e.target.value, 10);
+                        if (!isNaN(v)) setDraft((d) => ({ ...d, [f.key]: v }));
+                      }}
+                    />
+                    {f.suffix && <span className="text-[10px] text-white/35 font-medium w-6">{f.suffix}</span>}
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Footer */}
+        <div className="flex items-center justify-between px-5 py-4 border-t border-white/6 bg-white/2">
+          <button onClick={() => setDraft({})} disabled={!isDirty} className="text-[11px] text-white/35 hover:text-white/60 disabled:opacity-30 transition-colors font-medium">
+            Discard changes
+          </button>
+          <button
+            onClick={handleSave}
+            disabled={!isDirty || update.isPending}
+            className="flex items-center gap-2 px-5 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 disabled:opacity-40 disabled:cursor-not-allowed text-black text-xs font-black transition-colors"
+          >
+            {update.isPending
+              ? <span className="w-3.5 h-3.5 rounded-full border-2 border-black/30 border-t-black animate-spin" />
+              : <Check size={12} />}
+            Save Settings
+          </button>
+        </div>
       </div>
-      {sub && <div className="text-xs text-gray-500 mt-0.5">{sub}</div>}
     </div>
   );
 }
 
-// ── Open position row ─────────────────────────────────────────────────────────
+// ── Open position card ─────────────────────────────────────────────────────────
 
-function OpenPositionRow({ pos }: { pos: PaperPosition }) {
-  const pnl = pos.unrealizedPnlSol + pos.realizedPnlSol;
-  const pnlPct = pos.pnlPct;
-  const isUp = pnl >= 0;
-  const ageMs = Date.now() - pos.entryAt;
-
-  return (
-    <tr className="border-b border-[#1e1e2e] hover:bg-[#0f0f18] transition-colors">
-      <td className="px-3 py-3">
-        <div className="flex items-center gap-2">
-          <span className="font-bold text-amber-400">{pos.symbol || mintShort(pos.mint)}</span>
-          <a href={solscanUrl(pos.mint)} target="_blank" rel="noopener noreferrer"
-            className="text-gray-600 hover:text-gray-400">
-            <ExternalLink size={11} />
-          </a>
-        </div>
-        <div className="text-xs text-gray-600 font-mono">{mintShort(pos.mint)}</div>
-      </td>
-      <td className="px-3 py-3 font-mono text-xs text-gray-300">
-        ${fmtPrice(pos.entryPrice)}
-      </td>
-      <td className="px-3 py-3 font-mono text-xs text-gray-300">
-        {pos.currentPrice > 0 ? `$${fmtPrice(pos.currentPrice)}` : "—"}
-      </td>
-      <td className="px-3 py-3">
-        <span className={`font-mono text-sm font-bold ${isUp ? "text-green-400" : "text-red-400"}`}>
-          {fmtPct(pnlPct)}
-        </span>
-      </td>
-      <td className="px-3 py-3">
-        <span className={`font-mono text-sm font-bold ${isUp ? "text-green-400" : "text-red-400"}`}>
-          {fmtSigned(pnl)} SOL
-        </span>
-        <div className="text-xs text-gray-600">{fmt(pos.sizeSol)} SOL in</div>
-      </td>
-      <td className="px-3 py-3">
-        <div className="flex gap-1">
-          {pos.tp1Hit && <Badge className="bg-green-900/40 text-green-400 border-green-800 text-xs px-1">TP1</Badge>}
-          {pos.tp2Hit && <Badge className="bg-green-900/40 text-green-400 border-green-800 text-xs px-1">TP2</Badge>}
-          {!pos.tp1Hit && !pos.tp2Hit && <span className="text-gray-600 text-xs">—</span>}
-        </div>
-      </td>
-      <td className="px-3 py-3 text-xs text-gray-500">
-        {holdTime(ageMs)}
-      </td>
-    </tr>
-  );
-}
-
-// ── Closed position row ───────────────────────────────────────────────────────
-
-function HistoryRow({ pos }: { pos: PaperPosition }) {
-  const isWin = pos.realizedPnlSol >= 0;
-  const holdMs = pos.closedAt && pos.entryAt ? pos.closedAt - pos.entryAt : 0;
+function OpenPositionCard({ pos }: { pos: PaperPosition }) {
+  const pct     = pos.pnlPct;
+  const isPos   = pct >= 0;
+  const ageMs   = Date.now() - pos.entryAt;
+  const drawPct = pos.trailingHigh > 0 ? ((pos.currentPrice / pos.trailingHigh) - 1) * 100 : 0;
+  const atPeak  = pos.trailingHigh > 0 && pos.currentPrice >= pos.trailingHigh * 0.995;
 
   return (
-    <tr className="border-b border-[#1e1e2e] hover:bg-[#0f0f18] transition-colors">
-      <td className="px-3 py-2.5">
-        <div className="flex items-center gap-1.5">
-          {isWin ? <CheckCircle2 size={12} className="text-green-400" /> : <XCircle size={12} className="text-red-400" />}
-          <span className="font-bold text-sm text-white">{pos.symbol || mintShort(pos.mint)}</span>
-          <a href={solscanUrl(pos.mint)} target="_blank" rel="noopener noreferrer"
-            className="text-gray-600 hover:text-gray-400">
-            <ExternalLink size={10} />
-          </a>
-        </div>
-      </td>
-      <td className="px-3 py-2.5 font-mono text-xs text-gray-400">
-        ${fmtPrice(pos.entryPrice)}
-      </td>
-      <td className="px-3 py-2.5 font-mono text-xs text-gray-400">
-        {pos.exitPrice ? `$${fmtPrice(pos.exitPrice)}` : "—"}
-      </td>
-      <td className="px-3 py-2.5">
-        <span className={`font-mono text-sm font-bold ${isWin ? "text-green-400" : "text-red-400"}`}>
-          {fmtSigned(pos.realizedPnlSol)} SOL
-        </span>
-      </td>
-      <td className="px-3 py-2.5 text-xs text-gray-500 max-w-[180px] truncate">
-        {pos.closeReason ?? "—"}
-      </td>
-      <td className="px-3 py-2.5 text-xs text-gray-500">
-        {holdMs ? holdTime(holdMs) : "—"}
-      </td>
-      <td className="px-3 py-2.5 text-xs text-gray-600">
-        {pos.closedAt ? timeAgo(pos.closedAt) : "—"}
-      </td>
-    </tr>
-  );
-}
-
-// ── Event row ─────────────────────────────────────────────────────────────────
-
-function EventRow({ ev }: { ev: PaperSniperEvent }) {
-  const icon = ev.action === "entered"
-    ? <Activity size={12} className="text-amber-400" />
-    : ev.action === "closed"
-      ? (ev.pnlSol != null && ev.pnlSol >= 0
-          ? <CheckCircle2 size={12} className="text-green-400" />
-          : <XCircle size={12} className="text-red-400" />)
-      : <XCircle size={12} className="text-gray-500" />;
-
-  return (
-    <div className="flex items-start gap-2 py-1.5 border-b border-[#1a1a24] text-xs">
-      <span className="mt-0.5 shrink-0">{icon}</span>
-      <div className="flex-1 min-w-0">
-        <span className="text-gray-300 font-mono font-bold">{ev.symbol || mintShort(ev.mint)}</span>
-        {" "}
-        {ev.action === "entered" && <span className="text-amber-400">PAPER ENTRY</span>}
-        {ev.action === "closed" && (
-          <span className={ev.pnlSol != null && ev.pnlSol >= 0 ? "text-green-400" : "text-red-400"}>
-            CLOSED {ev.pnlSol != null ? `(${fmtSigned(ev.pnlSol, 4)} SOL)` : ""}
-          </span>
-        )}
-        {ev.action === "skipped" && <span className="text-gray-500">SKIPPED — {ev.skipReason}</span>}
-      </div>
-      <span className="text-gray-700 shrink-0">{timeAgo(ev.detectedAt)}</span>
-    </div>
-  );
-}
-
-// ── Main page ─────────────────────────────────────────────────────────────────
-
-export default function PaperMode() {
-  const [confirmReset, setConfirmReset] = useState(false);
-
-  const { data: status }    = usePaperSniperStatus();
-  const { data: positions } = usePaperSniperPositions();
-  const { data: history }   = usePaperSniperHistory();
-  const { data: events }    = usePaperSniperEvents();
-  const resetMut            = useResetPaperAccount();
-
-  const openPositions  = positions ?? [];
-  const closedHistory  = history  ?? [];
-  const recentEvents   = events   ?? [];
-
-  const totalTrades   = status?.tradesTotal ?? 0;
-  const wins          = status?.wins ?? 0;
-  const losses        = status?.losses ?? 0;
-  const winRate       = totalTrades > 0 ? ((wins / totalTrades) * 100).toFixed(1) : "—";
-  const realizedPnl   = status?.totalRealizedPnlSol ?? 0;
-  const unrealizedPnl = status?.totalUnrealizedPnlSol ?? 0;
-  const combinedPnl   = status?.totalCombinedPnlSol ?? 0;
-  const balance       = status?.virtualBalance ?? 0;
-
-  return (
-    <div className="min-h-screen bg-[#0a0a0f] text-white p-4 max-w-[1400px] mx-auto">
-
-      {/* Header */}
-      <div className="flex items-center justify-between mb-6 flex-wrap gap-3">
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-xl bg-amber-500/20 border border-amber-500/30 flex items-center justify-center">
-            <FileText size={18} className="text-amber-400" />
+    <div className={`rounded-2xl border p-4 ${isPos ? "bg-emerald-950/20 border-emerald-500/15" : "bg-red-950/20 border-red-500/15"}`}>
+      {/* Top row */}
+      <div className="flex items-start justify-between mb-3">
+        <div className="flex items-center gap-2.5">
+          <div className="w-9 h-9 rounded-xl bg-white/6 border border-white/10 flex items-center justify-center">
+            <span className="text-sm font-black text-white/60">{pos.symbol.charAt(0)}</span>
           </div>
           <div>
-            <h1 className="text-xl font-bold text-white">Paper Mode</h1>
-            <p className="text-xs text-gray-500">Simulated sniper — same filters, real prices, no real capital</p>
+            <div className="flex items-center gap-1.5">
+              <span className="text-sm font-black text-white">{pos.symbol}</span>
+              {pos.tp1Hit && <span className="text-[8px] px-1.5 py-0.5 rounded-full bg-violet-500/20 text-violet-300 font-bold border border-violet-500/20">TP1</span>}
+              {pos.tp2Hit && <span className="text-[8px] px-1.5 py-0.5 rounded-full bg-amber-500/20 text-amber-300 font-bold border border-amber-500/20">TP2</span>}
+              {atPeak    && <span className="text-[8px] px-1.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 font-bold border border-emerald-500/20">ATH</span>}
+            </div>
+            <p className="text-[10px] text-white/30 font-medium mt-0.5">{ageStr(ageMs)} in trade · {fmt(pos.sizeSol, 3)} SOL</p>
           </div>
         </div>
-        <TabNav />
-      </div>
-
-      {/* Stats bar */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-3 mb-6">
-        <StatCard
-          label="Paper Balance"
-          value={`${fmt(balance, 4)} SOL`}
-          sub="virtual SOL"
-        />
-        <StatCard
-          label="Realized P&L"
-          value={`${fmtSigned(realizedPnl, 4)} SOL`}
-          positive={realizedPnl >= 0}
-        />
-        <StatCard
-          label="Unrealized P&L"
-          value={`${fmtSigned(unrealizedPnl, 4)} SOL`}
-          positive={unrealizedPnl >= 0}
-        />
-        <StatCard
-          label="Combined P&L"
-          value={`${fmtSigned(combinedPnl, 4)} SOL`}
-          positive={combinedPnl >= 0}
-        />
-        <StatCard
-          label="Win Rate"
-          value={winRate === "—" ? "—" : `${winRate}%`}
-          sub={`${wins}W / ${losses}L`}
-          positive={wins > losses ? true : losses > wins ? false : undefined}
-        />
-        <StatCard
-          label="Open Positions"
-          value={String(status?.openCount ?? 0)}
-          sub={`max ${status?.config.maxOpenPositions ?? 3}`}
-        />
-        <StatCard
-          label="Total Trades"
-          value={String(totalTrades)}
-        />
-      </div>
-
-      {/* Open Positions */}
-      <div className="bg-[#0d0d14] border border-[#1e1e2e] rounded-xl mb-6">
-        <div className="px-4 py-3 border-b border-[#1e1e2e] flex items-center gap-2">
-          <Clock size={14} className="text-amber-400" />
-          <span className="font-semibold text-sm text-white">Open Paper Positions</span>
-          <Badge className="bg-amber-500/20 text-amber-400 border-amber-500/40 ml-1 text-xs">
-            {openPositions.length}
-          </Badge>
+        <div className={`text-right ${isPos ? "text-emerald-400" : "text-red-400"}`}>
+          <p className="text-xl font-black leading-none">{fmtPct(pct)}</p>
+          <p className={`text-[11px] font-bold mt-0.5 ${pos.unrealizedPnlSol >= 0 ? "text-emerald-300/70" : "text-red-300/70"}`}>
+            {pos.unrealizedPnlSol >= 0 ? "+" : ""}{fmt(pos.unrealizedPnlSol)} SOL
+          </p>
         </div>
-        {openPositions.length === 0 ? (
-          <div className="text-gray-600 text-sm text-center py-10">
-            No open paper positions — waiting for next graduation...
-          </div>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full">
-              <thead>
-                <tr className="text-xs text-gray-600 border-b border-[#1e1e2e]">
-                  <th className="text-left px-3 py-2">Token</th>
-                  <th className="text-left px-3 py-2">Entry</th>
-                  <th className="text-left px-3 py-2">Current</th>
-                  <th className="text-left px-3 py-2">P&L %</th>
-                  <th className="text-left px-3 py-2">P&L SOL</th>
-                  <th className="text-left px-3 py-2">TPs</th>
-                  <th className="text-left px-3 py-2">Age</th>
-                </tr>
-              </thead>
-              <tbody>
-                {openPositions.map((pos) => (
-                  <OpenPositionRow key={pos.id} pos={pos} />
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-
-        {/* Trade History */}
-        <div className="lg:col-span-2 bg-[#0d0d14] border border-[#1e1e2e] rounded-xl">
-          <div className="px-4 py-3 border-b border-[#1e1e2e] flex items-center gap-2">
-            {combinedPnl >= 0
-              ? <TrendingUp size={14} className="text-green-400" />
-              : <TrendingDown size={14} className="text-red-400" />}
-            <span className="font-semibold text-sm text-white">Paper Trade History</span>
-            <Badge className="bg-[#1e1e2e] text-gray-400 border-[#2a2a3e] ml-1 text-xs">
-              {closedHistory.length}
-            </Badge>
+      {/* Price row */}
+      <div className="grid grid-cols-3 gap-2 mb-3">
+        {[
+          { label: "Entry",  val: fmtPrice(pos.entryPrice),   cl: "text-white/70" },
+          { label: "Now",    val: fmtPrice(pos.currentPrice), cl: isPos ? "text-emerald-300" : "text-red-300" },
+          { label: "Peak",   val: fmtPrice(pos.trailingHigh), cl: "text-amber-300/80" },
+        ].map(({ label, val, cl }) => (
+          <div key={label} className="bg-white/3 rounded-xl p-2.5">
+            <p className="text-[9px] text-white/30 font-medium mb-1">{label}</p>
+            <p className={`text-[11px] font-bold tabular-nums ${cl}`}>{val}</p>
           </div>
-          {closedHistory.length === 0 ? (
-            <div className="text-gray-600 text-sm text-center py-10">
-              No closed paper trades yet
-            </div>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full">
-                <thead>
-                  <tr className="text-xs text-gray-600 border-b border-[#1e1e2e]">
-                    <th className="text-left px-3 py-2">Token</th>
-                    <th className="text-left px-3 py-2">Entry</th>
-                    <th className="text-left px-3 py-2">Exit</th>
-                    <th className="text-left px-3 py-2">P&L</th>
-                    <th className="text-left px-3 py-2">Reason</th>
-                    <th className="text-left px-3 py-2">Hold</th>
-                    <th className="text-left px-3 py-2">When</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {closedHistory.map((pos) => (
-                    <HistoryRow key={pos.id} pos={pos} />
-                  ))}
-                </tbody>
-              </table>
-            </div>
+        ))}
+      </div>
+
+      {/* SL bar */}
+      <div className="flex items-center gap-2">
+        <Shield size={10} className="text-white/20 shrink-0" />
+        <div className="flex-1 h-1 bg-white/6 rounded-full overflow-hidden">
+          <div
+            className="h-full rounded-full transition-all duration-700"
+            style={{ width: `${Math.max(0, Math.min(100, (pos.currentPrice / pos.trailingHigh) * 100))}%`, background: isPos ? "#34d399" : "#f87171" }}
+          />
+        </div>
+        <span className="text-[9px] text-white/30 font-medium tabular-nums">{drawPct.toFixed(1)}% from peak</span>
+        <a href={`https://solscan.io/token/${pos.mint}`} target="_blank" rel="noreferrer">
+          <ExternalLink size={10} className="text-white/20 hover:text-amber-400 transition-colors" />
+        </a>
+      </div>
+
+      {/* Realized partials */}
+      {pos.realizedPnlSol > 0 && (
+        <div className="mt-2.5 pt-2.5 border-t border-white/5 flex items-center gap-2">
+          <TrendingUp size={10} className="text-violet-400/60" />
+          <p className="text-[10px] text-white/35">
+            Banked: <span className="text-violet-300 font-bold">+{fmt(pos.realizedPnlSol)} SOL</span>
+            {pos.tp1RealizedSol > 0 && <span className="text-white/25"> (TP1 +{fmt(pos.tp1RealizedSol)})</span>}
+            {pos.tp2RealizedSol > 0 && <span className="text-white/25"> (TP2 +{fmt(pos.tp2RealizedSol)})</span>}
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── History row ────────────────────────────────────────────────────────────────
+
+function HistoryRow({ pos }: { pos: PaperPosition }) {
+  const isWin  = pos.realizedPnlSol >= 0;
+  const pnlPct = pos.exitPrice && pos.entryPrice ? ((pos.exitPrice / pos.entryPrice) - 1) * 100 : pos.pnlPct;
+
+  return (
+    <div className="flex items-center gap-3 py-3 border-b border-white/4 last:border-0 hover:bg-white/2 rounded-xl px-1 transition-colors">
+      <div className={`w-7 h-7 rounded-xl flex items-center justify-center shrink-0 ${isWin ? "bg-emerald-500/12" : "bg-red-500/12"}`}>
+        {isWin ? <TrendingUp size={13} className="text-emerald-400" /> : <TrendingDown size={13} className="text-red-400" />}
+      </div>
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-1.5">
+          <span className="text-xs font-black text-white">{pos.symbol}</span>
+          {pos.tp1Hit && <span className="text-[8px] px-1 py-0.5 rounded bg-violet-500/15 text-violet-300 font-bold">TP1</span>}
+          {pos.tp2Hit && <span className="text-[8px] px-1 py-0.5 rounded bg-amber-500/15 text-amber-300 font-bold">TP2</span>}
+        </div>
+        <p className="text-[10px] text-white/25 truncate mt-0.5">{pos.closeReason ?? "—"}</p>
+      </div>
+      <div className="text-right shrink-0">
+        <p className={`text-xs font-black ${isWin ? "text-emerald-400" : "text-red-400"}`}>
+          {isWin ? "+" : ""}{fmt(pos.realizedPnlSol)} SOL
+        </p>
+        <p className={`text-[10px] font-bold ${isWin ? "text-emerald-400/55" : "text-red-400/55"}`}>{fmtPct(pnlPct)}</p>
+      </div>
+    </div>
+  );
+}
+
+// ── Event row ──────────────────────────────────────────────────────────────────
+
+function EventRow({ e }: { e: PaperSniperEvent }) {
+  const isEnter  = e.action === "entered";
+  const isClose  = e.action === "closed";
+  const isWin    = (e.pnlSol ?? 0) >= 0;
+
+  return (
+    <div className="flex items-start gap-3 px-4 py-3 border-b border-white/4 last:border-0">
+      <div className={`w-6 h-6 rounded-full flex items-center justify-center shrink-0 mt-0.5 ${
+        isEnter ? "bg-emerald-500/15"
+        : isClose && isWin ? "bg-emerald-500/15"
+        : isClose ? "bg-red-500/15"
+        : "bg-white/6"
+      }`}>
+        {isEnter && <ChevronRight size={12} className="text-emerald-400" />}
+        {isClose && isWin  && <TrendingUp   size={12} className="text-emerald-400" />}
+        {isClose && !isWin && <TrendingDown  size={12} className="text-red-400" />}
+        {e.action === "skipped" && <AlertTriangle size={11} className="text-white/30" />}
+      </div>
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-[11px] font-bold text-white/80">{e.symbol}</span>
+          <span className={`text-[8px] font-black px-1.5 py-0.5 rounded-full ${
+            isEnter ? "bg-emerald-500/15 text-emerald-300"
+            : isClose ? "bg-violet-500/15 text-violet-300"
+            : "bg-white/6 text-white/35"
+          }`}>{e.action.toUpperCase()}</span>
+          {e.pnlSol !== undefined && (
+            <span className={`text-[10px] font-black ml-auto ${e.pnlSol >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+              {e.pnlSol >= 0 ? "+" : ""}{e.pnlSol.toFixed(4)} SOL
+            </span>
           )}
         </div>
+        {(e.skipReason || e.closeReason) && (
+          <p className="text-[10px] text-white/25 mt-0.5 truncate">{e.skipReason ?? e.closeReason}</p>
+        )}
+        <p className="text-[9px] text-white/20 mt-0.5">{new Date(e.detectedAt).toLocaleTimeString()}</p>
+      </div>
+    </div>
+  );
+}
 
-        {/* Events + Reset */}
-        <div className="flex flex-col gap-4">
-          {/* Events */}
-          <div className="bg-[#0d0d14] border border-[#1e1e2e] rounded-xl flex-1">
-            <div className="px-4 py-3 border-b border-[#1e1e2e] flex items-center gap-2">
-              <Activity size={14} className="text-amber-400" />
-              <span className="font-semibold text-sm text-white">Events</span>
+// ── Stat card ──────────────────────────────────────────────────────────────────
+
+function StatCard({ label, value, sub, accent = "neutral" }: {
+  label: string; value: string; sub?: string;
+  accent?: "amber" | "emerald" | "red" | "violet" | "neutral";
+}) {
+  const cls: Record<string, string> = {
+    amber:   "text-amber-400",
+    emerald: "text-emerald-400",
+    red:     "text-red-400",
+    violet:  "text-violet-400",
+    neutral: "text-white",
+  };
+  const bg: Record<string, string> = {
+    amber:   "bg-amber-500/8  border-amber-500/15",
+    emerald: "bg-emerald-500/8 border-emerald-500/15",
+    red:     "bg-red-500/8   border-red-500/15",
+    violet:  "bg-violet-500/8 border-violet-500/15",
+    neutral: "bg-white/4     border-white/8",
+  };
+  return (
+    <div className={`rounded-2xl border p-4 ${bg[accent]}`}>
+      <p className="text-[9px] text-white/35 font-black uppercase tracking-widest mb-2">{label}</p>
+      <p className={`text-xl font-black leading-none ${cls[accent]}`}>{value}</p>
+      {sub && <p className="text-[10px] text-white/30 mt-1.5 leading-relaxed">{sub}</p>}
+    </div>
+  );
+}
+
+// ── Main page ──────────────────────────────────────────────────────────────────
+
+export default function PaperMode() {
+  const [showSettings, setShowSettings] = useState(false);
+  const [showReset,    setShowReset]    = useState(false);
+  const [tab,          setTab]          = useState<"open" | "history" | "events">("open");
+
+  const { data: status }         = usePaperSniperStatus();
+  const { data: positions = [] } = usePaperSniperPositions();
+  const { data: history = []   } = usePaperSniperHistory();
+  const { data: events = []    } = usePaperSniperEvents();
+  const { data: config }         = usePaperSniperConfig();
+  const resetMutation            = useResetPaperAccount();
+
+  const realizedPnl   = status?.totalRealizedPnlSol   ?? 0;
+  const unrealizedPnl = status?.totalUnrealizedPnlSol ?? 0;
+  const combinedPnl   = status?.totalCombinedPnlSol   ?? 0;
+  const vBal          = status?.virtualBalance         ?? 0;
+  const startBal      = status?.startingBalance        ?? 0.1;
+  const balPct        = ((vBal / startBal) - 1) * 100;
+  const winRate       = status && status.tradesTotal > 0
+    ? `${((status.wins / status.tradesTotal) * 100).toFixed(0)}%`
+    : "—";
+
+  return (
+    <div className="min-h-screen bg-[#09090f]" style={{ fontFamily: "'Inter', sans-serif" }}>
+
+      {/* Amber glow */}
+      <div className="pointer-events-none absolute top-0 left-0 right-0 h-64 bg-gradient-to-b from-amber-500/7 via-amber-500/2 to-transparent" />
+
+      {/* ── Header ── */}
+      <div className="sticky top-0 z-40 bg-[#09090f]/92 backdrop-blur-xl border-b border-white/6">
+        <div className="flex items-center justify-between px-4 py-3 max-w-screen-sm mx-auto">
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-8 rounded-xl bg-amber-500/15 border border-amber-500/20 flex items-center justify-center">
+              <FileText size={14} className="text-amber-400" />
             </div>
-            <div className="px-4 py-2 max-h-[320px] overflow-y-auto">
-              {recentEvents.length === 0 ? (
-                <div className="text-gray-600 text-xs text-center py-6">No events yet</div>
-              ) : (
-                recentEvents.map((ev) => <EventRow key={ev.id} ev={ev} />)
-              )}
+            <div>
+              <h1 className="text-sm font-black text-white tracking-tight">Paper Mode</h1>
+              <p className="text-[9px] text-white/35 font-semibold tracking-wider uppercase mt-0.5">
+                Virtual trading · No real funds
+              </p>
             </div>
           </div>
+          <div className="flex items-center gap-2">
+            {status && status.tradesTotal > 0 && (
+              <div className="hidden sm:flex items-center gap-1 bg-white/5 border border-white/8 rounded-full px-2.5 py-1">
+                <span className="text-emerald-400 text-[10px] font-black">{status.wins}W</span>
+                <span className="text-white/25 text-[10px] mx-0.5">/</span>
+                <span className="text-red-400 text-[10px] font-black">{status.losses}L</span>
+              </div>
+            )}
+            <button
+              onClick={() => setShowSettings(true)}
+              className="w-8 h-8 rounded-xl bg-white/5 hover:bg-amber-500/15 border border-white/8 hover:border-amber-500/20 flex items-center justify-center transition-all group"
+            >
+              <Settings size={13} className="text-white/40 group-hover:text-amber-400 transition-colors" />
+            </button>
+            <button
+              onClick={() => setShowReset(true)}
+              className="w-8 h-8 rounded-xl bg-white/5 hover:bg-red-500/15 border border-white/8 hover:border-red-500/20 flex items-center justify-center transition-all group"
+            >
+              <RotateCcw size={13} className="text-white/40 group-hover:text-red-400 transition-colors" />
+            </button>
+          </div>
+        </div>
+      </div>
 
-          {/* Reset card */}
-          <div className="bg-[#0d0d14] border border-[#1e1e2e] rounded-xl p-4">
-            <div className="text-xs text-gray-500 mb-2">Reset paper account back to 0.1 SOL. All history will be cleared.</div>
-            {!confirmReset ? (
-              <Button
-                variant="outline"
-                size="sm"
-                className="w-full border-amber-700/40 text-amber-400 hover:bg-amber-900/20 hover:text-amber-300"
-                onClick={() => setConfirmReset(true)}
-              >
-                <RotateCcw size={13} className="mr-1.5" />
-                Reset Paper Account
-              </Button>
+      <div className="relative px-4 pt-5 pb-6 max-w-screen-sm mx-auto space-y-4">
+
+        {/* ── Balance hero ── */}
+        <div className="rounded-2xl bg-gradient-to-br from-amber-500/10 via-amber-600/4 to-transparent border border-amber-500/20 p-5">
+          <div className="flex items-start justify-between">
+            <div>
+              <p className="text-[10px] text-amber-400/65 font-black uppercase tracking-[0.18em] mb-1.5">Virtual Balance</p>
+              <p className="text-4xl font-black text-white leading-none tracking-tight">
+                {fmt(vBal)}
+                <span className="text-xl font-bold text-white/35 ml-2">SOL</span>
+              </p>
+              <div className="flex items-center gap-2 mt-2.5">
+                <div className={`w-1.5 h-1.5 rounded-full ${balPct >= 0 ? "bg-emerald-400" : "bg-red-400"}`} />
+                <span className={`text-xs font-bold ${balPct >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                  {balPct >= 0 ? "+" : ""}{balPct.toFixed(1)}% from start
+                </span>
+                <span className="text-white/20 text-xs font-medium">(started {fmt(startBal, 3)} SOL)</span>
+              </div>
+            </div>
+            <div className="text-right">
+              <div className="flex items-center gap-1 justify-end mb-1">
+                <Wallet size={10} className="text-amber-400/50" />
+                <span className="text-[10px] text-white/35 font-medium">In trades</span>
+              </div>
+              <p className="text-base font-black text-white/65">{fmt(status?.capitalInOpen ?? 0)} SOL</p>
+              <p className="text-[10px] text-white/25 mt-0.5">{status?.openCount ?? 0} open</p>
+            </div>
+          </div>
+        </div>
+
+        {/* ── Stats grid ── */}
+        <div className="grid grid-cols-2 gap-3">
+          <StatCard
+            label="Total P&L"
+            value={`${combinedPnl >= 0 ? "+" : ""}${fmt(combinedPnl)} SOL`}
+            sub={`Realized: ${realizedPnl >= 0 ? "+" : ""}${fmt(realizedPnl)}`}
+            accent={combinedPnl >= 0 ? "emerald" : "red"}
+          />
+          <StatCard
+            label="Unrealized"
+            value={`${unrealizedPnl >= 0 ? "+" : ""}${fmt(unrealizedPnl)} SOL`}
+            sub={`${positions.length} position${positions.length !== 1 ? "s" : ""} open`}
+            accent={unrealizedPnl === 0 ? "neutral" : unrealizedPnl > 0 ? "emerald" : "red"}
+          />
+          <StatCard
+            label="Win Rate"
+            value={winRate}
+            sub={`${status?.wins ?? 0}W · ${status?.losses ?? 0}L of ${status?.tradesTotal ?? 0} total`}
+            accent={winRate === "—" ? "neutral" : parseInt(winRate) >= 50 ? "emerald" : "red"}
+          />
+          <StatCard
+            label="Config"
+            value={`${config?.positionSizeSol ?? 0.05} SOL`}
+            sub={`TP1 +${config?.tp1Pct ?? 150}% · TP2 +${config?.tp2Pct ?? 400}% · Max ${config?.maxOpenPositions ?? 3}`}
+            accent="amber"
+          />
+        </div>
+
+        {/* ── Tabs ── */}
+        <div className="flex gap-1 bg-white/4 rounded-xl p-1">
+          {(["open", "history", "events"] as const).map((t) => (
+            <button
+              key={t}
+              onClick={() => setTab(t)}
+              className={`flex-1 py-2 rounded-lg text-[11px] font-bold transition-all capitalize ${
+                tab === t
+                  ? "bg-amber-500/18 text-amber-300 border border-amber-500/25"
+                  : "text-white/30 hover:text-white/55"
+              }`}
+            >
+              {t === "open"    && `Open (${positions.length})`}
+              {t === "history" && `History (${history.length})`}
+              {t === "events"  && `Events (${events.length})`}
+            </button>
+          ))}
+        </div>
+
+        {/* ── Open positions ── */}
+        {tab === "open" && (
+          <div className="space-y-3">
+            {positions.length === 0 ? (
+              <div className="flex flex-col items-center justify-center py-16 gap-4">
+                <div className="w-14 h-14 rounded-2xl bg-amber-500/8 border border-amber-500/15 flex items-center justify-center">
+                  <Target size={24} className="text-amber-400/40" />
+                </div>
+                <div className="text-center">
+                  <p className="text-sm font-bold text-white/25">Watching for graduations…</p>
+                  <p className="text-[11px] text-white/15 mt-1 max-w-xs">
+                    Paper trades fire automatically alongside live signals — no wallet needed.
+                  </p>
+                </div>
+              </div>
             ) : (
-              <div className="flex gap-2">
-                <Button
-                  variant="destructive"
-                  size="sm"
-                  className="flex-1"
-                  disabled={resetMut.isPending}
-                  onClick={() => {
-                    resetMut.mutate(undefined, {
-                      onSettled: () => setConfirmReset(false),
-                    });
-                  }}
-                >
-                  {resetMut.isPending ? "Resetting…" : "Confirm Reset"}
-                </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="flex-1 border-[#2a2a3e]"
-                  onClick={() => setConfirmReset(false)}
-                >
-                  Cancel
-                </Button>
+              positions.map((pos) => <OpenPositionCard key={pos.id} pos={pos} />)
+            )}
+          </div>
+        )}
+
+        {/* ── History ── */}
+        {tab === "history" && (
+          <div className="rounded-2xl bg-white/3 border border-white/6 overflow-hidden">
+            {history.length === 0 ? (
+              <div className="flex flex-col items-center justify-center py-16 gap-3">
+                <BarChart2 size={26} className="text-white/12" />
+                <p className="text-sm font-bold text-white/20">No closed trades yet</p>
+              </div>
+            ) : (
+              <div className="px-3 py-1">
+                {history.map((pos) => <HistoryRow key={pos.id} pos={pos} />)}
               </div>
             )}
           </div>
-        </div>
+        )}
+
+        {/* ── Events ── */}
+        {tab === "events" && (
+          <div className="rounded-2xl bg-white/3 border border-white/6 overflow-hidden">
+            {events.length === 0 ? (
+              <div className="flex flex-col items-center justify-center py-16 gap-3">
+                <Clock size={26} className="text-white/12" />
+                <p className="text-sm font-bold text-white/20">No events yet</p>
+              </div>
+            ) : events.map((e) => <EventRow key={e.id} e={e} />)}
+          </div>
+        )}
       </div>
+
+      {/* ── Settings modal ── */}
+      {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
+
+      {/* ── Reset confirm ── */}
+      {showReset && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center px-4">
+          <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" onClick={() => setShowReset(false)} />
+          <div className="relative w-full max-w-sm bg-[#111119] border border-red-500/25 rounded-2xl shadow-2xl p-6">
+            <div className="w-12 h-12 rounded-2xl bg-red-500/10 border border-red-500/20 flex items-center justify-center mx-auto mb-4">
+              <AlertTriangle size={20} className="text-red-400" />
+            </div>
+            <h3 className="text-base font-black text-white text-center mb-1.5">Reset Paper Account?</h3>
+            <p className="text-xs text-white/35 text-center mb-6 leading-relaxed">
+              All positions, history, and P&L will be permanently wiped.<br />
+              Virtual balance returns to 0.1 SOL.
+            </p>
+            <div className="flex gap-2">
+              <button onClick={() => setShowReset(false)} className="flex-1 py-2.5 rounded-xl bg-white/5 hover:bg-white/8 border border-white/8 text-white/55 text-xs font-bold transition-colors">
+                Cancel
+              </button>
+              <button
+                onClick={() => { resetMutation.mutate(); setShowReset(false); }}
+                disabled={resetMutation.isPending}
+                className="flex-1 py-2.5 rounded-xl bg-red-500 hover:bg-red-400 disabled:opacity-50 text-white text-xs font-black transition-colors"
+              >
+                {resetMutation.isPending ? "Resetting…" : "Reset Account"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

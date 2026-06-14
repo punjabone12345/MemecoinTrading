@@ -1,7 +1,6 @@
 import { useState } from "react";
-import { useLocation } from "wouter";
 import { useQueryClient } from "@tanstack/react-query";
-import { Target, Wifi, WifiOff, TrendingUp, TrendingDown, RefreshCw, Settings, X, CheckCircle2, XCircle, Clock, Zap, Trash2, Pencil, RotateCcw, AlertTriangle, Download, ExternalLink, Activity, LogOut, Wallet, Copy, FileText } from "lucide-react";
+import { Target, Wifi, WifiOff, TrendingUp, TrendingDown, RefreshCw, Settings, X, CheckCircle2, XCircle, Clock, Zap, Trash2, Pencil, RotateCcw, AlertTriangle, Download, ExternalLink, Activity, LogOut, Wallet, Copy } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -754,7 +753,6 @@ export default function GraduationSniper() {
   const [showReset,    setShowReset]    = useState(false);
   const [copied,       setCopied]       = useState(false);
   const queryClient = useQueryClient();
-  const [, navigate] = useLocation();
   const { data: status, isLoading: statusLoading } = useSniperStatus();
   const { data: wallet, isFetching: walletFetching } = useWalletBalance();
   const { data: positions = [] } = useSniperPositions();
@@ -800,14 +798,6 @@ export default function GraduationSniper() {
             </div>
           </div>
           <div className="flex items-center gap-2">
-            <button
-              onClick={() => navigate("/paper")}
-              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/20 text-amber-400 text-[10px] font-bold transition-colors"
-              title="Open Paper Mode"
-            >
-              <FileText className="w-3 h-3" />
-              PAPER
-            </button>
             <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold ${
               status?.wsConnected ? "bg-emerald-500/15 text-emerald-400" : "bg-red-500/15 text-red-400"
             }`}>
