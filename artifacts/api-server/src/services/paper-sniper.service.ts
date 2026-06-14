@@ -81,6 +81,7 @@ export interface PaperPosition {
   runnerRealizedSol: number;
   detectionPrice?: number;
   entryDriftPct?: number;
+  msDetectionToFill?: number;
   lastPriceAt?: number;
 }
 

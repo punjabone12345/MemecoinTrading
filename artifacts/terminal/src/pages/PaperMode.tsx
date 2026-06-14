@@ -202,6 +202,23 @@ function OpenPositionCard({ pos }: { pos: PaperPosition }) {
         ))}
       </div>
 
+      {/* Drift / execution row */}
+      {pos.detectionPrice != null && (
+        <div className="flex items-center gap-1 flex-wrap mb-2.5 text-[10px]">
+          <span className="text-white/30">Detect {fmtPrice(pos.detectionPrice)}</span>
+          <span className="text-white/20">→</span>
+          <span className="text-white/30">Fill {fmtPrice(pos.entryPrice)}</span>
+          {pos.entryDriftPct != null && (
+            <span className={`font-semibold ${pos.entryDriftPct > 5 ? "text-amber-400/80" : pos.entryDriftPct < -2 ? "text-emerald-400/80" : "text-white/40"}`}>
+              ({pos.entryDriftPct >= 0 ? "+" : ""}{pos.entryDriftPct.toFixed(1)}% drift)
+            </span>
+          )}
+          {pos.msDetectionToFill != null && (
+            <span className="text-white/25">{(pos.msDetectionToFill / 1000).toFixed(1)}s</span>
+          )}
+        </div>
+      )}
+
       {/* SL bar */}
       <div className="flex items-center gap-2">
         <Shield size={10} className="text-white/20 shrink-0" />
@@ -212,8 +229,8 @@ function OpenPositionCard({ pos }: { pos: PaperPosition }) {
           />
         </div>
         <span className="text-[9px] text-white/30 font-medium tabular-nums">{drawPct.toFixed(1)}% from peak</span>
-        <a href={`https://solscan.io/token/${pos.mint}`} target="_blank" rel="noreferrer">
-          <ExternalLink size={10} className="text-white/20 hover:text-amber-400 transition-colors" />
+        <a href={`https://dexscreener.com/solana/${pos.mint}`} target="_blank" rel="noreferrer" title="View on DexScreener">
+          <ExternalLink size={10} className="text-white/20 hover:text-violet-400 transition-colors" />
         </a>
       </div>
 
