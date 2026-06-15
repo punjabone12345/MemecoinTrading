@@ -121,7 +121,8 @@ const FIELDS: FieldDef[] = [
   { key: "slPhase2Pct",        label: "SL phase 2  (2–10 min)",description: "Max drawdown from peak, 2–10 min",           suffix: "%",   min: 1,     max: 90,   step: 1 },
   { key: "slPhase3Pct",        label: "SL phase 3  (10 min+)", description: "Max drawdown from peak after 10 min",        suffix: "%",   min: 1,     max: 90,   step: 1 },
   { key: "slAfterTp1Pct",        label: "SL after TP1",              description: "Trailing SL % from peak once TP1 is hit",       suffix: "%",   min: 1,      max: 90,     step: 1    },
-  { section: "Entry drift filter", key: "maxFillDriftPct",    label: "Max fill drift",            description: "Skip entry if price moved more than this % from detection baseline", suffix: "%", min: 1, max: 50, step: 1 },
+  { section: "Entry drift filter", key: "simulatedExecDelayMs", label: "Exec delay (sim)",          description: "Wait this long after graduation before entering — simulates real buy latency", suffix: "s", min: 0, max: 30, step: 1 },
+  { key: "maxFillDriftPct",       label: "Max fill drift",            description: "Skip entry if price drifted more than this % during exec delay", suffix: "%", min: 1, max: 50, step: 1 },
   { section: "Dead-coin filter", key: "deadCoinWindowMs",   label: "Dead-coin window",           description: "Auto-close if coin doesn't move enough within this window", suffix: "hrs", min: 0.5, max: 24, step: 0.5 },
   { key: "deadCoinMinMovePct",   label: "Min movement required",     description: "Peak must exceed this % from entry or coin is dead", suffix: "%",   min: 1,  max: 50, step: 1 },
 ];
@@ -130,7 +131,8 @@ const DEFAULT_CFG: PaperConfig = {
   positionSizeSol: 0.05, maxOpenPositions: 3,
   tp1Pct: 150, tp1ClosePct: 40, tp2Pct: 400, tp2ClosePct: 40,
   trailingStopPct: 30, slPhase1Pct: 20, slPhase2Pct: 25, slPhase3Pct: 30, slAfterTp1Pct: 35,
-  maxFillDriftPct: 15,
+  simulatedExecDelayMs: 5_000,
+  maxFillDriftPct: 20,
   deadCoinWindowMs: 7_200_000, deadCoinMinMovePct: 5,
 };
 
@@ -191,7 +193,9 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
                       value={
                         f.key === "deadCoinWindowMs"
                           ? ((draft[f.key] ?? merged[f.key]) as number) / 3_600_000
-                          : (draft[f.key] ?? merged[f.key])
+                          : f.key === "simulatedExecDelayMs"
+                            ? ((draft[f.key] ?? merged[f.key]) as number) / 1_000
+                            : (draft[f.key] ?? merged[f.key])
                       }
                       min={f.min}
                       max={f.max}
@@ -201,7 +205,9 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
                         if (!isNaN(raw)) {
                           const v = f.key === "deadCoinWindowMs"
                             ? Math.round(raw * 3_600_000)
-                            : f.step < 1 ? raw : parseInt(e.target.value, 10);
+                            : f.key === "simulatedExecDelayMs"
+                              ? Math.round(raw * 1_000)
+                              : f.step < 1 ? raw : parseInt(e.target.value, 10);
                           setDraft((d) => ({ ...d, [f.key]: v }));
                         }
                       }}

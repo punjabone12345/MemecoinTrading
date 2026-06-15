@@ -479,9 +479,10 @@ export interface PaperConfig {
   slPhase2Pct:        number;
   slPhase3Pct:        number;
   slAfterTp1Pct:      number;
-  deadCoinWindowMs:   number;
-  deadCoinMinMovePct: number;
-  maxFillDriftPct:    number;
+  deadCoinWindowMs:     number;
+  deadCoinMinMovePct:   number;
+  maxFillDriftPct:      number;
+  simulatedExecDelayMs: number;
 }
 
 export interface PaperSniperStatus {

@@ -17,9 +17,10 @@ export interface PaperConfig {
   slPhase2Pct:        number;  // SL % from peak during 2–10 min
   slPhase3Pct:        number;  // SL % from peak after 10 min
   slAfterTp1Pct:      number;  // trailing SL % from peak after TP1
-  deadCoinWindowMs:   number;  // ms to wait before dead-coin check (default 2h)
-  deadCoinMinMovePct: number;  // min peak move % required — if not reached, close as dead
-  maxFillDriftPct:    number;  // skip entry if price already moved > this % from detection baseline
+  deadCoinWindowMs:     number;  // ms to wait before dead-coin check (default 2h)
+  deadCoinMinMovePct:   number;  // min peak move % required — if not reached, close as dead
+  maxFillDriftPct:      number;  // skip entry if price already moved > this % from detection baseline
+  simulatedExecDelayMs: number;  // ms to wait after graduation before entering (simulates real exec latency)
 }
 
 const DEFAULT_PAPER_CONFIG: PaperConfig = {
@@ -34,9 +35,10 @@ const DEFAULT_PAPER_CONFIG: PaperConfig = {
   slPhase2Pct:        25,
   slPhase3Pct:        30,
   slAfterTp1Pct:      35,
-  deadCoinWindowMs:   2 * 60 * 60_000,  // 2 hours
-  deadCoinMinMovePct: 5,                 // must move >5% from entry
-  maxFillDriftPct:    15,                // skip if entry price > 15% above detection baseline
+  deadCoinWindowMs:     2 * 60 * 60_000,  // 2 hours
+  deadCoinMinMovePct:   5,                // must move >5% from entry
+  maxFillDriftPct:      20,               // skip if exec price > 20% above detection baseline
+  simulatedExecDelayMs: 5_000,            // 5s to simulate real buy latency
 };
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -307,23 +309,93 @@ class PaperSniperService {
       return;
     }
 
-    const sizeSol = cfg.positionSizeSol;
-    if (this.virtualBalance < sizeSol) {
+    if (this.virtualBalance < cfg.positionSizeSol) {
       this.addEvent({ id: uid(), detectedAt, mint, symbol, action: "skipped",
-        skipReason: `Insufficient paper balance (${this.virtualBalance.toFixed(4)} SOL < ${sizeSol} SOL)` });
+        skipReason: `Insufficient paper balance (${this.virtualBalance.toFixed(4)} SOL < ${cfg.positionSizeSol} SOL)` });
       return;
     }
 
-    this.seenMints.add(mint);
-
-    const driftPct = detectionPrice > 0
+    // Fast-fail: if price already exceeds drift threshold before the exec delay
+    const instantDriftPct = detectionPrice > 0
       ? ((entryPrice / detectionPrice) - 1) * 100
       : 0;
-
-    if (detectionPrice > 0 && driftPct > cfg.maxFillDriftPct) {
-      const reason = `Fill drift abort — price +${driftPct.toFixed(1)}% above detection baseline (>${cfg.maxFillDriftPct}% threshold)`;
+    if (detectionPrice > 0 && instantDriftPct > cfg.maxFillDriftPct) {
+      const reason = `Fill drift abort — price +${instantDriftPct.toFixed(1)}% above baseline at detection (>${cfg.maxFillDriftPct}% threshold)`;
       this.addEvent({ id: uid(), detectedAt, mint, symbol, action: "skipped", skipReason: reason });
-      logger.info({ mint, symbol, driftPct: driftPct.toFixed(1), maxFillDriftPct: cfg.maxFillDriftPct }, "Paper sniper: skipped — fill drift too high");
+      logger.info({ mint, symbol, instantDriftPct: instantDriftPct.toFixed(1) }, "Paper sniper: fast-fail — drift already exceeded at detection");
+      this.broadcast();
+      return;
+    }
+
+    // Reserve this mint so no duplicate fires during the exec delay
+    this.seenMints.add(mint);
+
+    // Simulate real execution latency: wait simulatedExecDelayMs, then re-fetch
+    // price and check drift again before entering — matches live bot's ~5s checks.
+    void this.scheduleDelayedEntry(mint, entryPrice, symbol, name, detectedAt, detectionPrice);
+  }
+
+  private async scheduleDelayedEntry(
+    mint: string,
+    entryPrice: number,
+    symbol: string,
+    name: string,
+    detectedAt: number,
+    detectionPrice: number,
+  ): Promise<void> {
+    const cfg = this.paperConfig;
+    const delayMs = cfg.simulatedExecDelayMs ?? 5_000;
+
+    if (delayMs > 0) {
+      await new Promise<void>((r) => setTimeout(r, delayMs));
+    }
+
+    // Re-read config (may have changed during wait)
+    const cfgNow = this.paperConfig;
+    const sizeSol = cfgNow.positionSizeSol;
+
+    // Re-check capacity after delay
+    if (this.virtualBalance < sizeSol) {
+      this.addEvent({ id: uid(), detectedAt, mint, symbol, action: "skipped",
+        skipReason: `Insufficient balance after ${(delayMs / 1000).toFixed(0)}s exec delay (${this.virtualBalance.toFixed(4)} SOL < ${sizeSol} SOL)` });
+      this.seenMints.delete(mint);
+      this.broadcast();
+      return;
+    }
+    if (this.openPositions.size >= cfgNow.maxOpenPositions) {
+      this.addEvent({ id: uid(), detectedAt, mint, symbol, action: "skipped",
+        skipReason: `Max positions reached after ${(delayMs / 1000).toFixed(0)}s exec delay` });
+      this.seenMints.delete(mint);
+      this.broadcast();
+      return;
+    }
+
+    // Fetch fresh execution price from DexScreener to simulate real fill price
+    let execPrice = entryPrice;
+    try {
+      type DexPair = { baseToken: { address: string }; priceUsd: string };
+      const res = await axios.get<DexPair[]>(
+        `${DEXSCREENER_BASE}/tokens/v1/solana/${mint}`,
+        { timeout: 4_000 },
+      );
+      const pairs = (res.data ?? []) as DexPair[];
+      for (const pair of pairs) {
+        const p = parseFloat(pair.priceUsd);
+        if (p > 0) { execPrice = p; break; }
+      }
+    } catch {
+      logger.debug({ mint, symbol }, "Paper sniper: exec-delay DexScreener fetch failed — using original price");
+    }
+
+    // Check drift with the real execution price
+    const execDriftPct = detectionPrice > 0
+      ? ((execPrice / detectionPrice) - 1) * 100
+      : 0;
+
+    if (detectionPrice > 0 && execDriftPct > cfgNow.maxFillDriftPct) {
+      const reason = `Exec delay drift abort — price +${execDriftPct.toFixed(1)}% above baseline after ${(delayMs / 1000).toFixed(0)}s (>${cfgNow.maxFillDriftPct}% threshold)`;
+      this.addEvent({ id: uid(), detectedAt, mint, symbol, action: "skipped", skipReason: reason });
+      logger.info({ mint, symbol, execDriftPct: execDriftPct.toFixed(1), delayMs }, "Paper sniper: skipped — exec delay drift exceeded threshold");
       this.seenMints.delete(mint);
       this.broadcast();
       return;
@@ -336,14 +408,14 @@ class PaperSniperService {
       name,
       detectedAt,
       entryAt:           Date.now(),
-      entryPrice,
-      currentPrice:      entryPrice,
+      entryPrice:        execPrice,
+      currentPrice:      execPrice,
       sizeSol,
       tp1Hit:            false,
       tp2Hit:            false,
       remainingFraction: 1.0,
-      effectiveSlPrice:  entryPrice * (1 - cfg.slPhase1Pct / 100),
-      trailingHigh:      entryPrice,
+      effectiveSlPrice:  execPrice * (1 - cfgNow.slPhase1Pct / 100),
+      trailingHigh:      execPrice,
       status:            "open",
       realizedPnlSol:    0,
       unrealizedPnlSol:  0,
@@ -353,7 +425,7 @@ class PaperSniperService {
       tp2RealizedSol:    0,
       runnerRealizedSol: 0,
       detectionPrice,
-      entryDriftPct:     driftPct,
+      entryDriftPct:     execDriftPct,
     };
 
     this.virtualBalance -= sizeSol;
@@ -365,7 +437,7 @@ class PaperSniperService {
     this.addEvent({ id: uid(), detectedAt, mint, symbol, action: "entered" });
 
     logger.info(
-      { mint, symbol, entryPrice, sizeSol, virtualBalance: this.virtualBalance },
+      { mint, symbol, detectionPrice, execPrice, execDriftPct: execDriftPct.toFixed(1) + "%", delayMs, sizeSol, virtualBalance: this.virtualBalance },
       "Paper sniper: PAPER position entered 📄",
     );
 
@@ -375,12 +447,13 @@ class PaperSniperService {
         `──────────────────────\n` +
         `🪙 Token: <b>${symbol}</b>\n` +
         `📋 CA: <code>${mint}</code>\n` +
-        `💵 Entry: <b>$${entryPrice < 0.0001 ? entryPrice.toExponential(3) : entryPrice.toFixed(8)}</b>\n` +
+        `💵 Entry: <b>$${execPrice < 0.0001 ? execPrice.toExponential(3) : execPrice.toFixed(8)}</b>\n` +
+        `📈 Drift: ${execDriftPct >= 0 ? "+" : ""}${execDriftPct.toFixed(1)}% (after ${(delayMs / 1000).toFixed(0)}s delay)\n` +
         `💰 Size: <b>${sizeSol.toFixed(4)} SOL</b> (virtual)\n` +
         `📊 Balance after: <b>${this.virtualBalance.toFixed(4)} SOL</b>\n` +
-        `🛡️ SL: -${cfg.slPhase1Pct}% (2m) → -${cfg.slPhase2Pct}% → -${cfg.slPhase3Pct}%\n` +
-        `🎯 TP1: +${cfg.tp1Pct}% (sell ${cfg.tp1ClosePct}%)\n` +
-        `🎯 TP2: +${cfg.tp2Pct}% (sell ${cfg.tp2ClosePct}%)\n` +
+        `🛡️ SL: -${cfgNow.slPhase1Pct}% (2m) → -${cfgNow.slPhase2Pct}% → -${cfgNow.slPhase3Pct}%\n` +
+        `🎯 TP1: +${cfgNow.tp1Pct}% (sell ${cfgNow.tp1ClosePct}%)\n` +
+        `🎯 TP2: +${cfgNow.tp2Pct}% (sell ${cfgNow.tp2ClosePct}%)\n` +
         `🕐 ${toIST(new Date())}`,
       );
     }
@@ -444,16 +517,19 @@ class PaperSniperService {
 
     // ── TP1 ───────────────────────────────────────────────────────────────
     if (!pos.tp1Hit && pct >= cfg.tp1Pct) {
-      const closeFrac = cfg.tp1ClosePct / 100;
-      const pnl = pos.sizeSol * closeFrac * (price / pos.entryPrice) - pos.sizeSol * closeFrac;
+      const closeFrac   = cfg.tp1ClosePct / 100;
+      const solReturned = pos.sizeSol * closeFrac * (price / pos.entryPrice);
+      const pnl         = solReturned - pos.sizeSol * closeFrac;
       pos.tp1Hit            = true;
       pos.realizedPnlSol   += pnl;
       pos.tp1RealizedSol    = pnl;
       pos.remainingFraction -= closeFrac;
       pos.effectiveSlPrice  = price * (1 - cfg.slAfterTp1Pct / 100);
-      logger.info({ mint: pos.mint, symbol: pos.symbol, pct: pct.toFixed(1), pnl },
+      this.virtualBalance  += solReturned;
+      logger.info({ mint: pos.mint, symbol: pos.symbol, pct: pct.toFixed(1), pnl, solReturned, virtualBalance: this.virtualBalance },
         "Paper sniper: TP1 hit 🎯");
       void this.persistPosition(pos);
+      void this.persistBalance();
       if (isTelegramConfigured()) {
         void sendTelegram(
           `🎯 <b>PAPER TP1 HIT</b>\n` +
@@ -472,16 +548,19 @@ class PaperSniperService {
 
     // ── TP2 ───────────────────────────────────────────────────────────────
     if (pos.tp1Hit && !pos.tp2Hit && pct >= cfg.tp2Pct) {
-      const closeFrac = (cfg.tp2ClosePct / 100) * pos.remainingFraction;
-      const pnl = pos.sizeSol * closeFrac * (price / pos.entryPrice) - pos.sizeSol * closeFrac;
+      const closeFrac   = (cfg.tp2ClosePct / 100) * pos.remainingFraction;
+      const solReturned = pos.sizeSol * closeFrac * (price / pos.entryPrice);
+      const pnl         = solReturned - pos.sizeSol * closeFrac;
       pos.tp2Hit            = true;
       pos.realizedPnlSol   += pnl;
       pos.tp2RealizedSol    = pnl;
-      pos.remainingFraction -= closeFrac / pos.remainingFraction;
+      pos.remainingFraction -= closeFrac;
       pos.effectiveSlPrice  = price * (1 - cfg.trailingStopPct / 100);
-      logger.info({ mint: pos.mint, symbol: pos.symbol, pct: pct.toFixed(1), pnl },
+      this.virtualBalance  += solReturned;
+      logger.info({ mint: pos.mint, symbol: pos.symbol, pct: pct.toFixed(1), pnl, solReturned, virtualBalance: this.virtualBalance },
         "Paper sniper: TP2 hit 🎯🎯");
       void this.persistPosition(pos);
+      void this.persistBalance();
       if (isTelegramConfigured()) {
         void sendTelegram(
           `🎯🎯 <b>PAPER TP2 HIT</b>\n` +
@@ -675,7 +754,8 @@ class PaperSniperService {
   // ── Public API ────────────────────────────────────────────────────────────
 
   closePositionById(id: string): boolean {
-    const pos = this.openPositions.get(id);
+    // openPositions is keyed by mint, not id — search by value
+    const pos = [...this.openPositions.values()].find((p) => p.id === id);
     if (!pos || pos.status !== "open") return false;
     this.closePaperPosition(pos, "Manual close", pos.currentPrice);
     return true;
