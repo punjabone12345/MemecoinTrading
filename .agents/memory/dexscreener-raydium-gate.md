@@ -1,25 +1,50 @@
 ---
-name: DexScreener AMM pool gate
-description: AMM pool verification for the graduation sniper — no early-exit, 75s window, pumpfun pair lingers after migration
+name: AMM pool gate — Jupiter quote replaces DexScreener
+description: The graduation gate uses Jupiter quote check (not DexScreener) to verify a migrated token is tradeable.
 ---
 
 ## The rule
 
-**Never early-exit on "pumpfun-only" DexScreener results.** The pumpfun bonding-curve pair stays on DexScreener for 30–90 s AFTER migration while the new pumpswap pool is still being indexed. Seeing only `dexId:"pumpfun"` does NOT mean the token is still on the curve.
+**Use Jupiter quote check as the AMM pool gate, not DexScreener.**
 
-Decision is only made AFTER the full window:
-1. **AMM pair found** (`dexId` in `{"raydium","pumpswap","orca","meteora"}`) at any point → proceed immediately ✅  
-2. **After 75s, saw non-AMM pairs but never AMM** → block (likely genuinely not migrated) ❌  
-3. **After 75s, no pairs at all** → fail-open (DexScreener down or extreme lag) ⚠️
+DexScreener is fundamentally the wrong tool for newly-graduated tokens:
+1. It lags 30–120 s after migration before indexing the new PumpSwap pool
+2. It KEEPS showing the old `pumpfun` bonding-curve pair indefinitely — so you can NEVER distinguish "token hasn't migrated" from "indexing lag" using DexScreener alone
+3. Confirmed live: FLAMY showed only `dexId:"pumpfun"` on DexScreener even after full migration, while Jupiter returned `routePlan: ['Pump.fun Amm']` and `outAmount: 39564462801`
 
-**Why:** Three successive bugs from wrong early-exit logic:
-- First version: required `dexId === "raydium"` only → missed PumpSwap graduations (Pump.fun migrated to PumpSwap)
-- Second version: accepted pumpswap but early-exited on "pumpfun-only" → blocked real graduations because the OLD pumpfun pair lingers on DexScreener while pumpswap is still being indexed
-- Correct version: never early-exit on pumpfun; retry 15×5s = 75s window; decide only at end
+Jupiter is the correct gate because:
+- It indexes PumpSwap pools within ~5–15 s of creation (much faster than DexScreener)
+- It directly validates the actual trading path — if Jupiter can quote, the swap will succeed
+- It's the engine we use for the actual buy anyway
 
-**How to apply:**
-- `GRAD_DEXES = new Set(["raydium", "pumpswap", "orca", "meteora"])` — any = proceed
-- Loop runs the **full** 15 attempts × 5 s regardless of what non-AMM pairs are seen
-- `lastSeenDexes` tracks what was visible on last attempt for the post-loop decision
-- Applied in both `graduation-sniper.service.ts` (inline loop + `hasRaydiumPool()` helper) and `paper-sniper.service.ts` (`scheduleDelayedEntry`)
-- The `hasRaydiumPool()` helper (used in a separate code path) also checks for all `GRAD_DEXES`, not just raydium
+## How it works (both services)
+
+```
+Gate: GET https://lite-api.jup.ag/swap/v1/quote
+      ?inputMint=So11...112&outputMint={mint}&amount=10000000&slippageBps=5000
+
+  outAmount > 0  → pool is live, proceed immediately ✅
+  error/no route → keep retrying
+  After 10 × 4s = 40s, still no route → block ❌ (genuine false trigger)
+```
+
+## Paper sniper price (Step 2, after Jupiter gate passes)
+
+Jupiter confirmed tradability. Now get USD price:
+1. Try DexScreener 5 × 3s — prefer AMM pair (`pumpswap`/`raydium`), accept any pair (bonding-curve price ≈ AMM price at launch)
+2. Fallback: calculate from Jupiter quote → `execPrice = (0.01 SOL × solUsdPrice) / jupiterOutAmount`
+
+**Why:** By the time Jupiter confirms (5–15s), DexScreener often still only has the bonding-curve pair. The bonding-curve `priceUsd` is valid and close to the AMM launch price, so it's an acceptable price source.
+
+## Applied in
+
+- `graduation-sniper.service.ts` — `processGraduation()`, `!wsolVaultPubkey` branch (~line 1178)
+- `paper-sniper.service.ts` — `scheduleDelayedEntry()` Step 1 gate + Step 2 price (~line 376)
+- The `hasRaydiumPool()` helper in graduation-sniper (separate code path) still uses DexScreener for ongoing position checks — that's fine since it's not time-sensitive
+
+## History of failed approaches
+
+1. Required `dexId === "raydium"` only → missed PumpSwap (Pump.fun migrated away from Raydium)
+2. Accepted pumpswap but early-exited on "pumpfun-only" → blocked real graduations (old pair lingers)
+3. Removed early-exit, 75s window → STILL blocked (DexScreener NEVER shows pumpswap for some tokens)
+4. ✅ **Jupiter quote check** — correct and fast

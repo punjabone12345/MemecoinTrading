@@ -1173,104 +1173,69 @@ class GraduationSniperService {
         }
         logger.info({ mint, symbol, poolSol, wsolVaultPubkey }, "Graduation sniper: on-chain pool SOL check passed ✅");
       } else if (!wsolVaultPubkey) {
-        // ── Raydium pool gate (no on-chain vault) ────────────────────────────
-        // The Enhanced API path returns wsolVaultPubkey: null, so the on-chain
-        // SOL balance check above was skipped.  Without a vault we can't confirm
-        // on-chain that a real Raydium pool was seeded.  Instead, query DexScreener
-        // directly for a confirmed Raydium pair.
+        // ── Jupiter route gate (replaces DexScreener gate) ──────────────────
+        // DexScreener is the wrong tool: it lags 30–120 s after migration AND
+        // keeps showing the old pumpfun bonding-curve pair alongside the new pool,
+        // making it impossible to distinguish "not migrated" from "indexing lag".
         //
-        // DexScreener has a 15–90s indexing lag after graduation, so we retry
-        // with a generous window. The key insight: Pump.fun now graduates tokens
-        // to PumpSwap (their own AMM), not Raydium. Both are valid migration targets.
+        // Jupiter is the correct gate: it indexes PumpSwap pools within ~5–15 s
+        // of creation.  If Jupiter can quote SOL→TOKEN, the pool is real and the
+        // buy will succeed.  If it can't, there is no tradeable pool yet.
         //
-        // Error path: if DexScreener is unreachable, we fail-open so real
-        // graduations are never blocked by a network hiccup.
-        logger.info({ mint, symbol }, "Graduation sniper: no WSOL vault from TX — verifying AMM pool via DexScreener");
+        //   • Jupiter returns outAmount > 0  → real migration, pool is live ✅
+        //   • Jupiter returns error/no route → keep retrying (up to 10 × 4 s = 40 s)
+        //   • After 40 s still no route     → almost certainly a false trigger ❌
+        //
+        // 0.01 SOL quote (10_000_000 lamports) is tiny enough to not affect pricing.
+        logger.info({ mint, symbol }, "Graduation sniper: no WSOL vault from TX — verifying via Jupiter route check");
 
-        // ── AMM pool verification ─────────────────────────────────────────────
-        // Pump.fun graduates tokens to PumpSwap (new, dexId="pumpswap") or
-        // Raydium CPMM (old, dexId="raydium"). Both are real graduation targets.
-        //
-        // CRITICAL TIMING ISSUE: After migration the OLD pump.fun bonding-curve
-        // pair (dexId="pumpfun") stays on DexScreener for 30–90 s while the NEW
-        // pumpswap pair is still being indexed. So at detection time we often see
-        // ONLY "pumpfun" — NOT because the token hasn't graduated, but because
-        // DexScreener hasn't indexed the pumpswap pair yet.
-        //
-        // Therefore we NEVER early-exit on "pumpfun-only". We retry the full
-        // window and decide only at the end:
-        //
-        //   • AMM pair (raydium/pumpswap/orca/meteora) found at ANY point → ✅ proceed
-        //   • After full window, still only pumpfun pairs         → ❌ block (not migrated)
-        //   • After full window, no pairs at all                  → ⚠️ fail-open (DS down)
-        //
-        // 15 attempts × 5 s = up to 75 s total window.
-        const AMM_CHECK_ATTEMPTS = 15;
-        const AMM_CHECK_DELAY_MS = 5_000;
-        const GRAD_DEXES = new Set(["raydium", "pumpswap", "orca", "meteora"]);
-        let ammConfirmed = false;
-        let lastSeenDexes: string[] = [];   // track what we saw on last attempt
+        const JUPE_GATE_URL      = "https://lite-api.jup.ag/swap/v1/quote";
+        const JUPE_GATE_WSOL     = "So11111111111111111111111111111111111111112";
+        const JUPE_GATE_ATTEMPTS = 10;
+        const JUPE_GATE_DELAY_MS = 4_000;
+        let jupiterRoutable = false;
 
-        for (let attempt = 0; attempt < AMM_CHECK_ATTEMPTS; attempt++) {
-          if (attempt > 0) await new Promise<void>((r) => setTimeout(r, AMM_CHECK_DELAY_MS));
+        for (let attempt = 0; attempt < JUPE_GATE_ATTEMPTS; attempt++) {
+          if (attempt > 0) await new Promise<void>((r) => setTimeout(r, JUPE_GATE_DELAY_MS));
           try {
-            type DexPair = { dexId?: string; priceUsd: string };
-            const res = await axios.get<DexPair[]>(
-              `${DEXSCREENER_BASE}/tokens/v1/solana/${mint}`,
-              { timeout: 6_000 },
-            );
-            const pairs = Array.isArray(res.data) ? res.data as DexPair[] : [];
-            const withPrice = pairs.filter((p) => (parseFloat(p.priceUsd) || 0) > 0);
-            lastSeenDexes = [...new Set(withPrice.map((p) => p.dexId ?? "unknown"))];
-
-            // AMM pair confirmed → real graduation, proceed immediately
-            const ammPair = withPrice.find((p) => GRAD_DEXES.has(p.dexId ?? ""));
-            if (ammPair) {
-              ammConfirmed = true;
-              logger.info({ mint, symbol, attempt: attempt + 1, dexId: ammPair.dexId },
-                "Graduation sniper: AMM pool confirmed via DexScreener ✅");
+            type QuoteResp = { outAmount?: string; error?: string };
+            const res = await axios.get<QuoteResp>(JUPE_GATE_URL, {
+              params: { inputMint: JUPE_GATE_WSOL, outputMint: mint, amount: 10_000_000, slippageBps: 5000 },
+              timeout: 6_000,
+            });
+            const outAmount = parseInt(res.data?.outAmount ?? "0", 10);
+            if (outAmount > 0) {
+              jupiterRoutable = true;
+              logger.info({ mint, symbol, attempt: attempt + 1, outAmount },
+                "Graduation sniper: Jupiter route confirmed — pool is live ✅");
               break;
             }
-
-            // No AMM yet — keep retrying regardless of what we see (pumpfun or nothing)
-            // The pumpfun bonding-curve pair lingers on DexScreener even after migration,
-            // so "pumpfun only" does NOT mean the token hasn't graduated — it means
-            // DexScreener hasn't indexed the new pumpswap pool yet.
-            logger.info({ mint, symbol, attempt: attempt + 1, totalAttempts: AMM_CHECK_ATTEMPTS, lastSeenDexes },
-              "Graduation sniper: no AMM pair yet — retrying (DexScreener indexing lag)");
+            logger.info({ mint, symbol, attempt: attempt + 1, totalAttempts: JUPE_GATE_ATTEMPTS },
+              "Graduation sniper: Jupiter route not yet available — retrying");
           } catch {
-            logger.warn({ mint, symbol, attempt: attempt + 1 },
-              "Graduation sniper: DexScreener call failed — retrying AMM check");
+            // 400 = no route found yet, 429 = rate-limited — keep retrying
+            logger.info({ mint, symbol, attempt: attempt + 1 },
+              "Graduation sniper: Jupiter quote returned no route — retrying");
           }
         }
 
-        if (!ammConfirmed) {
-          // After 75 s: if we ONLY ever saw pumpfun bonding-curve pairs (never any AMM
-          // pair and never zero pairs), it's very likely a real false trigger.
-          // If we saw nothing at all, DexScreener may be down — fail-open.
-          const neverSawAnything = lastSeenDexes.length === 0;
-          if (neverSawAnything) {
-            logger.warn({ mint, symbol },
-              "Graduation sniper: no DexScreener pairs after 75s — failing open (DexScreener lag/outage), proceeding");
-          } else {
-            // Saw pairs but never an AMM — most likely a false trigger (still on curve)
-            const reason = `No AMM pool found after 75s — seen only: ${lastSeenDexes.join(",")}`;
-            this.addEvent({ ...eventBase, symbol, action: "skipped", skipReason: reason });
-            logger.warn({ mint, symbol, lastSeenDexes },
-              "Graduation sniper: SKIPPED — no AMM pair found after 75s (likely false trigger)");
-            if (isTelegramConfigured()) {
-              void sendTelegram(
-                `⚠️ <b>FALSE TRIGGER BLOCKED</b>\n` +
-                `──────────────────────\n` +
-                `🪙 Token: <b>${symbol}</b>\n` +
-                `📋 CA: <code>${mint}</code>\n` +
-                `❌ No AMM pool after 75s (seen: ${lastSeenDexes.join(", ")})\n` +
-                `✅ Entry blocked (pre-graduation guard)\n` +
-                `🕐 ${toIST(new Date())}`,
-              );
-            }
-            return;
+        if (!jupiterRoutable) {
+          const reason = "No Jupiter swap route found after 40s — likely a false trigger (pool not yet seeded)";
+          this.addEvent({ ...eventBase, symbol, action: "skipped", skipReason: reason });
+          logger.warn({ mint, symbol },
+            "Graduation sniper: SKIPPED — no Jupiter route after 40s (pre-graduation false trigger)");
+          if (isTelegramConfigured()) {
+            void sendTelegram(
+              `⚠️ <b>FALSE TRIGGER BLOCKED</b>\n` +
+              `──────────────────────\n` +
+              `🪙 Token: <b>${symbol}</b>\n` +
+              `📋 CA: <code>${mint}</code>\n` +
+              `❌ No Jupiter swap route after 40s — pool not seeded yet\n` +
+              `✅ Entry blocked (pre-graduation guard)\n` +
+              `🕐 ${toIST(new Date())}`,
+            );
           }
+          return;
         }
       }
 

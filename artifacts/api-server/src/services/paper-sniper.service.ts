@@ -370,66 +370,100 @@ class PaperSniperService {
       return;
     }
 
-    // Fetch fresh execution price from DexScreener — any AMM pair required.
-    //
-    // CRITICAL: After migration, the OLD pumpfun bonding-curve pair stays on
-    // DexScreener for 30–90 s while the new pumpswap pool is still being indexed.
-    // Seeing "pumpfun only" does NOT mean the token hasn't graduated — it means
-    // DexScreener is lagging. Never early-exit on pumpfun-only; retry the full window.
-    //
-    //   • AMM pair (raydium/pumpswap) found any time → proceed ✅
-    //   • After 75s: saw pairs but never AMM          → block ❌ (likely false trigger)
-    //   • After 75s: no pairs at all                  → skip (unverifiable)
-    //
-    // 15 attempts × 5 s = 75 s total window.
-    const PAPER_AMM_ATTEMPTS = 15;
-    const PAPER_AMM_DELAY_MS = 5_000;
-    const GRAD_DEXES = new Set(["raydium", "pumpswap", "orca", "meteora"]);
-    let execPrice = 0;
-    let lastSeenDexes: string[] = [];
+    // ── Step 1: Jupiter route gate ───────────────────────────────────────────
+    // DexScreener is unreliable for newly-graduated tokens: it lags 30–120 s
+    // AND keeps showing the old pumpfun bonding-curve pair, making it impossible
+    // to tell "not migrated" from "indexing lag". Jupiter is the correct gate —
+    // it indexes PumpSwap pools within ~5–15 s of creation. If Jupiter can quote
+    // SOL→TOKEN, the pool is real and the trade will succeed.
+    const JUPE_GATE_URL      = "https://lite-api.jup.ag/swap/v1/quote";
+    const JUPE_GATE_WSOL     = "So11111111111111111111111111111111111111112";
+    const JUPE_GATE_ATTEMPTS = 10;
+    const JUPE_GATE_DELAY_MS = 4_000;
+    let jupiterRoutable = false;
+    let jupiterOutAmount = 0;
 
-    for (let attempt = 0; attempt < PAPER_AMM_ATTEMPTS && execPrice <= 0; attempt++) {
-      if (attempt > 0) {
-        await new Promise<void>((r) => setTimeout(r, PAPER_AMM_DELAY_MS));
-      }
+    for (let attempt = 0; attempt < JUPE_GATE_ATTEMPTS && !jupiterRoutable; attempt++) {
+      if (attempt > 0) await new Promise<void>((r) => setTimeout(r, JUPE_GATE_DELAY_MS));
       try {
-        type DexPair = { baseToken: { address: string }; priceUsd: string; dexId?: string };
+        type QuoteResp = { outAmount?: string; error?: string };
+        const res = await axios.get<QuoteResp>(JUPE_GATE_URL, {
+          params: { inputMint: JUPE_GATE_WSOL, outputMint: mint, amount: 10_000_000, slippageBps: 5000 },
+          timeout: 6_000,
+        });
+        jupiterOutAmount = parseInt(res.data?.outAmount ?? "0", 10);
+        if (jupiterOutAmount > 0) {
+          jupiterRoutable = true;
+          logger.info({ mint, symbol, attempt: attempt + 1, jupiterOutAmount },
+            "Paper sniper: Jupiter route confirmed — pool is live ✅");
+        } else {
+          logger.info({ mint, symbol, attempt: attempt + 1, totalAttempts: JUPE_GATE_ATTEMPTS },
+            "Paper sniper: Jupiter route not yet available — retrying");
+        }
+      } catch {
+        logger.info({ mint, symbol, attempt: attempt + 1 },
+          "Paper sniper: Jupiter quote returned no route — retrying");
+      }
+    }
+
+    if (!jupiterRoutable) {
+      this.addEvent({ id: uid(), detectedAt, mint, symbol, action: "skipped",
+        skipReason: `No Jupiter swap route after 40s — pool not yet seeded (false trigger)` });
+      logger.warn({ mint, symbol }, "Paper sniper: skipped — no Jupiter route after 40s (false trigger)");
+      this.seenMints.delete(mint);
+      this.broadcast();
+      return;
+    }
+
+    // ── Step 2: Get execution price ──────────────────────────────────────────
+    // Jupiter confirmed the pool is live. Now get an accurate USD price.
+    // DexScreener should be catching up by now; try a few times, then fall back
+    // to calculating from the Jupiter quote + SOL price.
+    let execPrice = 0;
+    for (let attempt = 0; attempt < 5 && execPrice <= 0; attempt++) {
+      if (attempt > 0) await new Promise<void>((r) => setTimeout(r, 3_000));
+      try {
+        type DexPair = { priceUsd: string; dexId?: string };
         const res = await axios.get<DexPair[]>(
           `${DEXSCREENER_BASE}/tokens/v1/solana/${mint}`,
-          { timeout: 6_000 },
+          { timeout: 5_000 },
         );
         const pairs = (res.data ?? []) as DexPair[];
-        const withPrice = pairs.filter((p) => (parseFloat(p.priceUsd) || 0) > 0);
-        lastSeenDexes = [...new Set(withPrice.map((p) => p.dexId ?? "unknown"))];
-
-        // AMM pair confirmed → use its price and proceed
-        const ammPair = withPrice.find((p) => GRAD_DEXES.has(p.dexId ?? ""));
-        if (ammPair) {
-          execPrice = parseFloat(ammPair.priceUsd);
-          logger.info({ mint, symbol, attempt: attempt + 1, dexId: ammPair.dexId },
-            "Paper sniper: AMM pair confirmed via DexScreener ✅");
-          break;
-        }
-
-        // No AMM yet — keep retrying. pumpfun pair may still be showing from before
-        // migration while the new pumpswap pool gets indexed (30–90 s lag).
-        logger.info({ mint, symbol, attempt: attempt + 1, totalAttempts: PAPER_AMM_ATTEMPTS, lastSeenDexes },
-          "Paper sniper: no AMM pair yet — retrying (DexScreener indexing lag)");
+        // Prefer AMM pairs; fall back to any pair (bonding curve price ≈ AMM price at launch)
+        const best = pairs.find((p) => ["raydium","pumpswap"].includes(p.dexId ?? ""))
+                  ?? pairs.find((p) => (parseFloat(p.priceUsd) || 0) > 0);
+        if (best) execPrice = parseFloat(best.priceUsd);
       } catch {
-        logger.debug({ mint, symbol, attempt: attempt + 1 }, "Paper sniper: DexScreener fetch failed — retrying");
+        logger.debug({ mint, symbol, attempt }, "Paper sniper: DexScreener price fetch failed");
+      }
+    }
+
+    // If DexScreener still doesn't have the price, calculate from Jupiter quote.
+    // jupiterOutAmount = tokens for 10_000_000 lamports (0.01 SOL).
+    // We need SOL price in USD to compute token USD price.
+    if (execPrice <= 0 && jupiterOutAmount > 0) {
+      try {
+        const SOL_MINT = "So11111111111111111111111111111111111111112";
+        type DexPair = { priceUsd: string };
+        const solRes = await axios.get<DexPair[]>(
+          `${DEXSCREENER_BASE}/tokens/v1/solana/${SOL_MINT}`, { timeout: 5_000 });
+        const solPairs = (solRes.data ?? []) as DexPair[];
+        const solUsd = parseFloat(solPairs[0]?.priceUsd ?? "0");
+        if (solUsd > 0) {
+          // 0.01 SOL → jupiterOutAmount tokens → price = (0.01 * solUsd) / jupiterOutAmount
+          execPrice = (0.01 * solUsd) / jupiterOutAmount;
+          logger.info({ mint, symbol, execPrice, solUsd, jupiterOutAmount },
+            "Paper sniper: exec price from Jupiter quote fallback");
+        }
+      } catch {
+        logger.warn({ mint, symbol }, "Paper sniper: SOL price fetch failed for Jupiter fallback");
       }
     }
 
     if (execPrice <= 0) {
-      const sawSomething = lastSeenDexes.length > 0;
-      const skipReason = sawSomething
-        ? `No AMM pool found after 75s — seen only: ${lastSeenDexes.join(",")} (likely false trigger)`
-        : `Price unverifiable — no DexScreener pairs after 75s (DexScreener lag or down)`;
-      this.addEvent({ id: uid(), detectedAt, mint, symbol, action: "skipped", skipReason });
-      logger.warn({ mint, symbol, lastSeenDexes },
-        sawSomething
-          ? "Paper sniper: skipped — no AMM pair after 75s (likely false trigger)"
-          : "Paper sniper: skipped — no pairs at all after 75s (DexScreener lag/down)");
+      this.addEvent({ id: uid(), detectedAt, mint, symbol, action: "skipped",
+        skipReason: `Price unverifiable after Jupiter route confirmed (DexScreener + Jupiter fallback both failed)` });
+      logger.warn({ mint, symbol }, "Paper sniper: skipped — price unavailable even after Jupiter route confirmed");
       this.seenMints.delete(mint);
       this.broadcast();
       return;
