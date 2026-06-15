@@ -959,14 +959,31 @@ class GraduationSniperService {
     // old RPC nodes omit them) fall through so no event is ever silently lost.
     const txLogs = value["logs"] as string[] | undefined;
     if (txLogs && txLogs.length > 0) {
-      const isMigration = txLogs.some((l) => l.toLowerCase().includes("migrate"));
+      // ── Tightened migration filter ────────────────────────────────────────
+      // BUGFIX: "migrate" alone is too loose — pump.fun pre-graduation events
+      // (bonding-curve completion signals, liquidity-lock confirmations, etc.)
+      // include "migrate" in status log lines WITHOUT being an actual migration
+      // instruction.  This was the root cause of the ASTROGUY false trigger:
+      // a pre-graduation event fired 4+ minutes before the real migrate_v2.
+      //
+      // Require an EXPLICIT Solana instruction-level log.  Pump.fun graduation
+      // emits exactly ONE of these in confirmed TXes:
+      //   "Program log: Instruction: Migrate"   (old Raydium CPMM path)
+      //   "Program log: Instruction: MigrateV2" (new pump.fun AMM / pumpswap)
+      // Also match the underscore form used in some inner-instruction logs.
+      const isMigration = txLogs.some((l) => {
+        const lower = l.toLowerCase();
+        return lower.includes("instruction: migrate") ||   // covers Migrate + MigrateV2
+               lower.includes("migrate_v2")             ||  // inner-instruction form
+               lower.includes("migratev2");                  // alternate camelCase
+      });
       if (!isMigration) {
-        logger.debug({ signature }, "Graduation sniper: non-migration TX — suppressed");
+        logger.debug({ signature }, "Graduation sniper: non-migration TX (no migrate instruction log) — suppressed");
         return;
       }
       logger.info(
         { signature, logCount: txLogs.length },
-        "Graduation sniper: migration logsNotification received ⚡",
+        "Graduation sniper: migrate_v2 instruction confirmed ⚡",
       );
     }
 
@@ -1156,7 +1173,48 @@ class GraduationSniperService {
         }
         logger.info({ mint, symbol, poolSol, wsolVaultPubkey }, "Graduation sniper: on-chain pool SOL check passed ✅");
       } else if (!wsolVaultPubkey) {
-        logger.info({ mint, symbol }, "Graduation sniper: no WSOL vault found in TX — skipping pool SOL check");
+        // ── Raydium pool gate (no on-chain vault) ────────────────────────────
+        // The Enhanced API path returns wsolVaultPubkey: null, so the on-chain
+        // SOL balance check above was skipped.  Without a vault we can't confirm
+        // on-chain that a real Raydium pool was seeded.  Instead, query DexScreener
+        // directly for a confirmed Raydium pair.
+        //
+        // DexScreener has a 15–60s indexing lag after graduation, so we retry
+        // up to 3× (with short gaps) before concluding no Raydium pool exists.
+        // If all attempts show only pumpswap/pump.fun pairs, this is a
+        // pre-graduation false trigger and we abort — exactly the ASTROGUY bug.
+        //
+        // Error path: if DexScreener is unreachable, hasRaydiumPool returns true
+        // (fail-open) so real graduations are never blocked by a network hiccup.
+        logger.info({ mint, symbol }, "Graduation sniper: no WSOL vault from TX — verifying Raydium pool via DexScreener");
+        let raydiumConfirmed = false;
+        const RAYDIUM_CHECK_ATTEMPTS  = 3;
+        const RAYDIUM_CHECK_DELAY_MS  = 4_000;
+        for (let attempt = 0; attempt < RAYDIUM_CHECK_ATTEMPTS && !raydiumConfirmed; attempt++) {
+          if (attempt > 0) await new Promise<void>((r) => setTimeout(r, RAYDIUM_CHECK_DELAY_MS));
+          raydiumConfirmed = await this.hasRaydiumPool(mint);
+          logger.info({ mint, symbol, attempt: attempt + 1, raydiumConfirmed },
+            "Graduation sniper: Raydium pool check");
+        }
+        if (!raydiumConfirmed) {
+          const reason = "Pre-graduation false trigger — no Raydium pool detected (token not yet migrated)";
+          this.addEvent({ ...eventBase, symbol, action: "skipped", skipReason: reason });
+          logger.warn({ mint, symbol },
+            "Graduation sniper: SKIPPED — pre-graduation false trigger (no Raydium pool on DexScreener after retries)");
+          if (isTelegramConfigured()) {
+            void sendTelegram(
+              `⚠️ <b>FALSE TRIGGER BLOCKED</b>\n` +
+              `──────────────────────\n` +
+              `🪙 Token: <b>${symbol}</b>\n` +
+              `📋 CA: <code>${mint}</code>\n` +
+              `❌ No Raydium pool found — token not yet migrated\n` +
+              `✅ Entry blocked (pre-graduation guard)\n` +
+              `🕐 ${toIST(new Date())}`,
+            );
+          }
+          return;
+        }
+        logger.info({ mint, symbol }, "Graduation sniper: Raydium pool confirmed via DexScreener ✅");
       }
 
       if (rugCheckData) {
@@ -1346,6 +1404,25 @@ class GraduationSniperService {
 
       const txData = enhRes.data?.[0];
       if (txData) {
+        // ── Type guard: reject known non-graduation TX types ─────────────────
+        // The Helius Enhanced API classifies transactions by type.  Graduation
+        // events are NOT SWAP / TRANSFER / STAKE / BURN — those are regular
+        // pump.fun interactions that can fire on the program subscription.
+        // Rejecting them here prevents the Enhanced API from returning a mint
+        // from an AMM buy/sell that happens to be a non-SOL transfer.
+        // "UNKNOWN" or absent type = fall through (cannot rule out graduation).
+        const NON_GRADUATION_TYPES = new Set([
+          "SWAP", "TRANSFER", "STAKE", "BURN", "NFT_SALE",
+          "COMPRESSED_NFT_MINT", "TOKEN_MINT",
+        ]);
+        if (txData.type && NON_GRADUATION_TYPES.has(txData.type.toUpperCase())) {
+          logger.info(
+            { signature, type: txData.type, source: txData.source },
+            "Graduation sniper: enhanced API — non-graduation TX type, rejecting",
+          );
+          return null;
+        }
+
         const transfers = txData.tokenTransfers ?? [];
         const mint = transfers.find((t) => t.mint && t.mint !== SOL_MINT)?.mint;
 
@@ -1355,7 +1432,7 @@ class GraduationSniperService {
         );
 
         if (mint) {
-          logger.info({ signature, mint, method: "enhanced-api" }, "Graduation sniper: mint extracted via enhanced API ✅");
+          logger.info({ signature, mint, type: txData.type, method: "enhanced-api" }, "Graduation sniper: mint extracted via enhanced API ✅");
           return { mint, wsolVaultPubkey: null };
         }
         // If enhanced API returned data but no non-SOL mint, this is likely
@@ -1502,7 +1579,7 @@ class GraduationSniperService {
     }
   }
 
-  private async fetchPrice(mint: string): Promise<{ price: number; symbol: string; name: string; liquidityUsd: number } | null> {
+  private async fetchPrice(mint: string): Promise<{ price: number; symbol: string; name: string; liquidityUsd: number; dexId: string } | null> {
     try {
       type DexPair = {
         priceUsd: string;
@@ -1533,11 +1610,34 @@ class GraduationSniperService {
       return {
         price,
         liquidityUsd,
+        dexId:  best.dexId ?? "unknown",
         symbol: best.baseToken.symbol,
         name:   best.baseToken.name,
       };
     } catch {
       return null;
+    }
+  }
+
+  // ── Raydium pool existence check ─────────────────────────────────────────────
+  // Queries DexScreener for a confirmed Raydium pair for this mint.
+  // Used as a final gate when the on-chain WSOL vault couldn't be extracted
+  // (Enhanced API path returns wsolVaultPubkey: null), to block pre-graduation
+  // false triggers where the token has a pumpswap/pump.fun pair but no Raydium pool yet.
+  private async hasRaydiumPool(mint: string): Promise<boolean> {
+    try {
+      type DexPair = { dexId?: string; priceUsd: string };
+      const res = await axios.get<DexPair[]>(
+        `${DEXSCREENER_BASE}/tokens/v1/solana/${mint}`,
+        { timeout: 6_000 },
+      );
+      const pairs = Array.isArray(res.data) ? res.data : [];
+      return pairs.some((p) => p.dexId === "raydium" && (parseFloat(p.priceUsd) || 0) > 0);
+    } catch {
+      // On network error: allow through — better to miss a rug check than block
+      // a valid graduation when DexScreener is briefly down.
+      logger.warn({ mint }, "Graduation sniper: hasRaydiumPool DexScreener call failed — allowing through");
+      return true;
     }
   }
 
