@@ -1210,6 +1210,7 @@ class GraduationSniperService {
         const JUPE_GATE_ATTEMPTS = 10;
         const JUPE_GATE_DELAY_MS = 4_000;
         let jupiterRoutable = false;
+        let jupiterOutAmount = 0;
 
         for (let attempt = 0; attempt < JUPE_GATE_ATTEMPTS; attempt++) {
           if (attempt > 0) await new Promise<void>((r) => setTimeout(r, JUPE_GATE_DELAY_MS));
@@ -1221,7 +1222,8 @@ class GraduationSniperService {
             });
             const outAmount = parseInt(res.data?.outAmount ?? "0", 10);
             if (outAmount > 0) {
-              jupiterRoutable = true;
+              jupiterRoutable    = true;
+              jupiterOutAmount   = outAmount;
               logger.info({ mint, symbol, attempt: attempt + 1, outAmount },
                 "Graduation sniper: Jupiter route confirmed — pool is live ✅");
               break;
