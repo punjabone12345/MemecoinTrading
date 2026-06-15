@@ -74,12 +74,12 @@ const RUG_DROP_ABORT_PCT    = 20;             // abort entry if price drops ≥ 
 //
 // MOMENTUM_SKIP_PCT: if price rose > this % we explicitly label it "Missed entry"
 //   (separate label helps distinguish "pumping too fast" from "drift + filters").
-const ENTRY_DRIFT_ABORT_PCT  = 8;              // abort buy if price rose > 8% from baseline
-const MOMENTUM_SKIP_PCT      = 15;             // label as "Missed entry" if > 15% from baseline
+const ENTRY_DRIFT_ABORT_PCT  = 20;             // abort buy if price rose > 20% from baseline
+const MOMENTUM_SKIP_PCT      = 20;             // label as "Missed entry" if > 20% from baseline
 // POST-FILL circuit breaker: if the actual Jupiter fill price is > this % above the
 // detection baseline, the buy chased the pump too hard. Emergency-sell immediately and
 // release seenMints so the token can be reconsidered on the next graduation event.
-const MAX_FILL_DRIFT_PCT     = 15;             // emergency-sell if fill > 15% above detection price
+const MAX_FILL_DRIFT_PCT     = 20;             // emergency-sell if fill > 20% above detection price
 
 // ── Type-A rug filters (pre-entry) ───────────────────────────────────────────
 const MIN_ENTRY_PRICE_USD   = 0.00001;        // skip tokens priced below $0.00001
@@ -161,7 +161,7 @@ const DEFAULT_CONFIG: SniperConfig = {
   tp2Pct:               400,
   tp2ClosePct:          40,
   trailingStopPct:      30,
-  waitBeforeEntryMs:    5_000,   // 5s minimum delay from detection — ensures pool is liquid and price feeds stable before entry
+  waitBeforeEntryMs:    8_000,   // 8s minimum delay from detection — ensures pool is liquid and price feeds stable before entry
   slippageBps:          3000,    // quote slippage for route-finding only; swap uses fixed SWAP_SLIPPAGE_BPS (5000 = 50% floor)
   priorityFeeLamports:  500_000, // 0.0005 SOL floor — Helius p75 used at runtime (old 50k was too low)
   jitoTipLamports:      100_000, // 0.0001 SOL Jito tip — bundles land in 1-2 slots (~400-800ms) vs 30-40s standard confirm
@@ -1142,7 +1142,7 @@ class GraduationSniperService {
         return;
       }
 
-      const { price: baselinePrice, symbol, name } = priceData;
+      let { price: baselinePrice, symbol, name } = priceData;
       catchEventBase = { ...eventBase, symbol }; // update with known symbol for catch block
 
       // ── FIX 1: Minimum entry price ────────────────────────────────────────────
@@ -1261,14 +1261,23 @@ class GraduationSniperService {
         // whose price froze at graduation time.  Jupiter quote → actual AMM pool
         // reserves → real current market price.  Compute it from the quote we just
         // fetched:  price = (0.01 SOL × SOL/USD) ÷ (jupiterOutAmount ÷ 10^6)
+        //
+        // IMPORTANT: also sync baselinePrice to the same Jupiter value.
+        // baselinePrice was fetched from DexScreener which may still show the old
+        // pumpfun bonding-curve price (lower than the real Raydium price). Comparing
+        // Jupiter entry price against a stale DexScreener baseline creates phantom
+        // drift of 15–20%+ even when the token hasn't moved at all. By using Jupiter
+        // as the baseline here we ensure the drift check measures real price movement,
+        // not source variance between DexScreener and Jupiter.
         if (jupiterOutAmount > 0) {
           const solUsd = await this.fetchSolUsdPrice();
           if (solUsd && solUsd > 0) {
             const jupiterImpliedPrice = (0.01 * solUsd) / (jupiterOutAmount / 1_000_000);
             if (jupiterImpliedPrice > 0) {
-              logger.info({ mint, symbol, jupiterImpliedPrice, solUsd, jupiterOutAmount, prevEntryPrice: entryPrice },
-                "Graduation sniper: entry price updated from Jupiter quote — reflects actual AMM pool state ✅");
+              logger.info({ mint, symbol, jupiterImpliedPrice, solUsd, jupiterOutAmount, prevEntryPrice: entryPrice, prevBaselinePrice: baselinePrice },
+                "Graduation sniper: entry price + baseline updated from Jupiter quote — reflects actual AMM pool state ✅");
               entryPrice = jupiterImpliedPrice;
+              baselinePrice = jupiterImpliedPrice; // sync baseline to same source to prevent phantom drift
             }
           }
         }
