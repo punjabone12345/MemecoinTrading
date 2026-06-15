@@ -370,24 +370,27 @@ class PaperSniperService {
       return;
     }
 
-    // Fetch fresh execution price from DexScreener — Raydium pair required.
+    // Fetch fresh execution price from DexScreener — any AMM pair required.
     //
-    // Two distinct outcomes from DexScreener:
-    //   • Raydium pair found            → confirmed migration, use that price ✅
-    //   • Non-Raydium pair only         → pumpswap/pump.fun = pre-graduation false trigger → block ❌
-    //   • No pairs at all               → DexScreener hasn't indexed yet → keep retrying
+    // Pump.fun can graduate to Raydium CPMM (old path) OR PumpSwap (new path).
+    // Both are valid migration targets. The ONLY definitive false-trigger signal
+    // is a "pumpfun" bonding-curve pair with NO AMM pair (token still on curve).
     //
-    // 10 attempts × 6 s = up to 60 s window, covering DexScreener's 30–90 s indexing lag.
-    // Non-Raydium-only triggers an immediate early exit (no point waiting further).
-    // If still no pairs after 60 s, skip as unverifiable.
+    //   • dexId "raydium" or "pumpswap" found → confirmed migration, use price ✅
+    //   • ONLY "pumpfun" bonding-curve pairs   → still on curve, block ❌
+    //   • No pairs at all                      → DexScreener lag, keep retrying ⏳
+    //
+    // 10 attempts × 6 s = up to 60 s window. Early exit on bonding-curve-only.
+    const PAPER_AMM_ATTEMPTS = 10;
+    const PAPER_AMM_DELAY_MS = 6_000;
+    const GRAD_DEXES = new Set(["raydium", "pumpswap", "orca", "meteora"]);
+    const CURVE_DEXES = new Set(["pumpfun"]);
     let execPrice = 0;
-    let foundNonRaydiumOnly = false;
-    const PAPER_RAYDIUM_ATTEMPTS  = 10;
-    const PAPER_RAYDIUM_DELAY_MS  = 6_000;
+    let bondingCurveOnly = false;
 
-    for (let attempt = 0; attempt < PAPER_RAYDIUM_ATTEMPTS && execPrice <= 0 && !foundNonRaydiumOnly; attempt++) {
+    for (let attempt = 0; attempt < PAPER_AMM_ATTEMPTS && execPrice <= 0 && !bondingCurveOnly; attempt++) {
       if (attempt > 0) {
-        await new Promise<void>((r) => setTimeout(r, PAPER_RAYDIUM_DELAY_MS));
+        await new Promise<void>((r) => setTimeout(r, PAPER_AMM_DELAY_MS));
       }
       try {
         type DexPair = { baseToken: { address: string }; priceUsd: string; dexId?: string };
@@ -396,28 +399,28 @@ class PaperSniperService {
           { timeout: 6_000 },
         );
         const pairs = (res.data ?? []) as DexPair[];
+        const withPrice = pairs.filter((p) => (parseFloat(p.priceUsd) || 0) > 0);
 
-        // Check Raydium first
-        for (const pair of pairs) {
-          if (pair.dexId === "raydium") {
-            const p = parseFloat(pair.priceUsd);
-            if (p > 0) { execPrice = p; break; }
-          }
+        // AMM pair found → confirmed graduation
+        const ammPair = withPrice.find((p) => GRAD_DEXES.has(p.dexId ?? ""));
+        if (ammPair) {
+          execPrice = parseFloat(ammPair.priceUsd);
+          logger.info({ mint, symbol, attempt: attempt + 1, dexId: ammPair.dexId },
+            "Paper sniper: AMM pair confirmed via DexScreener ✅");
+          break;
         }
-        if (execPrice > 0) break;
 
-        // Non-Raydium pairs present → definitive pre-graduation false trigger, stop immediately
-        const hasAnyPrice = pairs.some((p) => (parseFloat(p.priceUsd) || 0) > 0);
-        if (hasAnyPrice) {
-          foundNonRaydiumOnly = true;
-          const dexes = [...new Set(pairs.filter((p) => (parseFloat(p.priceUsd)||0) > 0).map((p) => p.dexId ?? "unknown"))];
+        // Only bonding-curve pairs → definitive false trigger, stop immediately
+        if (withPrice.length > 0 && withPrice.every((p) => CURVE_DEXES.has(p.dexId ?? ""))) {
+          bondingCurveOnly = true;
+          const dexes = [...new Set(withPrice.map((p) => p.dexId ?? "unknown"))];
           logger.warn({ mint, symbol, attempt: attempt + 1, dexes },
-            "Paper sniper: non-Raydium pairs only — pre-graduation false trigger, aborting");
+            "Paper sniper: only bonding-curve pairs — pre-graduation false trigger, aborting");
           break;
         }
 
         // No pairs yet — DexScreener still indexing, keep retrying
-        logger.info({ mint, symbol, attempt: attempt + 1, totalAttempts: PAPER_RAYDIUM_ATTEMPTS },
+        logger.info({ mint, symbol, attempt: attempt + 1, totalAttempts: PAPER_AMM_ATTEMPTS },
           "Paper sniper: no DexScreener pairs yet — retrying (DexScreener indexing lag)");
       } catch {
         logger.debug({ mint, symbol, attempt: attempt + 1 }, "Paper sniper: DexScreener fetch failed — retrying");
@@ -425,14 +428,14 @@ class PaperSniperService {
     }
 
     if (execPrice <= 0) {
-      const skipReason = foundNonRaydiumOnly
-        ? `Pre-graduation false trigger — pumpswap/pump.fun pair only, no Raydium pool found`
-        : `Price unverifiable — no DexScreener Raydium pair found after 60s (DexScreener lag or unindexed)`;
+      const skipReason = bondingCurveOnly
+        ? `Pre-graduation false trigger — only pump.fun bonding-curve pair found, no AMM pool yet`
+        : `Price unverifiable — no AMM pair on DexScreener after 60s (indexing lag or DexScreener down)`;
       this.addEvent({ id: uid(), detectedAt, mint, symbol, action: "skipped", skipReason });
-      logger.warn({ mint, symbol, foundNonRaydiumOnly },
-        foundNonRaydiumOnly
-          ? "Paper sniper: skipped — pre-graduation false trigger (pumpswap only, no Raydium)"
-          : "Paper sniper: skipped — no Raydium pair on DexScreener after 60s");
+      logger.warn({ mint, symbol, bondingCurveOnly },
+        bondingCurveOnly
+          ? "Paper sniper: skipped — pre-graduation false trigger (bonding curve only)"
+          : "Paper sniper: skipped — no AMM pair on DexScreener after 60s");
       this.seenMints.delete(mint);
       this.broadcast();
       return;

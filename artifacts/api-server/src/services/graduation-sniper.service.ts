@@ -1179,34 +1179,36 @@ class GraduationSniperService {
         // on-chain that a real Raydium pool was seeded.  Instead, query DexScreener
         // directly for a confirmed Raydium pair.
         //
-        // DexScreener has a 15–60s indexing lag after graduation, so we retry
-        // up to 3× (with short gaps) before concluding no Raydium pool exists.
-        // If all attempts show only pumpswap/pump.fun pairs, this is a
-        // pre-graduation false trigger and we abort — exactly the ASTROGUY bug.
+        // DexScreener has a 15–90s indexing lag after graduation, so we retry
+        // with a generous window. The key insight: Pump.fun now graduates tokens
+        // to PumpSwap (their own AMM), not Raydium. Both are valid migration targets.
         //
-        // Error path: if DexScreener is unreachable, hasRaydiumPool returns true
-        // (fail-open) so real graduations are never blocked by a network hiccup.
-        logger.info({ mint, symbol }, "Graduation sniper: no WSOL vault from TX — verifying Raydium pool via DexScreener");
+        // Error path: if DexScreener is unreachable, we fail-open so real
+        // graduations are never blocked by a network hiccup.
+        logger.info({ mint, symbol }, "Graduation sniper: no WSOL vault from TX — verifying AMM pool via DexScreener");
 
-        // ── Two-phase Raydium verification ───────────────────────────────────
-        // DexScreener takes 30–90 s to index a newly-created CPMM pool, so we
-        // must retry long enough to cover that lag.  However we can short-circuit
-        // early in the one case that definitively signals a false trigger:
+        // ── AMM pool verification (3-state) ──────────────────────────────────
+        // Pump.fun can graduate to either Raydium CPMM (old) or PumpSwap (new).
+        // Both are valid AMMs. The ONLY definitive false-trigger signal is when
+        // ONLY a "pumpfun" bonding-curve pair exists (token hasn't migrated yet).
         //
-        //   • Raydium pair found   → confirmed migration, proceed immediately ✅
-        //   • Non-Raydium pair only (pumpswap/pump.fun) → false trigger, block ❌
-        //   • No pairs at all      → DexScreener hasn't indexed yet, keep retrying
+        //   • dexId "raydium" or "pumpswap" pair found → real graduation ✅
+        //   • Only "pumpfun" bonding-curve pair        → still on curve, block ❌
+        //   • No pairs at all                          → DexScreener indexing lag, retry ⏳
         //
-        // 10 attempts × 6 s gap = up to 60 s total window, covers the 30–90 s lag.
-        // If still no pairs after 60 s, fail-open (DexScreener may be down) so a
-        // valid graduation is not permanently lost.
-        const RAYDIUM_CHECK_ATTEMPTS = 10;
-        const RAYDIUM_CHECK_DELAY_MS = 6_000;
-        let raydiumConfirmed = false;
-        let foundNonRaydiumOnly  = false;   // pumpswap/pump.fun only = clear false trigger
+        // 10 attempts × 6 s = up to 60 s window. Early exit on bonding-curve-only.
+        // Fail-open after 60 s (DexScreener outage) so no real graduation is lost.
+        const AMM_CHECK_ATTEMPTS = 10;
+        const AMM_CHECK_DELAY_MS = 6_000;
+        // Valid AMM dexIds — Pump.fun graduates to either of these
+        const GRAD_DEXES = new Set(["raydium", "pumpswap", "orca", "meteora"]);
+        // Bonding-curve-only dexIds — token NOT yet migrated
+        const CURVE_DEXES = new Set(["pumpfun"]);
+        let ammConfirmed = false;
+        let bondingCurveOnly = false;   // only pumpfun bonding curve = definitive false trigger
 
-        for (let attempt = 0; attempt < RAYDIUM_CHECK_ATTEMPTS; attempt++) {
-          if (attempt > 0) await new Promise<void>((r) => setTimeout(r, RAYDIUM_CHECK_DELAY_MS));
+        for (let attempt = 0; attempt < AMM_CHECK_ATTEMPTS; attempt++) {
+          if (attempt > 0) await new Promise<void>((r) => setTimeout(r, AMM_CHECK_DELAY_MS));
           try {
             type DexPair = { dexId?: string; priceUsd: string };
             const res = await axios.get<DexPair[]>(
@@ -1214,48 +1216,57 @@ class GraduationSniperService {
               { timeout: 6_000 },
             );
             const pairs = Array.isArray(res.data) ? res.data as DexPair[] : [];
+            const withPrice = pairs.filter((p) => (parseFloat(p.priceUsd) || 0) > 0);
 
-            // Check for Raydium first
-            if (pairs.some((p) => p.dexId === "raydium" && (parseFloat(p.priceUsd) || 0) > 0)) {
-              raydiumConfirmed = true;
-              logger.info({ mint, symbol, attempt: attempt + 1 },
-                "Graduation sniper: Raydium pool confirmed via DexScreener ✅");
+            // Real graduation — an AMM pair (raydium / pumpswap / orca / meteora)
+            const ammPair = withPrice.find((p) => GRAD_DEXES.has(p.dexId ?? ""));
+            if (ammPair) {
+              ammConfirmed = true;
+              logger.info({ mint, symbol, attempt: attempt + 1, dexId: ammPair.dexId },
+                "Graduation sniper: AMM pool confirmed via DexScreener ✅");
               break;
             }
 
-            // Non-Raydium pairs exist → definitive false trigger, stop immediately
-            if (pairs.some((p) => (parseFloat(p.priceUsd) || 0) > 0)) {
-              foundNonRaydiumOnly = true;
-              const dexes = [...new Set(pairs.filter((p) => (parseFloat(p.priceUsd)||0)>0).map((p)=>p.dexId??"unknown"))];
+            // Only bonding-curve pair(s) found → definitive false trigger, stop immediately
+            const hasAnyPrice = withPrice.length > 0;
+            if (hasAnyPrice && withPrice.every((p) => CURVE_DEXES.has(p.dexId ?? ""))) {
+              bondingCurveOnly = true;
+              const dexes = [...new Set(withPrice.map((p) => p.dexId ?? "unknown"))];
               logger.warn({ mint, symbol, attempt: attempt + 1, dexes },
-                "Graduation sniper: non-Raydium pairs only — pre-graduation false trigger, aborting early");
+                "Graduation sniper: only bonding-curve pairs — pre-graduation false trigger, aborting");
               break;
             }
 
-            // No pairs at all — DexScreener still indexing, keep retrying
-            logger.info({ mint, symbol, attempt: attempt + 1, totalAttempts: RAYDIUM_CHECK_ATTEMPTS },
-              "Graduation sniper: no DexScreener pairs yet — retrying (DexScreener indexing lag)");
+            // Pairs with unrecognised dexId? Log and keep retrying (conservative)
+            if (hasAnyPrice) {
+              const dexes = [...new Set(withPrice.map((p) => p.dexId ?? "unknown"))];
+              logger.info({ mint, symbol, attempt: attempt + 1, dexes },
+                "Graduation sniper: pairs found but none match known AMM dexIds — retrying");
+            } else {
+              // No pairs at all — DexScreener still indexing, keep retrying
+              logger.info({ mint, symbol, attempt: attempt + 1, totalAttempts: AMM_CHECK_ATTEMPTS },
+                "Graduation sniper: no DexScreener pairs yet — retrying (DexScreener indexing lag)");
+            }
           } catch {
-            // Network error — treat as not-yet-indexed, keep retrying
             logger.warn({ mint, symbol, attempt: attempt + 1 },
-              "Graduation sniper: DexScreener call failed — retrying Raydium check");
+              "Graduation sniper: DexScreener call failed — retrying AMM check");
           }
         }
 
-        if (!raydiumConfirmed) {
-          if (foundNonRaydiumOnly) {
-            // Definitive false trigger — pumpswap/pump.fun pair exists but no Raydium
-            const reason = "Pre-graduation false trigger — pumpswap/pump.fun pair only, no Raydium pool";
+        if (!ammConfirmed) {
+          if (bondingCurveOnly) {
+            // Definitive false trigger — only pump.fun bonding-curve pair, no AMM
+            const reason = "Pre-graduation false trigger — only pump.fun bonding-curve pair, token not yet migrated";
             this.addEvent({ ...eventBase, symbol, action: "skipped", skipReason: reason });
             logger.warn({ mint, symbol },
-              "Graduation sniper: SKIPPED — pre-graduation false trigger (pumpswap only, no Raydium)");
+              "Graduation sniper: SKIPPED — pre-graduation false trigger (bonding curve only, no AMM pool)");
             if (isTelegramConfigured()) {
               void sendTelegram(
                 `⚠️ <b>FALSE TRIGGER BLOCKED</b>\n` +
                 `──────────────────────\n` +
                 `🪙 Token: <b>${symbol}</b>\n` +
                 `📋 CA: <code>${mint}</code>\n` +
-                `❌ Only pumpswap/pump.fun pairs found — token not yet migrated to Raydium\n` +
+                `❌ Only pump.fun bonding-curve pair found — token not yet migrated to any AMM\n` +
                 `✅ Entry blocked (pre-graduation guard)\n` +
                 `🕐 ${toIST(new Date())}`,
               );
@@ -1263,9 +1274,8 @@ class GraduationSniperService {
             return;
           } else {
             // No pairs at all after 60s — DexScreener lag or outage, fail-open
-            // (Jupiter will have the route by now if it's a real graduation)
             logger.warn({ mint, symbol },
-              "Graduation sniper: no DexScreener pairs after 60s — failing open (DexScreener lag/outage), proceeding with entry");
+              "Graduation sniper: no DexScreener pairs after 60s — failing open (DexScreener lag/outage), proceeding");
           }
         }
       }
@@ -1672,12 +1682,13 @@ class GraduationSniperService {
     }
   }
 
-  // ── Raydium pool existence check ─────────────────────────────────────────────
-  // Queries DexScreener for a confirmed Raydium pair for this mint.
-  // Used as a final gate when the on-chain WSOL vault couldn't be extracted
-  // (Enhanced API path returns wsolVaultPubkey: null), to block pre-graduation
-  // false triggers where the token has a pumpswap/pump.fun pair but no Raydium pool yet.
+  // ── AMM pool existence check ──────────────────────────────────────────────────
+  // Queries DexScreener for a confirmed AMM pair for this mint.
+  // Pump.fun graduates to either Raydium CPMM (old) or PumpSwap (new — their own AMM).
+  // Both are valid graduation targets. Only a "pumpfun" bonding-curve pair means
+  // the token has NOT yet migrated.
   private async hasRaydiumPool(mint: string): Promise<boolean> {
+    const GRAD_DEXES = new Set(["raydium", "pumpswap", "orca", "meteora"]);
     try {
       type DexPair = { dexId?: string; priceUsd: string };
       const res = await axios.get<DexPair[]>(
@@ -1685,7 +1696,7 @@ class GraduationSniperService {
         { timeout: 6_000 },
       );
       const pairs = Array.isArray(res.data) ? res.data : [];
-      return pairs.some((p) => p.dexId === "raydium" && (parseFloat(p.priceUsd) || 0) > 0);
+      return pairs.some((p) => GRAD_DEXES.has(p.dexId ?? "") && (parseFloat(p.priceUsd) || 0) > 0);
     } catch {
       // On network error: allow through — better to miss a rug check than block
       // a valid graduation when DexScreener is briefly down.
