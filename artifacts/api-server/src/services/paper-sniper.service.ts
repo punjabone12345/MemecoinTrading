@@ -370,21 +370,40 @@ class PaperSniperService {
       return;
     }
 
-    // Fetch fresh execution price from DexScreener to simulate real fill price
-    let execPrice = entryPrice;
-    try {
-      type DexPair = { baseToken: { address: string }; priceUsd: string };
-      const res = await axios.get<DexPair[]>(
-        `${DEXSCREENER_BASE}/tokens/v1/solana/${mint}`,
-        { timeout: 4_000 },
-      );
-      const pairs = (res.data ?? []) as DexPair[];
-      for (const pair of pairs) {
-        const p = parseFloat(pair.priceUsd);
-        if (p > 0) { execPrice = p; break; }
+    // Fetch fresh execution price from DexScreener — retry up to 4 times (3s apart)
+    // to handle the 15–60s indexing lag for newly-graduated tokens.
+    // We intentionally do NOT fall back to entryPrice (Jupiter-sourced, often wrong
+    // for brand-new tokens). If DexScreener can't verify after all retries, skip.
+    let execPrice = 0;
+    for (let attempt = 0; attempt < 4 && execPrice <= 0; attempt++) {
+      if (attempt > 0) {
+        await new Promise<void>((r) => setTimeout(r, 3_000));
       }
-    } catch {
-      logger.debug({ mint, symbol }, "Paper sniper: exec-delay DexScreener fetch failed — using original price");
+      try {
+        type DexPair = { baseToken: { address: string }; priceUsd: string };
+        const res = await axios.get<DexPair[]>(
+          `${DEXSCREENER_BASE}/tokens/v1/solana/${mint}`,
+          { timeout: 5_000 },
+        );
+        const pairs = (res.data ?? []) as DexPair[];
+        for (const pair of pairs) {
+          const p = parseFloat(pair.priceUsd);
+          if (p > 0) { execPrice = p; break; }
+        }
+      } catch {
+        logger.debug({ mint, symbol, attempt }, "Paper sniper: exec-delay DexScreener fetch failed");
+      }
+    }
+
+    if (execPrice <= 0) {
+      // DexScreener hasn't indexed this token yet — skip rather than entering at a
+      // potentially wrong Jupiter-sourced detection price.
+      this.addEvent({ id: uid(), detectedAt, mint, symbol, action: "skipped",
+        skipReason: `Price unverifiable — DexScreener not indexed after exec delay` });
+      logger.warn({ mint, symbol }, "Paper sniper: skipped — DexScreener price unavailable after retries");
+      this.seenMints.delete(mint);
+      this.broadcast();
+      return;
     }
 
     // Check drift with the real execution price
@@ -801,6 +820,60 @@ class PaperSniperService {
 
   getHistory(): PaperPosition[] {
     return this.closedPositions.slice(0, 100);
+  }
+
+  async updateHistoryPosition(id: string, updates: Partial<Pick<PaperPosition,
+    "entryPrice" | "exitPrice" | "sizeSol" | "realizedPnlSol" | "closeReason" | "trailingHigh" | "detectionPrice"
+  >>): Promise<PaperPosition | null> {
+    const idx = this.closedPositions.findIndex((p) => p.id === id);
+    if (idx < 0) return null;
+    const pos = this.closedPositions[idx];
+    const oldPnl = pos.realizedPnlSol;
+
+    Object.assign(pos, updates);
+
+    // Recalculate derived fields if prices changed
+    if (updates.exitPrice !== undefined || updates.entryPrice !== undefined) {
+      if (pos.exitPrice && pos.entryPrice) {
+        pos.pnlPct      = ((pos.exitPrice / pos.entryPrice) - 1) * 100;
+        pos.totalPnlSol = pos.realizedPnlSol;
+      }
+    }
+
+    // Adjust live balance if realized PnL changed
+    if (updates.realizedPnlSol !== undefined) {
+      const delta = pos.realizedPnlSol - oldPnl;
+      this.virtualBalance     += delta;
+      this.allTimeRealizedSol += delta;
+    }
+
+    void this.persistPosition(pos);
+    void this.persistBalance();
+    this.broadcast();
+    return { ...pos };
+  }
+
+  async deleteHistoryPosition(id: string): Promise<boolean> {
+    const idx = this.closedPositions.findIndex((p) => p.id === id);
+    if (idx < 0) return false;
+    const pos = this.closedPositions.splice(idx, 1)[0];
+
+    // Reverse the net balance impact of this closed trade
+    this.virtualBalance     -= pos.realizedPnlSol;
+    this.allTimeRealizedSol -= pos.realizedPnlSol;
+    if (pos.realizedPnlSol >= 0) this.wins   = Math.max(0, this.wins   - 1);
+    else                         this.losses  = Math.max(0, this.losses - 1);
+
+    try {
+      await execute(`DELETE FROM paper_sniper_positions WHERE id = $1`, [id]);
+    } catch (err) {
+      logger.warn({ err: (err as Error).message, id }, "Paper sniper: failed to delete position from DB");
+    }
+
+    void this.persistBalance();
+    void this.persistStats();
+    this.broadcast();
+    return true;
   }
 
   getEvents(): PaperSniperEvent[] {

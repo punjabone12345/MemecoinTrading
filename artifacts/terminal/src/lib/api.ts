@@ -490,6 +490,45 @@ export function useClosePaperPosition() {
   });
 }
 
+export function useEditHistoryPosition() {
+  const queryClient = useQueryClient();
+  const { toast } = useToast();
+  return useMutation({
+    mutationFn: async ({ id, updates }: { id: string; updates: Record<string, unknown> }) => {
+      const res = await fetch(apiUrl(`/api/paper-sniper/history/${id}`), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(updates),
+      });
+      if (!res.ok) throw new Error("Update failed");
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["paper-sniper-history"] });
+      queryClient.invalidateQueries({ queryKey: ["paper-sniper-status"] });
+      toast({ title: "Trade updated", description: "Balance recalculated." });
+    },
+    onError: () => toast({ title: "Update failed", variant: "destructive" }),
+  });
+}
+
+export function useDeleteHistoryPosition() {
+  const queryClient = useQueryClient();
+  const { toast } = useToast();
+  return useMutation({
+    mutationFn: async (id: string) => {
+      const res = await fetch(apiUrl(`/api/paper-sniper/history/${id}`), { method: "DELETE" });
+      if (!res.ok) throw new Error("Delete failed");
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["paper-sniper-history"] });
+      queryClient.invalidateQueries({ queryKey: ["paper-sniper-status"] });
+      toast({ title: "Trade deleted", description: "Balance adjusted." });
+    },
+    onError: () => toast({ title: "Delete failed", variant: "destructive" }),
+  });
+}
+
 export function useResetPaperAccount() {
   const queryClient = useQueryClient();
   const { toast } = useToast();

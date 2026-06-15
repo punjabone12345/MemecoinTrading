@@ -41,6 +41,22 @@ router.post("/paper-sniper/positions/:id/close", (req, res) => {
   }
 });
 
+router.patch("/paper-sniper/history/:id", async (req, res) => {
+  try {
+    const updated = await paperSniperService.updateHistoryPosition(req.params.id, req.body as object);
+    if (!updated) return res.status(404).json({ error: "Trade not found in history" });
+    res.json(updated);
+  } catch (err) {
+    res.status(400).json({ error: (err as Error).message });
+  }
+});
+
+router.delete("/paper-sniper/history/:id", async (req, res) => {
+  const deleted = await paperSniperService.deleteHistoryPosition(req.params.id);
+  if (deleted) res.json({ success: true });
+  else res.status(404).json({ error: "Trade not found in history" });
+});
+
 router.post("/paper-sniper/reset", async (_req, res) => {
   await paperSniperService.reset();
   res.json({ success: true });

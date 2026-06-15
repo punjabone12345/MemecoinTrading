@@ -3,12 +3,13 @@ import {
   FileText, Settings, X, TrendingUp, TrendingDown, RotateCcw,
   AlertTriangle, Wallet, ChevronRight, ExternalLink,
   BarChart2, Clock, Target, Shield, Sliders, Check, Download,
-  ChevronDown, ChevronUp,
+  ChevronDown, ChevronUp, Pencil, Trash2,
 } from "lucide-react";
 import {
   usePaperSniperStatus, usePaperSniperPositions, usePaperSniperHistory,
   usePaperSniperEvents, useResetPaperAccount,
   usePaperSniperConfig, useUpdatePaperSniperConfig, useClosePaperPosition,
+  useEditHistoryPosition, useDeleteHistoryPosition,
 } from "@/lib/api";
 import { PaperConfig, PaperPosition, PaperSniperEvent } from "@/lib/types";
 
@@ -406,8 +407,95 @@ function OpenPositionCard({ pos }: { pos: PaperPosition }) {
 
 // ── History card (expandable) ──────────────────────────────────────────────────
 
+// ── Edit history modal ─────────────────────────────────────────────────────────
+function EditHistoryModal({ pos, onClose }: { pos: PaperPosition; onClose: () => void }) {
+  const editMutation = useEditHistoryPosition();
+  const [form, setForm] = useState({
+    entryPrice:     String(pos.entryPrice),
+    exitPrice:      String(pos.exitPrice ?? ""),
+    detectionPrice: String(pos.detectionPrice ?? ""),
+    trailingHigh:   String(pos.trailingHigh ?? ""),
+    sizeSol:        String(pos.sizeSol),
+    realizedPnlSol: String(pos.realizedPnlSol),
+    closeReason:    pos.closeReason ?? "",
+  });
+
+  function field(label: string, key: keyof typeof form, suffix?: string) {
+    return (
+      <div className="flex items-center justify-between py-2.5 border-b border-white/5 last:border-0">
+        <span className="text-[11px] text-white/50">{label}</span>
+        <div className="flex items-center gap-1.5">
+          <input
+            type={key === "closeReason" ? "text" : "number"}
+            value={form[key]}
+            onChange={(e) => setForm((f) => ({ ...f, [key]: e.target.value }))}
+            className="w-28 bg-white/5 border border-white/10 rounded-lg px-2 py-1 text-xs font-bold text-white text-right focus:outline-none focus:border-amber-500/50 tabular-nums"
+          />
+          {suffix && <span className="text-[10px] text-white/30 w-6">{suffix}</span>}
+        </div>
+      </div>
+    );
+  }
+
+  function save() {
+    const updates: Record<string, number | string> = {};
+    const ep  = parseFloat(form.entryPrice);
+    const xp  = parseFloat(form.exitPrice);
+    const dp  = parseFloat(form.detectionPrice);
+    const th  = parseFloat(form.trailingHigh);
+    const sz  = parseFloat(form.sizeSol);
+    const pnl = parseFloat(form.realizedPnlSol);
+    if (!isNaN(ep)  && ep  !== pos.entryPrice)     updates.entryPrice     = ep;
+    if (!isNaN(xp)  && xp  !== pos.exitPrice)      updates.exitPrice      = xp;
+    if (!isNaN(dp)  && dp  !== pos.detectionPrice)  updates.detectionPrice = dp;
+    if (!isNaN(th)  && th  !== pos.trailingHigh)    updates.trailingHigh   = th;
+    if (!isNaN(sz)  && sz  !== pos.sizeSol)         updates.sizeSol        = sz;
+    if (!isNaN(pnl) && pnl !== pos.realizedPnlSol) updates.realizedPnlSol = pnl;
+    if (form.closeReason !== (pos.closeReason ?? "")) updates.closeReason  = form.closeReason;
+    if (Object.keys(updates).length === 0) { onClose(); return; }
+    editMutation.mutate({ id: pos.id, updates }, { onSuccess: () => onClose() });
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/70 backdrop-blur-sm" onClick={onClose}>
+      <div className="w-full max-w-sm bg-[#111] border border-white/10 rounded-t-2xl p-5 pb-8" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between mb-4">
+          <div>
+            <p className="text-sm font-black text-white">Edit Trade — {pos.symbol}</p>
+            <p className="text-[10px] text-white/30 mt-0.5">Changes to Realized P&L adjust the virtual balance</p>
+          </div>
+          <button onClick={onClose} className="text-white/30 hover:text-white"><X size={16} /></button>
+        </div>
+        <div className="space-y-0">
+          {field("Entry price",      "entryPrice",     "USD")}
+          {field("Exit price",       "exitPrice",      "USD")}
+          {field("Detection price",  "detectionPrice", "USD")}
+          {field("Peak price",       "trailingHigh",   "USD")}
+          {field("Size",             "sizeSol",        "SOL")}
+          {field("Realized P&L",     "realizedPnlSol", "SOL")}
+          {field("Close reason",     "closeReason")}
+        </div>
+        <div className="flex gap-2 mt-4">
+          <button onClick={onClose} className="flex-1 py-2.5 rounded-xl border border-white/10 text-xs font-bold text-white/50">Cancel</button>
+          <button
+            onClick={save}
+            disabled={editMutation.isPending}
+            className="flex-1 py-2.5 rounded-xl bg-amber-500/15 border border-amber-500/30 text-xs font-bold text-amber-300 disabled:opacity-50"
+          >
+            {editMutation.isPending ? "Saving…" : "Save changes"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function HistoryCard({ pos }: { pos: PaperPosition }) {
-  const [expanded, setExpanded] = useState(false);
+  const [expanded,    setExpanded]    = useState(false);
+  const [showEdit,    setShowEdit]    = useState(false);
+  const [confirmDel,  setConfirmDel]  = useState(false);
+  const deleteMutation = useDeleteHistoryPosition();
+
   const isWin   = pos.realizedPnlSol >= 0;
   const holdMs  = pos.closedAt && pos.entryAt ? pos.closedAt - pos.entryAt : 0;
   const pnlPct  = pos.exitPrice && pos.entryPrice
@@ -418,146 +506,184 @@ function HistoryCard({ pos }: { pos: PaperPosition }) {
     : null;
 
   return (
-    <div className={`rounded-2xl border mb-2 overflow-hidden transition-colors ${isWin ? "bg-emerald-950/15 border-emerald-500/12" : "bg-red-950/15 border-red-500/12"}`}>
-      {/* Summary row — always visible */}
-      <button
-        onClick={() => setExpanded((e) => !e)}
-        className="w-full flex items-center gap-3 p-3.5 text-left hover:bg-white/2 transition-colors"
-      >
-        <div className={`w-8 h-8 rounded-xl flex items-center justify-center shrink-0 ${isWin ? "bg-emerald-500/15" : "bg-red-500/15"}`}>
-          {isWin
-            ? <TrendingUp size={14} className="text-emerald-400" />
-            : <TrendingDown size={14} className="text-red-400" />}
-        </div>
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-1.5 flex-wrap">
-            <span className="text-xs font-black text-white">{pos.symbol}</span>
-            {pos.tp1Hit && <span className="text-[8px] px-1.5 py-0.5 rounded-full bg-violet-500/18 text-violet-300 font-bold border border-violet-500/20">TP1</span>}
-            {pos.tp2Hit && <span className="text-[8px] px-1.5 py-0.5 rounded-full bg-amber-500/18 text-amber-300 font-bold border border-amber-500/20">TP2</span>}
-            {holdMs > 0 && <span className="text-[9px] text-white/25 font-medium">{holdStr(holdMs)}</span>}
+    <>
+      {showEdit && <EditHistoryModal pos={pos} onClose={() => setShowEdit(false)} />}
+
+      <div className={`rounded-2xl border mb-2 overflow-hidden transition-colors ${isWin ? "bg-emerald-950/15 border-emerald-500/12" : "bg-red-950/15 border-red-500/12"}`}>
+        {/* Summary row — always visible */}
+        <button
+          onClick={() => setExpanded((e) => !e)}
+          className="w-full flex items-center gap-3 p-3.5 text-left hover:bg-white/2 transition-colors"
+        >
+          <div className={`w-8 h-8 rounded-xl flex items-center justify-center shrink-0 ${isWin ? "bg-emerald-500/15" : "bg-red-500/15"}`}>
+            {isWin
+              ? <TrendingUp size={14} className="text-emerald-400" />
+              : <TrendingDown size={14} className="text-red-400" />}
           </div>
-          <p className="text-[10px] text-white/25 truncate mt-0.5">{pos.closeReason ?? "—"}</p>
-        </div>
-        <div className="text-right shrink-0 mr-1">
-          <p className={`text-sm font-black ${isWin ? "text-emerald-400" : "text-red-400"}`}>
-            {isWin ? "+" : ""}{fmt(pos.realizedPnlSol)} SOL
-          </p>
-          <p className={`text-[11px] font-bold ${isWin ? "text-emerald-400/60" : "text-red-400/60"}`}>
-            {fmtPct2(pnlPct)}
-          </p>
-        </div>
-        {expanded
-          ? <ChevronUp size={13} className="text-white/25 shrink-0" />
-          : <ChevronDown size={13} className="text-white/25 shrink-0" />}
-      </button>
-
-      {/* Expanded detail panel */}
-      {expanded && (
-        <div className="border-t border-white/6 px-4 pb-4 pt-3 space-y-3">
-
-          {/* Price grid */}
-          <div className="grid grid-cols-3 gap-2">
-            {[
-              { label: "Entry",  val: fmtPrice(pos.entryPrice),   cl: "text-white/70" },
-              { label: "Exit",   val: pos.exitPrice ? fmtPrice(pos.exitPrice) : "—", cl: isWin ? "text-emerald-300" : "text-red-300" },
-              { label: "Peak",   val: pos.trailingHigh ? fmtPrice(pos.trailingHigh) : "—", cl: "text-amber-300/80" },
-            ].map(({ label, val, cl }) => (
-              <div key={label} className="bg-white/3 rounded-xl p-2.5">
-                <p className="text-[9px] text-white/30 font-medium mb-1">{label}</p>
-                <p className={`text-[11px] font-bold tabular-nums ${cl}`}>{val}</p>
-              </div>
-            ))}
-          </div>
-
-          {/* Peak gain */}
-          {peakPct !== null && (
-            <div className="flex items-center justify-between text-[10px]">
-              <span className="text-white/30">Peak gain from entry</span>
-              <span className="text-amber-300 font-bold">{fmtPct2(peakPct)}</span>
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <span className="text-xs font-black text-white">{pos.symbol}</span>
+              {pos.tp1Hit && <span className="text-[8px] px-1.5 py-0.5 rounded-full bg-violet-500/18 text-violet-300 font-bold border border-violet-500/20">TP1</span>}
+              {pos.tp2Hit && <span className="text-[8px] px-1.5 py-0.5 rounded-full bg-amber-500/18 text-amber-300 font-bold border border-amber-500/20">TP2</span>}
+              {holdMs > 0 && <span className="text-[9px] text-white/25 font-medium">{holdStr(holdMs)}</span>}
             </div>
-          )}
+            <p className="text-[10px] text-white/25 truncate mt-0.5">{pos.closeReason ?? "—"}</p>
+          </div>
+          <div className="text-right shrink-0 mr-1">
+            <p className={`text-sm font-black ${isWin ? "text-emerald-400" : "text-red-400"}`}>
+              {isWin ? "+" : ""}{fmt(pos.realizedPnlSol)} SOL
+            </p>
+            <p className={`text-[11px] font-bold ${isWin ? "text-emerald-400/60" : "text-red-400/60"}`}>
+              {fmtPct2(pnlPct)}
+            </p>
+          </div>
+          {expanded
+            ? <ChevronUp size={13} className="text-white/25 shrink-0" />
+            : <ChevronDown size={13} className="text-white/25 shrink-0" />}
+        </button>
 
-          {/* Drift */}
-          {pos.detectionPrice != null && (
-            <div className="flex items-center gap-1 flex-wrap text-[10px]">
-              <span className="text-white/30">Detect {fmtPrice(pos.detectionPrice)}</span>
-              <span className="text-white/20">→</span>
-              <span className="text-white/30">Fill {fmtPrice(pos.entryPrice)}</span>
-              {pos.entryDriftPct != null && (
-                <span className={`font-semibold ${pos.entryDriftPct > 5 ? "text-amber-400/80" : pos.entryDriftPct < -2 ? "text-emerald-400/80" : "text-white/40"}`}>
-                  ({pos.entryDriftPct >= 0 ? "+" : ""}{pos.entryDriftPct.toFixed(1)}% drift)
+        {/* Expanded detail panel */}
+        {expanded && (
+          <div className="border-t border-white/6 px-4 pb-4 pt-3 space-y-3">
+
+            {/* Price grid */}
+            <div className="grid grid-cols-3 gap-2">
+              {[
+                { label: "Entry",  val: fmtPrice(pos.entryPrice),   cl: "text-white/70" },
+                { label: "Exit",   val: pos.exitPrice ? fmtPrice(pos.exitPrice) : "—", cl: isWin ? "text-emerald-300" : "text-red-300" },
+                { label: "Peak",   val: pos.trailingHigh ? fmtPrice(pos.trailingHigh) : "—", cl: "text-amber-300/80" },
+              ].map(({ label, val, cl }) => (
+                <div key={label} className="bg-white/3 rounded-xl p-2.5">
+                  <p className="text-[9px] text-white/30 font-medium mb-1">{label}</p>
+                  <p className={`text-[11px] font-bold tabular-nums ${cl}`}>{val}</p>
+                </div>
+              ))}
+            </div>
+
+            {/* Peak gain */}
+            {peakPct !== null && (
+              <div className="flex items-center justify-between text-[10px]">
+                <span className="text-white/30">Peak gain from entry</span>
+                <span className="text-amber-300 font-bold">{fmtPct2(peakPct)}</span>
+              </div>
+            )}
+
+            {/* Drift */}
+            {pos.detectionPrice != null && (
+              <div className="flex items-center gap-1 flex-wrap text-[10px]">
+                <span className="text-white/30">Detect {fmtPrice(pos.detectionPrice)}</span>
+                <span className="text-white/20">→</span>
+                <span className="text-white/30">Fill {fmtPrice(pos.entryPrice)}</span>
+                {pos.entryDriftPct != null && (
+                  <span className={`font-semibold ${pos.entryDriftPct > 5 ? "text-amber-400/80" : pos.entryDriftPct < -2 ? "text-emerald-400/80" : "text-white/40"}`}>
+                    ({pos.entryDriftPct >= 0 ? "+" : ""}{pos.entryDriftPct.toFixed(1)}% drift)
+                  </span>
+                )}
+              </div>
+            )}
+
+            {/* P&L breakdown */}
+            <div className="rounded-xl bg-white/3 border border-white/6 px-3 py-2.5 space-y-1.5">
+              <p className="text-[9px] font-black text-white/25 uppercase tracking-widest mb-2">P&L Breakdown</p>
+              <div className="flex justify-between text-[10px]">
+                <span className="text-white/35">Size</span>
+                <span className="text-white/65 font-bold">{fmt(pos.sizeSol, 4)} SOL</span>
+              </div>
+              <div className="flex justify-between text-[10px]">
+                <span className="text-white/35">Total realized</span>
+                <span className={`font-bold ${isWin ? "text-emerald-400" : "text-red-400"}`}>
+                  {isWin ? "+" : ""}{fmt(pos.realizedPnlSol, 4)} SOL
+                  <span className="text-white/30 font-medium ml-1">({fmtPct2(pnlPct)})</span>
                 </span>
+              </div>
+              {pos.tp1Hit && pos.tp1RealizedSol > 0 && (
+                <div className="flex justify-between text-[10px]">
+                  <span className="text-white/25 pl-2">↳ TP1</span>
+                  <span className="text-violet-300 font-bold">+{fmt(pos.tp1RealizedSol, 4)} SOL</span>
+                </div>
+              )}
+              {pos.tp2Hit && pos.tp2RealizedSol > 0 && (
+                <div className="flex justify-between text-[10px]">
+                  <span className="text-white/25 pl-2">↳ TP2</span>
+                  <span className="text-amber-300 font-bold">+{fmt(pos.tp2RealizedSol, 4)} SOL</span>
+                </div>
+              )}
+              {pos.runnerRealizedSol > 0 && (
+                <div className="flex justify-between text-[10px]">
+                  <span className="text-white/25 pl-2">↳ Runner</span>
+                  <span className="text-emerald-300 font-bold">+{fmt(pos.runnerRealizedSol, 4)} SOL</span>
+                </div>
               )}
             </div>
-          )}
 
-          {/* P&L breakdown */}
-          <div className="rounded-xl bg-white/3 border border-white/6 px-3 py-2.5 space-y-1.5">
-            <p className="text-[9px] font-black text-white/25 uppercase tracking-widest mb-2">P&L Breakdown</p>
-            <div className="flex justify-between text-[10px]">
-              <span className="text-white/35">Size</span>
-              <span className="text-white/65 font-bold">{fmt(pos.sizeSol, 4)} SOL</span>
+            {/* Timestamps */}
+            <div className="space-y-1">
+              {pos.entryAt > 0 && (
+                <div className="flex justify-between text-[10px]">
+                  <span className="text-white/25">Entered</span>
+                  <span className="text-white/45 font-medium tabular-nums">{toDateTime(pos.entryAt)}</span>
+                </div>
+              )}
+              {pos.closedAt && (
+                <div className="flex justify-between text-[10px]">
+                  <span className="text-white/25">Closed</span>
+                  <span className="text-white/45 font-medium tabular-nums">{toDateTime(pos.closedAt)}</span>
+                </div>
+              )}
+              {holdMs > 0 && (
+                <div className="flex justify-between text-[10px]">
+                  <span className="text-white/25">Hold time</span>
+                  <span className="text-white/45 font-medium">{holdStr(holdMs)}</span>
+                </div>
+              )}
             </div>
-            <div className="flex justify-between text-[10px]">
-              <span className="text-white/35">Total realized</span>
-              <span className={`font-bold ${isWin ? "text-emerald-400" : "text-red-400"}`}>
-                {isWin ? "+" : ""}{fmt(pos.realizedPnlSol, 4)} SOL
-                <span className="text-white/30 font-medium ml-1">({fmtPct2(pnlPct)})</span>
-              </span>
+
+            {/* DexScreener link + action buttons */}
+            <div className="flex items-center justify-between">
+              <a
+                href={`https://dexscreener.com/solana/${pos.mint}`}
+                target="_blank" rel="noreferrer"
+                className="flex items-center gap-1.5 text-[10px] text-violet-400/55 hover:text-violet-400 transition-colors"
+              >
+                <ExternalLink size={10} /> View on DexScreener
+              </a>
+              <div className="flex items-center gap-1.5">
+                <button
+                  onClick={() => setShowEdit(true)}
+                  className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-white/5 border border-white/10 text-[10px] font-bold text-white/50 hover:text-amber-300 hover:border-amber-500/30 hover:bg-amber-500/5 transition-colors"
+                >
+                  <Pencil size={9} /> Edit
+                </button>
+                {confirmDel ? (
+                  <div className="flex items-center gap-1">
+                    <button
+                      onClick={() => deleteMutation.mutate(pos.id, { onSuccess: () => setConfirmDel(false) })}
+                      disabled={deleteMutation.isPending}
+                      className="px-2.5 py-1.5 rounded-lg bg-red-500/15 border border-red-500/30 text-[10px] font-bold text-red-400 disabled:opacity-50"
+                    >
+                      {deleteMutation.isPending ? "…" : "Confirm"}
+                    </button>
+                    <button
+                      onClick={() => setConfirmDel(false)}
+                      className="px-2 py-1.5 rounded-lg bg-white/5 border border-white/10 text-[10px] text-white/40"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    onClick={() => setConfirmDel(true)}
+                    className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-white/5 border border-white/10 text-[10px] font-bold text-white/50 hover:text-red-400 hover:border-red-500/30 hover:bg-red-500/5 transition-colors"
+                  >
+                    <Trash2 size={9} /> Delete
+                  </button>
+                )}
+              </div>
             </div>
-            {pos.tp1Hit && pos.tp1RealizedSol > 0 && (
-              <div className="flex justify-between text-[10px]">
-                <span className="text-white/25 pl-2">↳ TP1</span>
-                <span className="text-violet-300 font-bold">+{fmt(pos.tp1RealizedSol, 4)} SOL</span>
-              </div>
-            )}
-            {pos.tp2Hit && pos.tp2RealizedSol > 0 && (
-              <div className="flex justify-between text-[10px]">
-                <span className="text-white/25 pl-2">↳ TP2</span>
-                <span className="text-amber-300 font-bold">+{fmt(pos.tp2RealizedSol, 4)} SOL</span>
-              </div>
-            )}
-            {pos.runnerRealizedSol > 0 && (
-              <div className="flex justify-between text-[10px]">
-                <span className="text-white/25 pl-2">↳ Runner</span>
-                <span className="text-emerald-300 font-bold">+{fmt(pos.runnerRealizedSol, 4)} SOL</span>
-              </div>
-            )}
           </div>
-
-          {/* Timestamps + links */}
-          <div className="space-y-1">
-            {pos.entryAt > 0 && (
-              <div className="flex justify-between text-[10px]">
-                <span className="text-white/25">Entered</span>
-                <span className="text-white/45 font-medium tabular-nums">{toDateTime(pos.entryAt)}</span>
-              </div>
-            )}
-            {pos.closedAt && (
-              <div className="flex justify-between text-[10px]">
-                <span className="text-white/25">Closed</span>
-                <span className="text-white/45 font-medium tabular-nums">{toDateTime(pos.closedAt)}</span>
-              </div>
-            )}
-            {holdMs > 0 && (
-              <div className="flex justify-between text-[10px]">
-                <span className="text-white/25">Hold time</span>
-                <span className="text-white/45 font-medium">{holdStr(holdMs)}</span>
-              </div>
-            )}
-          </div>
-
-          {/* DexScreener link */}
-          <a
-            href={`https://dexscreener.com/solana/${pos.mint}`}
-            target="_blank" rel="noreferrer"
-            className="flex items-center gap-1.5 text-[10px] text-violet-400/55 hover:text-violet-400 transition-colors"
-          >
-            <ExternalLink size={10} /> View on DexScreener
-          </a>
-        </div>
-      )}
-    </div>
+        )}
+      </div>
+    </>
   );
 }
 
