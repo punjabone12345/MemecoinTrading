@@ -1187,34 +1187,87 @@ class GraduationSniperService {
         // Error path: if DexScreener is unreachable, hasRaydiumPool returns true
         // (fail-open) so real graduations are never blocked by a network hiccup.
         logger.info({ mint, symbol }, "Graduation sniper: no WSOL vault from TX — verifying Raydium pool via DexScreener");
+
+        // ── Two-phase Raydium verification ───────────────────────────────────
+        // DexScreener takes 30–90 s to index a newly-created CPMM pool, so we
+        // must retry long enough to cover that lag.  However we can short-circuit
+        // early in the one case that definitively signals a false trigger:
+        //
+        //   • Raydium pair found   → confirmed migration, proceed immediately ✅
+        //   • Non-Raydium pair only (pumpswap/pump.fun) → false trigger, block ❌
+        //   • No pairs at all      → DexScreener hasn't indexed yet, keep retrying
+        //
+        // 10 attempts × 6 s gap = up to 60 s total window, covers the 30–90 s lag.
+        // If still no pairs after 60 s, fail-open (DexScreener may be down) so a
+        // valid graduation is not permanently lost.
+        const RAYDIUM_CHECK_ATTEMPTS = 10;
+        const RAYDIUM_CHECK_DELAY_MS = 6_000;
         let raydiumConfirmed = false;
-        const RAYDIUM_CHECK_ATTEMPTS  = 3;
-        const RAYDIUM_CHECK_DELAY_MS  = 4_000;
-        for (let attempt = 0; attempt < RAYDIUM_CHECK_ATTEMPTS && !raydiumConfirmed; attempt++) {
+        let foundNonRaydiumOnly  = false;   // pumpswap/pump.fun only = clear false trigger
+
+        for (let attempt = 0; attempt < RAYDIUM_CHECK_ATTEMPTS; attempt++) {
           if (attempt > 0) await new Promise<void>((r) => setTimeout(r, RAYDIUM_CHECK_DELAY_MS));
-          raydiumConfirmed = await this.hasRaydiumPool(mint);
-          logger.info({ mint, symbol, attempt: attempt + 1, raydiumConfirmed },
-            "Graduation sniper: Raydium pool check");
-        }
-        if (!raydiumConfirmed) {
-          const reason = "Pre-graduation false trigger — no Raydium pool detected (token not yet migrated)";
-          this.addEvent({ ...eventBase, symbol, action: "skipped", skipReason: reason });
-          logger.warn({ mint, symbol },
-            "Graduation sniper: SKIPPED — pre-graduation false trigger (no Raydium pool on DexScreener after retries)");
-          if (isTelegramConfigured()) {
-            void sendTelegram(
-              `⚠️ <b>FALSE TRIGGER BLOCKED</b>\n` +
-              `──────────────────────\n` +
-              `🪙 Token: <b>${symbol}</b>\n` +
-              `📋 CA: <code>${mint}</code>\n` +
-              `❌ No Raydium pool found — token not yet migrated\n` +
-              `✅ Entry blocked (pre-graduation guard)\n` +
-              `🕐 ${toIST(new Date())}`,
+          try {
+            type DexPair = { dexId?: string; priceUsd: string };
+            const res = await axios.get<DexPair[]>(
+              `${DEXSCREENER_BASE}/tokens/v1/solana/${mint}`,
+              { timeout: 6_000 },
             );
+            const pairs = Array.isArray(res.data) ? res.data as DexPair[] : [];
+
+            // Check for Raydium first
+            if (pairs.some((p) => p.dexId === "raydium" && (parseFloat(p.priceUsd) || 0) > 0)) {
+              raydiumConfirmed = true;
+              logger.info({ mint, symbol, attempt: attempt + 1 },
+                "Graduation sniper: Raydium pool confirmed via DexScreener ✅");
+              break;
+            }
+
+            // Non-Raydium pairs exist → definitive false trigger, stop immediately
+            if (pairs.some((p) => (parseFloat(p.priceUsd) || 0) > 0)) {
+              foundNonRaydiumOnly = true;
+              const dexes = [...new Set(pairs.filter((p) => (parseFloat(p.priceUsd)||0)>0).map((p)=>p.dexId??"unknown"))];
+              logger.warn({ mint, symbol, attempt: attempt + 1, dexes },
+                "Graduation sniper: non-Raydium pairs only — pre-graduation false trigger, aborting early");
+              break;
+            }
+
+            // No pairs at all — DexScreener still indexing, keep retrying
+            logger.info({ mint, symbol, attempt: attempt + 1, totalAttempts: RAYDIUM_CHECK_ATTEMPTS },
+              "Graduation sniper: no DexScreener pairs yet — retrying (DexScreener indexing lag)");
+          } catch {
+            // Network error — treat as not-yet-indexed, keep retrying
+            logger.warn({ mint, symbol, attempt: attempt + 1 },
+              "Graduation sniper: DexScreener call failed — retrying Raydium check");
           }
-          return;
         }
-        logger.info({ mint, symbol }, "Graduation sniper: Raydium pool confirmed via DexScreener ✅");
+
+        if (!raydiumConfirmed) {
+          if (foundNonRaydiumOnly) {
+            // Definitive false trigger — pumpswap/pump.fun pair exists but no Raydium
+            const reason = "Pre-graduation false trigger — pumpswap/pump.fun pair only, no Raydium pool";
+            this.addEvent({ ...eventBase, symbol, action: "skipped", skipReason: reason });
+            logger.warn({ mint, symbol },
+              "Graduation sniper: SKIPPED — pre-graduation false trigger (pumpswap only, no Raydium)");
+            if (isTelegramConfigured()) {
+              void sendTelegram(
+                `⚠️ <b>FALSE TRIGGER BLOCKED</b>\n` +
+                `──────────────────────\n` +
+                `🪙 Token: <b>${symbol}</b>\n` +
+                `📋 CA: <code>${mint}</code>\n` +
+                `❌ Only pumpswap/pump.fun pairs found — token not yet migrated to Raydium\n` +
+                `✅ Entry blocked (pre-graduation guard)\n` +
+                `🕐 ${toIST(new Date())}`,
+              );
+            }
+            return;
+          } else {
+            // No pairs at all after 60s — DexScreener lag or outage, fail-open
+            // (Jupiter will have the route by now if it's a real graduation)
+            logger.warn({ mint, symbol },
+              "Graduation sniper: no DexScreener pairs after 60s — failing open (DexScreener lag/outage), proceeding with entry");
+          }
+        }
       }
 
       if (rugCheckData) {

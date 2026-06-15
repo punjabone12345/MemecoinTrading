@@ -370,62 +370,69 @@ class PaperSniperService {
       return;
     }
 
-    // Fetch fresh execution price from DexScreener — retry up to 4 times (3s apart)
-    // to handle the 15–60s indexing lag for newly-graduated tokens.
+    // Fetch fresh execution price from DexScreener — Raydium pair required.
     //
-    // BUGFIX (pre-graduation guard): We now REQUIRE a Raydium pair specifically.
-    // A price on pump.fun / pumpswap only means the token has not yet migrated to
-    // Raydium.  Trading against a pumpswap price in paper mode would record a fake
-    // entry — Jupiter (real mode) has no Raydium route yet for a non-migrated token.
-    // If only non-Raydium pairs are found after all retries, skip the entry.
+    // Two distinct outcomes from DexScreener:
+    //   • Raydium pair found            → confirmed migration, use that price ✅
+    //   • Non-Raydium pair only         → pumpswap/pump.fun = pre-graduation false trigger → block ❌
+    //   • No pairs at all               → DexScreener hasn't indexed yet → keep retrying
     //
-    // We intentionally do NOT fall back to entryPrice (Jupiter-sourced, often wrong
-    // for brand-new tokens). If DexScreener can't verify a Raydium pair, skip.
+    // 10 attempts × 6 s = up to 60 s window, covering DexScreener's 30–90 s indexing lag.
+    // Non-Raydium-only triggers an immediate early exit (no point waiting further).
+    // If still no pairs after 60 s, skip as unverifiable.
     let execPrice = 0;
     let foundNonRaydiumOnly = false;
-    for (let attempt = 0; attempt < 4 && execPrice <= 0; attempt++) {
+    const PAPER_RAYDIUM_ATTEMPTS  = 10;
+    const PAPER_RAYDIUM_DELAY_MS  = 6_000;
+
+    for (let attempt = 0; attempt < PAPER_RAYDIUM_ATTEMPTS && execPrice <= 0 && !foundNonRaydiumOnly; attempt++) {
       if (attempt > 0) {
-        await new Promise<void>((r) => setTimeout(r, 3_000));
+        await new Promise<void>((r) => setTimeout(r, PAPER_RAYDIUM_DELAY_MS));
       }
       try {
         type DexPair = { baseToken: { address: string }; priceUsd: string; dexId?: string };
         const res = await axios.get<DexPair[]>(
           `${DEXSCREENER_BASE}/tokens/v1/solana/${mint}`,
-          { timeout: 5_000 },
+          { timeout: 6_000 },
         );
         const pairs = (res.data ?? []) as DexPair[];
 
-        // Prefer Raydium — only a Raydium pair proves the token has migrated
+        // Check Raydium first
         for (const pair of pairs) {
           if (pair.dexId === "raydium") {
             const p = parseFloat(pair.priceUsd);
-            if (p > 0) { execPrice = p; foundNonRaydiumOnly = false; break; }
+            if (p > 0) { execPrice = p; break; }
           }
         }
         if (execPrice > 0) break;
 
-        // Track whether we're seeing non-Raydium pairs (pre-graduation indicator)
+        // Non-Raydium pairs present → definitive pre-graduation false trigger, stop immediately
         const hasAnyPrice = pairs.some((p) => (parseFloat(p.priceUsd) || 0) > 0);
         if (hasAnyPrice) {
           foundNonRaydiumOnly = true;
-          const nonRaydiumDexes = [...new Set(pairs.filter((p) => (parseFloat(p.priceUsd) || 0) > 0).map((p) => p.dexId ?? "unknown"))];
-          logger.info({ mint, symbol, attempt, nonRaydiumDexes },
-            "Paper sniper: price found but no Raydium pair — token may not be migrated yet");
+          const dexes = [...new Set(pairs.filter((p) => (parseFloat(p.priceUsd)||0) > 0).map((p) => p.dexId ?? "unknown"))];
+          logger.warn({ mint, symbol, attempt: attempt + 1, dexes },
+            "Paper sniper: non-Raydium pairs only — pre-graduation false trigger, aborting");
+          break;
         }
+
+        // No pairs yet — DexScreener still indexing, keep retrying
+        logger.info({ mint, symbol, attempt: attempt + 1, totalAttempts: PAPER_RAYDIUM_ATTEMPTS },
+          "Paper sniper: no DexScreener pairs yet — retrying (DexScreener indexing lag)");
       } catch {
-        logger.debug({ mint, symbol, attempt }, "Paper sniper: exec-delay DexScreener fetch failed");
+        logger.debug({ mint, symbol, attempt: attempt + 1 }, "Paper sniper: DexScreener fetch failed — retrying");
       }
     }
 
     if (execPrice <= 0) {
       const skipReason = foundNonRaydiumOnly
-        ? `No Raydium pool found — token not yet migrated (pumpswap/pump.fun only, pre-graduation guard)`
-        : `Price unverifiable — DexScreener not indexed after exec delay`;
+        ? `Pre-graduation false trigger — pumpswap/pump.fun pair only, no Raydium pool found`
+        : `Price unverifiable — no DexScreener Raydium pair found after 60s (DexScreener lag or unindexed)`;
       this.addEvent({ id: uid(), detectedAt, mint, symbol, action: "skipped", skipReason });
       logger.warn({ mint, symbol, foundNonRaydiumOnly },
         foundNonRaydiumOnly
-          ? "Paper sniper: skipped — pre-graduation false trigger (no Raydium pair, pumpswap only)"
-          : "Paper sniper: skipped — DexScreener price unavailable after retries");
+          ? "Paper sniper: skipped — pre-graduation false trigger (pumpswap only, no Raydium)"
+          : "Paper sniper: skipped — no Raydium pair on DexScreener after 60s");
       this.seenMints.delete(mint);
       this.broadcast();
       return;
