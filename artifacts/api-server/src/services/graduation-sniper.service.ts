@@ -161,7 +161,7 @@ const DEFAULT_CONFIG: SniperConfig = {
   tp2Pct:               400,
   tp2ClosePct:          40,
   trailingStopPct:      30,
-  waitBeforeEntryMs:    0,       // 0s — Jupiter pre-quote fires immediately; buy withRetry handles route-not-found on first attempt
+  waitBeforeEntryMs:    5_000,   // 5s minimum delay from detection — ensures pool is liquid and price feeds stable before entry
   slippageBps:          3000,    // quote slippage for route-finding only; swap uses fixed SWAP_SLIPPAGE_BPS (5000 = 50% floor)
   priorityFeeLamports:  500_000, // 0.0005 SOL floor — Helius p75 used at runtime (old 50k was too low)
   jitoTipLamports:      100_000, // 0.0001 SOL Jito tip — bundles land in 1-2 slots (~400-800ms) vs 30-40s standard confirm
@@ -1074,6 +1074,22 @@ class GraduationSniperService {
       this.resetDailyCounterIfNeeded();
       this.graduationsToday++;
 
+      // ── Minimum entry delay ────────────────────────────────────────────────────
+      // Wait until waitBeforeEntryMs have elapsed since detection.  This gives the
+      // AMM pool time to become liquid, price feeds to stabilise, and early sniper
+      // bots time to set the real market price before we enter.
+      // Extraction above (~1-3 s) is counted against the delay, so we only sleep
+      // the remaining gap (e.g. with 5 s target and 2 s extraction → 3 s sleep).
+      {
+        const elapsed = Date.now() - detectedAt;
+        const remaining = Math.max(0, this.config.waitBeforeEntryMs - elapsed);
+        if (remaining > 0) {
+          logger.info({ mint, elapsed, remaining, target: this.config.waitBeforeEntryMs },
+            `Graduation sniper: entry delay — waiting ${remaining}ms (${elapsed}ms already elapsed)`);
+          await new Promise<void>((r) => setTimeout(r, remaining));
+        }
+      }
+
       // ── T0: fire ALL independent tasks simultaneously ─────────────────────────
       // Pool check, pre-quote, and baseline price have no dependencies on each
       // other — start all three at the exact same instant.  The rug-check price
@@ -1156,7 +1172,7 @@ class GraduationSniperService {
         this.fetchPriceFast(mint),
         poolCheckPromise,
       ]);
-      const entryPrice = rugCheckData?.price ?? baselinePrice;
+      let entryPrice = rugCheckData?.price ?? baselinePrice;
       logger.info({ mint, symbol, poolSol, rugPrice: rugCheckData?.price ?? null,
         parallelMs: Date.now() - t2Start, elapsedMs: Date.now() - t0 },
         "Sniper timing: T2 — rug price + pool check done ⚡ (pre-quote running in background)");
@@ -1236,6 +1252,23 @@ class GraduationSniperService {
             );
           }
           return;
+        }
+
+        // ── Use Jupiter-implied price as entry price ────────────────────────────
+        // The DexScreener prices above may reflect the bonding-curve pair (pumpfun)
+        // whose price froze at graduation time.  Jupiter quote → actual AMM pool
+        // reserves → real current market price.  Compute it from the quote we just
+        // fetched:  price = (0.01 SOL × SOL/USD) ÷ (jupiterOutAmount ÷ 10^6)
+        if (jupiterOutAmount > 0) {
+          const solUsd = await this.fetchSolUsdPrice();
+          if (solUsd && solUsd > 0) {
+            const jupiterImpliedPrice = (0.01 * solUsd) / (jupiterOutAmount / 1_000_000);
+            if (jupiterImpliedPrice > 0) {
+              logger.info({ mint, symbol, jupiterImpliedPrice, solUsd, jupiterOutAmount, prevEntryPrice: entryPrice },
+                "Graduation sniper: entry price updated from Jupiter quote — reflects actual AMM pool state ✅");
+              entryPrice = jupiterImpliedPrice;
+            }
+          }
         }
       }
 
@@ -1616,11 +1649,15 @@ class GraduationSniperService {
       const pairs: DexPair[] = Array.isArray(res.data) ? res.data : [];
       if (pairs.length === 0) return null;
 
-      // Prefer Raydium pair with highest liquidity
+      // Prefer AMM pairs (pumpswap/raydium/orca/meteora) with highest liquidity.
+      // Pump.fun now graduates to PumpSwap, so include it alongside Raydium.
+      // Bonding-curve "pumpfun" pairs are deprioritised — their price is the last
+      // curve price, which may not reflect the current AMM pool price.
+      const AMM_DEXES = new Set(["raydium", "pumpswap", "orca", "meteora"]);
       const sorted = [...pairs].sort((a, b) => {
-        const aRay = a.dexId === "raydium" ? 1 : 0;
-        const bRay = b.dexId === "raydium" ? 1 : 0;
-        if (bRay !== aRay) return bRay - aRay;
+        const aAmm = AMM_DEXES.has(a.dexId ?? "") ? 1 : 0;
+        const bAmm = AMM_DEXES.has(b.dexId ?? "") ? 1 : 0;
+        if (bAmm !== aAmm) return bAmm - aAmm;
         return (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0);
       });
 
@@ -2816,25 +2853,40 @@ class GraduationSniperService {
   private async fetchPriceFast(mint: string): Promise<{ price: number; symbol: string; name: string; liquidityUsd: number } | null> {
     return new Promise((resolve) => {
       let settled = false;
+      // Jupiter price (fast, no metadata) — stored as backup; only used if DexScreener
+      // doesn't respond within 3 s.  Showing mint.slice(0,8) as symbol in the UI is
+      // confusing — we always prefer DexScreener which has the real name/symbol.
+      let jupiterPrice: number | null = null;
+      let jupiterFallbackTimer: ReturnType<typeof setTimeout> | null = null;
+
       const settle = (result: { price: number; symbol: string; name: string; liquidityUsd: number } | null) => {
         if (result && !settled) {
           settled = true;
+          if (jupiterFallbackTimer) clearTimeout(jupiterFallbackTimer);
           resolve(result);
         }
       };
 
-      // Jupiter — usually responds in <3s for newly-graduated tokens
+      // Jupiter — fast but returns no symbol/name (mint address used as placeholder).
+      // Cache the price and give DexScreener up to 3 s to arrive with real metadata.
       void this.fetchJupiterPriceFallback(mint).then((price) => {
-        if (price) {
-          settle({ price, liquidityUsd: 0, symbol: mint.slice(0, 8), name: mint.slice(0, 8) });
+        if (price && !settled) {
+          jupiterPrice = price;
+          jupiterFallbackTimer = setTimeout(() => {
+            if (!settled && jupiterPrice) {
+              settled = true;
+              resolve({ price: jupiterPrice, liquidityUsd: 0, symbol: mint.slice(0, 8), name: mint.slice(0, 8) });
+            }
+          }, 3_000);
         }
-      }).catch(() => { /* network failure — DexScreener or timeout will resolve */ });
+      }).catch(() => {});
 
-      // DexScreener — complete metadata but 15–60s lag for new tokens; runs in parallel
-      void this.fetchPrice(mint).then(settle).catch(() => { /* network failure — Jupiter or timeout will resolve */ });
+      // DexScreener — correct symbol/name + AMM-preferred price; preferred over Jupiter.
+      // After the 5 s entry delay fires T0, the pumpfun bonding-curve pair is already
+      // indexed, so DexScreener typically responds in ~1-2 s here.
+      void this.fetchPrice(mint).then(settle).catch(() => {});
 
-      // Safety timeout: if both sources fail within 9s, resolve null
-      // (DexScreener's own HTTP timeout is 8s, so this fires only if both hung)
+      // Safety timeout: resolve null if both sources fail within 9 s
       setTimeout(() => {
         if (!settled) { settled = true; resolve(null); }
       }, 9_000);
