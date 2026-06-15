@@ -1,23 +1,25 @@
 ---
 name: DexScreener AMM pool gate
-description: AMM pool verification for the graduation sniper — 3-state logic, 60s window, PumpSwap is a valid graduation target
+description: AMM pool verification for the graduation sniper — no early-exit, 75s window, pumpfun pair lingers after migration
 ---
 
 ## The rule
 
-Pump.fun graduates tokens to **either Raydium CPMM (old) or PumpSwap (new)**. Both are valid. Never require Raydium specifically.
+**Never early-exit on "pumpfun-only" DexScreener results.** The pumpfun bonding-curve pair stays on DexScreener for 30–90 s AFTER migration while the new pumpswap pool is still being indexed. Seeing only `dexId:"pumpfun"` does NOT mean the token is still on the curve.
 
-3-state check on DexScreener response:
+Decision is only made AFTER the full window:
+1. **AMM pair found** (`dexId` in `{"raydium","pumpswap","orca","meteora"}`) at any point → proceed immediately ✅  
+2. **After 75s, saw non-AMM pairs but never AMM** → block (likely genuinely not migrated) ❌  
+3. **After 75s, no pairs at all** → fail-open (DexScreener down or extreme lag) ⚠️
 
-1. **AMM pair found** (`dexId` in `{"raydium","pumpswap","orca","meteora"}`) → real graduation → proceed ✅  
-2. **ONLY bonding-curve pair** (`dexId: "pumpfun"`, no AMM pair at all) → definitive false trigger → block immediately ❌  
-3. **No pairs at all** → DexScreener hasn't indexed yet → keep retrying ⏳
-
-**Why:** Original guard required `dexId === "raydium"` only. Pump.fun now migrates tokens to PumpSwap (dexId `"pumpswap"` on DexScreener). LIGHT and MUST were real graduations that got blocked because the guard treated pumpswap as a false trigger. The ONLY valid false-trigger signal is when ONLY a `"pumpfun"` bonding-curve pair exists with zero AMM pairs.
+**Why:** Three successive bugs from wrong early-exit logic:
+- First version: required `dexId === "raydium"` only → missed PumpSwap graduations (Pump.fun migrated to PumpSwap)
+- Second version: accepted pumpswap but early-exited on "pumpfun-only" → blocked real graduations because the OLD pumpfun pair lingers on DexScreener while pumpswap is still being indexed
+- Correct version: never early-exit on pumpfun; retry 15×5s = 75s window; decide only at end
 
 **How to apply:**
-- `GRAD_DEXES = new Set(["raydium", "pumpswap", "orca", "meteora"])` — any of these = real migration
-- `CURVE_DEXES = new Set(["pumpfun"])` — bonding curve only = pre-graduation  
-- 10 attempts × 6 s = 60 s window; early exit when only bonding-curve pairs found  
-- Fail-open after 60 s of no pairs (DexScreener outage) — better to attempt than lose graduation  
+- `GRAD_DEXES = new Set(["raydium", "pumpswap", "orca", "meteora"])` — any = proceed
+- Loop runs the **full** 15 attempts × 5 s regardless of what non-AMM pairs are seen
+- `lastSeenDexes` tracks what was visible on last attempt for the post-loop decision
 - Applied in both `graduation-sniper.service.ts` (inline loop + `hasRaydiumPool()` helper) and `paper-sniper.service.ts` (`scheduleDelayedEntry`)
+- The `hasRaydiumPool()` helper (used in a separate code path) also checks for all `GRAD_DEXES`, not just raydium

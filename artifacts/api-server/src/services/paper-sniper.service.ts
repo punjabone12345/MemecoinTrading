@@ -372,23 +372,23 @@ class PaperSniperService {
 
     // Fetch fresh execution price from DexScreener — any AMM pair required.
     //
-    // Pump.fun can graduate to Raydium CPMM (old path) OR PumpSwap (new path).
-    // Both are valid migration targets. The ONLY definitive false-trigger signal
-    // is a "pumpfun" bonding-curve pair with NO AMM pair (token still on curve).
+    // CRITICAL: After migration, the OLD pumpfun bonding-curve pair stays on
+    // DexScreener for 30–90 s while the new pumpswap pool is still being indexed.
+    // Seeing "pumpfun only" does NOT mean the token hasn't graduated — it means
+    // DexScreener is lagging. Never early-exit on pumpfun-only; retry the full window.
     //
-    //   • dexId "raydium" or "pumpswap" found → confirmed migration, use price ✅
-    //   • ONLY "pumpfun" bonding-curve pairs   → still on curve, block ❌
-    //   • No pairs at all                      → DexScreener lag, keep retrying ⏳
+    //   • AMM pair (raydium/pumpswap) found any time → proceed ✅
+    //   • After 75s: saw pairs but never AMM          → block ❌ (likely false trigger)
+    //   • After 75s: no pairs at all                  → skip (unverifiable)
     //
-    // 10 attempts × 6 s = up to 60 s window. Early exit on bonding-curve-only.
-    const PAPER_AMM_ATTEMPTS = 10;
-    const PAPER_AMM_DELAY_MS = 6_000;
+    // 15 attempts × 5 s = 75 s total window.
+    const PAPER_AMM_ATTEMPTS = 15;
+    const PAPER_AMM_DELAY_MS = 5_000;
     const GRAD_DEXES = new Set(["raydium", "pumpswap", "orca", "meteora"]);
-    const CURVE_DEXES = new Set(["pumpfun"]);
     let execPrice = 0;
-    let bondingCurveOnly = false;
+    let lastSeenDexes: string[] = [];
 
-    for (let attempt = 0; attempt < PAPER_AMM_ATTEMPTS && execPrice <= 0 && !bondingCurveOnly; attempt++) {
+    for (let attempt = 0; attempt < PAPER_AMM_ATTEMPTS && execPrice <= 0; attempt++) {
       if (attempt > 0) {
         await new Promise<void>((r) => setTimeout(r, PAPER_AMM_DELAY_MS));
       }
@@ -400,8 +400,9 @@ class PaperSniperService {
         );
         const pairs = (res.data ?? []) as DexPair[];
         const withPrice = pairs.filter((p) => (parseFloat(p.priceUsd) || 0) > 0);
+        lastSeenDexes = [...new Set(withPrice.map((p) => p.dexId ?? "unknown"))];
 
-        // AMM pair found → confirmed graduation
+        // AMM pair confirmed → use its price and proceed
         const ammPair = withPrice.find((p) => GRAD_DEXES.has(p.dexId ?? ""));
         if (ammPair) {
           execPrice = parseFloat(ammPair.priceUsd);
@@ -410,32 +411,25 @@ class PaperSniperService {
           break;
         }
 
-        // Only bonding-curve pairs → definitive false trigger, stop immediately
-        if (withPrice.length > 0 && withPrice.every((p) => CURVE_DEXES.has(p.dexId ?? ""))) {
-          bondingCurveOnly = true;
-          const dexes = [...new Set(withPrice.map((p) => p.dexId ?? "unknown"))];
-          logger.warn({ mint, symbol, attempt: attempt + 1, dexes },
-            "Paper sniper: only bonding-curve pairs — pre-graduation false trigger, aborting");
-          break;
-        }
-
-        // No pairs yet — DexScreener still indexing, keep retrying
-        logger.info({ mint, symbol, attempt: attempt + 1, totalAttempts: PAPER_AMM_ATTEMPTS },
-          "Paper sniper: no DexScreener pairs yet — retrying (DexScreener indexing lag)");
+        // No AMM yet — keep retrying. pumpfun pair may still be showing from before
+        // migration while the new pumpswap pool gets indexed (30–90 s lag).
+        logger.info({ mint, symbol, attempt: attempt + 1, totalAttempts: PAPER_AMM_ATTEMPTS, lastSeenDexes },
+          "Paper sniper: no AMM pair yet — retrying (DexScreener indexing lag)");
       } catch {
         logger.debug({ mint, symbol, attempt: attempt + 1 }, "Paper sniper: DexScreener fetch failed — retrying");
       }
     }
 
     if (execPrice <= 0) {
-      const skipReason = bondingCurveOnly
-        ? `Pre-graduation false trigger — only pump.fun bonding-curve pair found, no AMM pool yet`
-        : `Price unverifiable — no AMM pair on DexScreener after 60s (indexing lag or DexScreener down)`;
+      const sawSomething = lastSeenDexes.length > 0;
+      const skipReason = sawSomething
+        ? `No AMM pool found after 75s — seen only: ${lastSeenDexes.join(",")} (likely false trigger)`
+        : `Price unverifiable — no DexScreener pairs after 75s (DexScreener lag or down)`;
       this.addEvent({ id: uid(), detectedAt, mint, symbol, action: "skipped", skipReason });
-      logger.warn({ mint, symbol, bondingCurveOnly },
-        bondingCurveOnly
-          ? "Paper sniper: skipped — pre-graduation false trigger (bonding curve only)"
-          : "Paper sniper: skipped — no AMM pair on DexScreener after 60s");
+      logger.warn({ mint, symbol, lastSeenDexes },
+        sawSomething
+          ? "Paper sniper: skipped — no AMM pair after 75s (likely false trigger)"
+          : "Paper sniper: skipped — no pairs at all after 75s (DexScreener lag/down)");
       this.seenMints.delete(mint);
       this.broadcast();
       return;

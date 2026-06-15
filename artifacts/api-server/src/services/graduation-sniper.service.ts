@@ -1187,25 +1187,29 @@ class GraduationSniperService {
         // graduations are never blocked by a network hiccup.
         logger.info({ mint, symbol }, "Graduation sniper: no WSOL vault from TX — verifying AMM pool via DexScreener");
 
-        // ── AMM pool verification (3-state) ──────────────────────────────────
-        // Pump.fun can graduate to either Raydium CPMM (old) or PumpSwap (new).
-        // Both are valid AMMs. The ONLY definitive false-trigger signal is when
-        // ONLY a "pumpfun" bonding-curve pair exists (token hasn't migrated yet).
+        // ── AMM pool verification ─────────────────────────────────────────────
+        // Pump.fun graduates tokens to PumpSwap (new, dexId="pumpswap") or
+        // Raydium CPMM (old, dexId="raydium"). Both are real graduation targets.
         //
-        //   • dexId "raydium" or "pumpswap" pair found → real graduation ✅
-        //   • Only "pumpfun" bonding-curve pair        → still on curve, block ❌
-        //   • No pairs at all                          → DexScreener indexing lag, retry ⏳
+        // CRITICAL TIMING ISSUE: After migration the OLD pump.fun bonding-curve
+        // pair (dexId="pumpfun") stays on DexScreener for 30–90 s while the NEW
+        // pumpswap pair is still being indexed. So at detection time we often see
+        // ONLY "pumpfun" — NOT because the token hasn't graduated, but because
+        // DexScreener hasn't indexed the pumpswap pair yet.
         //
-        // 10 attempts × 6 s = up to 60 s window. Early exit on bonding-curve-only.
-        // Fail-open after 60 s (DexScreener outage) so no real graduation is lost.
-        const AMM_CHECK_ATTEMPTS = 10;
-        const AMM_CHECK_DELAY_MS = 6_000;
-        // Valid AMM dexIds — Pump.fun graduates to either of these
+        // Therefore we NEVER early-exit on "pumpfun-only". We retry the full
+        // window and decide only at the end:
+        //
+        //   • AMM pair (raydium/pumpswap/orca/meteora) found at ANY point → ✅ proceed
+        //   • After full window, still only pumpfun pairs         → ❌ block (not migrated)
+        //   • After full window, no pairs at all                  → ⚠️ fail-open (DS down)
+        //
+        // 15 attempts × 5 s = up to 75 s total window.
+        const AMM_CHECK_ATTEMPTS = 15;
+        const AMM_CHECK_DELAY_MS = 5_000;
         const GRAD_DEXES = new Set(["raydium", "pumpswap", "orca", "meteora"]);
-        // Bonding-curve-only dexIds — token NOT yet migrated
-        const CURVE_DEXES = new Set(["pumpfun"]);
         let ammConfirmed = false;
-        let bondingCurveOnly = false;   // only pumpfun bonding curve = definitive false trigger
+        let lastSeenDexes: string[] = [];   // track what we saw on last attempt
 
         for (let attempt = 0; attempt < AMM_CHECK_ATTEMPTS; attempt++) {
           if (attempt > 0) await new Promise<void>((r) => setTimeout(r, AMM_CHECK_DELAY_MS));
@@ -1217,8 +1221,9 @@ class GraduationSniperService {
             );
             const pairs = Array.isArray(res.data) ? res.data as DexPair[] : [];
             const withPrice = pairs.filter((p) => (parseFloat(p.priceUsd) || 0) > 0);
+            lastSeenDexes = [...new Set(withPrice.map((p) => p.dexId ?? "unknown"))];
 
-            // Real graduation — an AMM pair (raydium / pumpswap / orca / meteora)
+            // AMM pair confirmed → real graduation, proceed immediately
             const ammPair = withPrice.find((p) => GRAD_DEXES.has(p.dexId ?? ""));
             if (ammPair) {
               ammConfirmed = true;
@@ -1227,26 +1232,12 @@ class GraduationSniperService {
               break;
             }
 
-            // Only bonding-curve pair(s) found → definitive false trigger, stop immediately
-            const hasAnyPrice = withPrice.length > 0;
-            if (hasAnyPrice && withPrice.every((p) => CURVE_DEXES.has(p.dexId ?? ""))) {
-              bondingCurveOnly = true;
-              const dexes = [...new Set(withPrice.map((p) => p.dexId ?? "unknown"))];
-              logger.warn({ mint, symbol, attempt: attempt + 1, dexes },
-                "Graduation sniper: only bonding-curve pairs — pre-graduation false trigger, aborting");
-              break;
-            }
-
-            // Pairs with unrecognised dexId? Log and keep retrying (conservative)
-            if (hasAnyPrice) {
-              const dexes = [...new Set(withPrice.map((p) => p.dexId ?? "unknown"))];
-              logger.info({ mint, symbol, attempt: attempt + 1, dexes },
-                "Graduation sniper: pairs found but none match known AMM dexIds — retrying");
-            } else {
-              // No pairs at all — DexScreener still indexing, keep retrying
-              logger.info({ mint, symbol, attempt: attempt + 1, totalAttempts: AMM_CHECK_ATTEMPTS },
-                "Graduation sniper: no DexScreener pairs yet — retrying (DexScreener indexing lag)");
-            }
+            // No AMM yet — keep retrying regardless of what we see (pumpfun or nothing)
+            // The pumpfun bonding-curve pair lingers on DexScreener even after migration,
+            // so "pumpfun only" does NOT mean the token hasn't graduated — it means
+            // DexScreener hasn't indexed the new pumpswap pool yet.
+            logger.info({ mint, symbol, attempt: attempt + 1, totalAttempts: AMM_CHECK_ATTEMPTS, lastSeenDexes },
+              "Graduation sniper: no AMM pair yet — retrying (DexScreener indexing lag)");
           } catch {
             logger.warn({ mint, symbol, attempt: attempt + 1 },
               "Graduation sniper: DexScreener call failed — retrying AMM check");
@@ -1254,28 +1245,31 @@ class GraduationSniperService {
         }
 
         if (!ammConfirmed) {
-          if (bondingCurveOnly) {
-            // Definitive false trigger — only pump.fun bonding-curve pair, no AMM
-            const reason = "Pre-graduation false trigger — only pump.fun bonding-curve pair, token not yet migrated";
-            this.addEvent({ ...eventBase, symbol, action: "skipped", skipReason: reason });
+          // After 75 s: if we ONLY ever saw pumpfun bonding-curve pairs (never any AMM
+          // pair and never zero pairs), it's very likely a real false trigger.
+          // If we saw nothing at all, DexScreener may be down — fail-open.
+          const neverSawAnything = lastSeenDexes.length === 0;
+          if (neverSawAnything) {
             logger.warn({ mint, symbol },
-              "Graduation sniper: SKIPPED — pre-graduation false trigger (bonding curve only, no AMM pool)");
+              "Graduation sniper: no DexScreener pairs after 75s — failing open (DexScreener lag/outage), proceeding");
+          } else {
+            // Saw pairs but never an AMM — most likely a false trigger (still on curve)
+            const reason = `No AMM pool found after 75s — seen only: ${lastSeenDexes.join(",")}`;
+            this.addEvent({ ...eventBase, symbol, action: "skipped", skipReason: reason });
+            logger.warn({ mint, symbol, lastSeenDexes },
+              "Graduation sniper: SKIPPED — no AMM pair found after 75s (likely false trigger)");
             if (isTelegramConfigured()) {
               void sendTelegram(
                 `⚠️ <b>FALSE TRIGGER BLOCKED</b>\n` +
                 `──────────────────────\n` +
                 `🪙 Token: <b>${symbol}</b>\n` +
                 `📋 CA: <code>${mint}</code>\n` +
-                `❌ Only pump.fun bonding-curve pair found — token not yet migrated to any AMM\n` +
+                `❌ No AMM pool after 75s (seen: ${lastSeenDexes.join(", ")})\n` +
                 `✅ Entry blocked (pre-graduation guard)\n` +
                 `🕐 ${toIST(new Date())}`,
               );
             }
             return;
-          } else {
-            // No pairs at all after 60s — DexScreener lag or outage, fail-open
-            logger.warn({ mint, symbol },
-              "Graduation sniper: no DexScreener pairs after 60s — failing open (DexScreener lag/outage), proceeding");
           }
         }
       }
