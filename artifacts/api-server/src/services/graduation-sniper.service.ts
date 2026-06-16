@@ -61,7 +61,7 @@ const MAX_SELL_FAILS = 15;
 // reduction (5s → 2s) — if the route isn't indexed in 2s the first quote attempt
 // will fail and withRetry will reattempt after 800ms, effectively acting as a
 // dynamic wait rather than a hard sleep.
-const RUG_CHECK_WAIT_MS     = 1_500;          // monitor for 1.5s after baseline price (was 3s → 8s)
+const RUG_CHECK_WAIT_MS     = 0;              // 0ms gap — enter as fast as possible; gate handles pool confirmation
 const RUG_DROP_ABORT_PCT    = 20;             // abort entry if price drops ≥ 20% in that window
 
 // ── Entry drift / momentum filters ────────────────────────────────────────────
@@ -161,7 +161,7 @@ const DEFAULT_CONFIG: SniperConfig = {
   tp2Pct:               400,
   tp2ClosePct:          40,
   trailingStopPct:      30,
-  waitBeforeEntryMs:    8_000,   // 8s minimum delay from detection — ensures pool is liquid and price feeds stable before entry
+  waitBeforeEntryMs:    0,       // 0ms — enter as fast as possible after detection
   slippageBps:          3000,    // quote slippage for route-finding only; swap uses fixed SWAP_SLIPPAGE_BPS (5000 = 50% floor)
   priorityFeeLamports:  500_000, // 0.0005 SOL floor — Helius p75 used at runtime (old 50k was too low)
   jitoTipLamports:      100_000, // 0.0001 SOL Jito tip — bundles land in 1-2 slots (~400-800ms) vs 30-40s standard confirm
@@ -1207,8 +1207,8 @@ class GraduationSniperService {
         const JUPE_GATE_LITE_URL = "https://lite-api.jup.ag/swap/v1/quote";
         const JUPE_GATE_FULL_URL = "https://quote-api.jup.ag/v6/quote";
         const JUPE_GATE_WSOL     = "So11111111111111111111111111111111111111112";
-        const GATE_DEADLINE_MS   = 40_000;
-        const GATE_POLL_MS       = 2_000;
+        const GATE_DEADLINE_MS   = 30_000;   // 30s max — faster fail on genuine false triggers
+        const GATE_POLL_MS       = 1_000;   // 1s between retries (was 2s) — catch indexing sooner
 
         let gateConfirmed    = false;
         let jupiterOutAmount = 0;
