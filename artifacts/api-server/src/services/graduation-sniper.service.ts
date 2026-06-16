@@ -837,15 +837,12 @@ class GraduationSniperService {
         ws.send(JSON.stringify({ jsonrpc: "2.0", id: 0, method: "getHealth" }));
       }, 20_000);
 
-      // ── Backfill missed graduations after a reconnect ─────────────────────
-      // When the WS drops and reconnects, any graduation events that fired
-      // during the gap are permanently lost unless we actively poll for them.
-      // On every reconnect, query the last 25 signatures on the migration wallet
-      // and process any we haven't seen yet.  This ensures 100% graduation
-      // coverage even with 10+ reconnects per session.
-      if (isReconnect) {
-        void this.backfillMissedGraduations();
-      }
+      // ── Backfill missed graduations (initial connect + every reconnect) ──
+      // On initial connect: catches any graduations that happened while the
+      // server was starting up (build + boot can take several seconds).
+      // On reconnects: covers any events fired during the WS gap.
+      // Runs unconditionally so no graduation is silently missed at startup.
+      void this.backfillMissedGraduations();
     });
 
     ws.on("message", (data: WebSocket.RawData) => {
@@ -1000,9 +997,16 @@ class GraduationSniperService {
         // the pump.fun bonding curve program is ALWAYS invoked in the same TX
         // (to finalize the bonding curve).  Filter by whether the bonding curve
         // program address appears in the TX logs — this is unique to migrations.
-        const involvesBondingCurve = txLogs.some((l) =>
-          l.includes(PUMPFUN_PROGRAM_ID) || l.toLowerCase().includes("instruction: migrate"),
-        );
+        // Also explicitly check for migrate_v2 instruction name (Anchor logs as
+        // "Instruction: MigrateV2") so new pump.fun v2 TXs are never filtered out
+        // even if the bonding curve program ID doesn't appear in this subscription's logs.
+        const involvesBondingCurve = txLogs.some((l) => {
+          const lower = l.toLowerCase();
+          return l.includes(PUMPFUN_PROGRAM_ID)
+            || lower.includes("instruction: migrate")
+            || lower.includes("migrate_v2")
+            || lower.includes("migratev2");
+        });
         if (!involvesBondingCurve) {
           logger.debug({ signature }, "PumpSwap: non-graduation TX (no bonding curve) — suppressed");
           return;
@@ -1647,19 +1651,26 @@ class GraduationSniperService {
 
         const accountKeys    = txResult.transaction?.message?.accountKeys ?? [];
         const postBalances   = txResult.meta?.postTokenBalances ?? [];
-        const allBalances    = [
-          ...(txResult.meta?.preTokenBalances  ?? []),
-          ...postBalances,
-        ];
+        const preBalances    = txResult.meta?.preTokenBalances  ?? [];
 
-        // The graduated token mint appears in pre/post token balances.
-        // Filter out SOL (wrapped) and pick the non-SOL mint — that's the graduating token.
-        const mint = allBalances
-          .map((b) => b.mint)
-          .find((m) => m && m !== SOL_MINT);
+        // ── Mint extraction — LP-token-safe for migrate_v2 ────────────────────
+        // PumpSwap's migrate_v2 creates LP tokens inside the same TX.
+        // LP tokens ONLY appear in postTokenBalances (newly minted).
+        // The actual graduating meme token ALWAYS appears in preTokenBalances
+        // because its bonding-curve account is modified/closed during migration.
+        //
+        // Priority order:
+        //  1. First non-SOL mint in preTokenBalances → guaranteed to be the meme token
+        //  2. Non-SOL mint in postTokenBalances that ALSO appears in pre → pool vault
+        //  3. Any non-SOL mint anywhere → last resort (may be LP if 1+2 fail)
+        const preMintSet     = new Set(preBalances.map((b) => b.mint).filter(Boolean));
+        const preNonSolMint  = preBalances.map((b) => b.mint).find((m) => m && m !== SOL_MINT);
+        const postSafeMint   = postBalances.map((b) => b.mint).find((m) => m && m !== SOL_MINT && preMintSet.has(m));
+        const anyMint        = [...preBalances, ...postBalances].map((b) => b.mint).find((m) => m && m !== SOL_MINT);
+        const mint           = preNonSolMint ?? postSafeMint ?? anyMint;
 
         logger.info(
-          { signature, attempt: attempt + 1, mint: mint ?? "none", balanceCount: allBalances.length },
+          { signature, attempt: attempt + 1, mint: mint ?? "none", preCount: preBalances.length, postCount: postBalances.length },
           "Graduation sniper: token balance scan",
         );
 
