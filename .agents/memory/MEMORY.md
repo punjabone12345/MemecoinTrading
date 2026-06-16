@@ -9,3 +9,4 @@
 - [Sniper speed overhaul](sniper-speed-overhaul.md) — on-chain reserve ratio price replaces DexScreener for entry; cuts ~90s→~2.5s; Enhanced API removed (counterintuitively slower)
 - [DexScreener Raydium gate timing](dexscreener-raydium-gate.md) — 3-state check (raydium/non-raydium-only/none) with 60s window; pumpswap-only=block fast; no-pairs=keep retrying
 - [Detection zero-event fix](detection-zero-event-fix.md) — migration log filter + no-price abort caused zero detections; fix: bypass filter for migration wallet sub + 3rd pumpswap subscription + Jupiter fallback
+- [Old migration re-trading bugs](old-migration-trading-bugs.md) — backfill fires on boot (not just reconnect), no blockTime pre-filter, wrong vault extraction, one-sided drift guards; all fixed

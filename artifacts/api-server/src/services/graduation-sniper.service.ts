@@ -842,12 +842,14 @@ class GraduationSniperService {
         ws.send(JSON.stringify({ jsonrpc: "2.0", id: 0, method: "getHealth" }));
       }, 20_000);
 
-      // ── Backfill missed graduations (initial connect + every reconnect) ──
-      // On initial connect: catches any graduations that happened while the
-      // server was starting up (build + boot can take several seconds).
-      // On reconnects: covers any events fired during the WS gap.
-      // Runs unconditionally so no graduation is silently missed at startup.
-      void this.backfillMissedGraduations();
+      // ── Backfill missed graduations (RECONNECTS ONLY) ────────────────────
+      // On reconnect: covers graduations that fired during the WS gap.
+      // NOT run on initial connect — the live WS catches fresh events going
+      // forward, and backfilling on boot was the root cause of re-trading
+      // OLD migrations from before the server started.
+      if (this.wsReconnects > 0) {
+        void this.backfillMissedGraduations();
+      }
     });
 
     ws.on("message", (data: WebSocket.RawData) => {
@@ -882,15 +884,25 @@ class GraduationSniperService {
   // ── Backfill missed graduations after reconnect ───────────────────────────
   // Each reconnect creates a gap where Helius WS events are not received.
   // This method queries the last 25 confirmed signatures on the migration wallet
-  // via REST and processes any that aren't already in seenSignatures.
-  // Called on every reconnect (but NOT the first connect) so no graduation ever
-  // slips through a reconnect window.
+  // via REST and processes ONLY those that:
+  //   1. Are NOT already in seenSignatures
+  //   2. Have blockTime within the last MAX_BACKFILL_AGE_SEC seconds
+  //      (getSignaturesForAddress returns blockTime — use it to pre-filter
+  //       before making any getTransaction RPC call, saving rate-limit budget)
+  //   3. If blockTime is null (very recent, not yet finalized) — allow through;
+  //      extractMintFromTx's inner age gate is the final backstop.
+  //
+  // MAX_BACKFILL_AGE_SEC: same as the TX age gate in extractMintFromTx.
+  // Anything older cannot be a tradeable fresh pool anyway.
   private async backfillMissedGraduations(): Promise<void> {
     const apiKey = this.heliusApiKey;
     if (!apiKey) return;
 
+    const MAX_BACKFILL_AGE_SEC = 30; // must match extractMintFromTx MAX_TX_AGE_SEC
+    const nowSec = Math.floor(Date.now() / 1000);
+
     try {
-      type SigInfo = { signature: string; err: unknown | null };
+      type SigInfo = { signature: string; err: unknown | null; blockTime?: number | null };
       const res = await axios.post<{ result: SigInfo[] }>(
         `https://mainnet.helius-rpc.com/?api-key=${apiKey}`,
         {
@@ -904,10 +916,28 @@ class GraduationSniperService {
 
       const sigs = res.data?.result ?? [];
       let queued = 0;
+      let tooOld  = 0;
 
-      for (const { signature, err } of sigs) {
-        if (err) continue;                            // failed TX on-chain — skip
+      for (const { signature, err, blockTime } of sigs) {
+        if (err) continue;       // failed TX on-chain — skip
         if (!signature) continue;
+
+        // ── Pre-filter by blockTime ───────────────────────────────────────────
+        // getSignaturesForAddress includes blockTime for confirmed/finalized TXes.
+        // If blockTime is present and older than MAX_BACKFILL_AGE_SEC, mark as
+        // seen (suppress future re-processing) and skip immediately — no need to
+        // call getTransaction. This is the critical guard against re-trading
+        // historical migrations on every reconnect.
+        if (blockTime != null) {
+          const ageSec = nowSec - blockTime;
+          if (ageSec > MAX_BACKFILL_AGE_SEC) {
+            // Pre-mark as seen so the live WS or future backfills don't re-queue
+            this.seenSignatures.add(signature);
+            tooOld++;
+            continue;
+          }
+        }
+
         if (this.seenSignatures.has(signature)) continue; // already processed
 
         // Mark seen BEFORE spawning so parallel backfills don't double-fire
@@ -922,10 +952,10 @@ class GraduationSniperService {
       }
 
       logger.info(
-        { checked: sigs.length, queued, reconnects: this.wsReconnects },
+        { checked: sigs.length, queued, tooOld, reconnects: this.wsReconnects },
         queued > 0
           ? "Graduation sniper: backfill — queued missed graduations ✅"
-          : "Graduation sniper: backfill — no missed graduations (all already seen)",
+          : `Graduation sniper: backfill — no missed graduations (${tooOld} too old, rest already seen)`,
       );
     } catch (err) {
       logger.warn(
