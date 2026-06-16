@@ -376,33 +376,35 @@ class PaperSniperService {
     // to tell "not migrated" from "indexing lag". Jupiter is the correct gate —
     // it indexes PumpSwap pools within ~5–15 s of creation. If Jupiter can quote
     // SOL→TOKEN, the pool is real and the trade will succeed.
-    const JUPE_GATE_URL      = "https://lite-api.jup.ag/swap/v1/quote";
+    // Query both lite-api (fast, reduced coverage) and full quote-api (complete
+    // coverage) in parallel on every attempt. The lite-api often misses fresh
+    // PumpSwap pools; the full API covers them. Accept whichever succeeds first.
+    const JUPE_GATE_LITE_URL = "https://lite-api.jup.ag/swap/v1/quote";
+    const JUPE_GATE_FULL_URL = "https://quote-api.jup.ag/v6/quote";
     const JUPE_GATE_WSOL     = "So11111111111111111111111111111111111111112";
-    const JUPE_GATE_ATTEMPTS = 10;
-    const JUPE_GATE_DELAY_MS = 4_000;
+    const JUPE_GATE_ATTEMPTS = 20;          // 20 × 2s = ~40s total budget
+    const JUPE_GATE_DELAY_MS = 2_000;       // check every 2s (was 4s)
     let jupiterRoutable = false;
     let jupiterOutAmount = 0;
 
     for (let attempt = 0; attempt < JUPE_GATE_ATTEMPTS && !jupiterRoutable; attempt++) {
       if (attempt > 0) await new Promise<void>((r) => setTimeout(r, JUPE_GATE_DELAY_MS));
-      try {
-        type QuoteResp = { outAmount?: string; error?: string };
-        const res = await axios.get<QuoteResp>(JUPE_GATE_URL, {
-          params: { inputMint: JUPE_GATE_WSOL, outputMint: mint, amount: 10_000_000, slippageBps: 5000 },
-          timeout: 6_000,
-        });
-        jupiterOutAmount = parseInt(res.data?.outAmount ?? "0", 10);
-        if (jupiterOutAmount > 0) {
-          jupiterRoutable = true;
-          logger.info({ mint, symbol, attempt: attempt + 1, jupiterOutAmount },
-            "Paper sniper: Jupiter route confirmed — pool is live ✅");
-        } else {
-          logger.info({ mint, symbol, attempt: attempt + 1, totalAttempts: JUPE_GATE_ATTEMPTS },
-            "Paper sniper: Jupiter route not yet available — retrying");
-        }
-      } catch {
-        logger.info({ mint, symbol, attempt: attempt + 1 },
-          "Paper sniper: Jupiter quote returned no route — retrying");
+      type QuoteResp = { outAmount?: string; error?: string };
+      const params = { inputMint: JUPE_GATE_WSOL, outputMint: mint, amount: 10_000_000, slippageBps: 5000 };
+      const [liteResult, fullResult] = await Promise.allSettled([
+        axios.get<QuoteResp>(JUPE_GATE_LITE_URL, { params, timeout: 5_000 }),
+        axios.get<QuoteResp>(JUPE_GATE_FULL_URL, { params, timeout: 5_000 }),
+      ]);
+      const liteOut = liteResult.status === "fulfilled" ? parseInt(liteResult.value.data?.outAmount ?? "0", 10) : 0;
+      const fullOut = fullResult.status === "fulfilled" ? parseInt(fullResult.value.data?.outAmount ?? "0", 10) : 0;
+      jupiterOutAmount = Math.max(liteOut, fullOut);
+      if (jupiterOutAmount > 0) {
+        jupiterRoutable = true;
+        logger.info({ mint, symbol, attempt: attempt + 1, jupiterOutAmount, liteOut, fullOut },
+          "Paper sniper: Jupiter route confirmed — pool is live ✅");
+      } else {
+        logger.info({ mint, symbol, attempt: attempt + 1, totalAttempts: JUPE_GATE_ATTEMPTS, liteOut, fullOut },
+          "Paper sniper: Jupiter route not yet available — retrying");
       }
     }
 

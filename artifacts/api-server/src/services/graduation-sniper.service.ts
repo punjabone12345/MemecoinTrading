@@ -1205,36 +1205,37 @@ class GraduationSniperService {
         // 0.01 SOL quote (10_000_000 lamports) is tiny enough to not affect pricing.
         logger.info({ mint, symbol }, "Graduation sniper: no WSOL vault from TX — verifying via Jupiter route check");
 
-        const JUPE_GATE_URL      = "https://lite-api.jup.ag/swap/v1/quote";
+        // Query both lite-api (fast, reduced coverage) and full quote-api (complete
+        // coverage, slower) in parallel on every attempt. The lite-api often misses
+        // fresh PumpSwap pools; the full API covers them. Accept whichever succeeds.
+        const JUPE_GATE_LITE_URL = "https://lite-api.jup.ag/swap/v1/quote";
+        const JUPE_GATE_FULL_URL = "https://quote-api.jup.ag/v6/quote";
         const JUPE_GATE_WSOL     = "So11111111111111111111111111111111111111112";
-        const JUPE_GATE_ATTEMPTS = 10;
-        const JUPE_GATE_DELAY_MS = 4_000;
+        const JUPE_GATE_ATTEMPTS = 20;           // 20 × 2s = ~40s total budget
+        const JUPE_GATE_DELAY_MS = 2_000;        // check every 2s (was 4s) — catches indexing faster
         let jupiterRoutable = false;
         let jupiterOutAmount = 0;
 
         for (let attempt = 0; attempt < JUPE_GATE_ATTEMPTS; attempt++) {
           if (attempt > 0) await new Promise<void>((r) => setTimeout(r, JUPE_GATE_DELAY_MS));
-          try {
-            type QuoteResp = { outAmount?: string; error?: string };
-            const res = await axios.get<QuoteResp>(JUPE_GATE_URL, {
-              params: { inputMint: JUPE_GATE_WSOL, outputMint: mint, amount: 10_000_000, slippageBps: 5000 },
-              timeout: 6_000,
-            });
-            const outAmount = parseInt(res.data?.outAmount ?? "0", 10);
-            if (outAmount > 0) {
-              jupiterRoutable    = true;
-              jupiterOutAmount   = outAmount;
-              logger.info({ mint, symbol, attempt: attempt + 1, outAmount },
-                "Graduation sniper: Jupiter route confirmed — pool is live ✅");
-              break;
-            }
-            logger.info({ mint, symbol, attempt: attempt + 1, totalAttempts: JUPE_GATE_ATTEMPTS },
-              "Graduation sniper: Jupiter route not yet available — retrying");
-          } catch {
-            // 400 = no route found yet, 429 = rate-limited — keep retrying
-            logger.info({ mint, symbol, attempt: attempt + 1 },
-              "Graduation sniper: Jupiter quote returned no route — retrying");
+          type QuoteResp = { outAmount?: string; error?: string };
+          const params = { inputMint: JUPE_GATE_WSOL, outputMint: mint, amount: 10_000_000, slippageBps: 5000 };
+          const [liteResult, fullResult] = await Promise.allSettled([
+            axios.get<QuoteResp>(JUPE_GATE_LITE_URL, { params, timeout: 5_000 }),
+            axios.get<QuoteResp>(JUPE_GATE_FULL_URL, { params, timeout: 5_000 }),
+          ]);
+          const liteOut = liteResult.status === "fulfilled" ? parseInt(liteResult.value.data?.outAmount ?? "0", 10) : 0;
+          const fullOut = fullResult.status === "fulfilled" ? parseInt(fullResult.value.data?.outAmount ?? "0", 10) : 0;
+          const outAmount = Math.max(liteOut, fullOut);
+          if (outAmount > 0) {
+            jupiterRoutable  = true;
+            jupiterOutAmount = outAmount;
+            logger.info({ mint, symbol, attempt: attempt + 1, outAmount, liteOut, fullOut },
+              "Graduation sniper: Jupiter route confirmed — pool is live ✅");
+            break;
           }
+          logger.info({ mint, symbol, attempt: attempt + 1, totalAttempts: JUPE_GATE_ATTEMPTS, liteOut, fullOut },
+            "Graduation sniper: Jupiter route not yet available — retrying");
         }
 
         if (!jupiterRoutable) {
