@@ -10,7 +10,8 @@ import { jupiterSwapService } from "./jupiter-swap.service.js";
 
 // ── Constants ────────────────────────────────────────────────────────────────
 const MIGRATION_WALLET   = "39azUYFWPz3VHgKCf3VChUwbpURdCHRxjWVowf5jUJjg";
-const PUMPFUN_PROGRAM_ID = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
+const PUMPFUN_PROGRAM_ID  = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
+const PUMPSWAP_PROGRAM_ID = "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA";
 const DEXSCREENER_BASE   = "https://api.dexscreener.com";
 const RECONNECT_DELAY_MS  = 1_000;
 // If the WS is "connected" (TCP ping keeps it alive) but no JSON messages
@@ -243,6 +244,7 @@ class GraduationSniperService {
   private wsReconnects = 0;
   private subscriptionId: number | null = null;
   private programSubscriptionId: number | null = null;
+  private pumpswapSubscriptionId: number | null = null;
   private paperCallback: ((mint: string, entryPrice: number, symbol: string, name: string, detectedAt: number, detectionPrice: number) => void) | null = null;
   private priceIntervalId: ReturnType<typeof setInterval> | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -792,18 +794,29 @@ class GraduationSniperService {
         ],
       }));
 
-      // ── Second subscription: Pump.fun program ID ──────────────────────────
-      // Pump.fun introduced "migrate_v2" which may use a different migration
-      // wallet than MIGRATION_WALLET.  Subscribing to the program ID catches
-      // ALL Pump.fun transactions (including migrate_v2) regardless of which
-      // authority wallet is used.  handleMessage filters these aggressively
-      // using value.logs so only genuine migration events reach processGraduation.
+      // ── Second subscription: Pump.fun bonding-curve program ───────────────
+      // Catches all pump.fun transactions. handleMessage filters aggressively
+      // using instruction log strings — only migration events pass through.
       ws.send(JSON.stringify({
         jsonrpc: "2.0",
         id:      2,
         method:  "logsSubscribe",
         params:  [
           { mentions: [PUMPFUN_PROGRAM_ID] },
+          { commitment: "confirmed" },
+        ],
+      }));
+
+      // ── Third subscription: PumpSwap AMM program ────────────────────────────
+      // Catches graduations that go directly to pumpswap AMM pools.
+      // handleMessage uses a tighter filter: only passes TXs that also mention
+      // the pump.fun bonding-curve program (definitive sign of a graduation).
+      ws.send(JSON.stringify({
+        jsonrpc: "2.0",
+        id:      3,
+        method:  "logsSubscribe",
+        params:  [
+          { mentions: [PUMPSWAP_PROGRAM_ID] },
           { commitment: "confirmed" },
         ],
       }));
@@ -935,6 +948,13 @@ class GraduationSniperService {
       return;
     }
 
+    // Subscription confirmation — PumpSwap AMM sub (id: 3)
+    if (typeof msg["result"] === "number" && msg["id"] === 3) {
+      this.pumpswapSubscriptionId = msg["result"] as number;
+      logger.info({ pumpswapSubscriptionId: this.pumpswapSubscriptionId }, "Graduation sniper: PumpSwap AMM logsSubscribe confirmed");
+      return;
+    }
+
     // Log notification
     const method = msg["method"];
     if (method !== "logsNotification") return;
@@ -950,41 +970,66 @@ class GraduationSniperService {
     const signature = value["signature"] as string | undefined;
     if (!signature) return;
 
+    // ── Identify which subscription fired ────────────────────────────────────
+    // Helius logsNotification includes params.subscription = the sub ID.
+    // We use this to apply per-subscription filter logic instead of a single
+    // shared filter that can silently block events from the migration wallet
+    // if pump.fun renames their instruction (e.g. Migrate → GraduateV3).
+    const firedSubId         = params?.["subscription"] as number | undefined;
+    const isMigrationWalletSub = firedSubId != null && firedSubId === this.subscriptionId;
+    const isPumpswapSub        = firedSubId != null && firedSubId === this.pumpswapSubscriptionId;
+
     // ── Log-based migration filter ────────────────────────────────────────────
-    // Helius fires logsNotification for EVERY transaction mentioning either the
-    // migration wallet or the Pump.fun program ID.  The program subscription is
-    // especially noisy (1000+ buy/sell TXes per minute).  Filter immediately
-    // using the embedded log strings — only graduation events contain "migrate"
-    // (covers Migrate, MigrateV2, migrate_v2 etc.).  If logs are absent (some
-    // old RPC nodes omit them) fall through so no event is ever silently lost.
     const txLogs = value["logs"] as string[] | undefined;
     if (txLogs && txLogs.length > 0) {
-      // ── Tightened migration filter ────────────────────────────────────────
-      // BUGFIX: "migrate" alone is too loose — pump.fun pre-graduation events
-      // (bonding-curve completion signals, liquidity-lock confirmations, etc.)
-      // include "migrate" in status log lines WITHOUT being an actual migration
-      // instruction.  This was the root cause of the ASTROGUY false trigger:
-      // a pre-graduation event fired 4+ minutes before the real migrate_v2.
-      //
-      // Require an EXPLICIT Solana instruction-level log.  Pump.fun graduation
-      // emits exactly ONE of these in confirmed TXes:
-      //   "Program log: Instruction: Migrate"   (old Raydium CPMM path)
-      //   "Program log: Instruction: MigrateV2" (new pump.fun AMM / pumpswap)
-      // Also match the underscore form used in some inner-instruction logs.
-      const isMigration = txLogs.some((l) => {
-        const lower = l.toLowerCase();
-        return lower.includes("instruction: migrate") ||   // covers Migrate + MigrateV2
-               lower.includes("migrate_v2")             ||  // inner-instruction form
-               lower.includes("migratev2");                  // alternate camelCase
-      });
-      if (!isMigration) {
-        logger.debug({ signature }, "Graduation sniper: non-migration TX (no migrate instruction log) — suppressed");
-        return;
+
+      if (isMigrationWalletSub) {
+        // ── Migration wallet subscription: NO instruction filter ─────────────
+        // This wallet (39azUY…) is DEDICATED to signing graduation TXs only.
+        // We MUST NOT filter by instruction name here — pump.fun has renamed
+        // the migration instruction multiple times and will do so again.
+        // If a TX from this wallet passes the `err` check above, it IS a
+        // graduation.  extractMintFromTx is the final gate (returns null for
+        // non-graduation TXs that lack pool token balances).
+        logger.info({ signature, logCount: txLogs.length },
+          "Graduation sniper: migration wallet TX — processing (no instruction filter) ⚡");
+
+      } else if (isPumpswapSub) {
+        // ── PumpSwap AMM subscription: bonding-curve co-invocation filter ────
+        // PumpSwap fires for every swap/LP action.  Graduation TXs are special:
+        // the pump.fun bonding curve program is ALWAYS invoked in the same TX
+        // (to finalize the bonding curve).  Filter by whether the bonding curve
+        // program address appears in the TX logs — this is unique to migrations.
+        const involvesBondingCurve = txLogs.some((l) =>
+          l.includes(PUMPFUN_PROGRAM_ID) || l.toLowerCase().includes("instruction: migrate"),
+        );
+        if (!involvesBondingCurve) {
+          logger.debug({ signature }, "PumpSwap: non-graduation TX (no bonding curve) — suppressed");
+          return;
+        }
+        logger.info({ signature, logCount: txLogs.length },
+          "Graduation sniper: PumpSwap AMM graduation TX confirmed ⚡");
+
+      } else {
+        // ── Pump.fun program subscription (id: 2) or unknown ─────────────────
+        // This subscription is very noisy (1000+ buy/sell TXes per minute).
+        // Require an explicit instruction-level log to filter down to migrations.
+        // Pump.fun graduation emits one of:
+        //   "Program log: Instruction: Migrate"    (old Raydium CPMM path)
+        //   "Program log: Instruction: MigrateV2"  (new pumpswap path)
+        const isMigration = txLogs.some((l) => {
+          const lower = l.toLowerCase();
+          return lower.includes("instruction: migrate") ||
+                 lower.includes("migrate_v2")           ||
+                 lower.includes("migratev2");
+        });
+        if (!isMigration) {
+          logger.debug({ signature }, "Graduation sniper: non-migration TX (no migrate instruction) — suppressed");
+          return;
+        }
+        logger.info({ signature, logCount: txLogs.length },
+          "Graduation sniper: migrate instruction confirmed ⚡");
       }
-      logger.info(
-        { signature, logCount: txLogs.length },
-        "Graduation sniper: migrate_v2 instruction confirmed ⚡",
-      );
     }
 
     // ── Signature-level dedup ─────────────────────────────────────────────────
@@ -1126,6 +1171,12 @@ class GraduationSniperService {
       // Rug-check timer: 1.5s from T0 (runs concurrently with all the above)
       const rugTimerPromise = new Promise<void>((r) => setTimeout(r, 1_500));
 
+      // Jupiter price fallback: fires at T0 so it's ready by T1-T2 if on-chain
+      // vault extraction failed. fetchJupiterPriceFallback resolves in ~800ms.
+      // Cost: one extra Jupiter API call per graduation (cheap); benefit: zero
+      // "Price not found" aborts when wsolVaultPubkey/tokenVaultPubkey are null.
+      const jupFallbackPromise = this.fetchJupiterPriceFallback(mint);
+
       // ── T1: on-chain price ready (~200-400ms from T0) ─────────────────────────
       const [reserves, solUsd] = await Promise.all([reservesPromise, solUsdPromise]);
       const t1Ms = Date.now() - t0;
@@ -1152,7 +1203,17 @@ class GraduationSniperService {
         }, "Pipeline T1: on-chain price ✅ (pool reserve ratio)");
       } else {
         logger.warn({ mint, reserves: !!reserves, solUsd, elapsedMs: t1Ms },
-          "Pipeline T1: on-chain reserves unavailable — will try DexScreener/Jupiter fallback");
+          "Pipeline T1: on-chain reserves unavailable — checking Jupiter fallback");
+        // Jupiter was fired at T0 — poll it now (100ms budget, may already be ready)
+        const jupEarly = await Promise.race([
+          jupFallbackPromise,
+          new Promise<number | null>((r) => setTimeout(() => r(null), 100)),
+        ]);
+        if (jupEarly && jupEarly > 0 && solUsd && solUsd > 0) {
+          baselinePrice = jupEarly;
+          logger.info({ mint, jupEarly, baselinePrice, elapsedMs: t1Ms },
+            "Pipeline T1: Jupiter fallback price ready early ✅");
+        }
       }
 
       // ── Pool SOL validation (from reserves — no extra RPC needed) ─────────────
@@ -1391,10 +1452,24 @@ class GraduationSniperService {
       }
 
       // ── No-price abort ────────────────────────────────────────────────────────
+      // Last resort: if on-chain AND DexScreener both failed, give Jupiter one
+      // final window. jupFallbackPromise was fired at T0 (~1.5-2s ago at this
+      // point) so it should be resolved or nearly resolved by now.
       if (baselinePrice <= 0 && entryPrice <= 0) {
-        this.addEvent({ ...eventBase, symbol, action: "skipped", skipReason: "Price not found (on-chain + DexScreener, ~2s window)" });
-        logger.info({ mint, symbol }, "Pipeline: skipped — no price from on-chain or DexScreener ❌");
-        return;
+        const jupFinal = await Promise.race([
+          jupFallbackPromise,
+          new Promise<number | null>((r) => setTimeout(() => r(null), 2_000)),
+        ]);
+        if (jupFinal && jupFinal > 0 && solUsd && solUsd > 0) {
+          baselinePrice = jupFinal;
+          entryPrice    = jupFinal;
+          logger.info({ mint, symbol, jupFinal, elapsedMs: Date.now() - t0 },
+            "Pipeline: Jupiter fallback price (last resort) ✅");
+        } else {
+          this.addEvent({ ...eventBase, symbol, action: "skipped", skipReason: "Price not found (on-chain + DexScreener + Jupiter)" });
+          logger.info({ mint, symbol }, "Pipeline: skipped — no price from on-chain, DexScreener, or Jupiter ❌");
+          return;
+        }
       }
       if (entryPrice <= 0) entryPrice = baselinePrice;
 

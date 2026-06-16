@@ -8,3 +8,4 @@
 - [Sniper entry pipeline latency fix](sniper-latency-fix.md) — extractMintFromTx delays (17s→5s) + post-buy price resolution moved to background; cuts 40s→~8s
 - [Sniper speed overhaul](sniper-speed-overhaul.md) — on-chain reserve ratio price replaces DexScreener for entry; cuts ~90s→~2.5s; Enhanced API removed (counterintuitively slower)
 - [DexScreener Raydium gate timing](dexscreener-raydium-gate.md) — 3-state check (raydium/non-raydium-only/none) with 60s window; pumpswap-only=block fast; no-pairs=keep retrying
+- [Detection zero-event fix](detection-zero-event-fix.md) — migration log filter + no-price abort caused zero detections; fix: bypass filter for migration wallet sub + 3rd pumpswap subscription + Jupiter fallback
