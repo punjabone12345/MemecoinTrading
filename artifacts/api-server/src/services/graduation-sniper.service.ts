@@ -1691,6 +1691,7 @@ class GraduationSniperService {
             meta?: {
               preTokenBalances?:  TokenBalance[];
               postTokenBalances?: TokenBalance[];
+              logMessages?:       string[];
             };
           } | null;
         };
@@ -1758,6 +1759,45 @@ class GraduationSniperService {
         const accountKeys    = txResult.transaction?.message?.accountKeys ?? [];
         const postBalances   = txResult.meta?.postTokenBalances ?? [];
         const preBalances    = txResult.meta?.preTokenBalances  ?? [];
+        const txLogMessages  = txResult.meta?.logMessages ?? [];
+
+        // ── Pump.fun migration validator (CRITICAL anti-false-positive gate) ──
+        // The PumpSwap AMM subscription (sub 3) fires for ANY PumpSwap TX —
+        // including tokens created directly on PumpSwap (not from pump.fun) and
+        // already-migrated tokens that are actively trading. These must be
+        // rejected before they reach the paper/live sniper.
+        //
+        // A genuine pump.fun graduation TX satisfies AT LEAST ONE of:
+        //   1. MIGRATION_WALLET (39azUY…) appears in the TX account keys —
+        //      pump.fun's dedicated migration signer is present for EVERY
+        //      graduation and NEVER appears in random PumpSwap TXes.
+        //   2. TX logs contain "Instruction: Migrate" or "MigrateV2" —
+        //      Anchor emits this line only when the pump.fun bonding-curve
+        //      "migrate" or "migrate_v2" instruction executes.
+        //
+        // If neither condition is met → not a pump.fun graduation → discard.
+        const hasMigrationWallet = accountKeys.some(
+          (k) => k.pubkey === MIGRATION_WALLET,
+        );
+        const hasMigrateInstruction = txLogMessages.some((l) => {
+          const lower = l.toLowerCase();
+          return lower.includes("instruction: migrate")
+              || lower.includes("migrate_v2")
+              || lower.includes("migratev2");
+        });
+
+        if (!hasMigrationWallet && !hasMigrateInstruction) {
+          logger.warn(
+            { signature, attempt: attempt + 1, accountKeyCount: accountKeys.length, logCount: txLogMessages.length },
+            "Graduation sniper: NOT a pump.fun graduation — no migration wallet & no migrate instruction ⛔",
+          );
+          return null; // definitive reject — retry won't help
+        }
+
+        logger.info(
+          { signature, hasMigrationWallet, hasMigrateInstruction },
+          "Graduation sniper: pump.fun migration confirmed ✅",
+        );
 
         // ── Mint extraction — LP-token-safe for migrate_v2 ────────────────────
         // PumpSwap's migrate_v2 creates LP tokens inside the same TX.
