@@ -383,8 +383,11 @@ class PaperSniperService {
     const JUPE_FULL        = "https://quote-api.jup.ag/v6/quote";
     const WSOL_MINT        = "So11111111111111111111111111111111111111112";
     const PUMPSWAP_PROG    = "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA";
-    const AMM_DEXES        = new Set(["raydium", "pumpswap", "orca", "meteora"]);
-    const GATE_DEADLINE    = 30_000;
+    // DexScreener uses "pump-amm" (not "pumpswap") for PumpSwap-graduated tokens.
+    // Include all known variants so the gate doesn't miss tokens that are clearly
+    // live on DexScreener. The ANY-price fallback below catches unknown future dexIds.
+    const AMM_DEXES        = new Set(["raydium", "pumpswap", "pump-amm", "pump_amm", "orca", "meteora"]);
+    const GATE_DEADLINE    = 45_000; // extended: Jupiter can take 30-40s to index new pools
     const GATE_POLL        = 1_000;
     const heliusKey        = process.env["HELIUS_API_KEY"];
 
@@ -422,14 +425,18 @@ class PaperSniperService {
       const checks: Promise<Win>[] = [];
 
       // A: DexScreener AMM pair
+      // Strategy: prefer a known-AMM dexId, but fall back to ANY pair with a
+      // valid price. If DexScreener has the token at all, the pool clearly exists.
       checks.push(
         (async () => {
           type DexPair = { priceUsd: string; dexId?: string };
           const res = await axios.get<DexPair[]>(`${DEXSCREENER_BASE}/tokens/v1/solana/${mint}`, { timeout: 4_000 });
           const pairs = Array.isArray(res.data) ? res.data : [];
-          const best = pairs.find(p => AMM_DEXES.has(p.dexId ?? "") && (parseFloat(p.priceUsd) || 0) > 0);
-          if (best) return { source: `dex:${best.dexId}`, dexPrice: parseFloat(best.priceUsd) };
-          throw new Error("dex: no AMM pair");
+          const best =
+            pairs.find(p => AMM_DEXES.has(p.dexId ?? "") && (parseFloat(p.priceUsd) || 0) > 0) ??
+            pairs.find(p => (parseFloat(p.priceUsd) || 0) > 0); // any pair with price = pool exists
+          if (best) return { source: `dex:${best.dexId ?? "unknown"}`, dexPrice: parseFloat(best.priceUsd) };
+          throw new Error("dex: no pair with price");
         })()
       );
 
@@ -504,8 +511,9 @@ class PaperSniperService {
           { timeout: 5_000 },
         );
         const pairs = (res.data ?? []) as DexPair[];
-        // Prefer AMM pairs; fall back to any pair (bonding curve price ≈ AMM price at launch)
-        const best = pairs.find((p) => ["raydium","pumpswap"].includes(p.dexId ?? ""))
+        // Prefer AMM pairs; fall back to any pair with a price
+        // Include "pump-amm" — DexScreener's dexId for PumpSwap-graduated tokens
+        const best = pairs.find((p) => ["raydium","pumpswap","pump-amm","pump_amm"].includes(p.dexId ?? ""))
                   ?? pairs.find((p) => (parseFloat(p.priceUsd) || 0) > 0);
         if (best) execPrice = parseFloat(best.priceUsd);
       } catch {
