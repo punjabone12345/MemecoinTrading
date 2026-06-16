@@ -498,19 +498,41 @@ class PaperSniperService {
       return;
     }
 
-    // ── Step 2: Get execution price ──────────────────────────────────────────
-    // Jupiter confirmed the pool is live. Now get an accurate USD price.
-    // DexScreener should be catching up by now; try a few times, then fall back
-    // to calculating from the Jupiter quote + SOL price.
-    // STRICT AMM-only price fetch — never accept bonding-curve pair prices.
-    // The bonding-curve DexScreener pair (dexId "pump.fun" or similar) exists
-    // immediately and shows the pre-migration price.  Using it here is what
-    // caused the fake-cheap entry prices.  We wait up to 5 × 5s = 25s for the
-    // real AMM pair (pumpswap / pump-amm / raydium) to appear on DexScreener.
-    const AMM_DEX_IDS = ["raydium", "pumpswap", "pump-amm", "pump_amm", "orca", "meteora"];
-    let execPrice = 0;
-    for (let attempt = 0; attempt < 5 && execPrice <= 0; attempt++) {
-      if (attempt > 0) await new Promise<void>((r) => setTimeout(r, 5_000));
+    // ── Step 2: Get accurate AMM execution price ─────────────────────────────
+    //
+    // DESIGN PRINCIPLES (hard lessons from fake paper entries):
+    //
+    // 1. NEVER use the bonding-curve DexScreener pair.  pump.fun tokens always have
+    //    a DexScreener pair with dexId "pump.fun" that exists BEFORE migration and
+    //    shows the pre-pump pool-seed price.  Only AMM pairs (pumpswap/pump-amm/
+    //    raydium) reflect real post-graduation trading.
+    //
+    // 2. NEVER use the stale `jupiterOutAmount` from the gate check.  The gate
+    //    fires ~0-5s after graduation; Jupiter routes may not yet reflect the new
+    //    pool.  Always fetch a FRESH Jupiter quote here.
+    //
+    // 3. NEVER apply an artificial price floor from the detection baseline.
+    //    If no real AMM price is available, SKIP the trade — a fake entry is worse
+    //    than no entry.
+    //
+    // 4. Jupiter formula requires decimal adjustment: outAmount is in raw token
+    //    units.  pump.fun tokens have 6 decimals, so divide by 1_000_000 to get
+    //    UI tokens before computing USD price.
+    //
+    // Source priority:
+    //   A. DexScreener AMM pair — poll up to 60s (12 × 5s)
+    //   B. Jupiter fresh quote — correct formula: (0.01 SOL × SOL/USD) / (rawOut / 1e6)
+    //   C. No real price → SKIP (no entry)
+    //
+    const AMM_DEX_IDS       = new Set(["raydium", "pumpswap", "pump-amm", "pump_amm", "orca", "meteora"]);
+    const DEX_MAX_ATTEMPTS  = 12;   // 12 × 5s = 60s total
+    const DEX_POLL_MS       = 5_000;
+    let execPrice       = 0;
+    let execPriceSource = "";
+
+    // A: Poll DexScreener for AMM pair (up to 60s)
+    for (let attempt = 0; attempt < DEX_MAX_ATTEMPTS && execPrice <= 0; attempt++) {
+      if (attempt > 0) await new Promise<void>((r) => setTimeout(r, DEX_POLL_MS));
       try {
         type DexPair = { priceUsd: string; dexId?: string };
         const res = await axios.get<DexPair[]>(
@@ -518,114 +540,77 @@ class PaperSniperService {
           { timeout: 5_000 },
         );
         const pairs = (res.data ?? []) as DexPair[];
-        // STRICT: AMM pairs only — no bonding-curve fallback
-        const ammPair = pairs.find((p) => AMM_DEX_IDS.includes(p.dexId ?? "") && (parseFloat(p.priceUsd) || 0) > 0);
+        const ammPair = pairs.find((p) => AMM_DEX_IDS.has(p.dexId ?? "") && (parseFloat(p.priceUsd) || 0) > 0);
         if (ammPair) {
-          execPrice = parseFloat(ammPair.priceUsd);
+          execPrice       = parseFloat(ammPair.priceUsd);
+          execPriceSource = `dex:${ammPair.dexId ?? "amm"}`;
           logger.info({ mint, symbol, execPrice, dexId: ammPair.dexId, attempt },
             "Paper sniper: exec price from DexScreener AMM pair ✅");
         } else {
-          logger.debug({ mint, symbol, attempt }, "Paper sniper: DexScreener AMM pair not indexed yet — retrying");
+          logger.debug({ mint, symbol, attempt, maxAttempts: DEX_MAX_ATTEMPTS },
+            "Paper sniper: DexScreener AMM pair not indexed yet — retrying");
         }
       } catch {
-        logger.debug({ mint, symbol, attempt }, "Paper sniper: DexScreener price fetch failed");
+        logger.debug({ mint, symbol, attempt }, "Paper sniper: DexScreener fetch failed — retrying");
       }
     }
 
-    // If DexScreener still doesn't have the price, calculate from Jupiter quote.
-    // jupiterOutAmount = tokens for 10_000_000 lamports (0.01 SOL).
-    // We need SOL price in USD to compute token USD price.
-    if (execPrice <= 0 && jupiterOutAmount > 0) {
-      try {
-        const SOL_MINT = "So11111111111111111111111111111111111111112";
-        type DexPair = { priceUsd: string };
-        const solRes = await axios.get<DexPair[]>(
-          `${DEXSCREENER_BASE}/tokens/v1/solana/${SOL_MINT}`, { timeout: 5_000 });
-        const solPairs = (solRes.data ?? []) as DexPair[];
-        const solUsd = parseFloat(solPairs[0]?.priceUsd ?? "0");
-        if (solUsd > 0) {
-          // 0.01 SOL → jupiterOutAmount tokens → price = (0.01 * solUsd) / jupiterOutAmount
-          execPrice = (0.01 * solUsd) / jupiterOutAmount;
-          logger.info({ mint, symbol, execPrice, solUsd, jupiterOutAmount },
-            "Paper sniper: exec price from Jupiter quote fallback");
-        }
-      } catch {
-        logger.warn({ mint, symbol }, "Paper sniper: SOL price fetch failed for Jupiter fallback");
-      }
-    }
-
+    // B: Jupiter fresh quote fallback (correct decimal math)
+    // outAmount is raw token units; pump.fun = 6 decimals → divide by 1e6 for UI tokens.
+    // Price = (SOL spent in USD) / (UI tokens received)
+    //       = (0.01 × solUsd) / (outAmount / 1_000_000)
     if (execPrice <= 0) {
-      this.addEvent({ id: uid(), detectedAt, mint, symbol, action: "skipped",
-        skipReason: `Price unverifiable after Jupiter route confirmed (DexScreener + Jupiter fallback both failed)` });
-      logger.warn({ mint, symbol }, "Paper sniper: skipped — price unavailable even after Jupiter route confirmed");
+      try {
+        const WSOL_MINT = "So11111111111111111111111111111111111111112";
+        const JUPE_FULL = "https://quote-api.jup.ag/v6/quote";
+        type QuoteResp  = { outAmount?: string };
+        type SolPair    = { priceUsd: string };
+
+        const [jupRes, solRes] = await Promise.allSettled([
+          axios.get<QuoteResp>(JUPE_FULL, {
+            params: { inputMint: WSOL_MINT, outputMint: mint, amount: 10_000_000, slippageBps: 5000 },
+            timeout: 6_000,
+          }),
+          axios.get<SolPair[]>(
+            `${DEXSCREENER_BASE}/tokens/v1/solana/${WSOL_MINT}`,
+            { timeout: 4_000 },
+          ),
+        ]);
+
+        if (jupRes.status === "fulfilled" && solRes.status === "fulfilled") {
+          const rawOut = parseInt(jupRes.value.data?.outAmount ?? "0", 10);
+          const solUsd = parseFloat((solRes.value.data as SolPair[])[0]?.priceUsd ?? "0");
+          if (rawOut > 0 && solUsd > 0) {
+            const uiOut   = rawOut / 1_000_000;          // 6 decimals (pump.fun standard)
+            const jupPrice = (0.01 * solUsd) / uiOut;    // USD per UI token
+            if (jupPrice > 0) {
+              execPrice       = jupPrice;
+              execPriceSource = "jup-fresh";
+              logger.info({ mint, symbol, execPrice, rawOut, uiOut, solUsd },
+                "Paper sniper: exec price from Jupiter fresh quote ✅");
+            }
+          }
+        }
+      } catch {
+        logger.warn({ mint, symbol }, "Paper sniper: Jupiter fresh quote fallback failed");
+      }
+    }
+
+    // C: No real AMM price — refuse to enter with fake/stale price
+    if (execPrice <= 0) {
+      const skipReason = `No real AMM price after 60s — DexScreener AMM not indexed + Jupiter fallback failed. Refusing fake entry.`;
+      this.addEvent({ id: uid(), detectedAt, mint, symbol, action: "skipped", skipReason });
+      logger.warn({ mint, symbol }, "Paper sniper: SKIPPED — no real AMM price available, not entering ⛔");
       this.seenMints.delete(mint);
       this.broadcast();
       return;
     }
 
-    // ── Step 2b: Jupiter cross-validation — fix for stale DexScreener prices ──
-    // ROOT CAUSE: at T+5s after graduation, DexScreener may still serve the old
-    // bonding-curve price (pre-pump) for the token. The AMM pair takes 15–60s to
-    // index. If DexScreener returns a price close to the detection baseline (<2%
-    // drift), it is likely stale. Cross-validate with a fresh Jupiter quote which
-    // reads directly from on-chain AMM reserves and reflects the ACTUAL market price.
-    // If Jupiter implies a meaningfully higher price, use it as the fill price.
-    if (detectionPrice > 0) {
-      const prelimDrift = ((execPrice / detectionPrice) - 1) * 100;
-      if (prelimDrift < 2.0) {
-        try {
-          const WSOL_MINT  = "So11111111111111111111111111111111111111112";
-          const JUPE_FULL  = "https://quote-api.jup.ag/v6/quote";
-          type QuoteResp   = { outAmount?: string };
-          type SolPair     = { priceUsd: string };
-
-          const [jupRes, solRes] = await Promise.allSettled([
-            axios.get<QuoteResp>(JUPE_FULL, {
-              params: { inputMint: WSOL_MINT, outputMint: mint, amount: 10_000_000, slippageBps: 5000 },
-              timeout: 6_000,
-            }),
-            axios.get<SolPair[]>(`${DEXSCREENER_BASE}/tokens/v1/solana/${WSOL_MINT}`, { timeout: 4_000 }),
-          ]);
-
-          if (jupRes.status === "fulfilled" && solRes.status === "fulfilled") {
-            const jupOut = parseInt(jupRes.value.data?.outAmount ?? "0", 10);
-            const solUsd = parseFloat((solRes.value.data as SolPair[])[0]?.priceUsd ?? "0");
-            if (jupOut > 0 && solUsd > 0) {
-              // Jupiter: 0.01 SOL buys jupOut tokens (in smallest unit, 6 decimals assumed)
-              const jupImpliedPrice = (0.01 * solUsd) / (jupOut / 1_000_000);
-              if (jupImpliedPrice > execPrice * 1.05) {
-                logger.info(
-                  { mint, symbol, dexPrice: execPrice, jupPrice: jupImpliedPrice,
-                    improvement: (((jupImpliedPrice / execPrice) - 1) * 100).toFixed(1) + "%" },
-                  "Paper sniper: Jupiter price > DexScreener by >5% — using Jupiter (DexScreener was likely stale/bonding-curve) 🔄",
-                );
-                execPrice = jupImpliedPrice;
-              }
-            }
-          }
-        } catch {
-          // non-fatal: if Jupiter cross-check fails, proceed with DexScreener price
-        }
-      }
-    }
-
-    // ── Step 2c: Minimum fill drift floor ─────────────────────────────────────
-    // Real buys always pay MORE than the detection-moment price because:
-    //   1. Price moves in the 5–15s between detection and execution
-    //   2. Slippage on the actual swap
-    //   3. Priority fee impact
-    // If execPrice is ≤ detectionPrice (0% or negative drift), the price source
-    // (DexScreener or Jupiter) is returning a stale/pre-pump value. Apply a
-    // minimum 1.5% fill drift floor to prevent fake-cheap paper entries.
-    if (detectionPrice > 0 && execPrice > 0 && execPrice < detectionPrice * 1.015) {
-      const minFillPrice = detectionPrice * 1.015;
-      logger.info(
-        { mint, symbol, detectionPrice, execPrice, minFillPrice,
-          appliedFloor: ((minFillPrice / detectionPrice - 1) * 100).toFixed(2) + "%" },
-        "Paper sniper: applying minimum 1.5% fill drift floor (exec price was at or below detection baseline) 📈",
-      );
-      execPrice = minFillPrice;
-    }
+    logger.info(
+      { mint, symbol, execPrice, execPriceSource, detectionPrice,
+        drift: detectionPrice > 0 ? (((execPrice / detectionPrice) - 1) * 100).toFixed(1) + "%" : "n/a" },
+      "Paper sniper: execution price confirmed ✅",
+    );
 
     // Check drift with the real execution price
     const execDriftPct = detectionPrice > 0
