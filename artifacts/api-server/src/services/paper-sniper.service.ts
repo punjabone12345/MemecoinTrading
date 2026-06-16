@@ -424,19 +424,20 @@ class PaperSniperService {
 
       const checks: Promise<Win>[] = [];
 
-      // A: DexScreener AMM pair
-      // Strategy: prefer a known-AMM dexId, but fall back to ANY pair with a
-      // valid price. If DexScreener has the token at all, the pool clearly exists.
+      // A: DexScreener AMM pair ONLY — never bonding-curve pair.
+      // The bonding-curve pair (dexId: "pump.fun" or similar) is ALWAYS present
+      // on DexScreener even before migration completes and shows the pre-pump price.
+      // Using it as a price source is the root cause of fake-cheap paper entries.
+      // We must wait for the actual AMM pair (pumpswap/pump-amm/raydium) to appear.
       checks.push(
         (async () => {
           type DexPair = { priceUsd: string; dexId?: string };
           const res = await axios.get<DexPair[]>(`${DEXSCREENER_BASE}/tokens/v1/solana/${mint}`, { timeout: 4_000 });
           const pairs = Array.isArray(res.data) ? res.data : [];
-          const best =
-            pairs.find(p => AMM_DEXES.has(p.dexId ?? "") && (parseFloat(p.priceUsd) || 0) > 0) ??
-            pairs.find(p => (parseFloat(p.priceUsd) || 0) > 0); // any pair with price = pool exists
-          if (best) return { source: `dex:${best.dexId ?? "unknown"}`, dexPrice: parseFloat(best.priceUsd) };
-          throw new Error("dex: no pair with price");
+          // STRICT: only AMM pairs — no bonding-curve fallback
+          const ammPair = pairs.find(p => AMM_DEXES.has(p.dexId ?? "") && (parseFloat(p.priceUsd) || 0) > 0);
+          if (ammPair) return { source: `dex:${ammPair.dexId ?? "unknown"}`, dexPrice: parseFloat(ammPair.priceUsd) };
+          throw new Error("dex: no AMM pair indexed yet");
         })()
       );
 
@@ -501,9 +502,15 @@ class PaperSniperService {
     // Jupiter confirmed the pool is live. Now get an accurate USD price.
     // DexScreener should be catching up by now; try a few times, then fall back
     // to calculating from the Jupiter quote + SOL price.
+    // STRICT AMM-only price fetch — never accept bonding-curve pair prices.
+    // The bonding-curve DexScreener pair (dexId "pump.fun" or similar) exists
+    // immediately and shows the pre-migration price.  Using it here is what
+    // caused the fake-cheap entry prices.  We wait up to 5 × 5s = 25s for the
+    // real AMM pair (pumpswap / pump-amm / raydium) to appear on DexScreener.
+    const AMM_DEX_IDS = ["raydium", "pumpswap", "pump-amm", "pump_amm", "orca", "meteora"];
     let execPrice = 0;
     for (let attempt = 0; attempt < 5 && execPrice <= 0; attempt++) {
-      if (attempt > 0) await new Promise<void>((r) => setTimeout(r, 3_000));
+      if (attempt > 0) await new Promise<void>((r) => setTimeout(r, 5_000));
       try {
         type DexPair = { priceUsd: string; dexId?: string };
         const res = await axios.get<DexPair[]>(
@@ -511,11 +518,15 @@ class PaperSniperService {
           { timeout: 5_000 },
         );
         const pairs = (res.data ?? []) as DexPair[];
-        // Prefer AMM pairs; fall back to any pair with a price
-        // Include "pump-amm" — DexScreener's dexId for PumpSwap-graduated tokens
-        const best = pairs.find((p) => ["raydium","pumpswap","pump-amm","pump_amm"].includes(p.dexId ?? ""))
-                  ?? pairs.find((p) => (parseFloat(p.priceUsd) || 0) > 0);
-        if (best) execPrice = parseFloat(best.priceUsd);
+        // STRICT: AMM pairs only — no bonding-curve fallback
+        const ammPair = pairs.find((p) => AMM_DEX_IDS.includes(p.dexId ?? "") && (parseFloat(p.priceUsd) || 0) > 0);
+        if (ammPair) {
+          execPrice = parseFloat(ammPair.priceUsd);
+          logger.info({ mint, symbol, execPrice, dexId: ammPair.dexId, attempt },
+            "Paper sniper: exec price from DexScreener AMM pair ✅");
+        } else {
+          logger.debug({ mint, symbol, attempt }, "Paper sniper: DexScreener AMM pair not indexed yet — retrying");
+        }
       } catch {
         logger.debug({ mint, symbol, attempt }, "Paper sniper: DexScreener price fetch failed");
       }
