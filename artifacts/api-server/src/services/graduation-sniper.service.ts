@@ -1602,15 +1602,17 @@ class GraduationSniperService {
     const SOL_MINT = "So11111111111111111111111111111111111111112";
 
     // ── getTransaction with token balance scan ────────────────────────────────
-    // The WebSocket fires at "confirmed" commitment — the TX is already indexed
-    // by the time we get here, so attempt 0 (no delay) succeeds immediately.
-    // Enhanced API is NOT used: it requires extra Helius indexing time (1-5s)
-    // which is SLOWER than direct getTransaction for confirmed TXs.
-    // Tight retries: 300ms, 600ms, 1.2s — total budget 2.1s (was 5.2s).
-    const delays = [0, 300, 600, 1_200];
+    // Helius fires the WS logsNotification at "confirmed" commitment, but their
+    // RPC indexer takes an additional 1–5 seconds before getTransaction returns
+    // data for that signature. Starting at 0 ms wastes all early retries.
+    // Schedule: 1.5s, 3s, 5s, 8s, 12s, 18s — first attempt lands inside the
+    // typical 1–3s Helius indexing window; later slots catch slow blocks.
+    // commitment: "confirmed" matches the WS subscription so the RPC node
+    // looks in the confirmed ledger, not only finalized.
+    const delays = [1_500, 3_000, 5_000, 8_000, 12_000, 18_000];
 
     for (let attempt = 0; attempt < delays.length; attempt++) {
-      if (delays[attempt]! > 0) await new Promise((r) => setTimeout(r, delays[attempt]!));
+      await new Promise((r) => setTimeout(r, delays[attempt]!));
 
       try {
         type TokenBalance = { mint: string; accountIndex: number; uiTokenAmount?: { uiAmount?: number | null } };
@@ -1635,7 +1637,7 @@ class GraduationSniperService {
             jsonrpc: "2.0",
             id:      1,
             method:  "getTransaction",
-            params:  [signature, { encoding: "jsonParsed", maxSupportedTransactionVersion: 0 }],
+            params:  [signature, { encoding: "jsonParsed", commitment: "confirmed", maxSupportedTransactionVersion: 0 }],
           },
           { timeout: 12_000 },
         );
