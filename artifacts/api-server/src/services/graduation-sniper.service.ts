@@ -326,6 +326,11 @@ class GraduationSniperService {
   private heartbeatIntervalId: ReturnType<typeof setInterval> | null = null;
   private wsPingIntervalId: ReturnType<typeof setInterval> | null = null;  // WS-level ping keepalive
   private startedAt                 = Date.now();
+  // Unix timestamp (seconds) of when THIS server process started.
+  // Used to reject Helius WebSocket replay events (migrations that were
+  // confirmed on-chain before this process booted are by definition stale
+  // and must never be traded, regardless of how old they are in seconds).
+  private readonly serverStartTimeSec = Math.floor(Date.now() / 1000);
 
   // ── Stale-price guard ──────────────────────────────────────────────────────
   // Tracks when each position last got a valid price update from DexScreener.
@@ -1652,27 +1657,31 @@ class GraduationSniperService {
           continue;
         }
 
-        // ── Recency gate: reject stale migrations ─────────────────────────────
-        // blockTime is a Unix timestamp in seconds. On WebSocket reconnect,
-        // Helius can replay buffered events including migrations from minutes/
-        // hours ago. Trading these causes guaranteed -99% drift losses because
-        // the tokens are already dead. Only process if the TX landed within the
-        // last 90 seconds (generous enough to cover our own extraction retries
-        // of up to ~47s total, but tight enough to reject truly stale events).
-        const RECENCY_WINDOW_S = 90;
+        // ── Server-boot recency gate: reject pre-boot migration replays ──────
+        // blockTime is a Unix timestamp (seconds) of when the TX was confirmed
+        // on-chain.  Helius delivers queued/historical migration events the
+        // instant the WebSocket subscribes — these are tokens that graduated
+        // BEFORE this server process started and are already dead pools.
+        // Rule: if blockTime < serverStartTimeSec the TX existed before we
+        // booted → guaranteed replay → reject unconditionally.
+        // Grace buffer: subtract 30s from serverStartTimeSec to allow a
+        // migration that happened a few seconds before boot (e.g. during
+        // container startup) to still be traded if the pool is still fresh.
         const blockTime = txResult.blockTime;
         if (blockTime != null) {
-          const ageSec = Math.floor(Date.now() / 1000) - blockTime;
-          if (ageSec > RECENCY_WINDOW_S) {
+          const gracedBootSec = this.serverStartTimeSec - 30;
+          if (blockTime < gracedBootSec) {
+            const ageSec = Math.floor(Date.now() / 1000) - blockTime;
             logger.warn(
-              { signature, blockTime, ageSec, limit: RECENCY_WINDOW_S },
-              "Graduation sniper: STALE migration TX rejected — too old to trade safely ⛔",
+              { signature, blockTime, serverStartSec: this.serverStartTimeSec, ageSec },
+              "Graduation sniper: PRE-BOOT migration TX rejected — Helius replay of dead pool ⛔",
             );
             return null;
           }
+          const ageSec = Math.floor(Date.now() / 1000) - blockTime;
           logger.info(
             { signature, blockTime, ageSec },
-            "Graduation sniper: recency check passed ✅",
+            "Graduation sniper: recency check passed (post-boot TX) ✅",
           );
         }
 
