@@ -568,16 +568,30 @@ function HistoryCard({ pos }: { pos: PaperPosition }) {
               </div>
             )}
 
-            {/* Drift */}
+            {/* Drift + price mismatch warning */}
             {pos.detectionPrice != null && (
-              <div className="flex items-center gap-1 flex-wrap text-[10px]">
-                <span className="text-white/30">Detect {fmtPrice(pos.detectionPrice)}</span>
-                <span className="text-white/20">→</span>
-                <span className="text-white/30">Fill {fmtPrice(pos.entryPrice)}</span>
-                {pos.entryDriftPct != null && (
-                  <span className={`font-semibold ${pos.entryDriftPct > 5 ? "text-amber-400/80" : pos.entryDriftPct < -2 ? "text-emerald-400/80" : "text-white/40"}`}>
-                    ({pos.entryDriftPct >= 0 ? "+" : ""}{pos.entryDriftPct.toFixed(1)}% drift)
-                  </span>
+              <div className="space-y-1">
+                <div className="flex items-center gap-1 flex-wrap text-[10px]">
+                  <span className="text-white/30">Detect {fmtPrice(pos.detectionPrice)}</span>
+                  <span className="text-white/20">→</span>
+                  <span className="text-white/30">Fill {fmtPrice(pos.entryPrice)}</span>
+                  {pos.entryDriftPct != null && (
+                    <span className={`font-semibold ${pos.entryDriftPct > 5 ? "text-amber-400/80" : pos.entryDriftPct < -2 ? "text-emerald-400/80" : "text-white/40"}`}>
+                      ({pos.entryDriftPct >= 0 ? "+" : ""}{pos.entryDriftPct.toFixed(1)}% drift)
+                    </span>
+                  )}
+                </div>
+                {/* Show mismatch warning when fill ≈ detection (likely stale DexScreener at entry time) */}
+                {pos.entryDriftPct != null && pos.entryDriftPct < 1.6 && pos.entryDriftPct >= 0 && (
+                  <div className="flex items-start gap-1.5 bg-amber-500/8 border border-amber-500/20 rounded-lg px-2.5 py-2">
+                    <AlertTriangle size={10} className="text-amber-400/80 mt-0.5 shrink-0" />
+                    <p className="text-[9px] text-amber-400/70 leading-relaxed">
+                      <span className="font-bold text-amber-400/90">Possible price mismatch.</span>{" "}
+                      Fill ≈ detection price ({pos.entryDriftPct.toFixed(1)}% drift) suggests DexScreener served a stale
+                      pre-pump price at entry time. Actual fill in live trading would have been higher.
+                      P&L shown may be overstated.
+                    </p>
+                  </div>
                 )}
               </div>
             )}

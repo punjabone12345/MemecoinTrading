@@ -552,6 +552,70 @@ class PaperSniperService {
       return;
     }
 
+    // ── Step 2b: Jupiter cross-validation — fix for stale DexScreener prices ──
+    // ROOT CAUSE: at T+5s after graduation, DexScreener may still serve the old
+    // bonding-curve price (pre-pump) for the token. The AMM pair takes 15–60s to
+    // index. If DexScreener returns a price close to the detection baseline (<2%
+    // drift), it is likely stale. Cross-validate with a fresh Jupiter quote which
+    // reads directly from on-chain AMM reserves and reflects the ACTUAL market price.
+    // If Jupiter implies a meaningfully higher price, use it as the fill price.
+    if (detectionPrice > 0) {
+      const prelimDrift = ((execPrice / detectionPrice) - 1) * 100;
+      if (prelimDrift < 2.0) {
+        try {
+          const WSOL_MINT  = "So11111111111111111111111111111111111111112";
+          const JUPE_FULL  = "https://quote-api.jup.ag/v6/quote";
+          type QuoteResp   = { outAmount?: string };
+          type SolPair     = { priceUsd: string };
+
+          const [jupRes, solRes] = await Promise.allSettled([
+            axios.get<QuoteResp>(JUPE_FULL, {
+              params: { inputMint: WSOL_MINT, outputMint: mint, amount: 10_000_000, slippageBps: 5000 },
+              timeout: 6_000,
+            }),
+            axios.get<SolPair[]>(`${DEXSCREENER_BASE}/tokens/v1/solana/${WSOL_MINT}`, { timeout: 4_000 }),
+          ]);
+
+          if (jupRes.status === "fulfilled" && solRes.status === "fulfilled") {
+            const jupOut = parseInt(jupRes.value.data?.outAmount ?? "0", 10);
+            const solUsd = parseFloat((solRes.value.data as SolPair[])[0]?.priceUsd ?? "0");
+            if (jupOut > 0 && solUsd > 0) {
+              // Jupiter: 0.01 SOL buys jupOut tokens (in smallest unit, 6 decimals assumed)
+              const jupImpliedPrice = (0.01 * solUsd) / (jupOut / 1_000_000);
+              if (jupImpliedPrice > execPrice * 1.05) {
+                logger.info(
+                  { mint, symbol, dexPrice: execPrice, jupPrice: jupImpliedPrice,
+                    improvement: (((jupImpliedPrice / execPrice) - 1) * 100).toFixed(1) + "%" },
+                  "Paper sniper: Jupiter price > DexScreener by >5% — using Jupiter (DexScreener was likely stale/bonding-curve) 🔄",
+                );
+                execPrice = jupImpliedPrice;
+              }
+            }
+          }
+        } catch {
+          // non-fatal: if Jupiter cross-check fails, proceed with DexScreener price
+        }
+      }
+    }
+
+    // ── Step 2c: Minimum fill drift floor ─────────────────────────────────────
+    // Real buys always pay MORE than the detection-moment price because:
+    //   1. Price moves in the 5–15s between detection and execution
+    //   2. Slippage on the actual swap
+    //   3. Priority fee impact
+    // If execPrice is ≤ detectionPrice (0% or negative drift), the price source
+    // (DexScreener or Jupiter) is returning a stale/pre-pump value. Apply a
+    // minimum 1.5% fill drift floor to prevent fake-cheap paper entries.
+    if (detectionPrice > 0 && execPrice > 0 && execPrice < detectionPrice * 1.015) {
+      const minFillPrice = detectionPrice * 1.015;
+      logger.info(
+        { mint, symbol, detectionPrice, execPrice, minFillPrice,
+          appliedFloor: ((minFillPrice / detectionPrice - 1) * 100).toFixed(2) + "%" },
+        "Paper sniper: applying minimum 1.5% fill drift floor (exec price was at or below detection baseline) 📈",
+      );
+      execPrice = minFillPrice;
+    }
+
     // Check drift with the real execution price
     const execDriftPct = detectionPrice > 0
       ? ((execPrice / detectionPrice) - 1) * 100
