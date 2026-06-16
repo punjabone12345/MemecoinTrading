@@ -1751,25 +1751,56 @@ class GraduationSniperService {
         );
 
         if (mint) {
-          // Extract WSOL vault: highest-balance wSOL account in postBalances = the pool's
-          // liquidity vault (pump.fun seeds it with ~85 SOL at graduation).
-          const wsolEntries = postBalances
+          // ── Vault extraction: prefer NEWLY-CREATED accounts ───────────────
+          // During a PumpSwap migration TX:
+          //   • Bonding-curve wSOL vault: appears in BOTH pre AND post balances
+          //     (pre = ~85 SOL accumulated, post = 0 after draining into AMM).
+          //     Reading this gives the HIGH bonding-curve SOL/token ratio = inflated price.
+          //   • New AMM pool wSOL vault: appears ONLY in postBalances (pre = absent/0).
+          //     Reading this gives the CORRECT new pool SOL/token ratio = real market price.
+          //
+          // Strategy: prefer accounts whose accountIndex was NOT present in preBalances
+          // (newly created = zero pre-balance).  Fall back to highest-post-balance if
+          // no new accounts are found (shouldn't happen for PumpSwap migrations).
+
+          const preWsolIndices  = new Set(preBalances.filter((b) => b.mint === SOL_MINT).map((b) => b.accountIndex));
+          const preTokenIndices = new Set(preBalances.filter((b) => b.mint === mint).map((b) => b.accountIndex));
+
+          // Prefer newly-created wSOL accounts (not in pre), sorted by highest post-balance
+          const newWsolEntries = postBalances
+            .filter((b) => b.mint === SOL_MINT && !preWsolIndices.has(b.accountIndex))
+            .sort((a, b) => (b.uiTokenAmount?.uiAmount ?? 0) - (a.uiTokenAmount?.uiAmount ?? 0));
+          // Fallback: any wSOL account sorted by highest post-balance
+          const allWsolEntries = postBalances
             .filter((b) => b.mint === SOL_MINT)
             .sort((a, b) => (b.uiTokenAmount?.uiAmount ?? 0) - (a.uiTokenAmount?.uiAmount ?? 0));
 
-          const wsolVaultPubkey = wsolEntries.length > 0
-            ? (accountKeys[wsolEntries[0]!.accountIndex]?.pubkey ?? null)
+          const wsolEntry       = newWsolEntries[0] ?? allWsolEntries[0];
+          const wsolVaultPubkey = wsolEntry
+            ? (accountKeys[wsolEntry.accountIndex]?.pubkey ?? null)
             : null;
 
-          // Extract token vault: highest-balance non-SOL account in postBalances = the pool's
-          // token vault. Both vault pubkeys are needed for fetchOnChainPoolReserves price calc.
-          const tokenEntries = postBalances
+          // Prefer newly-created token accounts (not in pre), sorted by highest post-balance
+          const newTokenEntries = postBalances
+            .filter((b) => b.mint === mint && !preTokenIndices.has(b.accountIndex))
+            .sort((a, b) => (b.uiTokenAmount?.uiAmount ?? 0) - (a.uiTokenAmount?.uiAmount ?? 0));
+          // Fallback: any token account sorted by highest post-balance
+          const allTokenEntries = postBalances
             .filter((b) => b.mint === mint)
             .sort((a, b) => (b.uiTokenAmount?.uiAmount ?? 0) - (a.uiTokenAmount?.uiAmount ?? 0));
 
-          const tokenVaultPubkey = tokenEntries.length > 0
-            ? (accountKeys[tokenEntries[0]!.accountIndex]?.pubkey ?? null)
+          const tokenEntry       = newTokenEntries[0] ?? allTokenEntries[0];
+          const tokenVaultPubkey = tokenEntry
+            ? (accountKeys[tokenEntry.accountIndex]?.pubkey ?? null)
             : null;
+
+          logger.info({
+            signature, mint,
+            wsolSource:  newWsolEntries.length > 0 ? "new-account" : "fallback-highest",
+            tokenSource: newTokenEntries.length > 0 ? "new-account" : "fallback-highest",
+            newWsolCount:  newWsolEntries.length,
+            newTokenCount: newTokenEntries.length,
+          }, "Graduation sniper: vault extraction strategy");
 
           logger.info({
             signature, mint,
