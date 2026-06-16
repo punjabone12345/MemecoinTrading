@@ -1619,6 +1619,7 @@ class GraduationSniperService {
         type AccountKey   = { pubkey: string };
         type TxResult = {
           result: {
+            blockTime?: number | null;
             transaction?: {
               message?: {
                 accountKeys?: AccountKey[];
@@ -1649,6 +1650,30 @@ class GraduationSniperService {
             "Graduation sniper: getTransaction returned null — will retry if attempts remain",
           );
           continue;
+        }
+
+        // ── Recency gate: reject stale migrations ─────────────────────────────
+        // blockTime is a Unix timestamp in seconds. On WebSocket reconnect,
+        // Helius can replay buffered events including migrations from minutes/
+        // hours ago. Trading these causes guaranteed -99% drift losses because
+        // the tokens are already dead. Only process if the TX landed within the
+        // last 90 seconds (generous enough to cover our own extraction retries
+        // of up to ~47s total, but tight enough to reject truly stale events).
+        const RECENCY_WINDOW_S = 90;
+        const blockTime = txResult.blockTime;
+        if (blockTime != null) {
+          const ageSec = Math.floor(Date.now() / 1000) - blockTime;
+          if (ageSec > RECENCY_WINDOW_S) {
+            logger.warn(
+              { signature, blockTime, ageSec, limit: RECENCY_WINDOW_S },
+              "Graduation sniper: STALE migration TX rejected — too old to trade safely ⛔",
+            );
+            return null;
+          }
+          logger.info(
+            { signature, blockTime, ageSec },
+            "Graduation sniper: recency check passed ✅",
+          );
         }
 
         const accountKeys    = txResult.transaction?.message?.accountKeys ?? [];
