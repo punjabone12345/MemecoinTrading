@@ -549,10 +549,31 @@ class PaperSniperService {
       ? ((execPrice / detectionPrice) - 1) * 100
       : 0;
 
+    // Abort if price pumped too much (chasing the pump)
     if (detectionPrice > 0 && execDriftPct > cfgNow.maxFillDriftPct) {
       const reason = `Exec delay drift abort — price +${execDriftPct.toFixed(1)}% above baseline after ${(delayMs / 1000).toFixed(0)}s (>${cfgNow.maxFillDriftPct}% threshold)`;
       this.addEvent({ id: uid(), detectedAt, mint, symbol, action: "skipped", skipReason: reason });
       logger.info({ mint, symbol, execDriftPct: execDriftPct.toFixed(1), delayMs }, "Paper sniper: skipped — exec delay drift exceeded threshold");
+      this.seenMints.delete(mint);
+      this.broadcast();
+      return;
+    }
+
+    // ── CRITICAL: abort if price CRASHED vs detection baseline ────────────────
+    // A large negative execDriftPct means the real AMM pool price is far below
+    // what the on-chain vault read returned at detection time (bonding-curve
+    // vault price vs actual AMM pool price mismatch, or instant post-graduation
+    // rug).  Examples that reach here: STRIKE -89.4%, LAZY -99.7%.
+    // Threshold: -20% — a fresh legitimate graduation should not dump >20%
+    // within the first 5 seconds of pool existence.
+    const NEG_EXEC_DRIFT_ABORT = -20;
+    if (detectionPrice > 0 && execDriftPct < NEG_EXEC_DRIFT_ABORT) {
+      const reason = `Dead pool abort — exec price ${execDriftPct.toFixed(1)}% below detection baseline (<${NEG_EXEC_DRIFT_ABORT}% threshold) — pool already crashed`;
+      this.addEvent({ id: uid(), detectedAt, mint, symbol, action: "skipped", skipReason: reason });
+      logger.warn(
+        { mint, symbol, detectionPrice, execPrice, execDriftPct: execDriftPct.toFixed(1), limit: NEG_EXEC_DRIFT_ABORT },
+        "Paper sniper: DEAD POOL — exec price crashed vs detection baseline, entry aborted ⛔",
+      );
       this.seenMints.delete(mint);
       this.broadcast();
       return;

@@ -2072,12 +2072,21 @@ class GraduationSniperService {
     }, "Sniper timing: T9 — detection→fill drift summary 📊");
 
     // ── POST-FILL DRIFT CIRCUIT BREAKER ───────────────────────────────────────
-    if (entryDriftPct !== undefined && entryDriftPct > MAX_FILL_DRIFT_PCT) {
+    // Fires for BOTH positive drift (chased a pump) and large negative drift
+    // (bonding-curve vault price mismatch → filled into an already-dead pool).
+    // STRIKE/LAZY class: detection price was bonding curve vault price ($8.975e-5)
+    // but Jupiter filled at the real AMM pool price ($9.548e-6 = -89.4%).
+    const fillDriftTriggered =
+      entryDriftPct !== undefined &&
+      (entryDriftPct > MAX_FILL_DRIFT_PCT || entryDriftPct < -MAX_FILL_DRIFT_PCT);
+
+    if (fillDriftTriggered) {
+      const driftDir = entryDriftPct! > 0 ? `+${entryDriftPct!.toFixed(1)}% above` : `${entryDriftPct!.toFixed(1)}% below`;
       logger.warn(
-        { mint, symbol, entryDriftPct: entryDriftPct.toFixed(1), MAX_FILL_DRIFT_PCT, actualEntryPrice, detectionPrice },
-        "Graduation sniper: FILL DRIFT TOO HIGH — emergency-selling immediately 🚨",
+        { mint, symbol, entryDriftPct: entryDriftPct!.toFixed(1), MAX_FILL_DRIFT_PCT, actualEntryPrice, detectionPrice },
+        `Graduation sniper: FILL DRIFT ${entryDriftPct! > 0 ? "TOO HIGH" : "NEGATIVE (dead pool)"} — emergency-selling immediately 🚨`,
       );
-      const fillDriftReason = `Fill drift abort — filled +${entryDriftPct.toFixed(1)}% above detection price (>${MAX_FILL_DRIFT_PCT}% threshold) — emergency sold`;
+      const fillDriftReason = `Fill drift abort — filled ${driftDir} detection price (±${MAX_FILL_DRIFT_PCT}% threshold) — emergency sold`;
       this.addEvent({
         id:          uid(),
         detectedAt:  graduationDetectedAt ?? nowMs,
