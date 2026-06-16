@@ -1036,7 +1036,7 @@ class GraduationSniperService {
         return;
       }
 
-      const { mint, wsolVaultPubkey } = extracted;
+      const { mint, wsolVaultPubkey, tokenVaultPubkey } = extracted;
       const skipReason = this.checkSkipReason(mint);
       const eventBase  = { id: uid(), detectedAt, mint, symbol: mint.slice(0, 8), txSignature: signature };
       catchEventBase   = eventBase; // expose to catch block
@@ -1091,18 +1091,27 @@ class GraduationSniperService {
       }
 
       // ── T0: fire ALL independent tasks simultaneously ─────────────────────────
-      // Pool check, pre-quote, and baseline price have no dependencies on each
-      // other — start all three at the exact same instant.  The rug-check price
-      // (second read) is the only task that must wait: we need (a) a baseline to
-      // compare against, and (b) at least RUG_CHECK_WAIT_MS of elapsed time so a
-      // real dump would already be visible in the price API.
+      // On-chain vault reads complete in ~200-400ms — no DexScreener dependency.
+      // DexScreener is fired in background for symbol/name only (non-blocking).
+      // Jupiter pre-quote runs concurrently so it's ready when buy fires.
+      // Rug-check timer (1.5s) also starts at T0.
       const t0 = detectedAt;
-      logger.info({ mint, t0 }, "Sniper timing: T0 — all parallel tasks firing simultaneously ⚡");
+      logger.info({
+        mint, t0,
+        wsolVault:  wsolVaultPubkey?.slice(0, 8) ?? "none",
+        tokenVault: tokenVaultPubkey?.slice(0, 8) ?? "none",
+      }, "Pipeline T0: vaults known — firing all tasks simultaneously ⚡");
 
-      const poolCheckPromise = wsolVaultPubkey
-        ? this.fetchOnChainPoolSol(wsolVaultPubkey)
-        : Promise.resolve<number | null>(null);
+      // On-chain pool reserves (SOL vault + token vault balances in parallel)
+      // Available in ~200ms — zero indexer lag, as vaults are created by migration TX.
+      const reservesPromise = (wsolVaultPubkey && tokenVaultPubkey)
+        ? this.fetchOnChainPoolReserves(wsolVaultPubkey, tokenVaultPubkey)
+        : Promise.resolve<{ solBalance: number; tokenBalanceRaw: number; tokenBalanceUi: number } | null>(null);
 
+      // SOL/USD price (DexScreener USDC pair — ~200ms, needed for USD price calc)
+      const solUsdPromise = this.fetchSolUsdPrice();
+
+      // Jupiter pre-quote runs while we wait for on-chain data
       const preQuotePromise = jupiterSwapService.prefetchBuyQuoteAndFee(
         mint,
         this.config.positionSizeSol,
@@ -1110,306 +1119,298 @@ class GraduationSniperService {
         this.config.priorityFeeLamports,
       );
 
-      // ── T1: baseline price + enforce minimum rug-gap ─────────────────────────
-      // Wait for BOTH: baseline price (for rug comparison) AND the minimum gap
-      // (so a real dump is actually visible in the price feed).
-      // Using Promise.all means: if Jupiter responds in 0.8s, we still wait the
-      // remaining 0.7s of the 1.5s rug gap before fetching the second price.
-      let priceData: Awaited<ReturnType<typeof this.fetchPriceFast>> = null;
-      await Promise.all([
-        (async () => {
-          priceData = await this.fetchPriceFast(mint);
-          if (!priceData) {
-            const MAX_PRICE_RETRIES = 3;
-            const PRICE_RETRY_MS    = 1_000;
-            for (let attempt = 1; attempt <= MAX_PRICE_RETRIES; attempt++) {
-              logger.info({ mint, attempt, elapsedMs: Date.now() - t0 },
-                `Graduation sniper: price not found — retry ${attempt}/${MAX_PRICE_RETRIES}`);
-              await new Promise(r => setTimeout(r, PRICE_RETRY_MS));
-              priceData = await this.fetchPriceFast(mint);
-              if (priceData) break;
-            }
-          }
-        })(),
-        new Promise<void>((r) => setTimeout(r, RUG_CHECK_WAIT_MS)),
-      ]);
-      logger.info({ mint, found: !!priceData, elapsedMs: Date.now() - t0 },
-        "Sniper timing: T1 — baseline price ready + rug gap enforced");
+      // DexScreener: background fetch for symbol/name — does NOT block entry decision.
+      // If indexed (rare in first 60s), we get real metadata; otherwise temp mint-based symbol.
+      const dexPricePromise = this.fetchPriceFast(mint);
 
-      if (!priceData) {
-        this.addEvent({ ...eventBase, action: "skipped", skipReason: "Price not found (Jupiter + DexScreener, ~5s window)" });
-        logger.info({ mint }, "Graduation sniper: skipped — price not found after parallel retries");
-        return;
+      // Rug-check timer: 1.5s from T0 (runs concurrently with all the above)
+      const rugTimerPromise = new Promise<void>((r) => setTimeout(r, 1_500));
+
+      // ── T1: on-chain price ready (~200-400ms from T0) ─────────────────────────
+      const [reserves, solUsd] = await Promise.all([reservesPromise, solUsdPromise]);
+      const t1Ms = Date.now() - t0;
+
+      // Calculate price from pool reserve ratio: price_sol = wSOL_balance / token_balance_ui
+      // This is the same formula DEXes use for instantaneous price — available immediately.
+      let baselinePrice = 0;
+      let symbol = mint.slice(0, 8);
+      let name   = mint.slice(0, 8);
+      let onChainPriceValid = false;
+
+      if (reserves && reserves.solBalance > 0 && reserves.tokenBalanceUi > 0 && solUsd && solUsd > 0) {
+        const priceSol    = reserves.solBalance / reserves.tokenBalanceUi;
+        baselinePrice     = priceSol * solUsd;
+        onChainPriceValid = true;
+        logger.info({
+          mint,
+          baselinePrice,
+          priceSol,
+          solUsd,
+          solBalance:   reserves.solBalance,
+          tokenBalance: reserves.tokenBalanceUi,
+          elapsedMs:    t1Ms,
+        }, "Pipeline T1: on-chain price ✅ (pool reserve ratio)");
+      } else {
+        logger.warn({ mint, reserves: !!reserves, solUsd, elapsedMs: t1Ms },
+          "Pipeline T1: on-chain reserves unavailable — will try DexScreener/Jupiter fallback");
       }
 
-      let { price: baselinePrice, symbol, name, dexId: baselineDexId } = priceData;
-      catchEventBase = { ...eventBase, symbol }; // update with known symbol for catch block
-
-      // ── FIX 1: Minimum entry price ────────────────────────────────────────────
-      if (baselinePrice < MIN_ENTRY_PRICE_USD) {
-        const reason = `Price too low — $${baselinePrice.toExponential(3)} < $${MIN_ENTRY_PRICE_USD} (Type-A rug filter)`;
-        this.addEvent({ ...eventBase, symbol, action: "skipped", skipReason: reason });
-        logger.info({ mint, symbol, price: baselinePrice }, "Graduation sniper: skipped — price below minimum (FIX 1)");
-        return;
-      }
-
-      // Race-condition guard: re-check wallet/positions state with symbol known
-      const skipAfterPrice = this.checkSkipReason(mint);
-      if (skipAfterPrice) {
-        if (!liveOnlySkip) {
-          // Only emit a second event if the first check didn't already log it
-          this.addEvent({ ...eventBase, symbol, action: "skipped", skipReason: skipAfterPrice });
-        }
-        if (blacklistService.isBlacklisted(mint)) return;
-        liveOnlySkip = liveOnlySkip ?? skipAfterPrice;
-      }
-
-      // ── T2: rug-check price + pool check (pool may already be done) ───────────
-      // The 1.5s rug gap was already enforced in T1's Promise.all, so we fire
-      // the second price read NOW and wait for it + the pool check together.
-      const t2Start = Date.now();
-      const [rugCheckData, poolSol] = await Promise.all([
-        this.fetchPriceFast(mint),
-        poolCheckPromise,
-      ]);
-      let entryPrice = rugCheckData?.price ?? baselinePrice;
-      logger.info({ mint, symbol, poolSol, rugPrice: rugCheckData?.price ?? null,
-        parallelMs: Date.now() - t2Start, elapsedMs: Date.now() - t0 },
-        "Sniper timing: T2 — rug price + pool check done ⚡ (pre-quote running in background)");
-
-      // FIX 2: on-chain Raydium pool SOL balance check
-      if (wsolVaultPubkey && poolSol !== null) {
+      // ── Pool SOL validation (from reserves — no extra RPC needed) ─────────────
+      const poolSol: number | null = reserves?.solBalance ?? null;
+      if (poolSol !== null) {
         const minPoolSol = this.isLowLiquidityHour() ? LOW_LIQ_MIN_POOL_SOL : MIN_POOL_SOL;
         if (poolSol < minPoolSol) {
           const hourLabel = this.isLowLiquidityHour() ? " (low-liq hours)" : "";
           const reason = `Pool drained — ${poolSol.toFixed(2)} SOL < ${minPoolSol} SOL on-chain${hourLabel} (Type-A rug filter)`;
           this.addEvent({ ...eventBase, symbol, action: "skipped", skipReason: reason });
-          logger.warn({ mint, symbol, poolSol, minPoolSol, wsolVaultPubkey }, "Graduation sniper: skipped — pool below threshold (FIX 2)");
+          logger.warn({ mint, symbol, poolSol, minPoolSol }, "Pipeline T1: pool below threshold — skipping ❌");
           return;
         }
-        logger.info({ mint, symbol, poolSol, wsolVaultPubkey }, "Graduation sniper: on-chain pool SOL check passed ✅");
-      } else if (!wsolVaultPubkey) {
-        // ── Pool existence gate ─────────────────────────────────────────────────
-        // Uses Promise.any — the FIRST source to confirm wins and we exit
-        // immediately, without waiting for slower sources to settle.
-        //
-        // Sources (fired in parallel every attempt):
-        //  A. PumpSwap pool PDA — getAccountInfo on Helius RPC. The pool account
-        //     is CREATED inside the migration TX itself, so it exists on-chain the
-        //     instant Helius fires the WebSocket event. No indexer lag at all.
-        //     Three PDA seed patterns tried; whichever has lamports > 0 wins.
-        //  B. DexScreener AMM pair — pumpswap/raydium pair appears ~15-60s later.
-        //  C+D. Jupiter lite-api + full quote-api — also ~5-30s indexing lag.
-        //
-        // Fast path: if T1 already returned an AMM price, pool is confirmed.
-        // Slow path: attempt 0 fires immediately (no pre-wait) — PDA check alone
-        //   typically confirms in < 200ms on attempt 0.
+        logger.info({ mint, poolSol, elapsedMs: t1Ms }, "Pipeline T1: pool SOL check passed ✅");
+      }
 
+      // ── Pool existence gate ────────────────────────────────────────────────────
+      // On-chain reserves confirm pool existence with zero indexer lag: the vault
+      // token accounts are CREATED by the migration TX itself, so valid reserves
+      // (solBalance > 0 AND tokenBalance > 0) mean the pool definitely exists.
+      // Only run the slow DexScreener/Jupiter gate when vault data was unavailable.
+      const poolConfirmedOnChain = onChainPriceValid;
+
+      if (!poolConfirmedOnChain) {
+        // Fallback gate: PDA on-chain + DexScreener + Jupiter (existing guard).
+        // This path fires only when getTransaction didn't return vault pubkeys —
+        // should be rare with the new extractMintFromTx that always extracts vaults.
         const GATE_AMM_DEXES  = new Set(["raydium", "pumpswap", "orca", "meteora"]);
         const JUPE_LITE       = "https://lite-api.jup.ag/swap/v1/quote";
         const JUPE_FULL       = "https://quote-api.jup.ag/v6/quote";
         const WSOL_MINT       = "So11111111111111111111111111111111111111112";
         const PUMPSWAP_PROG   = "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA";
-        const GATE_DEADLINE   = 30_000;
-        const GATE_POLL       = 1_000;
+        const GATE_DEADLINE   = 20_000; // reduced from 30s — on-chain is primary now
+        const GATE_POLL       = 800;
         const heliusKey       = process.env["HELIUS_API_KEY"];
 
         let gateConfirmed    = false;
         let gateSource       = "";
         let jupiterOutAmount = 0;
 
-        // ── Fast path: T1 DexScreener already returned an AMM pair ─────────────
-        if (GATE_AMM_DEXES.has(baselineDexId ?? "")) {
-          gateConfirmed = true;
-          gateSource    = `T1-${baselineDexId}`;
-          logger.info({ mint, symbol, baselineDexId },
-            "Graduation sniper: T1 AMM pair confirmed — gate bypassed ✅");
-        } else {
-          // Derive PumpSwap pool PDA — three seed patterns to cover all versions.
-          // Pattern A: ["pool", baseMint]                          (early PumpSwap)
-          // Pattern B: ["pool", u16(0), baseMint, quoteMint]       (later version)
-          // Pattern C: ["pool", u16(0), quoteMint, baseMint]       (base/quote swapped)
-          const pdaAddresses: string[] = [];
+        const pdaAddresses: string[] = [];
+        try {
+          const mPK  = new PublicKey(mint);
+          const pPK  = new PublicKey(PUMPSWAP_PROG);
+          const wPK  = new PublicKey(WSOL_MINT);
+          const idx  = Buffer.from([0, 0]);
+          const [a]  = PublicKey.findProgramAddressSync([Buffer.from("pool"), mPK.toBuffer()], pPK);
+          const [b]  = PublicKey.findProgramAddressSync([Buffer.from("pool"), idx, mPK.toBuffer(), wPK.toBuffer()], pPK);
+          const [c]  = PublicKey.findProgramAddressSync([Buffer.from("pool"), idx, wPK.toBuffer(), mPK.toBuffer()], pPK);
+          pdaAddresses.push(a.toBase58(), b.toBase58(), c.toBase58());
+        } catch { /* non-fatal */ }
+
+        logger.info({ mint, symbol }, "Pipeline: no vault data — running fallback pool gate");
+
+        const deadline = Date.now() + GATE_DEADLINE;
+        let attempt = 0;
+
+        while (Date.now() < deadline && !gateConfirmed) {
+          if (attempt > 0) await new Promise<void>(r => setTimeout(r, GATE_POLL));
+          attempt++;
+
+          type QuoteResp = { outAmount?: string; error?: string };
+          type AcctResp  = { result?: { value?: { lamports?: number } | null } };
+          type Win       = { source: string; dexPrice?: number; jupOut?: number };
+          const jp = { inputMint: WSOL_MINT, outputMint: mint, amount: 10_000_000, slippageBps: 5000 };
+          const rpc = heliusKey ? `https://mainnet.helius-rpc.com/?api-key=${heliusKey}` : null;
+
+          const checks: Promise<Win>[] = [];
+
+          checks.push(
+            this.fetchPrice(mint).then(d => {
+              if (d && GATE_AMM_DEXES.has(d.dexId)) return { source: `dex:${d.dexId}`, dexPrice: d.price };
+              throw new Error("dex: no AMM pair");
+            })
+          );
+
+          if (rpc && pdaAddresses.length > 0) {
+            for (const pda of pdaAddresses) {
+              checks.push(
+                axios.post<AcctResp>(rpc,
+                  { jsonrpc: "2.0", id: 1, method: "getAccountInfo", params: [pda, { encoding: "base64" }] },
+                  { timeout: 3_000 }
+                ).then(r => {
+                  if ((r.data?.result?.value?.lamports ?? 0) > 0)
+                    return { source: `pda:${pda.slice(0, 8)}` };
+                  throw new Error(`pda ${pda.slice(0, 8)}: no account`);
+                })
+              );
+            }
+          }
+
+          checks.push(
+            axios.get<QuoteResp>(JUPE_LITE, { params: jp, timeout: 4_000 }).then(r => {
+              const out = parseInt(r.data?.outAmount ?? "0", 10);
+              if (out > 0) return { source: "jup-lite", jupOut: out };
+              throw new Error("jup-lite: no route");
+            })
+          );
+
+          checks.push(
+            axios.get<QuoteResp>(JUPE_FULL, { params: jp, timeout: 4_000 }).then(r => {
+              const out = parseInt(r.data?.outAmount ?? "0", 10);
+              if (out > 0) return { source: "jup-full", jupOut: out };
+              throw new Error("jup-full: no route");
+            })
+          );
+
           try {
-            const mPK  = new PublicKey(mint);
-            const pPK  = new PublicKey(PUMPSWAP_PROG);
-            const wPK  = new PublicKey(WSOL_MINT);
-            const idx  = Buffer.from([0, 0]);
-            const [a]  = PublicKey.findProgramAddressSync([Buffer.from("pool"), mPK.toBuffer()], pPK);
-            const [b]  = PublicKey.findProgramAddressSync([Buffer.from("pool"), idx, mPK.toBuffer(), wPK.toBuffer()], pPK);
-            const [c]  = PublicKey.findProgramAddressSync([Buffer.from("pool"), idx, wPK.toBuffer(), mPK.toBuffer()], pPK);
-            pdaAddresses.push(a.toBase58(), b.toBase58(), c.toBase58());
-          } catch { /* non-fatal */ }
-
-          logger.info({ mint, symbol, pdaA: pdaAddresses[0]?.slice(0, 12) ?? "n/a" },
-            "Graduation sniper: starting pool gate (PDA on-chain + DexScreener + Jupiter)");
-
-          const deadline = Date.now() + GATE_DEADLINE;
-          let attempt = 0;
-
-          while (Date.now() < deadline && !gateConfirmed) {
-            if (attempt > 0) await new Promise<void>(r => setTimeout(r, GATE_POLL));
-            attempt++;
-
-            type QuoteResp = { outAmount?: string; error?: string };
-            type AcctResp  = { result?: { value?: { lamports?: number } | null } };
-            type Win       = { source: string; dexPrice?: number; jupOut?: number };
-            const jp = { inputMint: WSOL_MINT, outputMint: mint, amount: 10_000_000, slippageBps: 5000 };
-            const rpc = heliusKey ? `https://mainnet.helius-rpc.com/?api-key=${heliusKey}` : null;
-
-            // Each check resolves with Win on success, rejects on failure.
-            // Promise.any resolves with the FIRST success — no waiting for others.
-            const checks: Promise<Win>[] = [];
-
-            // A: DexScreener AMM pair
-            checks.push(
-              this.fetchPriceFast(mint).then(d => {
-                if (d && GATE_AMM_DEXES.has(d.dexId)) return { source: `dex:${d.dexId}`, dexPrice: d.price };
-                throw new Error("dex: no AMM pair");
-              })
-            );
-
-            // B: PumpSwap pool PDA(s) on-chain — authoritative, zero indexer lag
-            if (rpc && pdaAddresses.length > 0) {
-              for (const pda of pdaAddresses) {
-                checks.push(
-                  axios.post<AcctResp>(rpc,
-                    { jsonrpc: "2.0", id: 1, method: "getAccountInfo", params: [pda, { encoding: "base64" }] },
-                    { timeout: 3_000 }
-                  ).then(r => {
-                    if ((r.data?.result?.value?.lamports ?? 0) > 0)
-                      return { source: `pda:${pda.slice(0, 8)}` };
-                    throw new Error(`pda ${pda.slice(0, 8)}: no account`);
-                  })
-                );
-              }
-            }
-
-            // C: Jupiter lite-api
-            checks.push(
-              axios.get<QuoteResp>(JUPE_LITE, { params: jp, timeout: 4_000 }).then(r => {
-                const out = parseInt(r.data?.outAmount ?? "0", 10);
-                if (out > 0) return { source: "jup-lite", jupOut: out };
-                throw new Error("jup-lite: no route");
-              })
-            );
-
-            // D: Jupiter full quote-api/v6
-            checks.push(
-              axios.get<QuoteResp>(JUPE_FULL, { params: jp, timeout: 4_000 }).then(r => {
-                const out = parseInt(r.data?.outAmount ?? "0", 10);
-                if (out > 0) return { source: "jup-full", jupOut: out };
-                throw new Error("jup-full: no route");
-              })
-            );
-
-            // Race — exit as soon as the first source confirms
-            try {
-              const winner = await Promise.any(checks);
-              gateConfirmed    = true;
-              gateSource       = winner.source;
-              jupiterOutAmount = winner.jupOut ?? 0;
-              if (winner.dexPrice && winner.dexPrice > 0) {
-                entryPrice    = winner.dexPrice;
-                baselinePrice = winner.dexPrice;
-              }
-              logger.info({ mint, symbol, gateSource, attempt },
-                `Graduation sniper: gate confirmed via ${gateSource} ✅`);
-              break;
-            } catch {
-              logger.info({ mint, symbol, attempt, msRemaining: Math.max(0, deadline - Date.now()) },
-                "Graduation sniper: gate pending — all sources unconfirmed, retrying");
-            }
+            const winner = await Promise.any(checks);
+            gateConfirmed    = true;
+            gateSource       = winner.source;
+            jupiterOutAmount = winner.jupOut ?? 0;
+            if (winner.dexPrice && winner.dexPrice > 0) baselinePrice = winner.dexPrice;
+            logger.info({ mint, symbol, gateSource, attempt },
+              `Pipeline: fallback gate confirmed via ${gateSource} ✅`);
+            break;
+          } catch {
+            logger.info({ mint, symbol, attempt, msRemaining: Math.max(0, deadline - Date.now()) },
+              "Pipeline: fallback gate pending — all sources unconfirmed, retrying");
           }
         }
 
         if (!gateConfirmed) {
-          const reason = "Pool not confirmed after 30s (no PDA account / DexScreener AMM pair / Jupiter route)";
+          const reason = "Pool not confirmed after 20s (no vault data / PDA / DexScreener / Jupiter)";
           this.addEvent({ ...eventBase, symbol, action: "skipped", skipReason: reason });
-          logger.warn({ mint, symbol }, "Graduation sniper: SKIPPED — gate timed out (false trigger guard)");
+          logger.warn({ mint, symbol }, "Pipeline: SKIPPED — fallback gate timed out ❌");
           if (isTelegramConfigured()) {
             void sendTelegram(
-              `⚠️ <b>FALSE TRIGGER BLOCKED</b>\n` +
-              `──────────────────────\n` +
-              `🪙 Token: <b>${symbol}</b>\n` +
-              `📋 CA: <code>${mint}</code>\n` +
-              `❌ Pool not confirmed after 30s (PDA + DexScreener + Jupiter all failed)\n` +
-              `✅ Entry blocked (pre-graduation guard)\n` +
-              `🕐 ${toIST(new Date())}`,
+              `⚠️ <b>FALSE TRIGGER BLOCKED</b>\n──────────────────────\n` +
+              `🪙 Token: <b>${symbol}</b>\n📋 CA: <code>${mint}</code>\n` +
+              `❌ Pool not confirmed after 20s (gate timed out)\n✅ Entry blocked\n🕐 ${toIST(new Date())}`,
             );
           }
           return;
         }
 
-        // ── Price sync when Jupiter won (DexScreener + PDA already sync above) ───
-        if (jupiterOutAmount > 0) {
-          const solUsd = await this.fetchSolUsdPrice();
-          if (solUsd && solUsd > 0) {
-            const jupiterImpliedPrice = (0.01 * solUsd) / (jupiterOutAmount / 1_000_000);
-            if (jupiterImpliedPrice > 0) {
-              logger.info({ mint, symbol, jupiterImpliedPrice, solUsd, jupiterOutAmount },
-                "Graduation sniper: entry price + baseline synced from Jupiter quote ✅");
-              entryPrice    = jupiterImpliedPrice;
-              baselinePrice = jupiterImpliedPrice;
-            }
+        if (jupiterOutAmount > 0 && baselinePrice <= 0) {
+          const solUsdFb = solUsd ?? await this.fetchSolUsdPrice();
+          if (solUsdFb && solUsdFb > 0) {
+            const jupiterImpliedPrice = (0.01 * solUsdFb) / (jupiterOutAmount / 1_000_000);
+            if (jupiterImpliedPrice > 0) baselinePrice = jupiterImpliedPrice;
           }
         }
       }
 
-      if (rugCheckData) {
-        const dropPct = (1 - rugCheckData.price / baselinePrice) * 100;
+      // ── Resolve symbol/name from DexScreener (non-blocking 200ms race) ─────────
+      // DexScreener has 30-120s indexing lag for new tokens — we can't block on it.
+      // Race for 200ms: if indexed we get real metadata, otherwise use temp symbol.
+      // The background price-refinement loop updates symbol after position opens.
+      const dexDataEarly = await Promise.race([
+        dexPricePromise,
+        new Promise<null>((r) => setTimeout(() => r(null), 200)),
+      ]);
+      if (dexDataEarly) {
+        symbol = dexDataEarly.symbol;
+        name   = dexDataEarly.name;
+        if (!onChainPriceValid && dexDataEarly.price > 0) baselinePrice = dexDataEarly.price;
+        logger.info({ mint, symbol, name, dexPrice: dexDataEarly.price },
+          "Pipeline: DexScreener symbol/name resolved early ✅");
+      } else {
+        logger.info({ mint, symbol }, "Pipeline: DexScreener not yet indexed — using mint as temp symbol");
+      }
+      catchEventBase = { ...eventBase, symbol };
+
+      // ── Minimum entry price filter ─────────────────────────────────────────────
+      if (baselinePrice > 0 && baselinePrice < MIN_ENTRY_PRICE_USD) {
+        const reason = `Price too low — $${baselinePrice.toExponential(3)} < $${MIN_ENTRY_PRICE_USD} (Type-A rug filter)`;
+        this.addEvent({ ...eventBase, symbol, action: "skipped", skipReason: reason });
+        logger.info({ mint, symbol, price: baselinePrice }, "Pipeline: skipped — price below minimum ❌");
+        return;
+      }
+
+      // Re-check wallet/positions with mint now reserved
+      const skipAfterPrice = this.checkSkipReason(mint);
+      if (skipAfterPrice) {
+        if (!liveOnlySkip) this.addEvent({ ...eventBase, symbol, action: "skipped", skipReason: skipAfterPrice });
+        if (blacklistService.isBlacklisted(mint)) return;
+        liveOnlySkip = liveOnlySkip ?? skipAfterPrice;
+      }
+
+      // ── T2: rug-check timer complete — re-read on-chain price ─────────────────
+      await rugTimerPromise;
+      const t2Ms = Date.now() - t0;
+      logger.info({ mint, symbol, elapsedMs: t2Ms }, "Pipeline T2: 1.5s rug timer complete — re-reading on-chain price");
+
+      // Re-read pool reserves for rug check (on-chain, instant, no DexScreener)
+      let entryPrice = baselinePrice;
+      let rugReadOnChain = false;
+      if (wsolVaultPubkey && tokenVaultPubkey) {
+        const rugReserves = await this.fetchOnChainPoolReserves(wsolVaultPubkey, tokenVaultPubkey);
+        if (rugReserves && rugReserves.tokenBalanceUi > 0 && solUsd && solUsd > 0) {
+          const rugPriceSol = rugReserves.solBalance / rugReserves.tokenBalanceUi;
+          const rugPriceUsd = rugPriceSol * solUsd;
+          rugReadOnChain    = true;
+          entryPrice        = rugPriceUsd;
+          logger.info({
+            mint, symbol,
+            rugPriceUsd,
+            baselinePrice,
+            priceDeltaPct: baselinePrice > 0 ? (((rugPriceUsd / baselinePrice) - 1) * 100).toFixed(2) + "%" : "n/a",
+            elapsedMs: Date.now() - t0,
+          }, "Pipeline T2: rug price from on-chain reserves ✅");
+        }
+      }
+      // Fallback: if on-chain rug read failed, try DexScreener with short timeout
+      if (!rugReadOnChain) {
+        const rugDex = await Promise.race([
+          this.fetchPriceFast(mint),
+          new Promise<null>((r) => setTimeout(() => r(null), 3_000)),
+        ]);
+        if (rugDex && rugDex.price > 0) {
+          entryPrice = rugDex.price;
+          if (symbol === mint.slice(0, 8)) { symbol = rugDex.symbol; name = rugDex.name; }
+          logger.info({ mint, symbol, rugDexPrice: rugDex.price },
+            "Pipeline T2: rug price from DexScreener (on-chain unavailable)");
+        }
+      }
+
+      // ── Rug detection ─────────────────────────────────────────────────────────
+      if (baselinePrice > 0 && entryPrice > 0) {
+        const dropPct = (1 - entryPrice / baselinePrice) * 100;
         if (dropPct >= RUG_DROP_ABORT_PCT) {
-          const skipReason = `Instant rug — dropped ${dropPct.toFixed(1)}% in ${RUG_CHECK_WAIT_MS / 1000}s`;
+          const skipReason = `Instant rug — dropped ${dropPct.toFixed(1)}% in 1.5s`;
           this.addEvent({ ...eventBase, symbol, action: "skipped", skipReason });
-          logger.warn(
-            { mint, symbol, baselinePrice, rugPrice: rugCheckData.price, dropPct: dropPct.toFixed(1) },
-            "Graduation sniper: instant rug detected — entry aborted",
-          );
+          logger.warn({ mint, symbol, baselinePrice, rugPrice: entryPrice, dropPct: dropPct.toFixed(1) },
+            "Pipeline T2: instant rug detected — entry aborted ❌");
           if (isTelegramConfigured()) {
             void sendTelegram(
-              `🚫 <b>SNIPER RUG ABORT</b>\n` +
-              `──────────────────────\n` +
-              `🪙 Token: <b>${symbol}</b>\n` +
-              `📋 CA: <code>${mint}</code>\n` +
-              `📉 Crashed: <b>-${dropPct.toFixed(1)}%</b> in ${RUG_CHECK_WAIT_MS / 1000}s\n` +
-              `✅ Entry aborted — capital protected\n` +
-              `🕐 ${toIST(new Date())}`,
+              `🚫 <b>SNIPER RUG ABORT</b>\n──────────────────────\n` +
+              `🪙 Token: <b>${symbol}</b>\n📋 CA: <code>${mint}</code>\n` +
+              `📉 Crashed: <b>-${dropPct.toFixed(1)}%</b> in 1.5s\n✅ Entry aborted\n🕐 ${toIST(new Date())}`,
             );
           }
           return;
         }
       }
 
-      // ── Low-liquidity hour filter (11pm–6am IST = 17:30–00:30 UTC) ────────────
-      // DexScreener liquidityUsd from rugCheckData. Skip tokens with insufficient
-      // DEX liquidity — thin pools are where rugs happen most often overnight.
-      //
-      // IMPORTANT: only apply this filter when liquidityUsd > 0.
-      // DexScreener has a 2–5 minute indexing lag after graduation, so for the
-      // first few minutes the API returns pairs with liquidity: null / $0 even
-      // when the pool actually has $10K+. Checking >= 0 caused valid tokens to
-      // be falsely skipped. When liquidityUsd === 0, real liquidity was already
-      // validated by the on-chain pool SOL check above — trust that instead.
-      if (rugCheckData && rugCheckData.liquidityUsd > 0) {
-        const minLiq  = this.isLowLiquidityHour() ? LOW_LIQ_MIN_LIQUIDITY_USD : NORMAL_MIN_LIQUIDITY_USD;
-        if (rugCheckData.liquidityUsd < minLiq) {
-          const hourLabel = this.isLowLiquidityHour() ? " [quiet hours]" : "";
-          const reason = `Insufficient DEX liquidity${hourLabel} — $${rugCheckData.liquidityUsd.toFixed(0)} < $${minLiq} min`;
+      // ── No-price abort ────────────────────────────────────────────────────────
+      if (baselinePrice <= 0 && entryPrice <= 0) {
+        this.addEvent({ ...eventBase, symbol, action: "skipped", skipReason: "Price not found (on-chain + DexScreener, ~2s window)" });
+        logger.info({ mint, symbol }, "Pipeline: skipped — no price from on-chain or DexScreener ❌");
+        return;
+      }
+      if (entryPrice <= 0) entryPrice = baselinePrice;
+
+      // ── Low-liquidity hour filter ──────────────────────────────────────────────
+      // Pool SOL check (above) already validates minimum liquidity on-chain.
+      // DexScreener liquidityUsd has 2-5 min indexing lag for new tokens — skip
+      // the DexScreener liquidity filter here; position monitoring will enforce it.
+      if (this.isLowLiquidityHour() && dexDataEarly && dexDataEarly.liquidityUsd > 0) {
+        const minLiq = LOW_LIQ_MIN_LIQUIDITY_USD;
+        if (dexDataEarly.liquidityUsd < minLiq) {
+          const reason = `Insufficient DEX liquidity [quiet hours] — $${dexDataEarly.liquidityUsd.toFixed(0)} < $${minLiq} min`;
           this.addEvent({ ...eventBase, symbol, action: "skipped", skipReason: reason });
-          logger.info(
-            { mint, symbol, liquidityUsd: rugCheckData.liquidityUsd, minLiq, isLowLiqHour: this.isLowLiquidityHour() },
-            "Graduation sniper: skipped — DEX liquidity below threshold",
-          );
+          logger.info({ mint, symbol, liquidityUsd: dexDataEarly.liquidityUsd, minLiq },
+            "Pipeline: skipped — DEX liquidity below quiet-hours threshold ❌");
           return;
         }
-      } else if (rugCheckData && rugCheckData.liquidityUsd === 0) {
-        // DexScreener returned pairs but liquidity is null/0 — not yet indexed.
-        // The on-chain pool SOL check already validated liquidity is real.
-        // Log and proceed; do not skip based on stale/missing DexScreener data.
-        logger.info(
-          { mint, symbol },
-          "Graduation sniper: DexScreener liquidity not yet indexed ($0) — skipping DEX liquidity filter, trusting on-chain pool check",
-        );
       }
 
       // ── PRICE DRIFT / MOMENTUM FILTER ─────────────────────────────────────────
@@ -1515,83 +1516,19 @@ class GraduationSniperService {
     return null;
   }
 
-  private async extractMintFromTx(signature: string): Promise<{ mint: string; wsolVaultPubkey: string | null } | null> {
+  private async extractMintFromTx(signature: string): Promise<{ mint: string; wsolVaultPubkey: string | null; tokenVaultPubkey: string | null } | null> {
     const apiKey = process.env["HELIUS_API_KEY"];
     if (!apiKey) return null;
 
     const SOL_MINT = "So11111111111111111111111111111111111111112";
 
-    // ── Strategy 1: Helius Enhanced Transactions API ──────────────────────────
-    // Returns a fully-parsed transaction with explicit `tokenTransfers` array.
-    // Handles both old `migrate` (Raydium CPMM) and new `migrate_v2` (Pump.fun
-    // AMM / pumpswap) because it parses across inner instructions.  Significantly
-    // more reliable than raw getTransaction preTokenBalances/postTokenBalances.
-    try {
-      type EnhancedTransfer = { mint: string; tokenAmount?: number };
-      type EnhancedTx = {
-        signature: string;
-        type?: string;
-        source?: string;
-        tokenTransfers?: EnhancedTransfer[];
-      };
-
-      const enhRes = await axios.post<EnhancedTx[]>(
-        `https://api.helius.xyz/v0/transactions?api-key=${apiKey}`,
-        { transactions: [signature], commitment: "confirmed" },
-        { timeout: 5_000 },
-      );
-
-      const txData = enhRes.data?.[0];
-      if (txData) {
-        // ── Type guard: reject known non-graduation TX types ─────────────────
-        // The Helius Enhanced API classifies transactions by type.  Graduation
-        // events are NOT SWAP / TRANSFER / STAKE / BURN — those are regular
-        // pump.fun interactions that can fire on the program subscription.
-        // Rejecting them here prevents the Enhanced API from returning a mint
-        // from an AMM buy/sell that happens to be a non-SOL transfer.
-        // "UNKNOWN" or absent type = fall through (cannot rule out graduation).
-        const NON_GRADUATION_TYPES = new Set([
-          "SWAP", "TRANSFER", "STAKE", "BURN", "NFT_SALE",
-          "COMPRESSED_NFT_MINT", "TOKEN_MINT",
-        ]);
-        if (txData.type && NON_GRADUATION_TYPES.has(txData.type.toUpperCase())) {
-          logger.info(
-            { signature, type: txData.type, source: txData.source },
-            "Graduation sniper: enhanced API — non-graduation TX type, rejecting",
-          );
-          return null;
-        }
-
-        const transfers = txData.tokenTransfers ?? [];
-        const mint = transfers.find((t) => t.mint && t.mint !== SOL_MINT)?.mint;
-
-        logger.info(
-          { signature, mint: mint ?? "none", type: txData.type, source: txData.source, transferCount: transfers.length },
-          "Graduation sniper: enhanced API scan",
-        );
-
-        if (mint) {
-          logger.info({ signature, mint, type: txData.type, method: "enhanced-api" }, "Graduation sniper: mint extracted via enhanced API ✅");
-          return { mint, wsolVaultPubkey: null };
-        }
-        // If enhanced API returned data but no non-SOL mint, this is likely
-        // not a graduation TX (e.g. pure SOL move).  Fall through to getTransaction
-        // which checks token balances and may disagree.
-      }
-    } catch (enhErr) {
-      logger.warn(
-        { signature, err: (enhErr as Error).message },
-        "Graduation sniper: enhanced API failed — falling back to getTransaction",
-      );
-    }
-
-    // ── Strategy 2: getTransaction with token balance scan ────────────────────
-    // Helius REST indexer lags behind the WebSocket by a short window.
-    // Attempt 0 is immediate — fast path for when the TX is already indexed.
-    // Retries use tight backoffs: 400ms, 800ms, 1.5s, 2.5s — total budget 5.2s.
-    // (Old delays [0,1s,3s,5s,8s] accumulated up to 17s and were the primary
-    // source of the 40s pre-execution latency.)
-    const delays = [0, 400, 800, 1_500, 2_500];
+    // ── getTransaction with token balance scan ────────────────────────────────
+    // The WebSocket fires at "confirmed" commitment — the TX is already indexed
+    // by the time we get here, so attempt 0 (no delay) succeeds immediately.
+    // Enhanced API is NOT used: it requires extra Helius indexing time (1-5s)
+    // which is SLOWER than direct getTransaction for confirmed TXs.
+    // Tight retries: 300ms, 600ms, 1.2s — total budget 2.1s (was 5.2s).
+    const delays = [0, 300, 600, 1_200];
 
     for (let attempt = 0; attempt < delays.length; attempt++) {
       if (delays[attempt]! > 0) await new Promise((r) => setTimeout(r, delays[attempt]!));
@@ -1652,8 +1589,8 @@ class GraduationSniperService {
         );
 
         if (mint) {
-          // Also extract the Raydium WSOL vault: the WSOL token account in postBalances with the
-          // highest balance is the pool's liquidity vault (pump.fun seeds it with ~85 SOL at graduation).
+          // Extract WSOL vault: highest-balance wSOL account in postBalances = the pool's
+          // liquidity vault (pump.fun seeds it with ~85 SOL at graduation).
           const wsolEntries = postBalances
             .filter((b) => b.mint === SOL_MINT)
             .sort((a, b) => (b.uiTokenAmount?.uiAmount ?? 0) - (a.uiTokenAmount?.uiAmount ?? 0));
@@ -1662,8 +1599,23 @@ class GraduationSniperService {
             ? (accountKeys[wsolEntries[0]!.accountIndex]?.pubkey ?? null)
             : null;
 
-          logger.info({ signature, mint, wsolVaultPubkey, attempt: attempt + 1 }, "Graduation sniper: mint + vault extracted ✅");
-          return { mint, wsolVaultPubkey };
+          // Extract token vault: highest-balance non-SOL account in postBalances = the pool's
+          // token vault. Both vault pubkeys are needed for fetchOnChainPoolReserves price calc.
+          const tokenEntries = postBalances
+            .filter((b) => b.mint === mint)
+            .sort((a, b) => (b.uiTokenAmount?.uiAmount ?? 0) - (a.uiTokenAmount?.uiAmount ?? 0));
+
+          const tokenVaultPubkey = tokenEntries.length > 0
+            ? (accountKeys[tokenEntries[0]!.accountIndex]?.pubkey ?? null)
+            : null;
+
+          logger.info({
+            signature, mint,
+            wsolVaultPubkey:  wsolVaultPubkey?.slice(0, 8) ?? null,
+            tokenVaultPubkey: tokenVaultPubkey?.slice(0, 8) ?? null,
+            attempt: attempt + 1,
+          }, "Graduation sniper: mint + both vaults extracted ✅");
+          return { mint, wsolVaultPubkey, tokenVaultPubkey };
         }
 
         logger.info(
@@ -1714,6 +1666,67 @@ class GraduationSniperService {
       return uiAmount;
     } catch (err) {
       logger.warn({ wsolVaultPubkey, err: (err as Error).message }, "Graduation sniper: fetchOnChainPoolSol failed");
+      return null;
+    }
+  }
+
+  // ── On-chain pool reserves (both vaults in one parallel RPC pair) ───────────
+  // Fetches wSOL vault balance AND token vault balance simultaneously.
+  // Price = solBalance / tokenBalanceUi (SOL per token) × SOL/USD = USD price.
+  // Available in ~200ms with zero indexer lag — vaults created by migration TX.
+  // This is the authoritative price source for the entry pipeline; DexScreener
+  // is only used for ongoing monitoring after the position is open (60s+ lag).
+  private async fetchOnChainPoolReserves(
+    wsolVaultPubkey: string,
+    tokenVaultPubkey: string,
+  ): Promise<{ solBalance: number; tokenBalanceRaw: number; tokenBalanceUi: number } | null> {
+    const apiKey = process.env["HELIUS_API_KEY"];
+    if (!apiKey) return null;
+    const rpc = `https://mainnet.helius-rpc.com/?api-key=${apiKey}`;
+
+    try {
+      type BalResp = {
+        result?: {
+          value?: {
+            uiAmount?: number | null;
+            amount?: string;
+            decimals?: number;
+          } | null;
+        };
+      };
+
+      const [solRes, tokRes] = await Promise.all([
+        axios.post<BalResp>(rpc,
+          { jsonrpc: "2.0", id: 1, method: "getTokenAccountBalance", params: [wsolVaultPubkey] },
+          { timeout: 4_000 },
+        ),
+        axios.post<BalResp>(rpc,
+          { jsonrpc: "2.0", id: 2, method: "getTokenAccountBalance", params: [tokenVaultPubkey] },
+          { timeout: 4_000 },
+        ),
+      ]);
+
+      const solBal    = solRes.data?.result?.value?.uiAmount ?? null;
+      const tokBal    = tokRes.data?.result?.value?.uiAmount ?? null;
+      const tokRawStr = tokRes.data?.result?.value?.amount ?? "0";
+      const tokRaw    = Number(tokRawStr);
+
+      if (solBal == null || tokBal == null || tokBal <= 0) {
+        logger.warn({
+          wsolVaultPubkey: wsolVaultPubkey.slice(0, 8),
+          tokenVaultPubkey: tokenVaultPubkey.slice(0, 8),
+          solBal, tokBal,
+        }, "Graduation sniper: fetchOnChainPoolReserves — null or zero balance");
+        return null;
+      }
+
+      return { solBalance: solBal, tokenBalanceRaw: tokRaw, tokenBalanceUi: tokBal };
+    } catch (err) {
+      logger.warn({
+        wsolVaultPubkey: wsolVaultPubkey.slice(0, 8),
+        tokenVaultPubkey: tokenVaultPubkey.slice(0, 8),
+        err: (err as Error).message,
+      }, "Graduation sniper: fetchOnChainPoolReserves failed");
       return null;
     }
   }
