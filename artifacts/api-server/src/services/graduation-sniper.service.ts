@@ -243,8 +243,6 @@ class GraduationSniperService {
   private wsConnected = false;
   private wsReconnects = 0;
   private subscriptionId: number | null = null;
-  private programSubscriptionId: number | null = null;
-  private pumpswapSubscriptionId: number | null = null;
   private paperCallback: ((mint: string, entryPrice: number, symbol: string, name: string, detectedAt: number, detectionPrice: number) => void) | null = null;
   private priceIntervalId: ReturnType<typeof setInterval> | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -799,32 +797,15 @@ class GraduationSniperService {
         ],
       }));
 
-      // ── Second subscription: Pump.fun bonding-curve program ───────────────
-      // Catches all pump.fun transactions. handleMessage filters aggressively
-      // using instruction log strings — only migration events pass through.
-      ws.send(JSON.stringify({
-        jsonrpc: "2.0",
-        id:      2,
-        method:  "logsSubscribe",
-        params:  [
-          { mentions: [PUMPFUN_PROGRAM_ID] },
-          { commitment: "confirmed" },
-        ],
-      }));
-
-      // ── Third subscription: PumpSwap AMM program ────────────────────────────
-      // Catches graduations that go directly to pumpswap AMM pools.
-      // handleMessage uses a tighter filter: only passes TXs that also mention
-      // the pump.fun bonding-curve program (definitive sign of a graduation).
-      ws.send(JSON.stringify({
-        jsonrpc: "2.0",
-        id:      3,
-        method:  "logsSubscribe",
-        params:  [
-          { mentions: [PUMPSWAP_PROGRAM_ID] },
-          { commitment: "confirmed" },
-        ],
-      }));
+      // ── Subscriptions 2 & 3 REMOVED ─────────────────────────────────────────
+      // The pump.fun program sub (mentions PUMPFUN_PROGRAM_ID) fired for every
+      // pump.fun buy/sell TX (~1000s/min), producing ~49 false grad events per
+      // real one even with log-level "migrate" instruction filtering.
+      // The PumpSwap AMM sub (mentions PUMPSWAP_PROGRAM_ID) fired for all
+      // PumpSwap TXes including non-pump.fun tokens launched directly on PumpSwap.
+      // Both are unnecessary: the migration wallet sub below is authoritative —
+      // 39azUY… signs EVERY pump.fun graduation and NOTHING else.
+      // The backfill (getSignaturesForAddress on the same wallet) covers reconnect gaps.
 
       // ── Two-layer keepalive — TCP + application-level JSON ───────────────
       // Layer 1 (TCP): WS ping frame every 20s keeps NAT gateways alive.
@@ -973,20 +954,6 @@ class GraduationSniperService {
       return;
     }
 
-    // Subscription confirmation — Pump.fun program sub (id: 2)
-    if (typeof msg["result"] === "number" && msg["id"] === 2) {
-      this.programSubscriptionId = msg["result"] as number;
-      logger.info({ programSubscriptionId: this.programSubscriptionId }, "Graduation sniper: pump.fun program logsSubscribe confirmed");
-      return;
-    }
-
-    // Subscription confirmation — PumpSwap AMM sub (id: 3)
-    if (typeof msg["result"] === "number" && msg["id"] === 3) {
-      this.pumpswapSubscriptionId = msg["result"] as number;
-      logger.info({ pumpswapSubscriptionId: this.pumpswapSubscriptionId }, "Graduation sniper: PumpSwap AMM logsSubscribe confirmed");
-      return;
-    }
-
     // Log notification
     const method = msg["method"];
     if (method !== "logsNotification") return;
@@ -1002,79 +969,16 @@ class GraduationSniperService {
     const signature = value["signature"] as string | undefined;
     if (!signature) return;
 
-    // ── Identify which subscription fired ────────────────────────────────────
-    // Helius logsNotification includes params.subscription = the sub ID.
-    // We use this to apply per-subscription filter logic instead of a single
-    // shared filter that can silently block events from the migration wallet
-    // if pump.fun renames their instruction (e.g. Migrate → GraduateV3).
-    const firedSubId         = params?.["subscription"] as number | undefined;
-    const isMigrationWalletSub = firedSubId != null && firedSubId === this.subscriptionId;
-    const isPumpswapSub        = firedSubId != null && firedSubId === this.pumpswapSubscriptionId;
-
-    // ── Log-based migration filter ────────────────────────────────────────────
+    // ── Migration wallet subscription only ────────────────────────────────────
+    // Only one subscription is registered (migration wallet 39azUY…).
+    // Every TX from this wallet is a pump.fun graduation — no instruction filter
+    // needed. extractMintFromTx is the final gate (returns null if it can't find
+    // a valid AMM pool token balance, i.e. not a real graduation TX).
     const txLogs = value["logs"] as string[] | undefined;
-    if (txLogs && txLogs.length > 0) {
-
-      if (isMigrationWalletSub) {
-        // ── Migration wallet subscription: NO instruction filter ─────────────
-        // This wallet (39azUY…) is DEDICATED to signing graduation TXs only.
-        // We MUST NOT filter by instruction name here — pump.fun has renamed
-        // the migration instruction multiple times and will do so again.
-        // If a TX from this wallet passes the `err` check above, it IS a
-        // graduation.  extractMintFromTx is the final gate (returns null for
-        // non-graduation TXs that lack pool token balances).
-        logger.info({ signature, logCount: txLogs.length },
-          "Graduation sniper: migration wallet TX — processing (no instruction filter) ⚡");
-
-      } else if (isPumpswapSub) {
-        // ── PumpSwap AMM subscription: bonding-curve co-invocation filter ────
-        // PumpSwap fires for every swap/LP action.  Graduation TXs are special:
-        // the pump.fun bonding curve program is ALWAYS invoked in the same TX
-        // (to finalize the bonding curve).  Filter by whether the bonding curve
-        // program address appears in the TX logs — this is unique to migrations.
-        // Also explicitly check for migrate_v2 instruction name (Anchor logs as
-        // "Instruction: MigrateV2") so new pump.fun v2 TXs are never filtered out
-        // even if the bonding curve program ID doesn't appear in this subscription's logs.
-        const involvesBondingCurve = txLogs.some((l) => {
-          const lower = l.toLowerCase();
-          return l.includes(PUMPFUN_PROGRAM_ID)
-            || lower.includes("instruction: migrate")
-            || lower.includes("migrate_v2")
-            || lower.includes("migratev2");
-        });
-        if (!involvesBondingCurve) {
-          logger.debug({ signature }, "PumpSwap: non-graduation TX (no bonding curve) — suppressed");
-          return;
-        }
-        logger.info({ signature, logCount: txLogs.length },
-          "Graduation sniper: PumpSwap AMM graduation TX confirmed ⚡");
-
-      } else {
-        // ── Pump.fun program subscription (id: 2) or unknown ─────────────────
-        // This subscription is very noisy (1000+ buy/sell TXes per minute).
-        // Require an explicit instruction-level log to filter down to migrations.
-        // Pump.fun graduation emits one of:
-        //   "Program log: Instruction: Migrate"    (old Raydium CPMM path)
-        //   "Program log: Instruction: MigrateV2"  (new pumpswap path)
-        const isMigration = txLogs.some((l) => {
-          const lower = l.toLowerCase();
-          return lower.includes("instruction: migrate") ||
-                 lower.includes("migrate_v2")           ||
-                 lower.includes("migratev2");
-        });
-        if (!isMigration) {
-          logger.debug({ signature }, "Graduation sniper: non-migration TX (no migrate instruction) — suppressed");
-          return;
-        }
-        logger.info({ signature, logCount: txLogs.length },
-          "Graduation sniper: migrate instruction confirmed ⚡");
-      }
-    }
+    logger.info({ signature, logCount: txLogs?.length ?? 0 },
+      "Graduation sniper: migration wallet TX — processing ⚡");
 
     // ── Signature-level dedup ─────────────────────────────────────────────────
-    // Both subscriptions (migration wallet + program ID) can fire for the same
-    // TX.  Without this guard every duplicate triggers a separate extractMintFromTx
-    // RPC call and burns rate-limit budget.
     if (this.seenSignatures.has(signature)) {
       logger.debug({ signature }, "Graduation sniper: duplicate WS signature — suppressed");
       return;
