@@ -1542,6 +1542,34 @@ class GraduationSniperService {
         return;
       }
 
+      // ── NEGATIVE DRIFT GUARD ───────────────────────────────────────────────
+      // If the current price is already significantly BELOW the baseline it
+      // means the pool is crashing (rug in progress or stale DexScreener price
+      // vs live on-chain price).  The -96% / -99% cases (CHIKI, LAZY) are caught
+      // here as a second defence layer after the 30s age gate.
+      // Threshold: -15% — a healthy graduation should not dump before we enter.
+      const NEG_DRIFT_ABORT_PCT = -15;
+      if (baselinePrice > 0 && driftPct < NEG_DRIFT_ABORT_PCT) {
+        const reason = `Negative drift abort — pool already down ${driftPct.toFixed(1)}% from detection (<${NEG_DRIFT_ABORT_PCT}% threshold) — likely dead pool`;
+        this.addEvent({ ...eventBase, symbol, action: "skipped", skipReason: reason });
+        logger.warn(
+          { mint, symbol, baselinePrice, entryPrice, driftPct: driftPct.toFixed(1), limit: NEG_DRIFT_ABORT_PCT },
+          "Graduation sniper: NEGATIVE DRIFT — pool crashing, buy aborted ⛔",
+        );
+        if (isTelegramConfigured()) {
+          void sendTelegram(
+            `⛔ <b>SNIPER ABORTED — CRASHING POOL</b>\n` +
+            `──────────────────────\n` +
+            `🪙 Token: <b>${symbol}</b>\n` +
+            `📋 CA: <code>${mint}</code>\n` +
+            `📉 Pool down: <b>${driftPct.toFixed(1)}%</b> since detection\n` +
+            `❌ Buy skipped — likely dead/rugged pool\n` +
+            `🕐 ${toIST(new Date())}`,
+          );
+        }
+        return;
+      }
+
       logger.info({ mint, symbol, driftPct: driftPct.toFixed(2) + "%", elapsedMs: Date.now() - t0 },
         "Graduation sniper: drift check passed ✅ — proceeding to buy");
 
@@ -1657,31 +1685,43 @@ class GraduationSniperService {
           continue;
         }
 
-        // ── Server-boot recency gate: reject pre-boot migration replays ──────
-        // blockTime is a Unix timestamp (seconds) of when the TX was confirmed
-        // on-chain.  Helius delivers queued/historical migration events the
-        // instant the WebSocket subscribes — these are tokens that graduated
-        // BEFORE this server process started and are already dead pools.
-        // Rule: if blockTime < serverStartTimeSec the TX existed before we
-        // booted → guaranteed replay → reject unconditionally.
-        // Grace buffer: subtract 30s from serverStartTimeSec to allow a
-        // migration that happened a few seconds before boot (e.g. during
-        // container startup) to still be traded if the pool is still fresh.
+        // ── Hard age gate: reject any migration TX older than 30 seconds ─────
+        // Two-layer check:
+        //  1. Hard 30s cap — any TX confirmed >30s ago is a dead pool, period.
+        //     Covers Helius WebSocket replays AND tokens that rugged instantly.
+        //  2. Pre-boot guard — TX confirmed before this process started is
+        //     always a Helius replay regardless of age. Kept as belt-and-braces.
+        //
+        // blockTime = Unix timestamp (seconds) from Solana RPC getTransaction.
+        // It is ALWAYS present for confirmed/finalized TXs; null only for
+        // very-recent unconfirmed slots (which we DO want to trade, so skip check).
+        const MAX_TX_AGE_SEC = 30;
         const blockTime = txResult.blockTime;
         if (blockTime != null) {
-          const gracedBootSec = this.serverStartTimeSec - 30;
-          if (blockTime < gracedBootSec) {
-            const ageSec = Math.floor(Date.now() / 1000) - blockTime;
+          const nowSec  = Math.floor(Date.now() / 1000);
+          const ageSec  = nowSec - blockTime;
+
+          // Layer 1: hard 30-second ceiling
+          if (ageSec > MAX_TX_AGE_SEC) {
             logger.warn(
-              { signature, blockTime, serverStartSec: this.serverStartTimeSec, ageSec },
-              "Graduation sniper: PRE-BOOT migration TX rejected — Helius replay of dead pool ⛔",
+              { signature, blockTime, ageSec, limit: MAX_TX_AGE_SEC, serverStartSec: this.serverStartTimeSec },
+              `Graduation sniper: STALE migration rejected — ${ageSec}s old (limit ${MAX_TX_AGE_SEC}s) ⛔`,
             );
             return null;
           }
-          const ageSec = Math.floor(Date.now() / 1000) - blockTime;
+
+          // Layer 2: pre-boot guard (TX existed before this server process started)
+          if (blockTime < this.serverStartTimeSec - 5) {
+            logger.warn(
+              { signature, blockTime, ageSec, serverStartSec: this.serverStartTimeSec },
+              "Graduation sniper: PRE-BOOT migration rejected — Helius replay ⛔",
+            );
+            return null;
+          }
+
           logger.info(
             { signature, blockTime, ageSec },
-            "Graduation sniper: recency check passed (post-boot TX) ✅",
+            `Graduation sniper: age check passed — ${ageSec}s old ✅`,
           );
         }
 
