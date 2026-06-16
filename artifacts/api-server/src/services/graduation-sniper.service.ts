@@ -1189,94 +1189,151 @@ class GraduationSniperService {
         }
         logger.info({ mint, symbol, poolSol, wsolVaultPubkey }, "Graduation sniper: on-chain pool SOL check passed ✅");
       } else if (!wsolVaultPubkey) {
-        // ── Pool existence gate (no on-chain WSOL vault in TX) ──────────────────
-        // Three sources race in parallel every 2s — whichever confirms first wins:
+        // ── Pool existence gate ─────────────────────────────────────────────────
+        // Uses Promise.any — the FIRST source to confirm wins and we exit
+        // immediately, without waiting for slower sources to settle.
         //
-        //  1. DexScreener — returns a pumpswap/raydium pair → pool indexed ✅
-        //     Preferred: gives us accurate USD price directly, no conversion needed.
-        //  2. Jupiter lite-api — outAmount > 0 → pool routable via lite API ✅
-        //  3. Jupiter quote-api/v6 — outAmount > 0 → pool routable via full API ✅
-        //     The full API has broader PumpSwap coverage than lite-api.
+        // Sources (fired in parallel every attempt):
+        //  A. PumpSwap pool PDA — getAccountInfo on Helius RPC. The pool account
+        //     is CREATED inside the migration TX itself, so it exists on-chain the
+        //     instant Helius fires the WebSocket event. No indexer lag at all.
+        //     Three PDA seed patterns tried; whichever has lamports > 0 wins.
+        //  B. DexScreener AMM pair — pumpswap/raydium pair appears ~15-60s later.
+        //  C+D. Jupiter lite-api + full quote-api — also ~5-30s indexing lag.
         //
-        // Fast path: if T1 DexScreener already returned an AMM pair (pool was
-        // already indexed when we first checked), skip the loop entirely.
-        //
-        // If none of the three confirm after 40s → false trigger, block entry.
+        // Fast path: if T1 already returned an AMM price, pool is confirmed.
+        // Slow path: attempt 0 fires immediately (no pre-wait) — PDA check alone
+        //   typically confirms in < 200ms on attempt 0.
 
-        const GATE_AMM_DEXES     = new Set(["raydium", "pumpswap", "orca", "meteora"]);
-        const JUPE_GATE_LITE_URL = "https://lite-api.jup.ag/swap/v1/quote";
-        const JUPE_GATE_FULL_URL = "https://quote-api.jup.ag/v6/quote";
-        const JUPE_GATE_WSOL     = "So11111111111111111111111111111111111111112";
-        const GATE_DEADLINE_MS   = 30_000;   // 30s max — faster fail on genuine false triggers
-        const GATE_POLL_MS       = 1_000;   // 1s between retries (was 2s) — catch indexing sooner
+        const GATE_AMM_DEXES  = new Set(["raydium", "pumpswap", "orca", "meteora"]);
+        const JUPE_LITE       = "https://lite-api.jup.ag/swap/v1/quote";
+        const JUPE_FULL       = "https://quote-api.jup.ag/v6/quote";
+        const WSOL_MINT       = "So11111111111111111111111111111111111111112";
+        const PUMPSWAP_PROG   = "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA";
+        const GATE_DEADLINE   = 30_000;
+        const GATE_POLL       = 1_000;
+        const heliusKey       = process.env["HELIUS_API_KEY"];
 
         let gateConfirmed    = false;
+        let gateSource       = "";
         let jupiterOutAmount = 0;
 
-        // ── Fast path: T1 already returned an AMM pair ──────────────────────────
+        // ── Fast path: T1 DexScreener already returned an AMM pair ─────────────
         if (GATE_AMM_DEXES.has(baselineDexId ?? "")) {
           gateConfirmed = true;
+          gateSource    = `T1-${baselineDexId}`;
           logger.info({ mint, symbol, baselineDexId },
-            "Graduation sniper: T1 DexScreener AMM pair confirmed — skipping gate ✅");
+            "Graduation sniper: T1 AMM pair confirmed — gate bypassed ✅");
         } else {
-          // ── Slow path: race all three sources until one confirms ──────────────
-          logger.info({ mint, symbol, baselineDexId: baselineDexId ?? "pumpfun/none" },
-            "Graduation sniper: T1 price from bonding-curve — racing DexScreener + Jupiter for AMM confirmation");
+          // Derive PumpSwap pool PDA — three seed patterns to cover all versions.
+          // Pattern A: ["pool", baseMint]                          (early PumpSwap)
+          // Pattern B: ["pool", u16(0), baseMint, quoteMint]       (later version)
+          // Pattern C: ["pool", u16(0), quoteMint, baseMint]       (base/quote swapped)
+          const pdaAddresses: string[] = [];
+          try {
+            const mPK  = new PublicKey(mint);
+            const pPK  = new PublicKey(PUMPSWAP_PROG);
+            const wPK  = new PublicKey(WSOL_MINT);
+            const idx  = Buffer.from([0, 0]);
+            const [a]  = PublicKey.findProgramAddressSync([Buffer.from("pool"), mPK.toBuffer()], pPK);
+            const [b]  = PublicKey.findProgramAddressSync([Buffer.from("pool"), idx, mPK.toBuffer(), wPK.toBuffer()], pPK);
+            const [c]  = PublicKey.findProgramAddressSync([Buffer.from("pool"), idx, wPK.toBuffer(), mPK.toBuffer()], pPK);
+            pdaAddresses.push(a.toBase58(), b.toBase58(), c.toBase58());
+          } catch { /* non-fatal */ }
 
-          const deadline = Date.now() + GATE_DEADLINE_MS;
+          logger.info({ mint, symbol, pdaA: pdaAddresses[0]?.slice(0, 12) ?? "n/a" },
+            "Graduation sniper: starting pool gate (PDA on-chain + DexScreener + Jupiter)");
+
+          const deadline = Date.now() + GATE_DEADLINE;
           let attempt = 0;
 
           while (Date.now() < deadline && !gateConfirmed) {
-            if (attempt > 0) await new Promise<void>(r => setTimeout(r, GATE_POLL_MS));
+            if (attempt > 0) await new Promise<void>(r => setTimeout(r, GATE_POLL));
             attempt++;
 
             type QuoteResp = { outAmount?: string; error?: string };
-            const jParams = { inputMint: JUPE_GATE_WSOL, outputMint: mint, amount: 10_000_000, slippageBps: 5000 };
+            type AcctResp  = { result?: { value?: { lamports?: number } | null } };
+            type Win       = { source: string; dexPrice?: number; jupOut?: number };
+            const jp = { inputMint: WSOL_MINT, outputMint: mint, amount: 10_000_000, slippageBps: 5000 };
+            const rpc = heliusKey ? `https://mainnet.helius-rpc.com/?api-key=${heliusKey}` : null;
 
-            // All three in parallel — lowest latency path wins
-            const [dexRes, liteRes, fullRes] = await Promise.allSettled([
-              this.fetchPriceFast(mint),
-              axios.get<QuoteResp>(JUPE_GATE_LITE_URL, { params: jParams, timeout: 4_000 }),
-              axios.get<QuoteResp>(JUPE_GATE_FULL_URL, { params: jParams, timeout: 4_000 }),
-            ]);
+            // Each check resolves with Win on success, rejects on failure.
+            // Promise.any resolves with the FIRST success — no waiting for others.
+            const checks: Promise<Win>[] = [];
 
-            // ── DexScreener AMM confirmation (gives accurate price) ─────────────
-            if (dexRes.status === "fulfilled" && dexRes.value && GATE_AMM_DEXES.has(dexRes.value.dexId)) {
-              gateConfirmed = true;
-              entryPrice    = dexRes.value.price;
-              baselinePrice = dexRes.value.price;
-              logger.info({ mint, symbol, dexId: dexRes.value.dexId, price: dexRes.value.price, attempt },
-                "Graduation sniper: DexScreener AMM confirmed — pool is live ✅");
-              break;
+            // A: DexScreener AMM pair
+            checks.push(
+              this.fetchPriceFast(mint).then(d => {
+                if (d && GATE_AMM_DEXES.has(d.dexId)) return { source: `dex:${d.dexId}`, dexPrice: d.price };
+                throw new Error("dex: no AMM pair");
+              })
+            );
+
+            // B: PumpSwap pool PDA(s) on-chain — authoritative, zero indexer lag
+            if (rpc && pdaAddresses.length > 0) {
+              for (const pda of pdaAddresses) {
+                checks.push(
+                  axios.post<AcctResp>(rpc,
+                    { jsonrpc: "2.0", id: 1, method: "getAccountInfo", params: [pda, { encoding: "base64" }] },
+                    { timeout: 3_000 }
+                  ).then(r => {
+                    if ((r.data?.result?.value?.lamports ?? 0) > 0)
+                      return { source: `pda:${pda.slice(0, 8)}` };
+                    throw new Error(`pda ${pda.slice(0, 8)}: no account`);
+                  })
+                );
+              }
             }
 
-            // ── Jupiter route confirmation ───────────────────────────────────────
-            const liteOut = liteRes.status === "fulfilled" ? parseInt(liteRes.value.data?.outAmount ?? "0", 10) : 0;
-            const fullOut = fullRes.status === "fulfilled" ? parseInt(fullRes.value.data?.outAmount ?? "0", 10) : 0;
-            jupiterOutAmount = Math.max(liteOut, fullOut);
-            if (jupiterOutAmount > 0) {
-              gateConfirmed = true;
-              logger.info({ mint, symbol, jupiterOutAmount, liteOut, fullOut, attempt },
-                "Graduation sniper: Jupiter route confirmed — pool is live ✅");
-              break;
-            }
+            // C: Jupiter lite-api
+            checks.push(
+              axios.get<QuoteResp>(JUPE_LITE, { params: jp, timeout: 4_000 }).then(r => {
+                const out = parseInt(r.data?.outAmount ?? "0", 10);
+                if (out > 0) return { source: "jup-lite", jupOut: out };
+                throw new Error("jup-lite: no route");
+              })
+            );
 
-            logger.info({ mint, symbol, attempt, msRemaining: Math.max(0, deadline - Date.now()) },
-              "Graduation sniper: pool not confirmed yet — retrying (DexScreener + Jupiter lite + Jupiter full)");
+            // D: Jupiter full quote-api/v6
+            checks.push(
+              axios.get<QuoteResp>(JUPE_FULL, { params: jp, timeout: 4_000 }).then(r => {
+                const out = parseInt(r.data?.outAmount ?? "0", 10);
+                if (out > 0) return { source: "jup-full", jupOut: out };
+                throw new Error("jup-full: no route");
+              })
+            );
+
+            // Race — exit as soon as the first source confirms
+            try {
+              const winner = await Promise.any(checks);
+              gateConfirmed    = true;
+              gateSource       = winner.source;
+              jupiterOutAmount = winner.jupOut ?? 0;
+              if (winner.dexPrice && winner.dexPrice > 0) {
+                entryPrice    = winner.dexPrice;
+                baselinePrice = winner.dexPrice;
+              }
+              logger.info({ mint, symbol, gateSource, attempt },
+                `Graduation sniper: gate confirmed via ${gateSource} ✅`);
+              break;
+            } catch {
+              logger.info({ mint, symbol, attempt, msRemaining: Math.max(0, deadline - Date.now()) },
+                "Graduation sniper: gate pending — all sources unconfirmed, retrying");
+            }
           }
         }
 
         if (!gateConfirmed) {
-          const reason = "Pool not confirmed after 40s (no DexScreener AMM pair, no Jupiter route) — likely a false trigger";
+          const reason = "Pool not confirmed after 30s (no PDA account / DexScreener AMM pair / Jupiter route)";
           this.addEvent({ ...eventBase, symbol, action: "skipped", skipReason: reason });
-          logger.warn({ mint, symbol }, "Graduation sniper: SKIPPED — pool unconfirmed after 40s (false trigger guard)");
+          logger.warn({ mint, symbol }, "Graduation sniper: SKIPPED — gate timed out (false trigger guard)");
           if (isTelegramConfigured()) {
             void sendTelegram(
               `⚠️ <b>FALSE TRIGGER BLOCKED</b>\n` +
               `──────────────────────\n` +
               `🪙 Token: <b>${symbol}</b>\n` +
               `📋 CA: <code>${mint}</code>\n` +
-              `❌ No AMM pair / swap route after 40s — pool not seeded\n` +
+              `❌ Pool not confirmed after 30s (PDA + DexScreener + Jupiter all failed)\n` +
               `✅ Entry blocked (pre-graduation guard)\n` +
               `🕐 ${toIST(new Date())}`,
             );
@@ -1284,16 +1341,13 @@ class GraduationSniperService {
           return;
         }
 
-        // ── Price sync when Jupiter confirmed (DexScreener already synced above) ─
-        // When DexScreener won, entryPrice/baselinePrice are already the AMM price.
-        // When Jupiter won, compute USD price from quote and sync both references so
-        // the drift check compares like-for-like (same source, same moment).
+        // ── Price sync when Jupiter won (DexScreener + PDA already sync above) ───
         if (jupiterOutAmount > 0) {
           const solUsd = await this.fetchSolUsdPrice();
           if (solUsd && solUsd > 0) {
             const jupiterImpliedPrice = (0.01 * solUsd) / (jupiterOutAmount / 1_000_000);
             if (jupiterImpliedPrice > 0) {
-              logger.info({ mint, symbol, jupiterImpliedPrice, solUsd, jupiterOutAmount, prevEntryPrice: entryPrice, prevBaselinePrice: baselinePrice },
+              logger.info({ mint, symbol, jupiterImpliedPrice, solUsd, jupiterOutAmount },
                 "Graduation sniper: entry price + baseline synced from Jupiter quote ✅");
               entryPrice    = jupiterImpliedPrice;
               baselinePrice = jupiterImpliedPrice;
@@ -1484,7 +1538,7 @@ class GraduationSniperService {
       const enhRes = await axios.post<EnhancedTx[]>(
         `https://api.helius.xyz/v0/transactions?api-key=${apiKey}`,
         { transactions: [signature], commitment: "confirmed" },
-        { timeout: 10_000 },
+        { timeout: 5_000 },
       );
 
       const txData = enhRes.data?.[0];

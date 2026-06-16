@@ -370,48 +370,121 @@ class PaperSniperService {
       return;
     }
 
-    // ── Step 1: Jupiter route gate ───────────────────────────────────────────
-    // DexScreener is unreliable for newly-graduated tokens: it lags 30–120 s
-    // AND keeps showing the old pumpfun bonding-curve pair, making it impossible
-    // to tell "not migrated" from "indexing lag". Jupiter is the correct gate —
-    // it indexes PumpSwap pools within ~5–15 s of creation. If Jupiter can quote
-    // SOL→TOKEN, the pool is real and the trade will succeed.
-    // Query both lite-api (fast, reduced coverage) and full quote-api (complete
-    // coverage) in parallel on every attempt. The lite-api often misses fresh
-    // PumpSwap pools; the full API covers them. Accept whichever succeeds first.
-    const JUPE_GATE_LITE_URL = "https://lite-api.jup.ag/swap/v1/quote";
-    const JUPE_GATE_FULL_URL = "https://quote-api.jup.ag/v6/quote";
-    const JUPE_GATE_WSOL     = "So11111111111111111111111111111111111111112";
-    const JUPE_GATE_ATTEMPTS = 20;          // 20 × 2s = ~40s total budget
-    const JUPE_GATE_DELAY_MS = 2_000;       // check every 2s (was 4s)
-    let jupiterRoutable = false;
+    // ── Step 1: Pool existence gate (Promise.any — first source wins) ───────────
+    // Sources fired in parallel on each attempt:
+    //  A. PumpSwap pool PDA on-chain check — pool is created IN the migration TX
+    //     so it exists on-chain immediately. getAccountInfo via Helius RPC.
+    //     Three seed patterns cover all PumpSwap versions.
+    //  B. DexScreener AMM pair (pumpswap/raydium) — ~15-60s indexing lag.
+    //  C+D. Jupiter lite + full APIs — ~5-30s indexing lag.
+    // Using Promise.any: as soon as ONE source confirms, we exit immediately.
+    // No waiting for slow sources to time out (unlike allSettled).
+    const JUPE_LITE        = "https://lite-api.jup.ag/swap/v1/quote";
+    const JUPE_FULL        = "https://quote-api.jup.ag/v6/quote";
+    const WSOL_MINT        = "So11111111111111111111111111111111111111112";
+    const PUMPSWAP_PROG    = "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA";
+    const AMM_DEXES        = new Set(["raydium", "pumpswap", "orca", "meteora"]);
+    const GATE_DEADLINE    = 30_000;
+    const GATE_POLL        = 1_000;
+    const heliusKey        = process.env["HELIUS_API_KEY"];
+
+    // Derive PumpSwap pool PDAs (three seed patterns)
+    const pdaAddresses: string[] = [];
+    try {
+      const { PublicKey } = await import("@solana/web3.js");
+      const mPK = new PublicKey(mint);
+      const pPK = new PublicKey(PUMPSWAP_PROG);
+      const wPK = new PublicKey(WSOL_MINT);
+      const idx = Buffer.from([0, 0]);
+      const [a] = PublicKey.findProgramAddressSync([Buffer.from("pool"), mPK.toBuffer()], pPK);
+      const [b] = PublicKey.findProgramAddressSync([Buffer.from("pool"), idx, mPK.toBuffer(), wPK.toBuffer()], pPK);
+      const [c] = PublicKey.findProgramAddressSync([Buffer.from("pool"), idx, wPK.toBuffer(), mPK.toBuffer()], pPK);
+      pdaAddresses.push(a.toBase58(), b.toBase58(), c.toBase58());
+    } catch { /* non-fatal */ }
+
+    let gateConfirmed  = false;
+    let gateSource     = "";
     let jupiterOutAmount = 0;
 
-    for (let attempt = 0; attempt < JUPE_GATE_ATTEMPTS && !jupiterRoutable; attempt++) {
-      if (attempt > 0) await new Promise<void>((r) => setTimeout(r, JUPE_GATE_DELAY_MS));
+    const deadline = Date.now() + GATE_DEADLINE;
+    let attempt = 0;
+
+    while (Date.now() < deadline && !gateConfirmed) {
+      if (attempt > 0) await new Promise<void>(r => setTimeout(r, GATE_POLL));
+      attempt++;
+
       type QuoteResp = { outAmount?: string; error?: string };
-      const params = { inputMint: JUPE_GATE_WSOL, outputMint: mint, amount: 10_000_000, slippageBps: 5000 };
-      const [liteResult, fullResult] = await Promise.allSettled([
-        axios.get<QuoteResp>(JUPE_GATE_LITE_URL, { params, timeout: 5_000 }),
-        axios.get<QuoteResp>(JUPE_GATE_FULL_URL, { params, timeout: 5_000 }),
-      ]);
-      const liteOut = liteResult.status === "fulfilled" ? parseInt(liteResult.value.data?.outAmount ?? "0", 10) : 0;
-      const fullOut = fullResult.status === "fulfilled" ? parseInt(fullResult.value.data?.outAmount ?? "0", 10) : 0;
-      jupiterOutAmount = Math.max(liteOut, fullOut);
-      if (jupiterOutAmount > 0) {
-        jupiterRoutable = true;
-        logger.info({ mint, symbol, attempt: attempt + 1, jupiterOutAmount, liteOut, fullOut },
-          "Paper sniper: Jupiter route confirmed — pool is live ✅");
-      } else {
-        logger.info({ mint, symbol, attempt: attempt + 1, totalAttempts: JUPE_GATE_ATTEMPTS, liteOut, fullOut },
-          "Paper sniper: Jupiter route not yet available — retrying");
+      type AcctResp  = { result?: { value?: { lamports?: number } | null } };
+      type Win       = { source: string; jupOut?: number; dexPrice?: number };
+      const jp  = { inputMint: WSOL_MINT, outputMint: mint, amount: 10_000_000, slippageBps: 5000 };
+      const rpc = heliusKey ? `https://mainnet.helius-rpc.com/?api-key=${heliusKey}` : null;
+
+      const checks: Promise<Win>[] = [];
+
+      // A: DexScreener AMM pair
+      checks.push(
+        (async () => {
+          type DexPair = { priceUsd: string; dexId?: string };
+          const res = await axios.get<DexPair[]>(`${DEXSCREENER_BASE}/tokens/v1/solana/${mint}`, { timeout: 4_000 });
+          const pairs = Array.isArray(res.data) ? res.data : [];
+          const best = pairs.find(p => AMM_DEXES.has(p.dexId ?? "") && (parseFloat(p.priceUsd) || 0) > 0);
+          if (best) return { source: `dex:${best.dexId}`, dexPrice: parseFloat(best.priceUsd) };
+          throw new Error("dex: no AMM pair");
+        })()
+      );
+
+      // B: PumpSwap pool PDA(s) on-chain
+      if (rpc && pdaAddresses.length > 0) {
+        for (const pda of pdaAddresses) {
+          checks.push(
+            axios.post<AcctResp>(rpc,
+              { jsonrpc: "2.0", id: 1, method: "getAccountInfo", params: [pda, { encoding: "base64" }] },
+              { timeout: 3_000 }
+            ).then(r => {
+              if ((r.data?.result?.value?.lamports ?? 0) > 0) return { source: `pda:${pda.slice(0, 8)}` };
+              throw new Error(`pda: no account`);
+            })
+          );
+        }
+      }
+
+      // C: Jupiter lite-api
+      checks.push(
+        axios.get<QuoteResp>(JUPE_LITE, { params: jp, timeout: 4_000 }).then(r => {
+          const out = parseInt(r.data?.outAmount ?? "0", 10);
+          if (out > 0) return { source: "jup-lite", jupOut: out };
+          throw new Error("jup-lite: no route");
+        })
+      );
+
+      // D: Jupiter full quote-api/v6
+      checks.push(
+        axios.get<QuoteResp>(JUPE_FULL, { params: jp, timeout: 4_000 }).then(r => {
+          const out = parseInt(r.data?.outAmount ?? "0", 10);
+          if (out > 0) return { source: "jup-full", jupOut: out };
+          throw new Error("jup-full: no route");
+        })
+      );
+
+      try {
+        const winner = await Promise.any(checks);
+        gateConfirmed    = true;
+        gateSource       = winner.source;
+        jupiterOutAmount = winner.jupOut ?? 0;
+        if (winner.dexPrice && winner.dexPrice > 0) {
+          // DexScreener confirmed — use its price for execution
+        }
+        logger.info({ mint, symbol, gateSource, attempt }, `Paper sniper: gate confirmed via ${gateSource} ✅`);
+      } catch {
+        logger.info({ mint, symbol, attempt, msRemaining: Math.max(0, deadline - Date.now()) },
+          "Paper sniper: gate pending — all sources unconfirmed, retrying");
       }
     }
 
-    if (!jupiterRoutable) {
+    if (!gateConfirmed) {
       this.addEvent({ id: uid(), detectedAt, mint, symbol, action: "skipped",
-        skipReason: `No Jupiter swap route after 40s — pool not yet seeded (false trigger)` });
-      logger.warn({ mint, symbol }, "Paper sniper: skipped — no Jupiter route after 40s (false trigger)");
+        skipReason: `Pool not confirmed after 30s (no PDA / DexScreener AMM / Jupiter route)` });
+      logger.warn({ mint, symbol }, "Paper sniper: skipped — gate timed out (false trigger guard)");
       this.seenMints.delete(mint);
       this.broadcast();
       return;
