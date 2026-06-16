@@ -1142,7 +1142,7 @@ class GraduationSniperService {
         return;
       }
 
-      let { price: baselinePrice, symbol, name } = priceData;
+      let { price: baselinePrice, symbol, name, dexId: baselineDexId } = priceData;
       catchEventBase = { ...eventBase, symbol }; // update with known symbol for catch block
 
       // ── FIX 1: Minimum entry price ────────────────────────────────────────────
@@ -1189,67 +1189,94 @@ class GraduationSniperService {
         }
         logger.info({ mint, symbol, poolSol, wsolVaultPubkey }, "Graduation sniper: on-chain pool SOL check passed ✅");
       } else if (!wsolVaultPubkey) {
-        // ── Jupiter route gate (replaces DexScreener gate) ──────────────────
-        // DexScreener is the wrong tool: it lags 30–120 s after migration AND
-        // keeps showing the old pumpfun bonding-curve pair alongside the new pool,
-        // making it impossible to distinguish "not migrated" from "indexing lag".
+        // ── Pool existence gate (no on-chain WSOL vault in TX) ──────────────────
+        // Three sources race in parallel every 2s — whichever confirms first wins:
         //
-        // Jupiter is the correct gate: it indexes PumpSwap pools within ~5–15 s
-        // of creation.  If Jupiter can quote SOL→TOKEN, the pool is real and the
-        // buy will succeed.  If it can't, there is no tradeable pool yet.
+        //  1. DexScreener — returns a pumpswap/raydium pair → pool indexed ✅
+        //     Preferred: gives us accurate USD price directly, no conversion needed.
+        //  2. Jupiter lite-api — outAmount > 0 → pool routable via lite API ✅
+        //  3. Jupiter quote-api/v6 — outAmount > 0 → pool routable via full API ✅
+        //     The full API has broader PumpSwap coverage than lite-api.
         //
-        //   • Jupiter returns outAmount > 0  → real migration, pool is live ✅
-        //   • Jupiter returns error/no route → keep retrying (up to 10 × 4 s = 40 s)
-        //   • After 40 s still no route     → almost certainly a false trigger ❌
+        // Fast path: if T1 DexScreener already returned an AMM pair (pool was
+        // already indexed when we first checked), skip the loop entirely.
         //
-        // 0.01 SOL quote (10_000_000 lamports) is tiny enough to not affect pricing.
-        logger.info({ mint, symbol }, "Graduation sniper: no WSOL vault from TX — verifying via Jupiter route check");
+        // If none of the three confirm after 40s → false trigger, block entry.
 
-        // Query both lite-api (fast, reduced coverage) and full quote-api (complete
-        // coverage, slower) in parallel on every attempt. The lite-api often misses
-        // fresh PumpSwap pools; the full API covers them. Accept whichever succeeds.
+        const GATE_AMM_DEXES     = new Set(["raydium", "pumpswap", "orca", "meteora"]);
         const JUPE_GATE_LITE_URL = "https://lite-api.jup.ag/swap/v1/quote";
         const JUPE_GATE_FULL_URL = "https://quote-api.jup.ag/v6/quote";
         const JUPE_GATE_WSOL     = "So11111111111111111111111111111111111111112";
-        const JUPE_GATE_ATTEMPTS = 20;           // 20 × 2s = ~40s total budget
-        const JUPE_GATE_DELAY_MS = 2_000;        // check every 2s (was 4s) — catches indexing faster
-        let jupiterRoutable = false;
+        const GATE_DEADLINE_MS   = 40_000;
+        const GATE_POLL_MS       = 2_000;
+
+        let gateConfirmed    = false;
         let jupiterOutAmount = 0;
 
-        for (let attempt = 0; attempt < JUPE_GATE_ATTEMPTS; attempt++) {
-          if (attempt > 0) await new Promise<void>((r) => setTimeout(r, JUPE_GATE_DELAY_MS));
-          type QuoteResp = { outAmount?: string; error?: string };
-          const params = { inputMint: JUPE_GATE_WSOL, outputMint: mint, amount: 10_000_000, slippageBps: 5000 };
-          const [liteResult, fullResult] = await Promise.allSettled([
-            axios.get<QuoteResp>(JUPE_GATE_LITE_URL, { params, timeout: 5_000 }),
-            axios.get<QuoteResp>(JUPE_GATE_FULL_URL, { params, timeout: 5_000 }),
-          ]);
-          const liteOut = liteResult.status === "fulfilled" ? parseInt(liteResult.value.data?.outAmount ?? "0", 10) : 0;
-          const fullOut = fullResult.status === "fulfilled" ? parseInt(fullResult.value.data?.outAmount ?? "0", 10) : 0;
-          const outAmount = Math.max(liteOut, fullOut);
-          if (outAmount > 0) {
-            jupiterRoutable  = true;
-            jupiterOutAmount = outAmount;
-            logger.info({ mint, symbol, attempt: attempt + 1, outAmount, liteOut, fullOut },
-              "Graduation sniper: Jupiter route confirmed — pool is live ✅");
-            break;
+        // ── Fast path: T1 already returned an AMM pair ──────────────────────────
+        if (GATE_AMM_DEXES.has(baselineDexId ?? "")) {
+          gateConfirmed = true;
+          logger.info({ mint, symbol, baselineDexId },
+            "Graduation sniper: T1 DexScreener AMM pair confirmed — skipping gate ✅");
+        } else {
+          // ── Slow path: race all three sources until one confirms ──────────────
+          logger.info({ mint, symbol, baselineDexId: baselineDexId ?? "pumpfun/none" },
+            "Graduation sniper: T1 price from bonding-curve — racing DexScreener + Jupiter for AMM confirmation");
+
+          const deadline = Date.now() + GATE_DEADLINE_MS;
+          let attempt = 0;
+
+          while (Date.now() < deadline && !gateConfirmed) {
+            if (attempt > 0) await new Promise<void>(r => setTimeout(r, GATE_POLL_MS));
+            attempt++;
+
+            type QuoteResp = { outAmount?: string; error?: string };
+            const jParams = { inputMint: JUPE_GATE_WSOL, outputMint: mint, amount: 10_000_000, slippageBps: 5000 };
+
+            // All three in parallel — lowest latency path wins
+            const [dexRes, liteRes, fullRes] = await Promise.allSettled([
+              this.fetchPriceFast(mint),
+              axios.get<QuoteResp>(JUPE_GATE_LITE_URL, { params: jParams, timeout: 4_000 }),
+              axios.get<QuoteResp>(JUPE_GATE_FULL_URL, { params: jParams, timeout: 4_000 }),
+            ]);
+
+            // ── DexScreener AMM confirmation (gives accurate price) ─────────────
+            if (dexRes.status === "fulfilled" && dexRes.value && GATE_AMM_DEXES.has(dexRes.value.dexId)) {
+              gateConfirmed = true;
+              entryPrice    = dexRes.value.price;
+              baselinePrice = dexRes.value.price;
+              logger.info({ mint, symbol, dexId: dexRes.value.dexId, price: dexRes.value.price, attempt },
+                "Graduation sniper: DexScreener AMM confirmed — pool is live ✅");
+              break;
+            }
+
+            // ── Jupiter route confirmation ───────────────────────────────────────
+            const liteOut = liteRes.status === "fulfilled" ? parseInt(liteRes.value.data?.outAmount ?? "0", 10) : 0;
+            const fullOut = fullRes.status === "fulfilled" ? parseInt(fullRes.value.data?.outAmount ?? "0", 10) : 0;
+            jupiterOutAmount = Math.max(liteOut, fullOut);
+            if (jupiterOutAmount > 0) {
+              gateConfirmed = true;
+              logger.info({ mint, symbol, jupiterOutAmount, liteOut, fullOut, attempt },
+                "Graduation sniper: Jupiter route confirmed — pool is live ✅");
+              break;
+            }
+
+            logger.info({ mint, symbol, attempt, msRemaining: Math.max(0, deadline - Date.now()) },
+              "Graduation sniper: pool not confirmed yet — retrying (DexScreener + Jupiter lite + Jupiter full)");
           }
-          logger.info({ mint, symbol, attempt: attempt + 1, totalAttempts: JUPE_GATE_ATTEMPTS, liteOut, fullOut },
-            "Graduation sniper: Jupiter route not yet available — retrying");
         }
 
-        if (!jupiterRoutable) {
-          const reason = "No Jupiter swap route found after 40s — likely a false trigger (pool not yet seeded)";
+        if (!gateConfirmed) {
+          const reason = "Pool not confirmed after 40s (no DexScreener AMM pair, no Jupiter route) — likely a false trigger";
           this.addEvent({ ...eventBase, symbol, action: "skipped", skipReason: reason });
-          logger.warn({ mint, symbol },
-            "Graduation sniper: SKIPPED — no Jupiter route after 40s (pre-graduation false trigger)");
+          logger.warn({ mint, symbol }, "Graduation sniper: SKIPPED — pool unconfirmed after 40s (false trigger guard)");
           if (isTelegramConfigured()) {
             void sendTelegram(
               `⚠️ <b>FALSE TRIGGER BLOCKED</b>\n` +
               `──────────────────────\n` +
               `🪙 Token: <b>${symbol}</b>\n` +
               `📋 CA: <code>${mint}</code>\n` +
-              `❌ No Jupiter swap route after 40s — pool not seeded yet\n` +
+              `❌ No AMM pair / swap route after 40s — pool not seeded\n` +
               `✅ Entry blocked (pre-graduation guard)\n` +
               `🕐 ${toIST(new Date())}`,
             );
@@ -1257,28 +1284,19 @@ class GraduationSniperService {
           return;
         }
 
-        // ── Use Jupiter-implied price as entry price ────────────────────────────
-        // The DexScreener prices above may reflect the bonding-curve pair (pumpfun)
-        // whose price froze at graduation time.  Jupiter quote → actual AMM pool
-        // reserves → real current market price.  Compute it from the quote we just
-        // fetched:  price = (0.01 SOL × SOL/USD) ÷ (jupiterOutAmount ÷ 10^6)
-        //
-        // IMPORTANT: also sync baselinePrice to the same Jupiter value.
-        // baselinePrice was fetched from DexScreener which may still show the old
-        // pumpfun bonding-curve price (lower than the real Raydium price). Comparing
-        // Jupiter entry price against a stale DexScreener baseline creates phantom
-        // drift of 15–20%+ even when the token hasn't moved at all. By using Jupiter
-        // as the baseline here we ensure the drift check measures real price movement,
-        // not source variance between DexScreener and Jupiter.
+        // ── Price sync when Jupiter confirmed (DexScreener already synced above) ─
+        // When DexScreener won, entryPrice/baselinePrice are already the AMM price.
+        // When Jupiter won, compute USD price from quote and sync both references so
+        // the drift check compares like-for-like (same source, same moment).
         if (jupiterOutAmount > 0) {
           const solUsd = await this.fetchSolUsdPrice();
           if (solUsd && solUsd > 0) {
             const jupiterImpliedPrice = (0.01 * solUsd) / (jupiterOutAmount / 1_000_000);
             if (jupiterImpliedPrice > 0) {
               logger.info({ mint, symbol, jupiterImpliedPrice, solUsd, jupiterOutAmount, prevEntryPrice: entryPrice, prevBaselinePrice: baselinePrice },
-                "Graduation sniper: entry price + baseline updated from Jupiter quote — reflects actual AMM pool state ✅");
-              entryPrice = jupiterImpliedPrice;
-              baselinePrice = jupiterImpliedPrice; // sync baseline to same source to prevent phantom drift
+                "Graduation sniper: entry price + baseline synced from Jupiter quote ✅");
+              entryPrice    = jupiterImpliedPrice;
+              baselinePrice = jupiterImpliedPrice;
             }
           }
         }
