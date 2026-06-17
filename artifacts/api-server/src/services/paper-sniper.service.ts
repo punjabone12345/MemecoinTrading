@@ -2,6 +2,7 @@ import axios from "axios";
 import { logger } from "../lib/logger.js";
 import { query, execute } from "../lib/db.js";
 import { sendTelegram, isTelegramConfigured, toIST } from "../lib/telegram.js";
+import type { GraduationQualityMeta } from "./graduation-sniper.service.js";
 
 // ── Paper-specific config ──────────────────────────────────────────────────────
 
@@ -21,6 +22,13 @@ export interface PaperConfig {
   deadCoinMinMovePct:   number;  // min peak move % required — if not reached, close as dead
   maxFillDriftPct:      number;  // skip entry if price already moved > this % from detection baseline
   simulatedExecDelayMs: number;  // ms to wait after graduation before entering (simulates real exec latency)
+  // ── Quality pre-entry filters ──────────────────────────────────────────────
+  enableLiquidityFilter:    boolean; // require minimum pool liquidity at graduation
+  minLiquidityUsd:          number;  // min pool liquidity in USD (e.g. 5000)
+  enableBondingCurveFilter: boolean; // require bonding curve completed within time limit
+  maxBondingCurveMinutes:   number;  // skip if bonding curve took > N minutes (e.g. 30)
+  enableHolderFilter:       boolean; // require minimum holder count at graduation
+  minHolderCount:           number;  // min holder count (e.g. 150)
 }
 
 const DEFAULT_PAPER_CONFIG: PaperConfig = {
@@ -39,6 +47,13 @@ const DEFAULT_PAPER_CONFIG: PaperConfig = {
   deadCoinMinMovePct:   5,                // must move >5% from entry
   maxFillDriftPct:      20,               // skip if exec price > 20% above detection baseline
   simulatedExecDelayMs: 5_000,            // 5s to simulate real buy latency
+  // Quality filters — enabled by default with calibrated thresholds for 24h backtest
+  enableLiquidityFilter:    true,
+  minLiquidityUsd:          5_000,  // skip if pool < $5,000 at graduation
+  enableBondingCurveFilter: true,
+  maxBondingCurveMinutes:   30,     // skip if bonding curve took > 30 min
+  enableHolderFilter:       true,
+  minHolderCount:           150,    // skip if < 150 holders at graduation
 };
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -294,6 +309,7 @@ class PaperSniperService {
     name: string,
     detectedAt: number,
     detectionPrice: number,
+    qualityMeta?: GraduationQualityMeta,
   ): void {
     const cfg = this.paperConfig;
 
@@ -313,6 +329,52 @@ class PaperSniperService {
       this.addEvent({ id: uid(), detectedAt, mint, symbol, action: "skipped",
         skipReason: `Insufficient paper balance (${this.virtualBalance.toFixed(4)} SOL < ${cfg.positionSizeSol} SOL)` });
       return;
+    }
+
+    // ── Quality pre-entry filters ────────────────────────────────────────────
+    // Filter 1: Minimum pool liquidity at graduation ($5k default)
+    if (cfg.enableLiquidityFilter) {
+      if (qualityMeta?.poolLiquidityUsd != null) {
+        if (qualityMeta.poolLiquidityUsd < cfg.minLiquidityUsd) {
+          const reason = `Low liquidity — $${qualityMeta.poolLiquidityUsd.toFixed(0)} < $${cfg.minLiquidityUsd} min (quality filter)`;
+          this.addEvent({ id: uid(), detectedAt, mint, symbol, action: "skipped", skipReason: reason });
+          logger.info({ mint, symbol, poolLiquidityUsd: qualityMeta.poolLiquidityUsd, minLiquidityUsd: cfg.minLiquidityUsd }, "Paper sniper: quality filter — low liquidity ❌");
+          this.broadcast();
+          return;
+        }
+      } else {
+        logger.debug({ mint }, "Paper sniper: liquidity filter active but no pool USD data — passing through");
+      }
+    }
+
+    // Filter 2: Bonding curve completion speed (<30 min default = enter, >2h = skip)
+    if (cfg.enableBondingCurveFilter) {
+      if (qualityMeta?.bondingCurveMinutes != null) {
+        if (qualityMeta.bondingCurveMinutes > cfg.maxBondingCurveMinutes) {
+          const reason = `Slow bonding curve — ${qualityMeta.bondingCurveMinutes.toFixed(1)} min > ${cfg.maxBondingCurveMinutes} min limit (quality filter)`;
+          this.addEvent({ id: uid(), detectedAt, mint, symbol, action: "skipped", skipReason: reason });
+          logger.info({ mint, symbol, bondingCurveMinutes: qualityMeta.bondingCurveMinutes, maxBondingCurveMinutes: cfg.maxBondingCurveMinutes }, "Paper sniper: quality filter — bonding curve too slow ❌");
+          this.broadcast();
+          return;
+        }
+      } else {
+        logger.debug({ mint }, "Paper sniper: bonding-curve filter active but no duration data — passing through");
+      }
+    }
+
+    // Filter 3: Minimum holder count at graduation (≥150 default)
+    if (cfg.enableHolderFilter) {
+      if (qualityMeta?.holderCount != null) {
+        if (qualityMeta.holderCount < cfg.minHolderCount) {
+          const reason = `Low holder count — ${qualityMeta.holderCount} < ${cfg.minHolderCount} min holders (quality filter)`;
+          this.addEvent({ id: uid(), detectedAt, mint, symbol, action: "skipped", skipReason: reason });
+          logger.info({ mint, symbol, holderCount: qualityMeta.holderCount, minHolderCount: cfg.minHolderCount }, "Paper sniper: quality filter — insufficient holders ❌");
+          this.broadcast();
+          return;
+        }
+      } else {
+        logger.debug({ mint }, "Paper sniper: holder filter active but no holder data — passing through");
+      }
     }
 
     // Fast-fail: if price already exceeds drift threshold before the exec delay

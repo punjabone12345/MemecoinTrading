@@ -212,8 +212,8 @@ await graduationSniperService.init();
 graduationSniperService.start();
 await paperSniperService.init();
 graduationSniperService.setPaperSniperCallback(
-  (mint, entryPrice, symbol, name, detectedAt, detectionPrice) => {
-    paperSniperService.onGraduation(mint, entryPrice, symbol, name, detectedAt, detectionPrice);
+  (mint, entryPrice, symbol, name, detectedAt, detectionPrice, qualityMeta) => {
+    paperSniperService.onGraduation(mint, entryPrice, symbol, name, detectedAt, detectionPrice, qualityMeta);
   },
 );
 

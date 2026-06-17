@@ -136,6 +136,13 @@ function fmtTgPrice(p: number): string {
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
+/** Quality metadata fetched at graduation time and forwarded to paper sniper for pre-entry filters. */
+export interface GraduationQualityMeta {
+  poolLiquidityUsd:    number | null; // reserves.solBalance × solUsd at graduation
+  bondingCurveMinutes: number | null; // minutes from token creation → graduation (pump.fun API)
+  holderCount:         number | null; // holder count at graduation (pump.fun API)
+}
+
 export interface SniperConfig {
   enabled: boolean;
   positionSizeSol: number;
@@ -243,7 +250,7 @@ class GraduationSniperService {
   private wsConnected = false;
   private wsReconnects = 0;
   private subscriptionId: number | null = null;
-  private paperCallback: ((mint: string, entryPrice: number, symbol: string, name: string, detectedAt: number, detectionPrice: number) => void) | null = null;
+  private paperCallback: ((mint: string, entryPrice: number, symbol: string, name: string, detectedAt: number, detectionPrice: number, qualityMeta: GraduationQualityMeta) => void) | null = null;
   private priceIntervalId: ReturnType<typeof setInterval> | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private started = false;
@@ -1024,7 +1031,7 @@ class GraduationSniperService {
         return;
       }
 
-      const { mint, wsolVaultPubkey, tokenVaultPubkey } = extracted;
+      const { mint, wsolVaultPubkey, tokenVaultPubkey, blockTime: graduationBlockTime } = extracted;
       const skipReason = this.checkSkipReason(mint);
       const eventBase  = { id: uid(), detectedAt, mint, symbol: mint.slice(0, 8), txSignature: signature };
       catchEventBase   = eventBase; // expose to catch block
@@ -1119,6 +1126,11 @@ class GraduationSniperService {
       // Cost: one extra Jupiter API call per graduation (cheap); benefit: zero
       // "Price not found" aborts when wsolVaultPubkey/tokenVaultPubkey are null.
       const jupFallbackPromise = this.fetchJupiterPriceFallback(mint);
+
+      // Pump.fun metadata: creation timestamp + holder count.
+      // Fetched concurrently at T0 — used for quality pre-entry filters in paper mode.
+      // Non-blocking: graduation proceeds even if this fails.
+      const pumpFunMetaPromise = this.fetchPumpFunMeta(mint);
 
       // ── T1: on-chain price ready (~200-400ms from T0) ─────────────────────────
       const [reserves, solUsd] = await Promise.all([reservesPromise, solUsdPromise]);
@@ -1520,7 +1532,27 @@ class GraduationSniperService {
       // ── Paper sniper tap-in ───────────────────────────────────────────────────
       // Always fires when quality filters pass — even if live must skip due to
       // insufficient wallet balance. Paper has its own virtual balance & checks.
-      this.paperCallback?.(mint, entryPrice, symbol, name, detectedAt, baselinePrice);
+      // ── Build quality metadata for paper sniper filters ───────────────────────
+      const pumpFunMeta = await pumpFunMetaPromise;
+      const poolLiquidityUsd: number | null =
+        (reserves?.solBalance != null && solUsd != null && solUsd > 0)
+          ? reserves.solBalance * solUsd
+          : null;
+      let bondingCurveMinutes: number | null = null;
+      if (graduationBlockTime != null && pumpFunMeta?.createdTimestampMs != null) {
+        const durationMs = graduationBlockTime * 1_000 - pumpFunMeta.createdTimestampMs;
+        bondingCurveMinutes = durationMs > 0 ? durationMs / 60_000 : null;
+      }
+      const qualityMeta: GraduationQualityMeta = {
+        poolLiquidityUsd,
+        bondingCurveMinutes,
+        holderCount: pumpFunMeta?.holderCount ?? null,
+      };
+      logger.info(
+        { mint, symbol, poolLiquidityUsd, bondingCurveMinutes, holderCount: qualityMeta.holderCount },
+        "Graduation sniper: quality meta computed",
+      );
+      this.paperCallback?.(mint, entryPrice, symbol, name, detectedAt, baselinePrice, qualityMeta);
 
       // Skip live entry if wallet can't support it (balance, not configured, etc.)
       if (liveOnlySkip) {
@@ -1562,7 +1594,31 @@ class GraduationSniperService {
     return null;
   }
 
-  private async extractMintFromTx(signature: string): Promise<{ mint: string; wsolVaultPubkey: string | null; tokenVaultPubkey: string | null } | null> {
+  // ── Pump.fun metadata fetch ───────────────────────────────────────────────
+  // Called concurrently at T0 alongside reserves/SOL price.
+  // Returns creation timestamp (ms) and holder count from the pump.fun API.
+  // Used for quality pre-entry filters in paper mode (bonding-curve speed, holders).
+  // Non-fatal: returns null if API is down or token not found.
+  private async fetchPumpFunMeta(mint: string): Promise<{ createdTimestampMs: number; holderCount: number | null } | null> {
+    try {
+      type PumpCoin = { created_timestamp?: number; holder_count?: number; [k: string]: unknown };
+      const res = await axios.get<PumpCoin>(
+        `https://frontend-api.pump.fun/coins/${mint}`,
+        { timeout: 5_000, headers: { Accept: "application/json" } },
+      );
+      const data = res.data;
+      if (!data || typeof data.created_timestamp !== "number") return null;
+      return {
+        createdTimestampMs: data.created_timestamp,
+        holderCount: typeof data.holder_count === "number" ? data.holder_count : null,
+      };
+    } catch {
+      logger.debug({ mint }, "Graduation sniper: pump.fun meta fetch failed (non-critical)");
+      return null;
+    }
+  }
+
+  private async extractMintFromTx(signature: string): Promise<{ mint: string; wsolVaultPubkey: string | null; tokenVaultPubkey: string | null; blockTime: number | null } | null> {
     const apiKey = process.env["HELIUS_API_KEY"];
     if (!apiKey) return null;
 
@@ -1792,7 +1848,7 @@ class GraduationSniperService {
             tokenVaultPubkey: tokenVaultPubkey?.slice(0, 8) ?? null,
             attempt: attempt + 1,
           }, "Graduation sniper: mint + both vaults extracted ✅");
-          return { mint, wsolVaultPubkey, tokenVaultPubkey };
+          return { mint, wsolVaultPubkey, tokenVaultPubkey, blockTime: blockTime ?? null };
         }
 
         logger.info(
@@ -3760,7 +3816,7 @@ class GraduationSniperService {
   }
 
   setPaperSniperCallback(
-    fn: (mint: string, entryPrice: number, symbol: string, name: string, detectedAt: number, detectionPrice: number) => void,
+    fn: (mint: string, entryPrice: number, symbol: string, name: string, detectedAt: number, detectionPrice: number, qualityMeta: GraduationQualityMeta) => void,
   ): void {
     this.paperCallback = fn;
   }
