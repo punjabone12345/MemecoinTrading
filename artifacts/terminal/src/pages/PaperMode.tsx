@@ -140,7 +140,7 @@ const DEFAULT_CFG: PaperConfig = {
   positionSizeSol: 0.05, maxOpenPositions: 3,
   tp1Pct: 150, tp1ClosePct: 40, tp2Pct: 400, tp2ClosePct: 40,
   trailingStopPct: 30, slPhase1Pct: 20, slPhase2Pct: 25, slPhase3Pct: 30, slAfterTp1Pct: 35,
-  simulatedExecDelayMs: 5_000,
+  simulatedExecDelayMs: 0,
   maxFillDriftPct: 20,
   deadCoinWindowMs: 7_200_000, deadCoinMinMovePct: 5,
   enableLiquidityFilter: true, minLiquidityUsd: 5_000,

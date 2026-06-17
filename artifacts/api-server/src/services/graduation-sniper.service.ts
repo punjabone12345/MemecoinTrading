@@ -138,9 +138,10 @@ function fmtTgPrice(p: number): string {
 
 /** Quality metadata fetched at graduation time and forwarded to paper sniper for pre-entry filters. */
 export interface GraduationQualityMeta {
-  poolLiquidityUsd:    number | null; // reserves.solBalance × solUsd at graduation
-  bondingCurveMinutes: number | null; // minutes from token creation → graduation (pump.fun API)
-  holderCount:         number | null; // holder count at graduation (pump.fun API)
+  poolLiquidityUsd:      number | null; // reserves.solBalance × solUsd at graduation
+  bondingCurveMinutes:   number | null; // minutes from token creation → graduation (pump.fun API)
+  holderCount:           number | null; // holder count at graduation (pump.fun API)
+  onChainPriceConfirmed: boolean;       // true when price came from on-chain vault reserves (not DexScreener/Jupiter)
 }
 
 export interface SniperConfig {
@@ -1546,7 +1547,8 @@ class GraduationSniperService {
       const qualityMeta: GraduationQualityMeta = {
         poolLiquidityUsd,
         bondingCurveMinutes,
-        holderCount: pumpFunMeta?.holderCount ?? null,
+        holderCount:           pumpFunMeta?.holderCount ?? null,
+        onChainPriceConfirmed: onChainPriceValid,
       };
       logger.info(
         { mint, symbol, poolLiquidityUsd, bondingCurveMinutes, holderCount: qualityMeta.holderCount },

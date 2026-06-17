@@ -46,7 +46,7 @@ const DEFAULT_PAPER_CONFIG: PaperConfig = {
   deadCoinWindowMs:     2 * 60 * 60_000,  // 2 hours
   deadCoinMinMovePct:   5,                // must move >5% from entry
   maxFillDriftPct:      20,               // skip if exec price > 20% above detection baseline
-  simulatedExecDelayMs: 5_000,            // 5s to simulate real buy latency
+  simulatedExecDelayMs: 0,               // 0 = instant (fast-path uses on-chain price when available)
   // Quality filters — enabled by default with calibrated thresholds for 24h backtest
   enableLiquidityFilter:    true,
   minLiquidityUsd:          5_000,  // skip if pool < $5,000 at graduation
@@ -394,7 +394,9 @@ class PaperSniperService {
 
     // Simulate real execution latency: wait simulatedExecDelayMs, then re-fetch
     // price and check drift again before entering — matches live bot's ~5s checks.
-    void this.scheduleDelayedEntry(mint, entryPrice, symbol, name, detectedAt, detectionPrice);
+    // Fast-path: when on-chain price is confirmed by graduation sniper, skip all
+    // polling and enter immediately with the validated price.
+    void this.scheduleDelayedEntry(mint, entryPrice, symbol, name, detectedAt, detectionPrice, qualityMeta);
   }
 
   private async scheduleDelayedEntry(
@@ -404,9 +406,111 @@ class PaperSniperService {
     name: string,
     detectedAt: number,
     detectionPrice: number,
+    qualityMeta?: GraduationQualityMeta,
   ): Promise<void> {
     const cfg = this.paperConfig;
-    const delayMs = cfg.simulatedExecDelayMs ?? 5_000;
+
+    // ── Fast path: on-chain price already confirmed by graduation sniper ──────
+    // When the graduation sniper validated pool reserves on-chain and passed
+    // a real price, we can skip:
+    //   1. The artificial exec delay (simulatedExecDelayMs)
+    //   2. The pool existence gate (pool already confirmed via vault reserves)
+    //   3. The DexScreener/Jupiter price re-poll (price already validated)
+    // This cuts entry time from up to 118s down to ~2-8s from graduation TX.
+    if (qualityMeta?.onChainPriceConfirmed && entryPrice > 0) {
+      logger.info({ mint, symbol, entryPrice, detectionPrice },
+        "Paper sniper: ⚡ FAST PATH — on-chain price confirmed, skipping gate + price poll");
+      // Re-check capacity after quality-filter pipeline
+      const cfgFast = this.paperConfig;
+      if (this.virtualBalance < cfgFast.positionSizeSol) {
+        this.addEvent({ id: uid(), detectedAt, mint, symbol, action: "skipped",
+          skipReason: `Insufficient balance (${this.virtualBalance.toFixed(4)} SOL < ${cfgFast.positionSizeSol} SOL)` });
+        this.seenMints.delete(mint);
+        this.broadcast();
+        return;
+      }
+      if (this.openPositions.size >= cfgFast.maxOpenPositions) {
+        this.addEvent({ id: uid(), detectedAt, mint, symbol, action: "skipped",
+          skipReason: `Max positions reached (${this.openPositions.size}/${cfgFast.maxOpenPositions})` });
+        this.seenMints.delete(mint);
+        this.broadcast();
+        return;
+      }
+      // Drift guard still applies on the fast path (no DexScreener re-check, use on-chain price directly)
+      const fastDriftPct = detectionPrice > 0 ? ((entryPrice / detectionPrice) - 1) * 100 : 0;
+      if (detectionPrice > 0 && fastDriftPct > cfgFast.maxFillDriftPct) {
+        const reason = `Drift abort — price +${fastDriftPct.toFixed(1)}% above baseline (>${cfgFast.maxFillDriftPct}% threshold)`;
+        this.addEvent({ id: uid(), detectedAt, mint, symbol, action: "skipped", skipReason: reason });
+        this.seenMints.delete(mint);
+        this.broadcast();
+        return;
+      }
+      // ── Negative drift guard: on-chain vault price >> actual AMM price ────
+      const NEG_FAST_DRIFT_ABORT = -20;
+      if (detectionPrice > 0 && fastDriftPct < NEG_FAST_DRIFT_ABORT) {
+        const reason = `Dead pool abort — on-chain price ${fastDriftPct.toFixed(1)}% below detection baseline — pool likely crashed`;
+        this.addEvent({ id: uid(), detectedAt, mint, symbol, action: "skipped", skipReason: reason });
+        this.seenMints.delete(mint);
+        this.broadcast();
+        return;
+      }
+      // ── Open position immediately (no pool gate, no price re-poll) ────────
+      const fastSizeSol = cfgFast.positionSizeSol;
+      const fastPos: PaperPosition = {
+        id:                uid(),
+        mint,
+        symbol,
+        name,
+        detectedAt,
+        entryAt:           Date.now(),
+        entryPrice,
+        currentPrice:      entryPrice,
+        sizeSol:           fastSizeSol,
+        tp1Hit:            false,
+        tp2Hit:            false,
+        remainingFraction: 1.0,
+        effectiveSlPrice:  entryPrice * (1 - cfgFast.slPhase1Pct / 100),
+        trailingHigh:      entryPrice,
+        status:            "open",
+        realizedPnlSol:    0,
+        unrealizedPnlSol:  0,
+        totalPnlSol:       0,
+        pnlPct:            0,
+        tp1RealizedSol:    0,
+        tp2RealizedSol:    0,
+        runnerRealizedSol: 0,
+        detectionPrice,
+        entryDriftPct:     fastDriftPct,
+      };
+      this.virtualBalance -= fastSizeSol;
+      this.openPositions.set(mint, fastPos);
+      void this.persistPosition(fastPos);
+      void this.persistBalance();
+      this.addEvent({ id: uid(), detectedAt, mint, symbol, action: "entered" });
+      logger.info(
+        { mint, symbol, entryPrice, fastDriftPct: fastDriftPct.toFixed(1) + "%", fastSizeSol, virtualBalance: this.virtualBalance },
+        "Paper sniper: ⚡ FAST PAPER position entered (on-chain price, zero gate delay) 📄",
+      );
+      if (isTelegramConfigured()) {
+        void sendTelegram(
+          `📄⚡ <b>PAPER ENTRY (instant)</b>\n` +
+          `──────────────────────\n` +
+          `🪙 Token: <b>${symbol}</b>\n` +
+          `📋 CA: <code>${mint}</code>\n` +
+          `💵 Entry: <b>$${entryPrice < 0.0001 ? entryPrice.toExponential(3) : entryPrice.toFixed(8)}</b>\n` +
+          `📈 Drift: ${fastDriftPct >= 0 ? "+" : ""}${fastDriftPct.toFixed(1)}% (on-chain, instant)\n` +
+          `💰 Size: <b>${fastSizeSol.toFixed(4)} SOL</b> (virtual)\n` +
+          `📊 Balance after: <b>${this.virtualBalance.toFixed(4)} SOL</b>\n` +
+          `🛡️ SL: -${cfgFast.slPhase1Pct}% (2m) → -${cfgFast.slPhase2Pct}% → -${cfgFast.slPhase3Pct}%\n` +
+          `🎯 TP1: +${cfgFast.tp1Pct}% · TP2: +${cfgFast.tp2Pct}%\n` +
+          `🕐 ${toIST(new Date())}`,
+        );
+      }
+      this.broadcast();
+      return;
+    }
+
+    const delayMs = cfg.simulatedExecDelayMs ?? 0;
 
     if (delayMs > 0) {
       await new Promise<void>((r) => setTimeout(r, delayMs));
