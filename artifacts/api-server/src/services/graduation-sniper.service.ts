@@ -86,13 +86,13 @@ const MAX_FILL_DRIFT_PCT     = 20;             // emergency-sell if fill > 20% a
 const MIN_ENTRY_PRICE_USD   = 0.00001;        // skip tokens priced below $0.00001
 const MIN_POOL_SOL          = 10;             // skip if Raydium pool holds < 10 SOL on-chain
 
-// ── STAGED STOP LOSS (FIX 1) ─────────────────────────────────────────────────
-const STAGED_SL_PHASE1_MS   = 2 * 60_000;    // first 2 minutes: 20% from entry (instant rug)
-const STAGED_SL_PHASE2_MS   = 10 * 60_000;   // 2–10 minutes: 25% from peak (trailing)
-const STAGED_SL_PHASE1_PCT  = 20;            // phase 1 drop threshold
-const STAGED_SL_PHASE2_PCT  = 25;            // phase 2 drop threshold
-const STAGED_SL_PHASE3_PCT  = 30;            // phase 3 (>10m) drop threshold
-const STAGED_SL_AFTER_TP1   = 35;            // after TP1: 35% from peak (allows 20-30% retracement before TP2)
+// ── STAGED STOP LOSS ──────────────────────────────────────────────────────────
+const STAGED_SL_PHASE1_MS   = 2 * 60_000;    // first 2 minutes: hard SL from entry
+const STAGED_SL_PHASE2_MS   = 10 * 60_000;   // 2–10 minutes: trailing from peak
+const STAGED_SL_PHASE1_PCT  = 15;            // 0-2m: -15% from entry
+const STAGED_SL_PHASE2_PCT  = 20;            // 2-10m: -20% from peak (trailing)
+const STAGED_SL_PHASE3_PCT  = 25;            // >10m: -25% from peak (trailing)
+const STAGED_SL_AFTER_TP1   = 15;            // after TP1: -15% trailing from peak (runner protection)
 
 // ── LIQUIDITY MONITORING (FIX 2) ─────────────────────────────────────────────
 const LIQUIDITY_CHECK_MS     = 30_000;        // check open-position liquidity every 30 s
@@ -164,12 +164,12 @@ const DEFAULT_CONFIG: SniperConfig = {
   enabled:              true,
   positionSizeSol:      0.002,   // small default — safe for wallets starting with 0.06 SOL (needs positionSize + 0.003 overhead)
   maxOpenPositions:     5,
-  slPct:                40,
-  tp1Pct:               150,
-  tp1ClosePct:          40,
-  tp2Pct:               400,
-  tp2ClosePct:          40,
-  trailingStopPct:      30,
+  slPct:                15,      // initial SL at entry — matches phase 1 (-15%)
+  tp1Pct:               60,      // TP1 at +60%
+  tp1ClosePct:          40,      // sell 40% at TP1
+  tp2Pct:               150,     // TP2 at +150%
+  tp2ClosePct:          40,      // sell 40% at TP2 → 20% runner remains
+  trailingStopPct:      15,      // trailing SL -15% from peak (runner after TP2)
   waitBeforeEntryMs:    0,       // 0ms — enter as fast as possible after detection
   slippageBps:          3000,    // quote slippage for route-finding only; swap uses fixed SWAP_SLIPPAGE_BPS (5000 = 50% floor)
   priorityFeeLamports:  500_000, // 0.0005 SOL floor — Helius p75 used at runtime (old 50k was too low)
@@ -2812,10 +2812,18 @@ class GraduationSniperService {
     // false "SL triggered" messages when Jupiter sell failed.
 
     if (pos.tp1Hit) {
+      // Breakeven floor: never let a winner turn into a loser
+      if (price <= pos.entryPrice) {
+        const dropPct = ((pos.entryPrice - price) / pos.entryPrice * 100).toFixed(1);
+        logger.warn({ mint: pos.mint, symbol: pos.symbol, dropPct }, "Graduation sniper: breakeven SL triggered");
+        await this.closePosition(pos, `Breakeven SL — price returned to entry (-${dropPct}%)`, price);
+        return true;
+      }
+      // Trailing SL -15% from peak protects runner gains
       if (dropFromPeak >= STAGED_SL_AFTER_TP1) {
         const loss = dropFromPeak.toFixed(0);
-        logger.warn({ mint: pos.mint, symbol: pos.symbol, dropFromPeak: loss }, "Graduation sniper: staged SL — after TP1");
-        await this.closePosition(pos, `Staged SL: -${loss}% from TP1 peak`, price);
+        logger.warn({ mint: pos.mint, symbol: pos.symbol, dropFromPeak: loss }, "Graduation sniper: trailing SL after TP1");
+        await this.closePosition(pos, `Trailing SL: -${loss}% from peak (after TP1)`, price);
         return true;
       }
       return false;

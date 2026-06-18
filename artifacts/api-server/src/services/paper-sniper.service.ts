@@ -34,15 +34,15 @@ export interface PaperConfig {
 const DEFAULT_PAPER_CONFIG: PaperConfig = {
   positionSizeSol:    0.05,
   maxOpenPositions:   3,
-  tp1Pct:             150,
-  tp1ClosePct:        40,
-  tp2Pct:             400,
-  tp2ClosePct:        40,
-  trailingStopPct:    30,
-  slPhase1Pct:        20,
-  slPhase2Pct:        25,
-  slPhase3Pct:        30,
-  slAfterTp1Pct:      35,
+  tp1Pct:             60,   // TP1 at +60%
+  tp1ClosePct:        40,   // sell 40% at TP1
+  tp2Pct:             150,  // TP2 at +150%
+  tp2ClosePct:        40,   // sell 40% at TP2 → 20% runner remains
+  trailingStopPct:    15,   // trailing SL -15% from peak (runner after TP1/TP2)
+  slPhase1Pct:        15,   // 0-2m: hard SL -15% from entry
+  slPhase2Pct:        20,   // 2-10m: trailing -20% from peak
+  slPhase3Pct:        25,   // >10m: trailing -25% from peak
+  slAfterTp1Pct:      15,   // kept for config compatibility — actual check uses effectiveSlPrice
   deadCoinWindowMs:     2 * 60 * 60_000,  // 2 hours
   deadCoinMinMovePct:   5,                // must move >5% from entry
   maxFillDriftPct:      20,               // skip if exec price > 20% above detection baseline
@@ -936,7 +936,7 @@ class PaperSniperService {
       pos.realizedPnlSol   += pnl;
       pos.tp1RealizedSol    = pnl;
       pos.remainingFraction -= closeFrac;
-      pos.effectiveSlPrice  = price * (1 - cfg.slAfterTp1Pct / 100);
+      pos.effectiveSlPrice  = pos.entryPrice; // breakeven SL immediately on TP1
       this.virtualBalance  += solReturned;
       logger.info({ mint: pos.mint, symbol: pos.symbol, pct: pct.toFixed(1), pnl, solReturned, virtualBalance: this.virtualBalance },
         "Paper sniper: TP1 hit 🎯");
