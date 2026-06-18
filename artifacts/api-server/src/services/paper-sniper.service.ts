@@ -46,7 +46,7 @@ const DEFAULT_PAPER_CONFIG: PaperConfig = {
   deadCoinWindowMs:     2 * 60 * 60_000,  // 2 hours
   deadCoinMinMovePct:   5,                // must move >5% from entry
   maxFillDriftPct:      20,               // skip if exec price > 20% above detection baseline
-  simulatedExecDelayMs: 0,               // 0 = instant (fast-path uses on-chain price when available)
+  simulatedExecDelayMs: 5_500,           // 5.5s delay — simulates realistic 5-6th candle entry
   // Quality filters — enabled by default with calibrated thresholds for 24h backtest
   enableLiquidityFilter:    true,
   minLiquidityUsd:          5_000,  // skip if pool < $5,000 at graduation
@@ -462,7 +462,7 @@ class PaperSniperService {
         symbol,
         name,
         detectedAt,
-        entryAt:           detectedAt, // price was observed at detection time, not at processing time
+        entryAt:           detectedAt + 5_500, // simulate realistic 5-6th candle entry (~5.5s after graduation)
         entryPrice,
         currentPrice:      entryPrice,
         sizeSol:           fastSizeSol,
