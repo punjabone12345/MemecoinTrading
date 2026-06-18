@@ -29,31 +29,41 @@ export interface PaperConfig {
   maxBondingCurveMinutes:   number;  // skip if bonding curve took > N minutes (e.g. 30)
   enableHolderFilter:       boolean; // require minimum holder count at graduation
   minHolderCount:           number;  // min holder count (e.g. 150)
+  // ── New strategy filters (mirrors live sniper behaviour) ───────────────────
+  enableCreatorFilter:      boolean; // skip if creator holds > maxCreatorHoldingsPct
+  maxCreatorHoldingsPct:    number;  // creator holdings % threshold (default 5%)
+  enableSellPressureExit:   boolean; // emergency exit when sells > buys×1.5 for ≥60s (pre-TP1)
+  enableWhaleDumpExit:      boolean; // emergency exit when liquidity drops 20–39% in 30s AND ≥5 SOL (pre-TP1)
 }
 
 const DEFAULT_PAPER_CONFIG: PaperConfig = {
-  positionSizeSol:    0.05,
-  maxOpenPositions:   3,
-  tp1Pct:             60,   // TP1 at +60%
+  positionSizeSol:    0.001,  // spec: match live sniper base position size
+  maxOpenPositions:   8,
+  tp1Pct:             150,  // TP1 at +150%
   tp1ClosePct:        40,   // sell 40% at TP1
-  tp2Pct:             150,  // TP2 at +150%
+  tp2Pct:             400,  // TP2 at +400%
   tp2ClosePct:        40,   // sell 40% at TP2 → 20% runner remains
-  trailingStopPct:    15,   // trailing SL -15% from peak (runner after TP1/TP2)
-  slPhase1Pct:        15,   // 0-2m: hard SL -15% from entry
-  slPhase2Pct:        20,   // 2-10m: trailing -20% from peak
-  slPhase3Pct:        25,   // >10m: trailing -25% from peak
-  slAfterTp1Pct:      15,   // kept for config compatibility — actual check uses effectiveSlPrice
+  trailingStopPct:    30,   // trailing SL -30% from peak (runner after TP1/TP2)
+  slPhase1Pct:        20,   // 0-2m: hard SL -20% from entry (spec: Phase 1)
+  slPhase2Pct:        25,   // 2-10m: trailing -25% from peak (spec: Phase 2)
+  slPhase3Pct:        30,   // >10m: trailing -30% from peak (spec: Phase 3)
+  slAfterTp1Pct:      35,   // trailing SL -35% from peak after TP1
   deadCoinWindowMs:     2 * 60 * 60_000,  // 2 hours
   deadCoinMinMovePct:   5,                // must move >5% from entry
-  maxFillDriftPct:      20,               // skip if exec price > 20% above detection baseline
+  maxFillDriftPct:      15,               // spec: skip if exec price > 15% above detection baseline
   simulatedExecDelayMs: 5_500,           // 5.5s delay — simulates realistic 5-6th candle entry
-  // Quality filters — enabled by default with calibrated thresholds for 24h backtest
+  // Quality filters — enabled by default with calibrated thresholds
   enableLiquidityFilter:    true,
   minLiquidityUsd:          5_000,  // skip if pool < $5,000 at graduation
   enableBondingCurveFilter: true,
   maxBondingCurveMinutes:   30,     // skip if bonding curve took > 30 min
   enableHolderFilter:       true,
   minHolderCount:           150,    // skip if < 150 holders at graduation
+  // Strategy exit filters — mirrors live sniper
+  enableCreatorFilter:      true,   // skip if creator holds > 5%
+  maxCreatorHoldingsPct:    5,      // creator rug-risk threshold
+  enableSellPressureExit:   true,   // emergency exit on sustained sell pressure (≥60s)
+  enableWhaleDumpExit:      true,   // emergency exit on whale liquidity pull (pre-TP1)
 };
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -147,6 +157,10 @@ class PaperSniperService {
   private events: PaperSniperEvent[] = [];
   private broadcaster: (() => void) | null = null;
   private priceIntervalId: ReturnType<typeof setInterval> | null = null;
+  // Sell pressure tracking — per-mint timestamp when sustained sell pressure started
+  private sellPressureStartAt = new Map<string, number>();
+  // Whale dump detection — per-mint last-seen liquidity USD
+  private lastPositionLiquidityUsd = new Map<string, number>();
 
   private paperConfig: PaperConfig = { ...DEFAULT_PAPER_CONFIG };
   private virtualBalance = STARTING_BALANCE;
@@ -380,6 +394,17 @@ class PaperSniperService {
         }
       } else {
         logger.debug({ mint }, "Paper sniper: holder filter active but no holder data — passing through");
+      }
+    }
+
+    // Filter 4: Creator holdings rug-risk filter (>5% threshold by default)
+    if (cfg.enableCreatorFilter) {
+      if (qualityMeta?.creatorHoldingsPct != null && qualityMeta.creatorHoldingsPct > cfg.maxCreatorHoldingsPct) {
+        const reason = `Creator holds ${qualityMeta.creatorHoldingsPct.toFixed(1)}% — dump risk (>${cfg.maxCreatorHoldingsPct}% threshold)`;
+        this.addEvent({ id: uid(), detectedAt, mint, symbol, action: "skipped", skipReason: reason });
+        logger.info({ mint, symbol, creatorHoldingsPct: qualityMeta.creatorHoldingsPct, max: cfg.maxCreatorHoldingsPct }, "Paper sniper: creator filter — rug risk ❌");
+        this.broadcast();
+        return;
       }
     }
 
@@ -895,30 +920,68 @@ class PaperSniperService {
     if (positions.length === 0) return;
 
     const cfg = this.paperConfig;
+    const now = Date.now();
 
     for (let i = 0; i < positions.length; i += BATCH_MAX) {
       const batch = positions.slice(i, i + BATCH_MAX);
       const mints = batch.map((p) => p.mint).join(",");
       try {
-        type DexPair = { baseToken: { address: string }; priceUsd: string };
+        type DexPair = {
+          baseToken: { address: string };
+          priceUsd: string;
+          liquidity?: { usd?: number };
+          txns?: { m5?: { buys?: number; sells?: number } };
+        };
         const res = await axios.get<DexPair[]>(
           `${DEXSCREENER_BASE}/tokens/v1/solana/${mints}`,
           { timeout: 6_000 },
         );
         const pairs = res.data ?? [];
         const priceMap = new Map<string, number>();
+        const liqMap   = new Map<string, number>();
+        const buysMap  = new Map<string, number>();
+        const sellsMap = new Map<string, number>();
         for (const pair of pairs) {
+          const addr = pair.baseToken.address;
           const p = parseFloat(pair.priceUsd);
-          if (p > 0) priceMap.set(pair.baseToken.address, p);
+          if (p > 0) priceMap.set(addr, p);
+          if (pair.liquidity?.usd != null) liqMap.set(addr, pair.liquidity.usd);
+          if (pair.txns?.m5) {
+            buysMap.set(addr,  pair.txns.m5.buys  ?? 0);
+            sellsMap.set(addr, pair.txns.m5.sells ?? 0);
+          }
         }
 
         for (const pos of batch) {
           const price = priceMap.get(pos.mint);
           if (!price || price <= 0) continue;
           pos.currentPrice = price;
-          pos.lastPriceAt  = Date.now();
+          pos.lastPriceAt  = now;
           if (price > pos.trailingHigh) pos.trailingHigh = price;
-          this.checkTpSl(pos, cfg);
+
+          // ── Whale dump detection (pre-TP1, enabled toggle) ──────────────────
+          if (cfg.enableWhaleDumpExit && !pos.tp1Hit) {
+            const liqUsd = liqMap.get(pos.mint);
+            if (liqUsd != null && liqUsd > 0) {
+              const prev = this.lastPositionLiquidityUsd.get(pos.mint);
+              this.lastPositionLiquidityUsd.set(pos.mint, liqUsd);
+              if (prev != null && prev > 0) {
+                const dropPct = (1 - liqUsd / prev) * 100;
+                const prevSolEst = prev / (price > 0 ? price * 150 : 1);
+                const solDropEst = prevSolEst * (dropPct / 100);
+                if (dropPct >= 20 && dropPct < 40 && solDropEst >= 5) {
+                  logger.warn({ mint: pos.mint, symbol: pos.symbol, dropPct: dropPct.toFixed(1), solDropEst: solDropEst.toFixed(1) },
+                    "Paper sniper: WHALE DUMP detected — emergency exit 🐋");
+                  this.closePaperPosition(pos, `Whale dump: -${dropPct.toFixed(0)}% liquidity (~${solDropEst.toFixed(1)} SOL)`, price);
+                  continue;
+                }
+              }
+            }
+          }
+
+          const buysM5  = buysMap.get(pos.mint)  ?? 0;
+          const sellsM5 = sellsMap.get(pos.mint) ?? 0;
+          this.checkTpSl(pos, cfg, buysM5, sellsM5);
         }
       } catch { /* non-fatal */ }
     }
@@ -927,13 +990,14 @@ class PaperSniperService {
     this.broadcast();
   }
 
-  private checkTpSl(pos: PaperPosition, cfg: PaperConfig): void {
+  private checkTpSl(pos: PaperPosition, cfg: PaperConfig, buysM5 = 0, sellsM5 = 0): void {
     if (pos.status !== "open") return;
     if (!pos.lastPriceAt || Date.now() - pos.lastPriceAt > STALE_PRICE_MS) return;
 
     const price = pos.currentPrice;
     const pct   = ((price / pos.entryPrice) - 1) * 100;
     const ageMs = Date.now() - pos.entryAt;
+    const now   = Date.now();
 
     // ── TP1 ───────────────────────────────────────────────────────────────
     if (!pos.tp1Hit && pct >= cfg.tp1Pct) {
@@ -1003,6 +1067,26 @@ class PaperSniperService {
       pos.effectiveSlPrice = Math.max(pos.effectiveSlPrice, trailPrice);
     }
 
+    // ── Sell pressure emergency exit (pre-TP1 only, enabled toggle) ──────────
+    if (cfg.enableSellPressureExit && !pos.tp1Hit && !pos.tp2Hit && !pos.tp3Hit) {
+      const hasSellPressure = sellsM5 > 0 && sellsM5 > buysM5 * 1.5;
+      if (hasSellPressure) {
+        if (!this.sellPressureStartAt.has(pos.mint)) {
+          this.sellPressureStartAt.set(pos.mint, now);
+        }
+        const pressureMs = now - (this.sellPressureStartAt.get(pos.mint) ?? now);
+        if (pressureMs >= 60_000) {
+          logger.warn({ mint: pos.mint, symbol: pos.symbol, sellsM5, buysM5, pressureSec: (pressureMs / 1000).toFixed(0) },
+            "Paper sniper: SELL PRESSURE >60s — emergency exit 🚨");
+          this.sellPressureStartAt.delete(pos.mint);
+          this.closePaperPosition(pos, `Sell pressure >60s (${sellsM5} sells vs ${buysM5} buys in 5m)`, price);
+          return;
+        }
+      } else {
+        if (this.sellPressureStartAt.has(pos.mint)) this.sellPressureStartAt.delete(pos.mint);
+      }
+    }
+
     // ── Dead-coin filter ──────────────────────────────────────────────────
     if (!pos.tp1Hit) {
       const peakMovePct = pos.trailingHigh > 0
@@ -1057,6 +1141,8 @@ class PaperSniperService {
     pos.totalPnlSol = pos.realizedPnlSol;
 
     this.openPositions.delete(pos.mint);
+    this.sellPressureStartAt.delete(pos.mint);
+    this.lastPositionLiquidityUsd.delete(pos.mint);
     this.closedPositions.unshift(pos);
     if (this.closedPositions.length > 200) this.closedPositions.pop();
 

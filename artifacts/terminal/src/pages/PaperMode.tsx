@@ -134,18 +134,25 @@ const FIELDS: FieldDef[] = [
   { key: "maxBondingCurveMinutes",   label: "Max bonding curve time",     description: "Skip if curve took longer than N minutes to graduate (e.g. 30)", suffix: "min", min: 5, max: 240, step: 5, toggleKey: "enableBondingCurveFilter" },
   { key: "enableHolderFilter",   type: "boolean", label: "Min holder count filter",     description: "Skip tokens with too few holders at graduation",              suffix: "", min: 0, max: 1, step: 1 },
   { key: "minHolderCount",       label: "Min holder count",            description: "Skip graduation if holder count < this value (e.g. 150)",     suffix: "",    min: 10,    max: 2_000,  step: 10,  toggleKey: "enableHolderFilter" },
+  { section: "Strategy exits",   key: "enableCreatorFilter",  type: "boolean", label: "Creator holdings filter",     description: "Skip tokens where creator still holds > threshold % (rug risk)", suffix: "", min: 0, max: 1, step: 1 },
+  { key: "maxCreatorHoldingsPct", label: "Max creator holdings",       description: "Skip if creator wallet holds more than this % of supply",     suffix: "%",   min: 1,     max: 50,     step: 1,   toggleKey: "enableCreatorFilter" },
+  { key: "enableSellPressureExit", type: "boolean", label: "Sell pressure exit",        description: "Emergency exit when sells > buys×1.5 for ≥60s (pre-TP1 only)",    suffix: "", min: 0, max: 1, step: 1 },
+  { key: "enableWhaleDumpExit",    type: "boolean", label: "Whale dump exit",           description: "Emergency exit if liquidity drops 20–39% in one 3s tick AND ≥5 SOL pulled (pre-TP1)", suffix: "", min: 0, max: 1, step: 1 },
 ];
 
 const DEFAULT_CFG: PaperConfig = {
-  positionSizeSol: 0.05, maxOpenPositions: 3,
+  positionSizeSol: 0.001, maxOpenPositions: 8,
   tp1Pct: 150, tp1ClosePct: 40, tp2Pct: 400, tp2ClosePct: 40,
   trailingStopPct: 30, slPhase1Pct: 20, slPhase2Pct: 25, slPhase3Pct: 30, slAfterTp1Pct: 35,
-  simulatedExecDelayMs: 0,
-  maxFillDriftPct: 20,
+  simulatedExecDelayMs: 5_500,
+  maxFillDriftPct: 15,
   deadCoinWindowMs: 7_200_000, deadCoinMinMovePct: 5,
   enableLiquidityFilter: true, minLiquidityUsd: 5_000,
   enableBondingCurveFilter: true, maxBondingCurveMinutes: 30,
   enableHolderFilter: true, minHolderCount: 150,
+  enableCreatorFilter: true, maxCreatorHoldingsPct: 5,
+  enableSellPressureExit: true,
+  enableWhaleDumpExit: true,
 };
 
 function SettingsModal({ onClose }: { onClose: () => void }) {

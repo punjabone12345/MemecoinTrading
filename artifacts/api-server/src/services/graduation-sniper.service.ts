@@ -9,6 +9,24 @@ import { solanaWalletService } from "./solana-wallet.service.js";
 import { jupiterSwapService } from "./jupiter-swap.service.js";
 import { tokenQualityService, type QualityMetrics } from "./token-quality.service.js";
 
+// ── Quality meta passed to paper sniper at entry ──────────────────────────────
+export interface GraduationQualityMeta {
+  /** Pool liquidity in USD at graduation time */
+  poolLiquidityUsd?: number;
+  /** Minutes it took for the bonding curve to complete */
+  bondingCurveMinutes?: number;
+  /** Holder count at graduation time */
+  holderCount?: number;
+  /** Creator holdings % (rug-risk filter) */
+  creatorHoldingsPct?: number;
+  /** Top-holder concentration % */
+  topHolderPct?: number;
+  /** Whether whale dump was detected */
+  whaleDetected?: boolean;
+  /** Whether an on-chain price was confirmed before entry */
+  onChainPriceConfirmed?: boolean;
+}
+
 // ── Constants ────────────────────────────────────────────────────────────────
 const MIGRATION_WALLET   = "39azUYFWPz3VHgKCf3VChUwbpURdCHRxjWVowf5jUJjg";
 const PUMPFUN_PROGRAM_ID  = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
@@ -282,7 +300,7 @@ class GraduationSniperService {
   private wsConnected = false;
   private wsReconnects = 0;
   private subscriptionId: number | null = null;
-  private paperCallback: ((mint: string, entryPrice: number, symbol: string, name: string, detectedAt: number, detectionPrice: number) => void) | null = null;
+  private paperCallback: ((mint: string, entryPrice: number, symbol: string, name: string, detectedAt: number, detectionPrice: number, qualityMeta?: GraduationQualityMeta) => void) | null = null;
   private priceIntervalId: ReturnType<typeof setInterval> | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private started = false;
@@ -1288,7 +1306,13 @@ class GraduationSniperService {
       }
 
       // ── Paper sniper tap-in (always fires when quality passes) ───────────────
-      this.paperCallback?.(mint, entryPrice, symbol, name, detectedAt, initialPrice);
+      this.paperCallback?.(mint, entryPrice, symbol, name, detectedAt, initialPrice, {
+        poolLiquidityUsd:     quality ? quality.liquiditySol * 150 : undefined,
+        creatorHoldingsPct:   quality?.creatorHoldingsPct,
+        topHolderPct:         quality?.topHolderPct,
+        whaleDetected:        quality?.whaleDetected,
+        onChainPriceConfirmed: true,
+      } satisfies GraduationQualityMeta);
 
       if (liveOnlySkip) {
         logger.info({ mint, symbol, liveOnlySkip }, 'Graduation sniper: live entry skipped — paper-only');
@@ -3818,7 +3842,7 @@ class GraduationSniperService {
   }
 
   setPaperSniperCallback(
-    fn: (mint: string, entryPrice: number, symbol: string, name: string, detectedAt: number, detectionPrice: number) => void,
+    fn: (mint: string, entryPrice: number, symbol: string, name: string, detectedAt: number, detectionPrice: number, qualityMeta?: GraduationQualityMeta) => void,
   ): void {
     this.paperCallback = fn;
   }

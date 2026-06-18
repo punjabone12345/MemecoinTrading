@@ -515,6 +515,11 @@ export interface PaperConfig {
   maxBondingCurveMinutes:   number;
   enableHolderFilter:       boolean;
   minHolderCount:           number;
+  // Strategy exit filters
+  enableCreatorFilter:      boolean;
+  maxCreatorHoldingsPct:    number;
+  enableSellPressureExit:   boolean;
+  enableWhaleDumpExit:      boolean;
 }
 
 export interface PaperSniperStatus {

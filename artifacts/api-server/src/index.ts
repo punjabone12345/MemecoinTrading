@@ -223,7 +223,7 @@ graduationSniperService.start();
 await paperSniperService.init();
 graduationSniperService.setPaperSniperCallback(
   (mint, entryPrice, symbol, name, detectedAt, detectionPrice, qualityMeta) => {
-    paperSniperService.onGraduation(mint, entryPrice, symbol, name, detectedAt, detectionPrice, qualityMeta);
+    void paperSniperService.onGraduation(mint, entryPrice, symbol, name, detectedAt, detectionPrice, qualityMeta);
   },
 );
 
