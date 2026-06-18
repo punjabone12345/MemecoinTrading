@@ -333,6 +333,19 @@ class PaperSniperService {
   ): void {
     const cfg = this.paperConfig;
 
+    // ── Quality auto-skip relay from graduation sniper ────────────────────────
+    // When the graduation sniper already determined a quality skip reason, relay
+    // it to the paper sniper event feed so users can see what's being evaluated
+    // and rejected, even when the live sniper gate fires before paper entry.
+    if (qualityMeta?.autoSkipReason) {
+      if (this.seenMints.has(mint)) return; // already logged
+      this.seenMints.add(mint);
+      this.addEvent({ id: uid(), detectedAt, mint, symbol, action: "skipped",
+        skipReason: qualityMeta.autoSkipReason });
+      this.broadcast();
+      return;
+    }
+
     if (this.seenMints.has(mint)) {
       logger.debug({ mint }, "Paper sniper: mint already seen — skip");
       return;
@@ -342,12 +355,14 @@ class PaperSniperService {
     if (openCount >= cfg.maxOpenPositions) {
       this.addEvent({ id: uid(), detectedAt, mint, symbol, action: "skipped",
         skipReason: `Max positions reached (${openCount}/${cfg.maxOpenPositions})` });
+      this.broadcast();
       return;
     }
 
     if (this.virtualBalance < cfg.positionSizeSol) {
       this.addEvent({ id: uid(), detectedAt, mint, symbol, action: "skipped",
         skipReason: `Insufficient paper balance (${this.virtualBalance.toFixed(4)} SOL < ${cfg.positionSizeSol} SOL)` });
+      this.broadcast();
       return;
     }
 

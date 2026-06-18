@@ -311,15 +311,16 @@ class TokenQualityService {
   }
 
   // ── Helius Enhanced Transactions: unique buyers + whale detection ──────────
-  // Wait 25s before querying — Enhanced Transactions index new pool TXes within
-  // 20-40s of confirmation.  poolPda is the PumpSwap pool address so we get
-  // all swap transactions for this specific pool.
+  // Wait 45s before querying — Enhanced Transactions index new pool TXes within
+  // 30-60s of confirmation. Waiting 45s (near the end of the 60s window) gives
+  // the indexer time to accumulate real buyer transactions. 25s was too early
+  // and returned 0 buyers even for tokens with 100+ SOL of liquidity.
   private async fetchBuyerData(
     mint:     string,
     poolPda:  string,
     apiKey:   string,
   ): Promise<{ uniqueBuyers: number; whaleDetected: boolean } | null> {
-    await new Promise<void>((r) => setTimeout(r, 25_000));
+    await new Promise<void>((r) => setTimeout(r, 45_000));
 
     try {
       const rpcUrl = `https://mainnet.helius-rpc.com/?api-key=${apiKey}`;
