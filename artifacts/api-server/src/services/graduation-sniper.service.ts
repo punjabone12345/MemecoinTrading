@@ -76,12 +76,12 @@ const RUG_DROP_ABORT_PCT    = 20;             // abort entry if price drops ≥ 
 //
 // MOMENTUM_SKIP_PCT: if price rose > this % we explicitly label it "Missed entry"
 //   (separate label helps distinguish "pumping too fast" from "drift + filters").
-const ENTRY_DRIFT_ABORT_PCT  = 20;             // abort buy if price rose > 20% from baseline
-const MOMENTUM_SKIP_PCT      = 20;             // label as "Missed entry" if > 20% from baseline
+const ENTRY_DRIFT_ABORT_PCT  = 8;              // abort buy if price rose > 8% from baseline (spec: entry drift >8% → skip)
+const MOMENTUM_SKIP_PCT      = 8;              // label as "Missed entry" if > 8% from baseline
 // POST-FILL circuit breaker: if the actual Jupiter fill price is > this % above the
 // detection baseline, the buy chased the pump too hard. Emergency-sell immediately and
 // release seenMints so the token can be reconsidered on the next graduation event.
-const MAX_FILL_DRIFT_PCT     = 20;             // emergency-sell if fill > 20% above detection price
+const MAX_FILL_DRIFT_PCT     = 15;             // emergency-sell if fill > 15% above detection price
 
 // ── Type-A rug filters (pre-entry) ───────────────────────────────────────────
 const MIN_ENTRY_PRICE_USD   = 0.00001;        // skip tokens priced below $0.00001
@@ -168,10 +168,10 @@ export interface SniperConfig {
 
 const DEFAULT_CONFIG: SniperConfig = {
   enabled:              true,
-  positionSizeSol:      0.002,
+  positionSizeSol:      0.001,  // spec: 0.001 SOL base position size
   maxOpenPositions:     5,
-  // New 4-stage TP/SL
-  slPct:                12,     // hard SL -12% from entry (pre-TP1)
+  // Staged SL — displayed value matches Phase 1 threshold
+  slPct:                20,     // Phase 1: hard SL -20% from entry (pre-TP1, 0-2 min)
   tp1Pct:               100,    // TP1 at +100%
   tp1ClosePct:          30,     // sell 30% at TP1
   tp2Pct:               300,    // TP2 at +300%
@@ -251,6 +251,7 @@ export interface SniperEvent {
   uniqueBuyers?: number;
   buyPressureRatio?: number;
   topHolderPct?: number;
+  creatorHoldingsPct?: number;
   whaleDetected?: boolean;
 }
 
@@ -352,6 +353,9 @@ class GraduationSniperService {
   private lastPositionLiquidityUsd: Map<string, number> = new Map();
   // FIX 4: Persistent closed-trade fingerprints — prevents duplicate logs on restart
   private closedTradeFingerprints: Set<string> = new Set();
+  // Sell pressure tracking — tracks when consecutive sell pressure started per mint
+  // Spec: sell pressure > buy pressure for 60 consecutive seconds → emergency exit
+  private sellPressureStartAt: Map<string, number> = new Map();
 
   // ── Health monitoring & rate counters ──────────────────────────────────────
   private jupiterCallsThisMinute    = 0;
@@ -1181,12 +1185,13 @@ class GraduationSniperService {
 
       // ── Quality gate ─────────────────────────────────────────────────────────
       const qualityEventFields = {
-        qualityScore:     quality.totalScore,
-        liquiditySol:     quality.liquiditySol,
-        uniqueBuyers:     quality.uniqueBuyers,
-        buyPressureRatio: quality.buyPressureRatio,
-        topHolderPct:     quality.topHolderPct,
-        whaleDetected:    quality.whaleDetected,
+        qualityScore:      quality.totalScore,
+        liquiditySol:      quality.liquiditySol,
+        uniqueBuyers:      quality.uniqueBuyers,
+        buyPressureRatio:  quality.buyPressureRatio,
+        topHolderPct:      quality.topHolderPct,
+        creatorHoldingsPct: quality.creatorHoldingsPct,
+        whaleDetected:     quality.whaleDetected,
       };
 
       if (quality.autoSkipReason) {
@@ -2265,7 +2270,8 @@ class GraduationSniperService {
     // Sell confirmed — now remove from open positions
     this.openPositions.delete(pos.mint);
     this.closingMints.delete(pos.mint);
-    this.sellFailCount.delete(pos.mint); // reset on confirmed close
+    this.sellFailCount.delete(pos.mint);      // reset on confirmed close
+    this.sellPressureStartAt.delete(pos.mint); // clear sell pressure timer
     // Record the confirmed on-chain sell tx — positions without this are "unverified"
     if (exitTxSig) pos.exitSig = exitTxSig;
 
@@ -2405,7 +2411,28 @@ class GraduationSniperService {
         this.lastPositionLiquidityUsd.set(pos.mint, liquidityUsd);
         if (prev === undefined || prev <= 0 || liquidityUsd <= 0) continue;
         const dropPct = (1 - liquidityUsd / prev) * 100;
-        if (dropPct >= LIQUIDITY_DROP_TRIGGER) {
+        // Whale dump: 20-39% liquidity drop in 30s (spec: >5 SOL whale dump → exit)
+        const prevSolEst  = prev / (price > 0 ? price * 150 : 1);   // rough SOL estimate at current price
+        const solDropEst  = prevSolEst * (dropPct / 100);
+        if (dropPct >= 20 && dropPct < LIQUIDITY_DROP_TRIGGER && !pos.tp1Hit && solDropEst >= 5) {
+          logger.warn(
+            { mint: pos.mint, symbol: pos.symbol, prev: prev.toFixed(0), now: liquidityUsd.toFixed(0), dropPct: dropPct.toFixed(1), solDropEst: solDropEst.toFixed(1) },
+            "Graduation sniper: WHALE DUMP detected — emergency exit (pre-TP1) 🐋",
+          );
+          if (isTelegramConfigured()) {
+            void sendTelegram(
+              `🐋 <b>SNIPER WHALE DUMP EXIT</b>\n` +
+              `──────────────────────\n` +
+              `🪙 Token: <b>${pos.symbol}</b>\n` +
+              `📋 CA: <code>${pos.mint}</code>\n` +
+              `💧 Liquidity: <b>$${prev.toFixed(0)} → $${liquidityUsd.toFixed(0)}</b>\n` +
+              `📉 Drop: <b>-${dropPct.toFixed(1)}%</b> (~${solDropEst.toFixed(1)} SOL) in 30s\n` +
+              `🚨 Whale dump detected — exiting position\n` +
+              `🕐 ${toIST(new Date())}`,
+            );
+          }
+          void this.closePosition(pos, `Whale dump: -${dropPct.toFixed(0)}% liquidity in 30s (~${solDropEst.toFixed(1)} SOL)`, price);
+        } else if (dropPct >= LIQUIDITY_DROP_TRIGGER) {
           logger.warn(
             { mint: pos.mint, symbol: pos.symbol, prev: prev.toFixed(0), now: liquidityUsd.toFixed(0), dropPct: dropPct.toFixed(1) },
             "Graduation sniper: LIQUIDITY RUG — exiting immediately",
@@ -2606,27 +2633,70 @@ class GraduationSniperService {
     };
   }
 
-  // ── SL evaluator (pre-TP1 only) ───────────────────────────────────────────
-  // After TP1 hit, SL management moves to the trailing logic in _checkPositionPriceInner.
+  // ── SL evaluator — 3-phase staged SL (pre-TP1 only) ─────────────────────
+  // Spec:
+  //   Phase 1 (0–2 min):  hard SL -20% from entry price
+  //   Phase 2 (2–10 min): trailing SL -25% from peak
+  //   Phase 3 (10min+):   trailing SL -30% from peak
+  // After any TP hit, SL management moves to the trailing logic in _checkPositionPriceInner.
 
   private async checkStagedSL(pos: SniperPosition, price: number): Promise<boolean> {
     // After any TP hit, SL is managed by the trailing stop in the price loop
     if (pos.tp1Hit || pos.tp2Hit || pos.tp3Hit) return false;
 
-    // Pre-TP1: hard SL at -slPct% from entry price
-    const dropFromEntry = (1 - price / pos.entryPrice) * 100;
-    if (dropFromEntry >= this.config.slPct) {
-      logger.warn(
-        { mint: pos.mint, symbol: pos.symbol, dropFromEntry: dropFromEntry.toFixed(1), threshold: this.config.slPct },
-        "Graduation sniper: hard SL triggered ❌",
-      );
-      await this.closePosition(
-        pos,
-        `SL: -${dropFromEntry.toFixed(1)}% from entry (>${this.config.slPct}% threshold)`,
-        price,
-      );
-      return true;
+    const ageMs = Date.now() - pos.entryAt;
+
+    if (ageMs < STAGED_SL_PHASE1_MS) {
+      // Phase 1 (0–2 min): hard SL -20% from ENTRY price (catches instant rugs)
+      const slThreshold = pos.entryPrice * (1 - STAGED_SL_PHASE1_PCT / 100);
+      pos.effectiveSlPrice = slThreshold;
+      const dropFromEntry = (1 - price / pos.entryPrice) * 100;
+      if (dropFromEntry >= STAGED_SL_PHASE1_PCT) {
+        logger.warn(
+          { mint: pos.mint, symbol: pos.symbol, dropFromEntry: dropFromEntry.toFixed(1), phase: 1, ageMin: (ageMs / 60000).toFixed(1) },
+          "Graduation sniper: Staged SL Phase 1 triggered (-20% from entry) ❌",
+        );
+        await this.closePosition(
+          pos,
+          `Staged SL Ph1 -${STAGED_SL_PHASE1_PCT}% from entry (${(ageMs / 60000).toFixed(1)}m)`,
+          price,
+        );
+        return true;
+      }
+    } else if (ageMs < STAGED_SL_PHASE2_MS) {
+      // Phase 2 (2–10 min): trailing SL -25% from peak
+      const slThreshold = pos.trailingHigh * (1 - STAGED_SL_PHASE2_PCT / 100);
+      pos.effectiveSlPrice = slThreshold;
+      if (price <= slThreshold) {
+        logger.warn(
+          { mint: pos.mint, symbol: pos.symbol, dropFromPeak: ((1 - price / pos.trailingHigh) * 100).toFixed(1), phase: 2 },
+          "Graduation sniper: Staged SL Phase 2 triggered (-25% from peak) ❌",
+        );
+        await this.closePosition(
+          pos,
+          `Staged SL Ph2 -${STAGED_SL_PHASE2_PCT}% from peak ($${fmtTgPrice(pos.trailingHigh)})`,
+          price,
+        );
+        return true;
+      }
+    } else {
+      // Phase 3 (10min+): trailing SL -30% from peak
+      const slThreshold = pos.trailingHigh * (1 - STAGED_SL_PHASE3_PCT / 100);
+      pos.effectiveSlPrice = slThreshold;
+      if (price <= slThreshold) {
+        logger.warn(
+          { mint: pos.mint, symbol: pos.symbol, dropFromPeak: ((1 - price / pos.trailingHigh) * 100).toFixed(1), phase: 3 },
+          "Graduation sniper: Staged SL Phase 3 triggered (-30% from peak) ❌",
+        );
+        await this.closePosition(
+          pos,
+          `Staged SL Ph3 -${STAGED_SL_PHASE3_PCT}% from peak ($${fmtTgPrice(pos.trailingHigh)})`,
+          price,
+        );
+        return true;
+      }
     }
+
     return false;
   }
 
@@ -2754,7 +2824,7 @@ class GraduationSniperService {
 
   private async checkPositionPrice(
     mint: string,
-    preloaded?: { price: number; liquidityUsd: number },
+    preloaded?: { price: number; liquidityUsd: number; buysM5?: number; sellsM5?: number },
   ): Promise<void> {
     // Concurrency guard — skip if a price check is already in-flight for this mint.
     // Without this, the 10-s setInterval can fire a second tick while executeTP1Atomic
@@ -2771,7 +2841,7 @@ class GraduationSniperService {
 
   private async _checkPositionPriceInner(
     mint: string,
-    preloaded?: { price: number; liquidityUsd: number },
+    preloaded?: { price: number; liquidityUsd: number; buysM5?: number; sellsM5?: number },
   ): Promise<void> {
     const pos = this.openPositions.get(mint);
     // Skip positions already mid-close (sell in-flight) to avoid double-close
@@ -2934,7 +3004,42 @@ class GraduationSniperService {
       return;
     }
 
-    // ── Pre-TP1: hard SL check (-slPct% from entry) ───────────────────────────
+    // ── Sell pressure emergency exit (pre-TP1 only) ────────────────────────────
+    // Spec: sell pressure > buy pressure for 60 consecutive seconds → emergency exit
+    if (!pos.tp1Hit && !pos.tp2Hit && !pos.tp3Hit) {
+      const buysM5  = preloaded?.buysM5  ?? 0;
+      const sellsM5 = preloaded?.sellsM5 ?? 0;
+      // Sell pressure: sells exceed buys by at least 50% in the last 5 minutes
+      const hasSellPressure = sellsM5 > 0 && sellsM5 > buysM5 * 1.5;
+      if (hasSellPressure) {
+        if (!this.sellPressureStartAt.has(mint)) {
+          this.sellPressureStartAt.set(mint, now);
+          logger.debug({ mint, symbol: pos.symbol, sellsM5, buysM5 }, "Graduation sniper: sell pressure timer started");
+        }
+        const pressureDurationMs = now - (this.sellPressureStartAt.get(mint) ?? now);
+        if (pressureDurationMs >= 60_000) {
+          logger.warn(
+            { mint, symbol: pos.symbol, sellsM5, buysM5, pressureSec: (pressureDurationMs / 1000).toFixed(0) },
+            "Graduation sniper: SELL PRESSURE >60s — emergency exit 🚨",
+          );
+          this.sellPressureStartAt.delete(mint);
+          await this.closePosition(
+            pos,
+            `Sell pressure >60s (${sellsM5} sells vs ${buysM5} buys in 5m)`,
+            price,
+          );
+          return;
+        }
+      } else {
+        // Reset the timer when buy pressure recovers
+        if (this.sellPressureStartAt.has(mint)) {
+          this.sellPressureStartAt.delete(mint);
+          logger.debug({ mint, symbol: pos.symbol }, "Graduation sniper: sell pressure reset — buy pressure recovered");
+        }
+      }
+    }
+
+    // ── Pre-TP1: staged SL check (3-phase: -20%/-25%/-30%) ──────────────────
     if (await this.checkStagedSL(pos, price)) return;
 
     // ── Dead position exit (>2h open, <5% move, no TP hit) ───────────────────
@@ -2987,8 +3092,8 @@ class GraduationSniperService {
   // Missing entries = token not indexed yet (handled by caller with Jupiter fallback).
   private async fetchBatchedPrices(
     mints: string[],
-  ): Promise<Map<string, { price: number; liquidityUsd: number }>> {
-    const result = new Map<string, { price: number; liquidityUsd: number }>();
+  ): Promise<Map<string, { price: number; liquidityUsd: number; buysM5: number; sellsM5: number }>> {
+    const result = new Map<string, { price: number; liquidityUsd: number; buysM5: number; sellsM5: number }>();
     if (mints.length === 0) return result;
 
     // Split into batches of at most BATCH_DEXSCREENER_MAX
@@ -3000,6 +3105,7 @@ class GraduationSniperService {
           priceUsd: string;
           liquidity?: { usd?: number };
           dexId?: string;
+          txns?: { m5?: { buys: number; sells: number }; h1?: { buys: number; sells: number } };
         };
         this.dexscreenerCallsThisMinute++;
         this.dexscreenerCallsTotal++;
@@ -3029,7 +3135,12 @@ class GraduationSniperService {
           const best  = sorted[0]!;
           const price = parseFloat(best.priceUsd) || 0;
           if (price > 0) {
-            result.set(mint, { price, liquidityUsd: best.liquidity?.usd ?? 0 });
+            result.set(mint, {
+              price,
+              liquidityUsd: best.liquidity?.usd ?? 0,
+              buysM5:  best.txns?.m5?.buys  ?? 0,
+              sellsM5: best.txns?.m5?.sells ?? 0,
+            });
           }
         }
       } catch (err) {

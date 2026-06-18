@@ -533,6 +533,11 @@ function EventRow({ evt }: { evt: SniperEvent }) {
                   🐋 top {evt.topHolderPct.toFixed(1)}%{evt.whaleDetected ? " ⚠️" : ""}
                 </span>
               )}
+              {evt.creatorHoldingsPct !== undefined && evt.creatorHoldingsPct > 0 && (
+                <span className={`text-[9px] ${evt.creatorHoldingsPct > 5 ? "text-red-400 font-bold" : "text-white/35"}`}>
+                  👤 creator {evt.creatorHoldingsPct.toFixed(1)}%{evt.creatorHoldingsPct > 5 ? " 🚨" : ""}
+                </span>
+              )}
             </div>
           )}
           <div className="text-[10px] text-white/20 font-mono">{mintShort(evt.mint)}</div>

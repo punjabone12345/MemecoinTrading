@@ -72,8 +72,9 @@ class TokenQualityService {
     const buyPressureRatio = dexResult?.buyPressureRatio ?? 1.0;
     const uniqueBuyers    = buyerResult?.uniqueBuyers ?? (dexResult?.m5Buys ?? 0);
     // Conservative fallback: if holder data unavailable assume 100% (auto-skip)
-    const topHolderPct    = holderResult?.topHolderPct ?? 0; // 0 = unknown = don't auto-skip on unknown
-    const whaleDetected   = buyerResult?.whaleDetected ?? false;
+    const topHolderPct      = holderResult?.topHolderPct      ?? 0; // 0 = unknown = don't auto-skip on unknown
+    const creatorHoldingsPct = holderResult?.creatorHoldingsPct ?? 0;
+    const whaleDetected     = buyerResult?.whaleDetected ?? false;
 
     // ── Score each dimension (25 pts each, 100 pts total) ───────────────────
     const liquidityScore   = this.scoreLiquidity(liquiditySol);
@@ -86,8 +87,11 @@ class TokenQualityService {
     const totalScore = liquidityScore + buyerScore + buyPressureScore + holderScore;
 
     // Auto-skip on any hard-fail dimension (score = 0)
+    // Spec: creator holdings >5% → skip (rug risk: creator holding reserves to dump)
     let autoSkipReason: string | null = null;
-    if (liquidityScore   === 0) autoSkipReason = `Liquidity ${liquiditySol.toFixed(1)} SOL < 25 SOL minimum`;
+    if (creatorHoldingsPct > 5)
+      autoSkipReason = `Creator holds ${creatorHoldingsPct.toFixed(1)}% — dump risk (>5% threshold)`;
+    else if (liquidityScore   === 0) autoSkipReason = `Liquidity ${liquiditySol.toFixed(1)} SOL < 25 SOL minimum`;
     else if (buyerScore  === 0) autoSkipReason = `Unique buyers ${uniqueBuyers} < 20 minimum`;
     else if (buyPressureScore === 0) autoSkipReason = `Buy pressure ${buyPressureRatio.toFixed(2)}x < 1.5x minimum`;
     else if (topHolderPct > 0 && holderScore === 0)
@@ -105,7 +109,7 @@ class TokenQualityService {
 
     const result: QualityMetrics = {
       liquiditySol, marketCapUsd, uniqueBuyers, buyPressureRatio,
-      topHolderPct, creatorHoldingsPct: 0, whaleDetected,
+      topHolderPct, creatorHoldingsPct, whaleDetected,
       liquidityScore, buyerScore, buyPressureScore, holderScore, totalScore,
       positionMultiplier, autoSkipReason, dataCollectionMs,
     };
@@ -214,19 +218,36 @@ class TokenQualityService {
     return best;
   }
 
-  // ── Helius RPC: top token holder % ───────────────────────────────────────
+  // ── pump.fun creator wallet lookup ────────────────────────────────────────
+  private async fetchCreatorWallet(mint: string): Promise<string | null> {
+    try {
+      type PumpCoin = { creator?: string; [k: string]: unknown };
+      const res = await axios.get<PumpCoin>(
+        `https://client-api-2-74b1891ee9f9.herokuapp.com/coins/${mint}`,
+        { timeout: 5_000 },
+      );
+      return res.data?.creator ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  // ── Helius RPC: top token holder % + creator holdings % ──────────────────
   // Wait 20s before querying — new tokens take 15-30s to appear in RPC indices.
+  // Also fetches creator wallet from pump.fun API and checks their holdings %.
   private async fetchHolderData(
     mint:   string,
     rpcUrl: string,
-  ): Promise<{ topHolderPct: number } | null> {
+  ): Promise<{ topHolderPct: number; creatorHoldingsPct: number } | null> {
     await new Promise<void>((r) => setTimeout(r, 20_000));
 
     try {
-      type LargestAccount = { uiAmount: number | null };
+      type LargestAccount = { address?: string; uiAmount: number | null };
       type SupplyValue    = { uiAmount: number | null };
 
-      const [largestRes, supplyRes] = await Promise.all([
+      // Fetch creator wallet + token largest accounts + supply in parallel
+      const [creatorWallet, largestRes, supplyRes] = await Promise.all([
+        this.fetchCreatorWallet(mint),
         axios.post<{ result?: { value?: LargestAccount[] } }>(rpcUrl, {
           jsonrpc: "2.0", id: 1,
           method: "getTokenLargestAccounts",
@@ -239,7 +260,7 @@ class TokenQualityService {
         }, { timeout: 8_000 }),
       ]);
 
-      const accounts     = largestRes.data?.result?.value ?? [];
+      const accounts      = largestRes.data?.result?.value ?? [];
       const totalSupplyUi = supplyRes.data?.result?.value?.uiAmount ?? 0;
 
       if (accounts.length === 0 || totalSupplyUi <= 0) {
@@ -250,8 +271,39 @@ class TokenQualityService {
       const topUiAmount  = accounts[0]?.uiAmount ?? 0;
       const topHolderPct = (topUiAmount / totalSupplyUi) * 100;
 
-      logger.info({ mint, topHolderPct: topHolderPct.toFixed(1) }, "Quality: holder data collected ✅");
-      return { topHolderPct };
+      // Try to find creator's token account balance in the largest accounts list
+      // The largest accounts API returns token accounts (ATAs), not wallet addresses.
+      // We need to fetch the creator's ATA separately to get their balance.
+      let creatorHoldingsPct = 0;
+      if (creatorWallet) {
+        try {
+          // Derive creator's ATA and fetch balance
+          type TokenAccountsResult = { value?: Array<{ account?: { data?: { parsed?: { info?: { tokenAmount?: { uiAmount?: number } } } } } }> };
+          const ataRes = await axios.post<{ result?: TokenAccountsResult }>(rpcUrl, {
+            jsonrpc: "2.0", id: 3,
+            method: "getTokenAccountsByOwner",
+            params: [
+              creatorWallet,
+              { mint },
+              { encoding: "jsonParsed", commitment: "confirmed" },
+            ],
+          }, { timeout: 6_000 });
+          const tokenAccounts = ataRes.data?.result?.value ?? [];
+          const creatorBalance = tokenAccounts.reduce((sum, acc) => {
+            const ui = acc.account?.data?.parsed?.info?.tokenAmount?.uiAmount ?? 0;
+            return sum + ui;
+          }, 0);
+          if (creatorBalance > 0 && totalSupplyUi > 0) {
+            creatorHoldingsPct = (creatorBalance / totalSupplyUi) * 100;
+          }
+        } catch { /* non-fatal — leave creatorHoldingsPct = 0 */ }
+      }
+
+      logger.info(
+        { mint, topHolderPct: topHolderPct.toFixed(1), creatorWallet: creatorWallet?.slice(0, 8), creatorHoldingsPct: creatorHoldingsPct.toFixed(1) },
+        "Quality: holder data collected ✅",
+      );
+      return { topHolderPct, creatorHoldingsPct };
     } catch (err) {
       logger.debug({ mint, err: (err as Error).message }, "Quality: holder data fetch failed");
       return null;

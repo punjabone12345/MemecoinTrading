@@ -423,6 +423,7 @@ export interface SniperEvent {
   uniqueBuyers?: number;
   buyPressureRatio?: number;
   topHolderPct?: number;
+  creatorHoldingsPct?: number;
   whaleDetected?: boolean;
 }
 
