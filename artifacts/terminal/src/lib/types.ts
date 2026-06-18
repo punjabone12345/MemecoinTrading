@@ -507,6 +507,13 @@ export interface PaperConfig {
   deadCoinMinMovePct:   number;
   maxFillDriftPct:      number;
   simulatedExecDelayMs: number;
+  // Quality pre-entry filters
+  enableLiquidityFilter:    boolean;
+  minLiquidityUsd:          number;
+  enableBondingCurveFilter: boolean;
+  maxBondingCurveMinutes:   number;
+  enableHolderFilter:       boolean;
+  minHolderCount:           number;
 }
 
 export interface PaperSniperStatus {

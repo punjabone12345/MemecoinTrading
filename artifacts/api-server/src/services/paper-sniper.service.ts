@@ -2,6 +2,7 @@ import axios from "axios";
 import { logger } from "../lib/logger.js";
 import { query, execute } from "../lib/db.js";
 import { sendTelegram, isTelegramConfigured, toIST } from "../lib/telegram.js";
+import type { GraduationQualityMeta } from "./graduation-sniper.service.js";
 
 // ── Paper-specific config ──────────────────────────────────────────────────────
 
@@ -21,24 +22,38 @@ export interface PaperConfig {
   deadCoinMinMovePct:   number;  // min peak move % required — if not reached, close as dead
   maxFillDriftPct:      number;  // skip entry if price already moved > this % from detection baseline
   simulatedExecDelayMs: number;  // ms to wait after graduation before entering (simulates real exec latency)
+  // ── Quality pre-entry filters ──────────────────────────────────────────────
+  enableLiquidityFilter:    boolean; // require minimum pool liquidity at graduation
+  minLiquidityUsd:          number;  // min pool liquidity in USD (e.g. 5000)
+  enableBondingCurveFilter: boolean; // require bonding curve completed within time limit
+  maxBondingCurveMinutes:   number;  // skip if bonding curve took > N minutes (e.g. 30)
+  enableHolderFilter:       boolean; // require minimum holder count at graduation
+  minHolderCount:           number;  // min holder count (e.g. 150)
 }
 
 const DEFAULT_PAPER_CONFIG: PaperConfig = {
   positionSizeSol:    0.05,
   maxOpenPositions:   3,
-  tp1Pct:             150,
-  tp1ClosePct:        40,
-  tp2Pct:             400,
-  tp2ClosePct:        40,
-  trailingStopPct:    30,
-  slPhase1Pct:        20,
-  slPhase2Pct:        25,
-  slPhase3Pct:        30,
-  slAfterTp1Pct:      35,
+  tp1Pct:             60,   // TP1 at +60%
+  tp1ClosePct:        40,   // sell 40% at TP1
+  tp2Pct:             150,  // TP2 at +150%
+  tp2ClosePct:        40,   // sell 40% at TP2 → 20% runner remains
+  trailingStopPct:    15,   // trailing SL -15% from peak (runner after TP1/TP2)
+  slPhase1Pct:        15,   // 0-2m: hard SL -15% from entry
+  slPhase2Pct:        20,   // 2-10m: trailing -20% from peak
+  slPhase3Pct:        25,   // >10m: trailing -25% from peak
+  slAfterTp1Pct:      15,   // kept for config compatibility — actual check uses effectiveSlPrice
   deadCoinWindowMs:     2 * 60 * 60_000,  // 2 hours
   deadCoinMinMovePct:   5,                // must move >5% from entry
   maxFillDriftPct:      20,               // skip if exec price > 20% above detection baseline
-  simulatedExecDelayMs: 5_000,            // 5s to simulate real buy latency
+  simulatedExecDelayMs: 5_500,           // 5.5s delay — simulates realistic 5-6th candle entry
+  // Quality filters — enabled by default with calibrated thresholds for 24h backtest
+  enableLiquidityFilter:    true,
+  minLiquidityUsd:          5_000,  // skip if pool < $5,000 at graduation
+  enableBondingCurveFilter: true,
+  maxBondingCurveMinutes:   30,     // skip if bonding curve took > 30 min
+  enableHolderFilter:       true,
+  minHolderCount:           150,    // skip if < 150 holders at graduation
 };
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -300,6 +315,7 @@ class PaperSniperService {
     name: string,
     detectedAt: number,
     detectionPrice: number,
+    qualityMeta?: GraduationQualityMeta,
   ): void {
     const cfg = this.paperConfig;
 
@@ -321,6 +337,52 @@ class PaperSniperService {
       return;
     }
 
+    // ── Quality pre-entry filters ────────────────────────────────────────────
+    // Filter 1: Minimum pool liquidity at graduation ($5k default)
+    if (cfg.enableLiquidityFilter) {
+      if (qualityMeta?.poolLiquidityUsd != null) {
+        if (qualityMeta.poolLiquidityUsd < cfg.minLiquidityUsd) {
+          const reason = `Low liquidity — $${qualityMeta.poolLiquidityUsd.toFixed(0)} < $${cfg.minLiquidityUsd} min (quality filter)`;
+          this.addEvent({ id: uid(), detectedAt, mint, symbol, action: "skipped", skipReason: reason });
+          logger.info({ mint, symbol, poolLiquidityUsd: qualityMeta.poolLiquidityUsd, minLiquidityUsd: cfg.minLiquidityUsd }, "Paper sniper: quality filter — low liquidity ❌");
+          this.broadcast();
+          return;
+        }
+      } else {
+        logger.debug({ mint }, "Paper sniper: liquidity filter active but no pool USD data — passing through");
+      }
+    }
+
+    // Filter 2: Bonding curve completion speed (<30 min default = enter, >2h = skip)
+    if (cfg.enableBondingCurveFilter) {
+      if (qualityMeta?.bondingCurveMinutes != null) {
+        if (qualityMeta.bondingCurveMinutes > cfg.maxBondingCurveMinutes) {
+          const reason = `Slow bonding curve — ${qualityMeta.bondingCurveMinutes.toFixed(1)} min > ${cfg.maxBondingCurveMinutes} min limit (quality filter)`;
+          this.addEvent({ id: uid(), detectedAt, mint, symbol, action: "skipped", skipReason: reason });
+          logger.info({ mint, symbol, bondingCurveMinutes: qualityMeta.bondingCurveMinutes, maxBondingCurveMinutes: cfg.maxBondingCurveMinutes }, "Paper sniper: quality filter — bonding curve too slow ❌");
+          this.broadcast();
+          return;
+        }
+      } else {
+        logger.debug({ mint }, "Paper sniper: bonding-curve filter active but no duration data — passing through");
+      }
+    }
+
+    // Filter 3: Minimum holder count at graduation (≥150 default)
+    if (cfg.enableHolderFilter) {
+      if (qualityMeta?.holderCount != null) {
+        if (qualityMeta.holderCount < cfg.minHolderCount) {
+          const reason = `Low holder count — ${qualityMeta.holderCount} < ${cfg.minHolderCount} min holders (quality filter)`;
+          this.addEvent({ id: uid(), detectedAt, mint, symbol, action: "skipped", skipReason: reason });
+          logger.info({ mint, symbol, holderCount: qualityMeta.holderCount, minHolderCount: cfg.minHolderCount }, "Paper sniper: quality filter — insufficient holders ❌");
+          this.broadcast();
+          return;
+        }
+      } else {
+        logger.debug({ mint }, "Paper sniper: holder filter active but no holder data — passing through");
+      }
+    }
+
     // Fast-fail: if price already exceeds drift threshold before the exec delay
     const instantDriftPct = detectionPrice > 0
       ? ((entryPrice / detectionPrice) - 1) * 100
@@ -338,7 +400,9 @@ class PaperSniperService {
 
     // Simulate real execution latency: wait simulatedExecDelayMs, then re-fetch
     // price and check drift again before entering — matches live bot's ~5s checks.
-    void this.scheduleDelayedEntry(mint, entryPrice, symbol, name, detectedAt, detectionPrice);
+    // Fast-path: when on-chain price is confirmed by graduation sniper, skip all
+    // polling and enter immediately with the validated price.
+    void this.scheduleDelayedEntry(mint, entryPrice, symbol, name, detectedAt, detectionPrice, qualityMeta);
   }
 
   private async scheduleDelayedEntry(
@@ -348,9 +412,111 @@ class PaperSniperService {
     name: string,
     detectedAt: number,
     detectionPrice: number,
+    qualityMeta?: GraduationQualityMeta,
   ): Promise<void> {
     const cfg = this.paperConfig;
-    const delayMs = cfg.simulatedExecDelayMs ?? 5_000;
+
+    // ── Fast path: on-chain price already confirmed by graduation sniper ──────
+    // When the graduation sniper validated pool reserves on-chain and passed
+    // a real price, we can skip:
+    //   1. The artificial exec delay (simulatedExecDelayMs)
+    //   2. The pool existence gate (pool already confirmed via vault reserves)
+    //   3. The DexScreener/Jupiter price re-poll (price already validated)
+    // This cuts entry time from up to 118s down to ~2-8s from graduation TX.
+    if (qualityMeta?.onChainPriceConfirmed && entryPrice > 0) {
+      logger.info({ mint, symbol, entryPrice, detectionPrice },
+        "Paper sniper: ⚡ FAST PATH — on-chain price confirmed, skipping gate + price poll");
+      // Re-check capacity after quality-filter pipeline
+      const cfgFast = this.paperConfig;
+      if (this.virtualBalance < cfgFast.positionSizeSol) {
+        this.addEvent({ id: uid(), detectedAt, mint, symbol, action: "skipped",
+          skipReason: `Insufficient balance (${this.virtualBalance.toFixed(4)} SOL < ${cfgFast.positionSizeSol} SOL)` });
+        this.seenMints.delete(mint);
+        this.broadcast();
+        return;
+      }
+      if (this.openPositions.size >= cfgFast.maxOpenPositions) {
+        this.addEvent({ id: uid(), detectedAt, mint, symbol, action: "skipped",
+          skipReason: `Max positions reached (${this.openPositions.size}/${cfgFast.maxOpenPositions})` });
+        this.seenMints.delete(mint);
+        this.broadcast();
+        return;
+      }
+      // Drift guard still applies on the fast path (no DexScreener re-check, use on-chain price directly)
+      const fastDriftPct = detectionPrice > 0 ? ((entryPrice / detectionPrice) - 1) * 100 : 0;
+      if (detectionPrice > 0 && fastDriftPct > cfgFast.maxFillDriftPct) {
+        const reason = `Drift abort — price +${fastDriftPct.toFixed(1)}% above baseline (>${cfgFast.maxFillDriftPct}% threshold)`;
+        this.addEvent({ id: uid(), detectedAt, mint, symbol, action: "skipped", skipReason: reason });
+        this.seenMints.delete(mint);
+        this.broadcast();
+        return;
+      }
+      // ── Negative drift guard: on-chain vault price >> actual AMM price ────
+      const NEG_FAST_DRIFT_ABORT = -20;
+      if (detectionPrice > 0 && fastDriftPct < NEG_FAST_DRIFT_ABORT) {
+        const reason = `Dead pool abort — on-chain price ${fastDriftPct.toFixed(1)}% below detection baseline — pool likely crashed`;
+        this.addEvent({ id: uid(), detectedAt, mint, symbol, action: "skipped", skipReason: reason });
+        this.seenMints.delete(mint);
+        this.broadcast();
+        return;
+      }
+      // ── Open position immediately (no pool gate, no price re-poll) ────────
+      const fastSizeSol = cfgFast.positionSizeSol;
+      const fastPos: PaperPosition = {
+        id:                uid(),
+        mint,
+        symbol,
+        name,
+        detectedAt,
+        entryAt:           detectedAt + 5_500, // simulate realistic 5-6th candle entry (~5.5s after graduation)
+        entryPrice,
+        currentPrice:      entryPrice,
+        sizeSol:           fastSizeSol,
+        tp1Hit:            false,
+        tp2Hit:            false,
+        remainingFraction: 1.0,
+        effectiveSlPrice:  entryPrice * (1 - cfgFast.slPhase1Pct / 100),
+        trailingHigh:      entryPrice,
+        status:            "open",
+        realizedPnlSol:    0,
+        unrealizedPnlSol:  0,
+        totalPnlSol:       0,
+        pnlPct:            0,
+        tp1RealizedSol:    0,
+        tp2RealizedSol:    0,
+        runnerRealizedSol: 0,
+        detectionPrice,
+        entryDriftPct:     fastDriftPct,
+      };
+      this.virtualBalance -= fastSizeSol;
+      this.openPositions.set(mint, fastPos);
+      void this.persistPosition(fastPos);
+      void this.persistBalance();
+      this.addEvent({ id: uid(), detectedAt, mint, symbol, action: "entered" });
+      logger.info(
+        { mint, symbol, entryPrice, fastDriftPct: fastDriftPct.toFixed(1) + "%", fastSizeSol, virtualBalance: this.virtualBalance },
+        "Paper sniper: ⚡ FAST PAPER position entered (on-chain price, zero gate delay) 📄",
+      );
+      if (isTelegramConfigured()) {
+        void sendTelegram(
+          `📄⚡ <b>PAPER ENTRY (instant)</b>\n` +
+          `──────────────────────\n` +
+          `🪙 Token: <b>${symbol}</b>\n` +
+          `📋 CA: <code>${mint}</code>\n` +
+          `💵 Entry: <b>$${entryPrice < 0.0001 ? entryPrice.toExponential(3) : entryPrice.toFixed(8)}</b>\n` +
+          `📈 Drift: ${fastDriftPct >= 0 ? "+" : ""}${fastDriftPct.toFixed(1)}% (on-chain, instant)\n` +
+          `💰 Size: <b>${fastSizeSol.toFixed(4)} SOL</b> (virtual)\n` +
+          `📊 Balance after: <b>${this.virtualBalance.toFixed(4)} SOL</b>\n` +
+          `🛡️ SL: -${cfgFast.slPhase1Pct}% (2m) → -${cfgFast.slPhase2Pct}% → -${cfgFast.slPhase3Pct}%\n` +
+          `🎯 TP1: +${cfgFast.tp1Pct}% · TP2: +${cfgFast.tp2Pct}%\n` +
+          `🕐 ${toIST(new Date())}`,
+        );
+      }
+      this.broadcast();
+      return;
+    }
+
+    const delayMs = cfg.simulatedExecDelayMs ?? 0;
 
     if (delayMs > 0) {
       await new Promise<void>((r) => setTimeout(r, delayMs));
@@ -430,19 +596,20 @@ class PaperSniperService {
 
       const checks: Promise<Win>[] = [];
 
-      // A: DexScreener AMM pair
-      // Strategy: prefer a known-AMM dexId, but fall back to ANY pair with a
-      // valid price. If DexScreener has the token at all, the pool clearly exists.
+      // A: DexScreener AMM pair ONLY — never bonding-curve pair.
+      // The bonding-curve pair (dexId: "pump.fun" or similar) is ALWAYS present
+      // on DexScreener even before migration completes and shows the pre-pump price.
+      // Using it as a price source is the root cause of fake-cheap paper entries.
+      // We must wait for the actual AMM pair (pumpswap/pump-amm/raydium) to appear.
       checks.push(
         (async () => {
           type DexPair = { priceUsd: string; dexId?: string };
           const res = await axios.get<DexPair[]>(`${DEXSCREENER_BASE}/tokens/v1/solana/${mint}`, { timeout: 4_000 });
           const pairs = Array.isArray(res.data) ? res.data : [];
-          const best =
-            pairs.find(p => AMM_DEXES.has(p.dexId ?? "") && (parseFloat(p.priceUsd) || 0) > 0) ??
-            pairs.find(p => (parseFloat(p.priceUsd) || 0) > 0); // any pair with price = pool exists
-          if (best) return { source: `dex:${best.dexId ?? "unknown"}`, dexPrice: parseFloat(best.priceUsd) };
-          throw new Error("dex: no pair with price");
+          // STRICT: only AMM pairs — no bonding-curve fallback
+          const ammPair = pairs.find(p => AMM_DEXES.has(p.dexId ?? "") && (parseFloat(p.priceUsd) || 0) > 0);
+          if (ammPair) return { source: `dex:${ammPair.dexId ?? "unknown"}`, dexPrice: parseFloat(ammPair.priceUsd) };
+          throw new Error("dex: no AMM pair indexed yet");
         })()
       );
 
@@ -503,13 +670,41 @@ class PaperSniperService {
       return;
     }
 
-    // ── Step 2: Get execution price ──────────────────────────────────────────
-    // Jupiter confirmed the pool is live. Now get an accurate USD price.
-    // DexScreener should be catching up by now; try a few times, then fall back
-    // to calculating from the Jupiter quote + SOL price.
-    let execPrice = 0;
-    for (let attempt = 0; attempt < 5 && execPrice <= 0; attempt++) {
-      if (attempt > 0) await new Promise<void>((r) => setTimeout(r, 3_000));
+    // ── Step 2: Get accurate AMM execution price ─────────────────────────────
+    //
+    // DESIGN PRINCIPLES (hard lessons from fake paper entries):
+    //
+    // 1. NEVER use the bonding-curve DexScreener pair.  pump.fun tokens always have
+    //    a DexScreener pair with dexId "pump.fun" that exists BEFORE migration and
+    //    shows the pre-pump pool-seed price.  Only AMM pairs (pumpswap/pump-amm/
+    //    raydium) reflect real post-graduation trading.
+    //
+    // 2. NEVER use the stale `jupiterOutAmount` from the gate check.  The gate
+    //    fires ~0-5s after graduation; Jupiter routes may not yet reflect the new
+    //    pool.  Always fetch a FRESH Jupiter quote here.
+    //
+    // 3. NEVER apply an artificial price floor from the detection baseline.
+    //    If no real AMM price is available, SKIP the trade — a fake entry is worse
+    //    than no entry.
+    //
+    // 4. Jupiter formula requires decimal adjustment: outAmount is in raw token
+    //    units.  pump.fun tokens have 6 decimals, so divide by 1_000_000 to get
+    //    UI tokens before computing USD price.
+    //
+    // Source priority:
+    //   A. DexScreener AMM pair — poll up to 60s (12 × 5s)
+    //   B. Jupiter fresh quote — correct formula: (0.01 SOL × SOL/USD) / (rawOut / 1e6)
+    //   C. No real price → SKIP (no entry)
+    //
+    const AMM_DEX_IDS       = new Set(["raydium", "pumpswap", "pump-amm", "pump_amm", "orca", "meteora"]);
+    const DEX_MAX_ATTEMPTS  = 12;   // 12 × 5s = 60s total
+    const DEX_POLL_MS       = 5_000;
+    let execPrice       = 0;
+    let execPriceSource = "";
+
+    // A: Poll DexScreener for AMM pair (up to 60s)
+    for (let attempt = 0; attempt < DEX_MAX_ATTEMPTS && execPrice <= 0; attempt++) {
+      if (attempt > 0) await new Promise<void>((r) => setTimeout(r, DEX_POLL_MS));
       try {
         type DexPair = { priceUsd: string; dexId?: string };
         const res = await axios.get<DexPair[]>(
@@ -517,46 +712,77 @@ class PaperSniperService {
           { timeout: 5_000 },
         );
         const pairs = (res.data ?? []) as DexPair[];
-        // Prefer AMM pairs; fall back to any pair with a price
-        // Include "pump-amm" — DexScreener's dexId for PumpSwap-graduated tokens
-        const best = pairs.find((p) => ["raydium","pumpswap","pump-amm","pump_amm"].includes(p.dexId ?? ""))
-                  ?? pairs.find((p) => (parseFloat(p.priceUsd) || 0) > 0);
-        if (best) execPrice = parseFloat(best.priceUsd);
-      } catch {
-        logger.debug({ mint, symbol, attempt }, "Paper sniper: DexScreener price fetch failed");
-      }
-    }
-
-    // If DexScreener still doesn't have the price, calculate from Jupiter quote.
-    // jupiterOutAmount = tokens for 10_000_000 lamports (0.01 SOL).
-    // We need SOL price in USD to compute token USD price.
-    if (execPrice <= 0 && jupiterOutAmount > 0) {
-      try {
-        const SOL_MINT = "So11111111111111111111111111111111111111112";
-        type DexPair = { priceUsd: string };
-        const solRes = await axios.get<DexPair[]>(
-          `${DEXSCREENER_BASE}/tokens/v1/solana/${SOL_MINT}`, { timeout: 5_000 });
-        const solPairs = (solRes.data ?? []) as DexPair[];
-        const solUsd = parseFloat(solPairs[0]?.priceUsd ?? "0");
-        if (solUsd > 0) {
-          // 0.01 SOL → jupiterOutAmount tokens → price = (0.01 * solUsd) / jupiterOutAmount
-          execPrice = (0.01 * solUsd) / jupiterOutAmount;
-          logger.info({ mint, symbol, execPrice, solUsd, jupiterOutAmount },
-            "Paper sniper: exec price from Jupiter quote fallback");
+        const ammPair = pairs.find((p) => AMM_DEX_IDS.has(p.dexId ?? "") && (parseFloat(p.priceUsd) || 0) > 0);
+        if (ammPair) {
+          execPrice       = parseFloat(ammPair.priceUsd);
+          execPriceSource = `dex:${ammPair.dexId ?? "amm"}`;
+          logger.info({ mint, symbol, execPrice, dexId: ammPair.dexId, attempt },
+            "Paper sniper: exec price from DexScreener AMM pair ✅");
+        } else {
+          logger.debug({ mint, symbol, attempt, maxAttempts: DEX_MAX_ATTEMPTS },
+            "Paper sniper: DexScreener AMM pair not indexed yet — retrying");
         }
       } catch {
-        logger.warn({ mint, symbol }, "Paper sniper: SOL price fetch failed for Jupiter fallback");
+        logger.debug({ mint, symbol, attempt }, "Paper sniper: DexScreener fetch failed — retrying");
       }
     }
 
+    // B: Jupiter fresh quote fallback (correct decimal math)
+    // outAmount is raw token units; pump.fun = 6 decimals → divide by 1e6 for UI tokens.
+    // Price = (SOL spent in USD) / (UI tokens received)
+    //       = (0.01 × solUsd) / (outAmount / 1_000_000)
     if (execPrice <= 0) {
-      this.addEvent({ id: uid(), detectedAt, mint, symbol, action: "skipped",
-        skipReason: `Price unverifiable after Jupiter route confirmed (DexScreener + Jupiter fallback both failed)` });
-      logger.warn({ mint, symbol }, "Paper sniper: skipped — price unavailable even after Jupiter route confirmed");
+      try {
+        const WSOL_MINT = "So11111111111111111111111111111111111111112";
+        const JUPE_FULL = "https://quote-api.jup.ag/v6/quote";
+        type QuoteResp  = { outAmount?: string };
+        type SolPair    = { priceUsd: string };
+
+        const [jupRes, solRes] = await Promise.allSettled([
+          axios.get<QuoteResp>(JUPE_FULL, {
+            params: { inputMint: WSOL_MINT, outputMint: mint, amount: 10_000_000, slippageBps: 5000 },
+            timeout: 6_000,
+          }),
+          axios.get<SolPair[]>(
+            `${DEXSCREENER_BASE}/tokens/v1/solana/${WSOL_MINT}`,
+            { timeout: 4_000 },
+          ),
+        ]);
+
+        if (jupRes.status === "fulfilled" && solRes.status === "fulfilled") {
+          const rawOut = parseInt(jupRes.value.data?.outAmount ?? "0", 10);
+          const solUsd = parseFloat((solRes.value.data as SolPair[])[0]?.priceUsd ?? "0");
+          if (rawOut > 0 && solUsd > 0) {
+            const uiOut   = rawOut / 1_000_000;          // 6 decimals (pump.fun standard)
+            const jupPrice = (0.01 * solUsd) / uiOut;    // USD per UI token
+            if (jupPrice > 0) {
+              execPrice       = jupPrice;
+              execPriceSource = "jup-fresh";
+              logger.info({ mint, symbol, execPrice, rawOut, uiOut, solUsd },
+                "Paper sniper: exec price from Jupiter fresh quote ✅");
+            }
+          }
+        }
+      } catch {
+        logger.warn({ mint, symbol }, "Paper sniper: Jupiter fresh quote fallback failed");
+      }
+    }
+
+    // C: No real AMM price — refuse to enter with fake/stale price
+    if (execPrice <= 0) {
+      const skipReason = `No real AMM price after 60s — DexScreener AMM not indexed + Jupiter fallback failed. Refusing fake entry.`;
+      this.addEvent({ id: uid(), detectedAt, mint, symbol, action: "skipped", skipReason });
+      logger.warn({ mint, symbol }, "Paper sniper: SKIPPED — no real AMM price available, not entering ⛔");
       this.seenMints.delete(mint);
       this.broadcast();
       return;
     }
+
+    logger.info(
+      { mint, symbol, execPrice, execPriceSource, detectionPrice,
+        drift: detectionPrice > 0 ? (((execPrice / detectionPrice) - 1) * 100).toFixed(1) + "%" : "n/a" },
+      "Paper sniper: execution price confirmed ✅",
+    );
 
     // Check drift with the real execution price
     const execDriftPct = detectionPrice > 0
@@ -718,7 +944,7 @@ class PaperSniperService {
       pos.realizedPnlSol   += pnl;
       pos.tp1RealizedSol    = pnl;
       pos.remainingFraction -= closeFrac;
-      pos.effectiveSlPrice  = price * (1 - cfg.slAfterTp1Pct / 100);
+      pos.effectiveSlPrice  = pos.entryPrice; // breakeven SL immediately on TP1
       this.virtualBalance  += solReturned;
       logger.info({ mint: pos.mint, symbol: pos.symbol, pct: pct.toFixed(1), pnl, solReturned, virtualBalance: this.virtualBalance },
         "Paper sniper: TP1 hit 🎯");

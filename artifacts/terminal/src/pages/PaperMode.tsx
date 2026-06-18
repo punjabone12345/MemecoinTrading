@@ -68,7 +68,7 @@ function downloadPaperCsv(history: PaperPosition[]) {
     return [
       p.symbol,
       p.mint,
-      p.entryAt  ? toDateTime(p.entryAt)  : "",
+      (p.detectedAt ?? p.entryAt) ? toDateTime(p.detectedAt ?? p.entryAt) : "",
       p.closedAt ? toDateTime(p.closedAt) : "",
       holdMs ? holdStr(holdMs) : "",
       p.entryPrice.toString(),
@@ -108,6 +108,8 @@ type FieldDef = {
   max: number;
   step: number;
   section?: string;
+  type?: "number" | "boolean";
+  toggleKey?: keyof PaperConfig; // for numeric fields paired with a boolean toggle
 };
 
 const FIELDS: FieldDef[] = [
@@ -126,15 +128,24 @@ const FIELDS: FieldDef[] = [
   { key: "maxFillDriftPct",       label: "Max fill drift",            description: "Skip entry if price drifted more than this % during exec delay", suffix: "%", min: 1, max: 50, step: 1 },
   { section: "Dead-coin filter", key: "deadCoinWindowMs",   label: "Dead-coin window",           description: "Auto-close if coin doesn't move enough within this window", suffix: "hrs", min: 0.5, max: 24, step: 0.5 },
   { key: "deadCoinMinMovePct",   label: "Min movement required",     description: "Peak must exceed this % from entry or coin is dead", suffix: "%",   min: 1,  max: 50, step: 1 },
+  { section: "Quality filters",  key: "enableLiquidityFilter",    type: "boolean", label: "Min liquidity filter",       description: "Skip tokens with pool liquidity below threshold at graduation", suffix: "", min: 0, max: 1, step: 1 },
+  { key: "minLiquidityUsd",      label: "Min liquidity",               description: "Skip graduation if pool < this USD (e.g. 5000)",              suffix: "$",   min: 100,   max: 50_000, step: 100, toggleKey: "enableLiquidityFilter" },
+  { key: "enableBondingCurveFilter", type: "boolean", label: "Bonding curve speed filter", description: "Skip tokens whose bonding curve took too long to complete", suffix: "", min: 0, max: 1, step: 1 },
+  { key: "maxBondingCurveMinutes",   label: "Max bonding curve time",     description: "Skip if curve took longer than N minutes to graduate (e.g. 30)", suffix: "min", min: 5, max: 240, step: 5, toggleKey: "enableBondingCurveFilter" },
+  { key: "enableHolderFilter",   type: "boolean", label: "Min holder count filter",     description: "Skip tokens with too few holders at graduation",              suffix: "", min: 0, max: 1, step: 1 },
+  { key: "minHolderCount",       label: "Min holder count",            description: "Skip graduation if holder count < this value (e.g. 150)",     suffix: "",    min: 10,    max: 2_000,  step: 10,  toggleKey: "enableHolderFilter" },
 ];
 
 const DEFAULT_CFG: PaperConfig = {
   positionSizeSol: 0.05, maxOpenPositions: 3,
   tp1Pct: 150, tp1ClosePct: 40, tp2Pct: 400, tp2ClosePct: 40,
   trailingStopPct: 30, slPhase1Pct: 20, slPhase2Pct: 25, slPhase3Pct: 30, slAfterTp1Pct: 35,
-  simulatedExecDelayMs: 5_000,
+  simulatedExecDelayMs: 0,
   maxFillDriftPct: 20,
   deadCoinWindowMs: 7_200_000, deadCoinMinMovePct: 5,
+  enableLiquidityFilter: true, minLiquidityUsd: 5_000,
+  enableBondingCurveFilter: true, maxBondingCurveMinutes: 30,
+  enableHolderFilter: true, minHolderCount: 150,
 };
 
 function SettingsModal({ onClose }: { onClose: () => void }) {
@@ -175,6 +186,10 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
           {FIELDS.map((f) => {
             const showSection = f.section && !sections.includes(f.section);
             if (f.section && showSection) sections.push(f.section);
+            const isBoolean = f.type === "boolean";
+            const boolVal = isBoolean ? !!(merged[f.key]) : false;
+            // Dim numeric rows when their paired toggle is off
+            const toggleActive = f.toggleKey ? !!(merged[f.toggleKey]) : true;
             return (
               <div key={f.key}>
                 {showSection && (
@@ -182,39 +197,48 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
                     {f.section}
                   </p>
                 )}
-                <div className="flex items-center justify-between py-3 border-b border-white/4 last:border-0">
+                <div className={`flex items-center justify-between py-3 border-b border-white/4 last:border-0 transition-opacity ${!toggleActive ? "opacity-40 pointer-events-none" : ""}`}>
                   <div className="flex-1 mr-4">
                     <p className="text-[11px] font-semibold text-white/75">{f.label}</p>
                     <p className="text-[10px] text-white/30 mt-0.5">{f.description}</p>
                   </div>
-                  <div className="flex items-center gap-1.5">
-                    <input
-                      type="number"
-                      className="w-20 bg-white/5 border border-white/10 rounded-xl px-2.5 py-1.5 text-xs font-black text-white text-right focus:outline-none focus:border-amber-500/50 focus:bg-amber-500/5 transition-colors tabular-nums"
-                      value={
-                        f.key === "deadCoinWindowMs"
-                          ? ((draft[f.key] ?? merged[f.key]) as number) / 3_600_000
-                          : f.key === "simulatedExecDelayMs"
-                            ? ((draft[f.key] ?? merged[f.key]) as number) / 1_000
-                            : (draft[f.key] ?? merged[f.key])
-                      }
-                      min={f.min}
-                      max={f.max}
-                      step={f.step}
-                      onChange={(e) => {
-                        const raw = parseFloat(e.target.value);
-                        if (!isNaN(raw)) {
-                          const v = f.key === "deadCoinWindowMs"
-                            ? Math.round(raw * 3_600_000)
+                  {isBoolean ? (
+                    <button
+                      onClick={() => setDraft((d) => ({ ...d, [f.key]: !boolVal }))}
+                      className={`relative w-10 h-5 rounded-full transition-colors ${boolVal ? "bg-amber-500" : "bg-white/10"}`}
+                    >
+                      <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${boolVal ? "translate-x-5" : "translate-x-0"}`} />
+                    </button>
+                  ) : (
+                    <div className="flex items-center gap-1.5">
+                      <input
+                        type="number"
+                        className="w-20 bg-white/5 border border-white/10 rounded-xl px-2.5 py-1.5 text-xs font-black text-white text-right focus:outline-none focus:border-amber-500/50 focus:bg-amber-500/5 transition-colors tabular-nums"
+                        value={
+                          f.key === "deadCoinWindowMs"
+                            ? ((draft[f.key] ?? merged[f.key]) as number) / 3_600_000
                             : f.key === "simulatedExecDelayMs"
-                              ? Math.round(raw * 1_000)
-                              : f.step < 1 ? raw : parseInt(e.target.value, 10);
-                          setDraft((d) => ({ ...d, [f.key]: v }));
+                              ? ((draft[f.key] ?? merged[f.key]) as number) / 1_000
+                              : (draft[f.key] ?? merged[f.key])
                         }
-                      }}
-                    />
-                    {f.suffix && <span className="text-[10px] text-white/35 font-medium w-6">{f.suffix}</span>}
-                  </div>
+                        min={f.min}
+                        max={f.max}
+                        step={f.step}
+                        onChange={(e) => {
+                          const raw = parseFloat(e.target.value);
+                          if (!isNaN(raw)) {
+                            const v = f.key === "deadCoinWindowMs"
+                              ? Math.round(raw * 3_600_000)
+                              : f.key === "simulatedExecDelayMs"
+                                ? Math.round(raw * 1_000)
+                                : f.step < 1 ? raw : parseInt(e.target.value, 10);
+                            setDraft((d) => ({ ...d, [f.key]: v }));
+                          }
+                        }}
+                      />
+                      {f.suffix && <span className="text-[10px] text-white/35 font-medium w-6">{f.suffix}</span>}
+                    </div>
+                  )}
                 </div>
               </div>
             );
@@ -568,16 +592,30 @@ function HistoryCard({ pos }: { pos: PaperPosition }) {
               </div>
             )}
 
-            {/* Drift */}
+            {/* Drift + price mismatch warning */}
             {pos.detectionPrice != null && (
-              <div className="flex items-center gap-1 flex-wrap text-[10px]">
-                <span className="text-white/30">Detect {fmtPrice(pos.detectionPrice)}</span>
-                <span className="text-white/20">→</span>
-                <span className="text-white/30">Fill {fmtPrice(pos.entryPrice)}</span>
-                {pos.entryDriftPct != null && (
-                  <span className={`font-semibold ${pos.entryDriftPct > 5 ? "text-amber-400/80" : pos.entryDriftPct < -2 ? "text-emerald-400/80" : "text-white/40"}`}>
-                    ({pos.entryDriftPct >= 0 ? "+" : ""}{pos.entryDriftPct.toFixed(1)}% drift)
-                  </span>
+              <div className="space-y-1">
+                <div className="flex items-center gap-1 flex-wrap text-[10px]">
+                  <span className="text-white/30">Detect {fmtPrice(pos.detectionPrice)}</span>
+                  <span className="text-white/20">→</span>
+                  <span className="text-white/30">Fill {fmtPrice(pos.entryPrice)}</span>
+                  {pos.entryDriftPct != null && (
+                    <span className={`font-semibold ${pos.entryDriftPct > 5 ? "text-amber-400/80" : pos.entryDriftPct < -2 ? "text-emerald-400/80" : "text-white/40"}`}>
+                      ({pos.entryDriftPct >= 0 ? "+" : ""}{pos.entryDriftPct.toFixed(1)}% drift)
+                    </span>
+                  )}
+                </div>
+                {/* Show mismatch warning when fill ≈ detection (likely stale DexScreener at entry time) */}
+                {pos.entryDriftPct != null && pos.entryDriftPct < 1.6 && pos.entryDriftPct >= 0 && (
+                  <div className="flex items-start gap-1.5 bg-amber-500/8 border border-amber-500/20 rounded-lg px-2.5 py-2">
+                    <AlertTriangle size={10} className="text-amber-400/80 mt-0.5 shrink-0" />
+                    <p className="text-[9px] text-amber-400/70 leading-relaxed">
+                      <span className="font-bold text-amber-400/90">Possible price mismatch.</span>{" "}
+                      Fill ≈ detection price ({pos.entryDriftPct.toFixed(1)}% drift) suggests DexScreener served a stale
+                      pre-pump price at entry time. Actual fill in live trading would have been higher.
+                      P&L shown may be overstated.
+                    </p>
+                  </div>
                 )}
               </div>
             )}
@@ -618,10 +656,10 @@ function HistoryCard({ pos }: { pos: PaperPosition }) {
 
             {/* Timestamps */}
             <div className="space-y-1">
-              {pos.entryAt > 0 && (
+              {(pos.detectedAt ?? pos.entryAt) > 0 && (
                 <div className="flex justify-between text-[10px]">
                   <span className="text-white/25">Entered</span>
-                  <span className="text-white/45 font-medium tabular-nums">{toDateTime(pos.entryAt)}</span>
+                  <span className="text-white/45 font-medium tabular-nums">{toDateTime(pos.detectedAt ?? pos.entryAt)}</span>
                 </div>
               )}
               {pos.closedAt && (
