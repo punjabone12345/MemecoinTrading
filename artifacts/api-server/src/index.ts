@@ -170,6 +170,16 @@ if (process.env["DATABASE_URL"]) {
       await migClient.query(`ALTER TABLE sniper_positions ADD COLUMN IF NOT EXISTS detection_price DOUBLE PRECISION`);
       await migClient.query(`ALTER TABLE sniper_positions ADD COLUMN IF NOT EXISTS entry_drift_pct DOUBLE PRECISION`);
       await migClient.query(`ALTER TABLE sniper_positions ADD COLUMN IF NOT EXISTS ms_detection_to_fill BIGINT`);
+      // TP3 + quality columns
+      await migClient.query(`ALTER TABLE sniper_positions ADD COLUMN IF NOT EXISTS tp3_hit BOOLEAN DEFAULT FALSE`);
+      await migClient.query(`ALTER TABLE sniper_positions ADD COLUMN IF NOT EXISTS tp3_realized_sol DOUBLE PRECISION DEFAULT 0`);
+      await migClient.query(`ALTER TABLE sniper_positions ADD COLUMN IF NOT EXISTS quality_score INTEGER DEFAULT 0`);
+      await migClient.query(`ALTER TABLE sniper_positions ADD COLUMN IF NOT EXISTS liquidity_sol DOUBLE PRECISION DEFAULT 0`);
+      await migClient.query(`ALTER TABLE sniper_positions ADD COLUMN IF NOT EXISTS buy_pressure_ratio DOUBLE PRECISION DEFAULT 1`);
+      await migClient.query(`ALTER TABLE sniper_positions ADD COLUMN IF NOT EXISTS unique_buyers INTEGER DEFAULT 0`);
+      await migClient.query(`ALTER TABLE sniper_positions ADD COLUMN IF NOT EXISTS top_holder_pct DOUBLE PRECISION DEFAULT 0`);
+      await migClient.query(`ALTER TABLE sniper_positions ADD COLUMN IF NOT EXISTS whale_detected BOOLEAN DEFAULT FALSE`);
+      await migClient.query(`ALTER TABLE sniper_positions ADD COLUMN IF NOT EXISTS position_multiplier DOUBLE PRECISION DEFAULT 1`);
       await migClient.query(`
         CREATE TABLE IF NOT EXISTS paper_sniper_positions (
           id TEXT PRIMARY KEY,

@@ -7,6 +7,7 @@ import { blacklistService } from "./blacklist.service.js";
 import { sendTelegram, isTelegramConfigured, toIST } from "../lib/telegram.js";
 import { solanaWalletService } from "./solana-wallet.service.js";
 import { jupiterSwapService } from "./jupiter-swap.service.js";
+import { tokenQualityService, type QualityMetrics } from "./token-quality.service.js";
 
 // ── Constants ────────────────────────────────────────────────────────────────
 const MIGRATION_WALLET   = "39azUYFWPz3VHgKCf3VChUwbpURdCHRxjWVowf5jUJjg";
@@ -140,12 +141,25 @@ export interface SniperConfig {
   enabled: boolean;
   positionSizeSol: number;
   maxOpenPositions: number;
+  // Stop-loss
   slPct: number;
+  // TP1 — sell 30% at +100%
   tp1Pct: number;
   tp1ClosePct: number;
+  // TP2 — sell 30% at +300%, trailing SL -15%
   tp2Pct: number;
   tp2ClosePct: number;
+  trailingStopAfterTp2Pct: number;
+  // TP3 — sell 20% at +600%, tighten trailing to -10%
+  tp3Pct: number;
+  tp3ClosePct: number;
+  trailingStopAfterTp3Pct: number;
+  // Runner (after TP3): trailing SL -10% from peak
   trailingStopPct: number;
+  // Quality gate
+  minQualityScore: number;
+  // Candle entry window (ms from graduation detection)
+  maxEntryWindowMs: number;
   waitBeforeEntryMs: number;
   slippageBps: number;
   priorityFeeLamports: number;
@@ -154,18 +168,26 @@ export interface SniperConfig {
 
 const DEFAULT_CONFIG: SniperConfig = {
   enabled:              true,
-  positionSizeSol:      0.002,   // small default — safe for wallets starting with 0.06 SOL (needs positionSize + 0.003 overhead)
+  positionSizeSol:      0.002,
   maxOpenPositions:     5,
-  slPct:                40,
-  tp1Pct:               150,
-  tp1ClosePct:          40,
-  tp2Pct:               400,
-  tp2ClosePct:          40,
-  trailingStopPct:      30,
-  waitBeforeEntryMs:    0,       // 0ms — enter as fast as possible after detection
-  slippageBps:          3000,    // quote slippage for route-finding only; swap uses fixed SWAP_SLIPPAGE_BPS (5000 = 50% floor)
-  priorityFeeLamports:  500_000, // 0.0005 SOL floor — Helius p75 used at runtime (old 50k was too low)
-  jitoTipLamports:      100_000, // 0.0001 SOL Jito tip — bundles land in 1-2 slots (~400-800ms) vs 30-40s standard confirm
+  // New 4-stage TP/SL
+  slPct:                12,     // hard SL -12% from entry (pre-TP1)
+  tp1Pct:               100,    // TP1 at +100%
+  tp1ClosePct:          30,     // sell 30% at TP1
+  tp2Pct:               300,    // TP2 at +300%
+  tp2ClosePct:          30,     // sell 30% at TP2
+  trailingStopAfterTp2Pct: 15,  // trailing SL -15% after TP2
+  tp3Pct:               600,    // TP3 at +600%
+  tp3ClosePct:          20,     // sell 20% at TP3
+  trailingStopAfterTp3Pct: 10,  // trailing SL -10% after TP3
+  trailingStopPct:      10,     // runner trailing SL -10% (same as after TP3)
+  // Quality gate
+  minQualityScore:      70,     // minimum score out of 100 to enter
+  maxEntryWindowMs:     90_000, // 90s from detection to enter
+  waitBeforeEntryMs:    0,
+  slippageBps:          3000,
+  priorityFeeLamports:  500_000,
+  jitoTipLamports:      100_000,
 };
 
 export interface SniperPosition {
@@ -180,6 +202,7 @@ export interface SniperPosition {
   sizeSol: number;
   tp1Hit: boolean;
   tp2Hit: boolean;
+  tp3Hit: boolean;
   remainingFraction: number;
   effectiveSlPrice: number;
   trailingHigh: number;
@@ -192,18 +215,26 @@ export interface SniperPosition {
   closedAt?: number;
   exitPrice?: number;
   txSignature: string;
-  tokenAmount: number;       // raw token units received on buy (for selling later)
-  // Separate entry/exit tx signatures for on-chain verification
-  entrySig: string;          // buy tx — set at entry, never overwritten
-  exitSig?: string;          // sell tx — only set after confirmed on-chain sell
+  tokenAmount: number;
+  entrySig: string;
+  exitSig?: string;
   // P&L breakdown per stage
   tp1RealizedSol: number;
   tp2RealizedSol: number;
+  tp3RealizedSol: number;
   runnerRealizedSol: number;
   // Entry drift / latency analysis
-  detectionPrice?: number;   // first DexScreener price after 5s wait — baseline for drift%
-  entryDriftPct?: number;    // (fillPrice - detectionPrice) / detectionPrice × 100
-  msDetectionToFill?: number; // ms from graduation detected → buy confirmed on-chain
+  detectionPrice?: number;
+  entryDriftPct?: number;
+  msDetectionToFill?: number;
+  // Quality metrics at entry
+  qualityScore: number;
+  liquiditySol: number;
+  buyPressureRatio: number;
+  uniqueBuyers: number;
+  topHolderPct: number;
+  whaleDetected: boolean;
+  positionMultiplier: number;
 }
 
 export interface SniperEvent {
@@ -214,6 +245,13 @@ export interface SniperEvent {
   action: "entered" | "skipped";
   skipReason?: string;
   txSignature: string;
+  // Quality metrics (present for entered + quality-skipped events)
+  qualityScore?: number;
+  liquiditySol?: number;
+  uniqueBuyers?: number;
+  buyPressureRatio?: number;
+  topHolderPct?: number;
+  whaleDetected?: boolean;
 }
 
 export interface SniperStatus {
@@ -714,7 +752,16 @@ class GraduationSniperService {
       exitSig:          row["exit_sig"] ? String(row["exit_sig"]) : undefined,
       tp1RealizedSol:   Number(row["tp1_realized_sol"] ?? 0),
       tp2RealizedSol:   Number(row["tp2_realized_sol"] ?? 0),
+      tp3RealizedSol:   Number(row["tp3_realized_sol"] ?? 0),
       runnerRealizedSol: Number(row["runner_realized_sol"] ?? 0),
+      tp3Hit:            Boolean(row["tp3_hit"]),
+      qualityScore:      Number(row["quality_score"] ?? 0),
+      liquiditySol:      Number(row["liquidity_sol"] ?? 0),
+      buyPressureRatio:  Number(row["buy_pressure_ratio"] ?? 1),
+      uniqueBuyers:      Number(row["unique_buyers"] ?? 0),
+      topHolderPct:      Number(row["top_holder_pct"] ?? 0),
+      whaleDetected:     Boolean(row["whale_detected"]),
+      positionMultiplier: Number(row["position_multiplier"] ?? 1),
     };
     this.updateLivePnl(p);
     return p;
@@ -1062,474 +1109,193 @@ class GraduationSniperService {
       this.resetDailyCounterIfNeeded();
       this.graduationsToday++;
 
-      // ── Minimum entry delay ────────────────────────────────────────────────────
-      // Wait until waitBeforeEntryMs have elapsed since detection.  This gives the
-      // AMM pool time to become liquid, price feeds to stabilise, and early sniper
-      // bots time to set the real market price before we enter.
-      // Extraction above (~1-3 s) is counted against the delay, so we only sleep
-      // the remaining gap (e.g. with 5 s target and 2 s extraction → 3 s sleep).
+      // ── Entry delay ────────────────────────────────────────────────────────────
       {
         const elapsed = Date.now() - detectedAt;
         const remaining = Math.max(0, this.config.waitBeforeEntryMs - elapsed);
         if (remaining > 0) {
-          logger.info({ mint, elapsed, remaining, target: this.config.waitBeforeEntryMs },
-            `Graduation sniper: entry delay — waiting ${remaining}ms (${elapsed}ms already elapsed)`);
+          logger.info({ mint, elapsed, remaining }, 'Graduation sniper: entry delay wait');
           await new Promise<void>((r) => setTimeout(r, remaining));
         }
       }
 
-      // ── T0: fire ALL independent tasks simultaneously ─────────────────────────
-      // On-chain vault reads complete in ~200-400ms — no DexScreener dependency.
-      // DexScreener is fired in background for symbol/name only (non-blocking).
-      // Jupiter pre-quote runs concurrently so it's ready when buy fires.
-      // Rug-check timer (1.5s) also starts at T0.
-      const t0 = detectedAt;
-      logger.info({
-        mint, t0,
-        wsolVault:  wsolVaultPubkey?.slice(0, 8) ?? "none",
-        tokenVault: tokenVaultPubkey?.slice(0, 8) ?? "none",
-      }, "Pipeline T0: vaults known — firing all tasks simultaneously ⚡");
+      // ── T0: on-chain price + SOL/USD (parallel) ────────────────────────────────
+      const [reserves, solUsd] = await Promise.all([
+        (wsolVaultPubkey && tokenVaultPubkey)
+          ? this.fetchOnChainPoolReserves(wsolVaultPubkey, tokenVaultPubkey)
+          : Promise.resolve(null),
+        this.fetchSolUsdPrice(),
+      ]);
 
-      // On-chain pool reserves (SOL vault + token vault balances in parallel)
-      // Available in ~200ms — zero indexer lag, as vaults are created by migration TX.
-      const reservesPromise = (wsolVaultPubkey && tokenVaultPubkey)
-        ? this.fetchOnChainPoolReserves(wsolVaultPubkey, tokenVaultPubkey)
-        : Promise.resolve<{ solBalance: number; tokenBalanceRaw: number; tokenBalanceUi: number } | null>(null);
+      const initialPoolSol    = reserves?.solBalance ?? 0;
+      const effectiveSolUsd   = solUsd ?? 150;
+      const initialPrice      = (reserves && reserves.solBalance > 0 && reserves.tokenBalanceUi > 0 && effectiveSolUsd > 0)
+        ? (reserves.solBalance / reserves.tokenBalanceUi) * effectiveSolUsd
+        : 0;
 
-      // SOL/USD price (DexScreener USDC pair — ~200ms, needed for USD price calc)
-      const solUsdPromise = this.fetchSolUsdPrice();
+      // Pre-quality pool SOL check — fast rejection before 60s quality window
+      if (initialPoolSol > 0) {
+        const minPoolSol = this.isLowLiquidityHour() ? LOW_LIQ_MIN_POOL_SOL : MIN_POOL_SOL;
+        if (initialPoolSol < minPoolSol) {
+          const reason = `Pool drained — ${initialPoolSol.toFixed(2)} SOL < ${minPoolSol} SOL (pre-quality rug filter)`;
+          this.addEvent({ ...eventBase, action: 'skipped', skipReason: reason });
+          logger.warn({ mint, initialPoolSol, minPoolSol }, 'Graduation sniper: pre-quality pool SOL check failed ❌');
+          return;
+        }
+        logger.info({ mint, initialPoolSol }, 'Graduation sniper: pre-quality pool SOL check passed ✅');
+      }
 
-      // Jupiter pre-quote runs while we wait for on-chain data
-      const preQuotePromise = jupiterSwapService.prefetchBuyQuoteAndFee(
-        mint,
-        this.config.positionSizeSol,
-        this.config.slippageBps,
-        this.config.priorityFeeLamports,
-      );
-
-      // DexScreener: background fetch for symbol/name — does NOT block entry decision.
-      // If indexed (rare in first 60s), we get real metadata; otherwise temp mint-based symbol.
-      const dexPricePromise = this.fetchPriceFast(mint);
-
-      // Rug-check timer: 1.5s from T0 (runs concurrently with all the above)
-      const rugTimerPromise = new Promise<void>((r) => setTimeout(r, 1_500));
-
-      // Jupiter price fallback: fires at T0 so it's ready by T1-T2 if on-chain
-      // vault extraction failed. fetchJupiterPriceFallback resolves in ~800ms.
-      // Cost: one extra Jupiter API call per graduation (cheap); benefit: zero
-      // "Price not found" aborts when wsolVaultPubkey/tokenVaultPubkey are null.
-      const jupFallbackPromise = this.fetchJupiterPriceFallback(mint);
-
-      // ── T1: on-chain price ready (~200-400ms from T0) ─────────────────────────
-      const [reserves, solUsd] = await Promise.all([reservesPromise, solUsdPromise]);
-      const t1Ms = Date.now() - t0;
-
-      // Calculate price from pool reserve ratio: price_sol = wSOL_balance / token_balance_ui
-      // This is the same formula DEXes use for instantaneous price — available immediately.
-      let baselinePrice = 0;
+      // ── Symbol resolution (3s race with DexScreener) ──────────────────────────
       let symbol = mint.slice(0, 8);
       let name   = mint.slice(0, 8);
-      let onChainPriceValid = false;
-
-      if (reserves && reserves.solBalance > 0 && reserves.tokenBalanceUi > 0 && solUsd && solUsd > 0) {
-        const priceSol    = reserves.solBalance / reserves.tokenBalanceUi;
-        baselinePrice     = priceSol * solUsd;
-        onChainPriceValid = true;
-        logger.info({
-          mint,
-          baselinePrice,
-          priceSol,
-          solUsd,
-          solBalance:   reserves.solBalance,
-          tokenBalance: reserves.tokenBalanceUi,
-          elapsedMs:    t1Ms,
-        }, "Pipeline T1: on-chain price ✅ (pool reserve ratio)");
-      } else {
-        logger.warn({ mint, reserves: !!reserves, solUsd, elapsedMs: t1Ms },
-          "Pipeline T1: on-chain reserves unavailable — checking Jupiter fallback");
-        // Jupiter was fired at T0 — poll it now (100ms budget, may already be ready)
-        const jupEarly = await Promise.race([
-          jupFallbackPromise,
-          new Promise<number | null>((r) => setTimeout(() => r(null), 100)),
-        ]);
-        if (jupEarly && jupEarly > 0 && solUsd && solUsd > 0) {
-          baselinePrice = jupEarly;
-          logger.info({ mint, jupEarly, baselinePrice, elapsedMs: t1Ms },
-            "Pipeline T1: Jupiter fallback price ready early ✅");
-        }
-      }
-
-      // ── Pool SOL validation (from reserves — no extra RPC needed) ─────────────
-      const poolSol: number | null = reserves?.solBalance ?? null;
-      if (poolSol !== null) {
-        const minPoolSol = this.isLowLiquidityHour() ? LOW_LIQ_MIN_POOL_SOL : MIN_POOL_SOL;
-        if (poolSol < minPoolSol) {
-          const hourLabel = this.isLowLiquidityHour() ? " (low-liq hours)" : "";
-          const reason = `Pool drained — ${poolSol.toFixed(2)} SOL < ${minPoolSol} SOL on-chain${hourLabel} (Type-A rug filter)`;
-          this.addEvent({ ...eventBase, symbol, action: "skipped", skipReason: reason });
-          logger.warn({ mint, symbol, poolSol, minPoolSol }, "Pipeline T1: pool below threshold — skipping ❌");
-          return;
-        }
-        logger.info({ mint, poolSol, elapsedMs: t1Ms }, "Pipeline T1: pool SOL check passed ✅");
-      }
-
-      // ── Pool existence gate ────────────────────────────────────────────────────
-      // On-chain reserves confirm pool existence with zero indexer lag: the vault
-      // token accounts are CREATED by the migration TX itself, so valid reserves
-      // (solBalance > 0 AND tokenBalance > 0) mean the pool definitely exists.
-      // Only run the slow DexScreener/Jupiter gate when vault data was unavailable.
-      const poolConfirmedOnChain = onChainPriceValid;
-
-      if (!poolConfirmedOnChain) {
-        // Fallback gate: PDA on-chain + DexScreener + Jupiter (existing guard).
-        // This path fires only when getTransaction didn't return vault pubkeys —
-        // should be rare with the new extractMintFromTx that always extracts vaults.
-        const GATE_AMM_DEXES  = new Set(["raydium", "pumpswap", "orca", "meteora"]);
-        const JUPE_LITE       = "https://lite-api.jup.ag/swap/v1/quote";
-        const JUPE_FULL       = "https://quote-api.jup.ag/v6/quote";
-        const WSOL_MINT       = "So11111111111111111111111111111111111111112";
-        const PUMPSWAP_PROG   = "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA";
-        const GATE_DEADLINE   = 20_000; // reduced from 30s — on-chain is primary now
-        const GATE_POLL       = 800;
-        const heliusKey       = process.env["HELIUS_API_KEY"];
-
-        let gateConfirmed    = false;
-        let gateSource       = "";
-        let jupiterOutAmount = 0;
-
-        const pdaAddresses: string[] = [];
-        try {
-          const mPK  = new PublicKey(mint);
-          const pPK  = new PublicKey(PUMPSWAP_PROG);
-          const wPK  = new PublicKey(WSOL_MINT);
-          const idx  = Buffer.from([0, 0]);
-          const [a]  = PublicKey.findProgramAddressSync([Buffer.from("pool"), mPK.toBuffer()], pPK);
-          const [b]  = PublicKey.findProgramAddressSync([Buffer.from("pool"), idx, mPK.toBuffer(), wPK.toBuffer()], pPK);
-          const [c]  = PublicKey.findProgramAddressSync([Buffer.from("pool"), idx, wPK.toBuffer(), mPK.toBuffer()], pPK);
-          pdaAddresses.push(a.toBase58(), b.toBase58(), c.toBase58());
-        } catch { /* non-fatal */ }
-
-        logger.info({ mint, symbol }, "Pipeline: no vault data — running fallback pool gate");
-
-        const deadline = Date.now() + GATE_DEADLINE;
-        let attempt = 0;
-
-        while (Date.now() < deadline && !gateConfirmed) {
-          if (attempt > 0) await new Promise<void>(r => setTimeout(r, GATE_POLL));
-          attempt++;
-
-          type QuoteResp = { outAmount?: string; error?: string };
-          type AcctResp  = { result?: { value?: { lamports?: number } | null } };
-          type Win       = { source: string; dexPrice?: number; jupOut?: number };
-          const jp = { inputMint: WSOL_MINT, outputMint: mint, amount: 10_000_000, slippageBps: 5000 };
-          const rpc = heliusKey ? `https://mainnet.helius-rpc.com/?api-key=${heliusKey}` : null;
-
-          const checks: Promise<Win>[] = [];
-
-          checks.push(
-            this.fetchPrice(mint).then(d => {
-              if (d && GATE_AMM_DEXES.has(d.dexId)) return { source: `dex:${d.dexId}`, dexPrice: d.price };
-              throw new Error("dex: no AMM pair");
-            })
-          );
-
-          if (rpc && pdaAddresses.length > 0) {
-            for (const pda of pdaAddresses) {
-              checks.push(
-                axios.post<AcctResp>(rpc,
-                  { jsonrpc: "2.0", id: 1, method: "getAccountInfo", params: [pda, { encoding: "base64" }] },
-                  { timeout: 3_000 }
-                ).then(r => {
-                  if ((r.data?.result?.value?.lamports ?? 0) > 0)
-                    return { source: `pda:${pda.slice(0, 8)}` };
-                  throw new Error(`pda ${pda.slice(0, 8)}: no account`);
-                })
-              );
-            }
-          }
-
-          checks.push(
-            axios.get<QuoteResp>(JUPE_LITE, { params: jp, timeout: 4_000 }).then(r => {
-              const out = parseInt(r.data?.outAmount ?? "0", 10);
-              if (out > 0) return { source: "jup-lite", jupOut: out };
-              throw new Error("jup-lite: no route");
-            })
-          );
-
-          checks.push(
-            axios.get<QuoteResp>(JUPE_FULL, { params: jp, timeout: 4_000 }).then(r => {
-              const out = parseInt(r.data?.outAmount ?? "0", 10);
-              if (out > 0) return { source: "jup-full", jupOut: out };
-              throw new Error("jup-full: no route");
-            })
-          );
-
-          try {
-            const winner = await Promise.any(checks);
-            gateConfirmed    = true;
-            gateSource       = winner.source;
-            jupiterOutAmount = winner.jupOut ?? 0;
-            if (winner.dexPrice && winner.dexPrice > 0) baselinePrice = winner.dexPrice;
-            logger.info({ mint, symbol, gateSource, attempt },
-              `Pipeline: fallback gate confirmed via ${gateSource} ✅`);
-            break;
-          } catch {
-            logger.info({ mint, symbol, attempt, msRemaining: Math.max(0, deadline - Date.now()) },
-              "Pipeline: fallback gate pending — all sources unconfirmed, retrying");
-          }
-        }
-
-        if (!gateConfirmed) {
-          const reason = "Pool not confirmed after 20s (no vault data / PDA / DexScreener / Jupiter)";
-          this.addEvent({ ...eventBase, symbol, action: "skipped", skipReason: reason });
-          logger.warn({ mint, symbol }, "Pipeline: SKIPPED — fallback gate timed out ❌");
-          if (isTelegramConfigured()) {
-            void sendTelegram(
-              `⚠️ <b>FALSE TRIGGER BLOCKED</b>\n──────────────────────\n` +
-              `🪙 Token: <b>${symbol}</b>\n📋 CA: <code>${mint}</code>\n` +
-              `❌ Pool not confirmed after 20s (gate timed out)\n✅ Entry blocked\n🕐 ${toIST(new Date())}`,
-            );
-          }
-          return;
-        }
-
-        if (jupiterOutAmount > 0 && baselinePrice <= 0) {
-          const solUsdFb = solUsd ?? await this.fetchSolUsdPrice();
-          if (solUsdFb && solUsdFb > 0) {
-            const jupiterImpliedPrice = (0.01 * solUsdFb) / (jupiterOutAmount / 1_000_000);
-            if (jupiterImpliedPrice > 0) baselinePrice = jupiterImpliedPrice;
-          }
-        }
-      }
-
-      // ── Resolve symbol/name from DexScreener (non-blocking 200ms race) ─────────
-      // DexScreener has 30-120s indexing lag for new tokens — we can't block on it.
-      // Race for 200ms: if indexed we get real metadata, otherwise use temp symbol.
-      // The background price-refinement loop updates symbol after position opens.
-      const dexDataEarly = await Promise.race([
-        dexPricePromise,
-        new Promise<null>((r) => setTimeout(() => r(null), 200)),
-      ]);
-      if (dexDataEarly) {
-        symbol = dexDataEarly.symbol;
-        name   = dexDataEarly.name;
-        if (!onChainPriceValid && dexDataEarly.price > 0) baselinePrice = dexDataEarly.price;
-        logger.info({ mint, symbol, name, dexPrice: dexDataEarly.price },
-          "Pipeline: DexScreener symbol/name resolved early ✅");
-      } else {
-        logger.info({ mint, symbol }, "Pipeline: DexScreener not yet indexed — using mint as temp symbol");
-      }
-      catchEventBase = { ...eventBase, symbol };
-
-      // ── Minimum entry price filter ─────────────────────────────────────────────
-      if (baselinePrice > 0 && baselinePrice < MIN_ENTRY_PRICE_USD) {
-        const reason = `Price too low — $${baselinePrice.toExponential(3)} < $${MIN_ENTRY_PRICE_USD} (Type-A rug filter)`;
-        this.addEvent({ ...eventBase, symbol, action: "skipped", skipReason: reason });
-        logger.info({ mint, symbol, price: baselinePrice }, "Pipeline: skipped — price below minimum ❌");
-        return;
-      }
-
-      // Re-check wallet/positions with mint now reserved
-      const skipAfterPrice = this.checkSkipReason(mint);
-      if (skipAfterPrice) {
-        if (!liveOnlySkip) this.addEvent({ ...eventBase, symbol, action: "skipped", skipReason: skipAfterPrice });
-        if (blacklistService.isBlacklisted(mint)) return;
-        liveOnlySkip = liveOnlySkip ?? skipAfterPrice;
-      }
-
-      // ── T2: rug-check timer complete — re-read on-chain price ─────────────────
-      await rugTimerPromise;
-      const t2Ms = Date.now() - t0;
-      logger.info({ mint, symbol, elapsedMs: t2Ms }, "Pipeline T2: 1.5s rug timer complete — re-reading on-chain price");
-
-      // Re-read pool reserves for rug check (on-chain, instant, no DexScreener)
-      let entryPrice = baselinePrice;
-      let rugReadOnChain = false;
-      if (wsolVaultPubkey && tokenVaultPubkey) {
-        const rugReserves = await this.fetchOnChainPoolReserves(wsolVaultPubkey, tokenVaultPubkey);
-        if (rugReserves && rugReserves.tokenBalanceUi > 0 && solUsd && solUsd > 0) {
-          const rugPriceSol = rugReserves.solBalance / rugReserves.tokenBalanceUi;
-          const rugPriceUsd = rugPriceSol * solUsd;
-          rugReadOnChain    = true;
-          entryPrice        = rugPriceUsd;
-          logger.info({
-            mint, symbol,
-            rugPriceUsd,
-            baselinePrice,
-            priceDeltaPct: baselinePrice > 0 ? (((rugPriceUsd / baselinePrice) - 1) * 100).toFixed(2) + "%" : "n/a",
-            elapsedMs: Date.now() - t0,
-          }, "Pipeline T2: rug price from on-chain reserves ✅");
-        }
-      }
-      // Fallback: if on-chain rug read failed, try DexScreener with short timeout
-      if (!rugReadOnChain) {
-        const rugDex = await Promise.race([
+      try {
+        const dexEarly = await Promise.race([
           this.fetchPriceFast(mint),
           new Promise<null>((r) => setTimeout(() => r(null), 3_000)),
         ]);
-        if (rugDex && rugDex.price > 0) {
-          entryPrice = rugDex.price;
-          if (symbol === mint.slice(0, 8)) { symbol = rugDex.symbol; name = rugDex.name; }
-          logger.info({ mint, symbol, rugDexPrice: rugDex.price },
-            "Pipeline T2: rug price from DexScreener (on-chain unavailable)");
+        if (dexEarly) {
+          symbol = dexEarly.symbol || mint.slice(0, 8);
+          name   = dexEarly.name   || mint.slice(0, 8);
         }
+      } catch { /* non-fatal */ }
+
+      const fullEventBase = { ...eventBase, symbol };
+
+      // ── Derive PumpSwap pool PDA (for buyer data collection) ──────────────────
+      let poolPda: string | null = null;
+      try {
+        const { PublicKey: PK } = await import('@solana/web3.js');
+        const mPK = new PK(mint);
+        const pPK = new PK(PUMPSWAP_PROGRAM_ID);
+        const idx = Buffer.from([0, 0]);
+        const wPK = new PK('So11111111111111111111111111111111111111112');
+        const [pda] = PK.findProgramAddressSync([Buffer.from('pool'), idx, mPK.toBuffer(), wPK.toBuffer()], pPK);
+        poolPda = pda.toBase58();
+      } catch { /* non-fatal */ }
+
+      // ── QUALITY COLLECTION (parallel, ~60s window) ────────────────────────────
+      const heliusKey = process.env['HELIUS_API_KEY'] ?? null;
+      const quality = await tokenQualityService.collectQualityData(
+        mint, symbol, poolPda, initialPoolSol, heliusKey,
+      );
+
+      // ── Quality gate ─────────────────────────────────────────────────────────
+      const qualityEventFields = {
+        qualityScore:     quality.totalScore,
+        liquiditySol:     quality.liquiditySol,
+        uniqueBuyers:     quality.uniqueBuyers,
+        buyPressureRatio: quality.buyPressureRatio,
+        topHolderPct:     quality.topHolderPct,
+        whaleDetected:    quality.whaleDetected,
+      };
+
+      if (quality.autoSkipReason) {
+        this.addEvent({ ...fullEventBase, action: 'skipped',
+          skipReason: `Quality: ${quality.autoSkipReason}`, ...qualityEventFields });
+        logger.info({ mint, symbol, reason: quality.autoSkipReason }, 'Graduation sniper: quality auto-skip ❌');
+        return;
       }
 
-      // ── Rug detection ─────────────────────────────────────────────────────────
-      if (baselinePrice > 0 && entryPrice > 0) {
-        const dropPct = (1 - entryPrice / baselinePrice) * 100;
-        if (dropPct >= RUG_DROP_ABORT_PCT) {
-          const skipReason = `Instant rug — dropped ${dropPct.toFixed(1)}% in 1.5s`;
-          this.addEvent({ ...eventBase, symbol, action: "skipped", skipReason });
-          logger.warn({ mint, symbol, baselinePrice, rugPrice: entryPrice, dropPct: dropPct.toFixed(1) },
-            "Pipeline T2: instant rug detected — entry aborted ❌");
-          if (isTelegramConfigured()) {
-            void sendTelegram(
-              `🚫 <b>SNIPER RUG ABORT</b>\n──────────────────────\n` +
-              `🪙 Token: <b>${symbol}</b>\n📋 CA: <code>${mint}</code>\n` +
-              `📉 Crashed: <b>-${dropPct.toFixed(1)}%</b> in 1.5s\n✅ Entry aborted\n🕐 ${toIST(new Date())}`,
-            );
-          }
-          return;
-        }
+      if (quality.totalScore < this.config.minQualityScore) {
+        this.addEvent({ ...fullEventBase, action: 'skipped',
+          skipReason: `Quality score ${quality.totalScore}/100 < min ${this.config.minQualityScore}`,
+          ...qualityEventFields });
+        logger.info({ mint, symbol, score: quality.totalScore, min: this.config.minQualityScore },
+          'Graduation sniper: quality score below threshold ❌');
+        return;
       }
 
-      // ── No-price abort ────────────────────────────────────────────────────────
-      // Last resort: if on-chain AND DexScreener both failed, give Jupiter one
-      // final window. jupFallbackPromise was fired at T0 (~1.5-2s ago at this
-      // point) so it should be resolved or nearly resolved by now.
-      if (baselinePrice <= 0 && entryPrice <= 0) {
-        const jupFinal = await Promise.race([
-          jupFallbackPromise,
-          new Promise<number | null>((r) => setTimeout(() => r(null), 2_000)),
-        ]);
-        if (jupFinal && jupFinal > 0 && solUsd && solUsd > 0) {
-          baselinePrice = jupFinal;
-          entryPrice    = jupFinal;
-          logger.info({ mint, symbol, jupFinal, elapsedMs: Date.now() - t0 },
-            "Pipeline: Jupiter fallback price (last resort) ✅");
-        } else {
-          this.addEvent({ ...eventBase, symbol, action: "skipped", skipReason: "Price not found (on-chain + DexScreener + Jupiter)" });
-          logger.info({ mint, symbol }, "Pipeline: skipped — no price from on-chain, DexScreener, or Jupiter ❌");
-          return;
-        }
-      }
-      if (entryPrice <= 0) entryPrice = baselinePrice;
+      logger.info({ mint, symbol, score: quality.totalScore, multiplier: quality.positionMultiplier },
+        `Graduation sniper: quality gate PASSED ✅ — score ${quality.totalScore}/100 → ${(quality.positionMultiplier * 100).toFixed(0)}% size`);
 
-      // ── Low-liquidity hour filter ──────────────────────────────────────────────
-      // Pool SOL check (above) already validates minimum liquidity on-chain.
-      // DexScreener liquidityUsd has 2-5 min indexing lag for new tokens — skip
-      // the DexScreener liquidity filter here; position monitoring will enforce it.
-      if (this.isLowLiquidityHour() && dexDataEarly && dexDataEarly.liquidityUsd > 0) {
-        const minLiq = LOW_LIQ_MIN_LIQUIDITY_USD;
-        if (dexDataEarly.liquidityUsd < minLiq) {
-          const reason = `Insufficient DEX liquidity [quiet hours] — $${dexDataEarly.liquidityUsd.toFixed(0)} < $${minLiq} min`;
-          this.addEvent({ ...eventBase, symbol, action: "skipped", skipReason: reason });
-          logger.info({ mint, symbol, liquidityUsd: dexDataEarly.liquidityUsd, minLiq },
-            "Pipeline: skipped — DEX liquidity below quiet-hours threshold ❌");
-          return;
-        }
+      // Variable position size based on quality score
+      const positionSizeSol = this.config.positionSizeSol * quality.positionMultiplier;
+
+      // ── CANDLE ENTRY (10s candles) ────────────────────────────────────────────
+      const maxEntryAt = detectedAt + this.config.maxEntryWindowMs;
+
+      if (Date.now() > maxEntryAt) {
+        this.addEvent({ ...fullEventBase, action: 'skipped',
+          skipReason: 'Entry window expired (quality check took too long)', ...qualityEventFields });
+        logger.warn({ mint, symbol }, 'Graduation sniper: candle entry window expired ⏱❌');
+        return;
       }
 
-      // ── PRICE DRIFT / MOMENTUM FILTER ─────────────────────────────────────────
-      // Compare current pre-buy price (entryPrice) to baseline (baselinePrice).
-      // If the token has already run significantly in our ~13s of checks, the buy
-      // would enter at a pumped price — SL is then set from that inflated level
-      // and the first natural pullback triggers an instant loss.
-      const driftPct = baselinePrice > 0 ? ((entryPrice / baselinePrice) - 1) * 100 : 0;
+      // Candle 1: 10s observation window
+      const c1 = await this.buildCandle(mint, wsolVaultPubkey, tokenVaultPubkey, effectiveSolUsd, 10_000);
+
+      if (Date.now() > maxEntryAt) {
+        this.addEvent({ ...fullEventBase, action: 'skipped',
+          skipReason: 'Entry window expired after candle 1', ...qualityEventFields });
+        return;
+      }
+
+      if (!c1.isGreen) {
+        this.addEvent({ ...fullEventBase, action: 'skipped',
+          skipReason: `Candle 1 bearish (open ${c1.open.toExponential(3)} → close ${c1.close.toExponential(3)})`,
+          ...qualityEventFields });
+        logger.info({ mint, symbol, c1Open: c1.open, c1Close: c1.close },
+          'Graduation sniper: candle 1 bearish — skip ❌');
+        return;
+      }
+
+      if (!c1.isActive) {
+        this.addEvent({ ...fullEventBase, action: 'skipped',
+          skipReason: `Candle 1 inactive (buys: ${c1.buysDelta})`, ...qualityEventFields });
+        logger.info({ mint, symbol, buysDelta: c1.buysDelta },
+          'Graduation sniper: candle 1 inactive — skip ❌');
+        return;
+      }
+
       logger.info({
         mint, symbol,
-        baselinePrice,
-        entryPrice,
-        driftPct: driftPct.toFixed(2) + "%",
-        elapsedMs: Date.now() - t0,
-        ENTRY_DRIFT_ABORT_PCT,
-        MOMENTUM_SKIP_PCT,
-      }, "Sniper timing: T6 — pre-buy drift check");
+        c1Open: c1.open.toExponential(4), c1Close: c1.close.toExponential(4),
+        c1High: c1.high.toExponential(4), c1Buys: c1.buysDelta, c1Sells: c1.sellsDelta,
+      }, 'Graduation sniper: candle 1 GREEN ✅ — watching candle 2 for breakout above c1.high');
 
-      if (driftPct >= MOMENTUM_SKIP_PCT) {
-        // Token pumped ≥15% from baseline — "missed entry" (ran before we got there)
-        const reason = `Missed entry — price already +${driftPct.toFixed(1)}% from detection (>${MOMENTUM_SKIP_PCT}% threshold)`;
-        this.addEvent({ ...eventBase, symbol, action: "skipped", skipReason: reason });
-        logger.warn({ mint, symbol, baselinePrice, entryPrice, driftPct: driftPct.toFixed(1), elapsedMs: Date.now() - t0 },
-          "Graduation sniper: MISSED ENTRY — token pumped too fast, skipping buy");
-        if (isTelegramConfigured()) {
-          void sendTelegram(
-            `⏩ <b>SNIPER MISSED ENTRY</b>\n` +
-            `──────────────────────\n` +
-            `🪙 Token: <b>${symbol}</b>\n` +
-            `📋 CA: <code>${mint}</code>\n` +
-            `📈 Already pumped: <b>+${driftPct.toFixed(1)}%</b> during entry checks\n` +
-            `❌ Buy skipped — would be chasing\n` +
-            `🕐 ${toIST(new Date())}`,
-          );
+      // Candle 2: poll every 3s — enter on breakout above c1.high
+      let entryPrice = 0;
+      const c2Deadline = Math.min(Date.now() + 10_000, maxEntryAt);
+      while (Date.now() < c2Deadline) {
+        if (wsolVaultPubkey && tokenVaultPubkey) {
+          try {
+            const r = await this.fetchOnChainPoolReserves(wsolVaultPubkey, tokenVaultPubkey);
+            if (r && r.solBalance > 0 && r.tokenBalanceUi > 0) {
+              const p = (r.solBalance / r.tokenBalanceUi) * effectiveSolUsd;
+              if (p > c1.high) {
+                entryPrice = p;
+                logger.info({ mint, symbol, price: p.toExponential(4), c1High: c1.high.toExponential(4) },
+                  'Graduation sniper: candle 2 BREAKOUT ✅ — entering position');
+                break;
+              }
+            }
+          } catch { /* retry next interval */ }
         }
+        const waitMs = Math.min(3_000, c2Deadline - Date.now());
+        if (waitMs > 0) await new Promise<void>((r) => setTimeout(r, waitMs));
+      }
+
+      if (!entryPrice) {
+        this.addEvent({ ...fullEventBase, action: 'skipped',
+          skipReason: `Candle 2 no breakout above ${c1.high.toExponential(3)}`, ...qualityEventFields });
+        logger.info({ mint, symbol, c1High: c1.high }, 'Graduation sniper: candle 2 no breakout — skip ❌');
         return;
       }
 
-      if (driftPct >= ENTRY_DRIFT_ABORT_PCT) {
-        // Token rose 8–14% from baseline — abort but don't label as "missed"
-        const reason = `Entry drift abort — price +${driftPct.toFixed(1)}% from detection (>${ENTRY_DRIFT_ABORT_PCT}% threshold)`;
-        this.addEvent({ ...eventBase, symbol, action: "skipped", skipReason: reason });
-        logger.warn({ mint, symbol, baselinePrice, entryPrice, driftPct: driftPct.toFixed(1) },
-          "Graduation sniper: entry drift too high — buy aborted");
-        return;
-      }
+      // ── Paper sniper tap-in (always fires when quality passes) ───────────────
+      this.paperCallback?.(mint, entryPrice, symbol, name, detectedAt, initialPrice);
 
-      // ── NEGATIVE DRIFT GUARD ───────────────────────────────────────────────
-      // If the current price is already significantly BELOW the baseline it
-      // means the pool is crashing (rug in progress or stale DexScreener price
-      // vs live on-chain price).  The -96% / -99% cases (CHIKI, LAZY) are caught
-      // here as a second defence layer after the 30s age gate.
-      // Threshold: -15% — a healthy graduation should not dump before we enter.
-      const NEG_DRIFT_ABORT_PCT = -15;
-      if (baselinePrice > 0 && driftPct < NEG_DRIFT_ABORT_PCT) {
-        const reason = `Negative drift abort — pool already down ${driftPct.toFixed(1)}% from detection (<${NEG_DRIFT_ABORT_PCT}% threshold) — likely dead pool`;
-        this.addEvent({ ...eventBase, symbol, action: "skipped", skipReason: reason });
-        logger.warn(
-          { mint, symbol, baselinePrice, entryPrice, driftPct: driftPct.toFixed(1), limit: NEG_DRIFT_ABORT_PCT },
-          "Graduation sniper: NEGATIVE DRIFT — pool crashing, buy aborted ⛔",
-        );
-        if (isTelegramConfigured()) {
-          void sendTelegram(
-            `⛔ <b>SNIPER ABORTED — CRASHING POOL</b>\n` +
-            `──────────────────────\n` +
-            `🪙 Token: <b>${symbol}</b>\n` +
-            `📋 CA: <code>${mint}</code>\n` +
-            `📉 Pool down: <b>${driftPct.toFixed(1)}%</b> since detection\n` +
-            `❌ Buy skipped — likely dead/rugged pool\n` +
-            `🕐 ${toIST(new Date())}`,
-          );
-        }
-        return;
-      }
-
-      logger.info({ mint, symbol, driftPct: driftPct.toFixed(2) + "%", elapsedMs: Date.now() - t0 },
-        "Graduation sniper: drift check passed ✅ — proceeding to buy");
-
-      // Grab pre-fetch result opportunistically — it has been running in background
-      // for ~3-4s (rug wait + price fetch + drift check).  If it's ready, use it;
-      // if still pending/failed, race gives null within 50ms and buy() retries fresh.
-      const preQuote = await Promise.race([
-        preQuotePromise,
-        new Promise<null>((r) => setTimeout(() => r(null), 50)),
-      ]);
-      logger.info({ mint, symbol, preQuoteReady: !!preQuote, elapsedMs: Date.now() - t0 },
-        preQuote ? "Sniper timing: pre-fetch quote ready — skipping getQuote call ⚡" : "Sniper timing: pre-fetch not ready — buy() will fetch fresh quote");
-
-      // ── Paper sniper tap-in ───────────────────────────────────────────────────
-      // Always fires when quality filters pass — even if live must skip due to
-      // insufficient wallet balance. Paper has its own virtual balance & checks.
-      this.paperCallback?.(mint, entryPrice, symbol, name, detectedAt, baselinePrice);
-
-      // Skip live entry if wallet can't support it (balance, not configured, etc.)
       if (liveOnlySkip) {
-        logger.info({ mint, symbol, liveOnlySkip }, "Graduation sniper: live entry skipped — paper-only trade");
+        logger.info({ mint, symbol, liveOnlySkip }, 'Graduation sniper: live entry skipped — paper-only');
         return;
       }
 
-      await this.enterPosition(mint, symbol, name, entryPrice, signature, baselinePrice, detectedAt, preQuote);
-      this.addEvent({ ...eventBase, symbol, action: "entered" });
+      await this.enterPosition(
+        mint, symbol, name, entryPrice, signature, initialPrice, detectedAt, null,
+        positionSizeSol, quality,
+      );
+      this.addEvent({ ...fullEventBase, action: 'entered', ...qualityEventFields });
+
 
     } catch (err) {
       const errMsg = (err as Error).message ?? String(err);
@@ -1987,18 +1753,24 @@ class GraduationSniperService {
     name: string,
     price: number,
     _detectedTxSig: string,
-    detectionPrice?: number,     // baselinePrice (first DexScreener fetch ~5s after grad)
-    graduationDetectedAt?: number, // Date.now() at graduation WS event
+    detectionPrice?: number,
+    graduationDetectedAt?: number,
     preQuote?: { quote: unknown; fee: number; fetchedAt: number } | null,
+    positionSizeSolOverride?: number,
+    quality?: QualityMetrics | null,
   ): Promise<void> {
     const cfg = this.config;
     const id  = uid();
     const buyStart = Date.now();
+    const actualPositionSizeSol = positionSizeSolOverride ?? cfg.positionSizeSol;
 
     logger.info({
       mint, symbol,
       preBuyPrice: price,
       detectionPrice: detectionPrice ?? null,
+      positionSizeSol: actualPositionSizeSol,
+      qualityScore: quality?.totalScore ?? null,
+      multiplier: quality?.positionMultiplier ?? null,
       preQuoteAgeMs: preQuote ? buyStart - preQuote.fetchedAt : null,
       msSinceDetection: graduationDetectedAt ? buyStart - graduationDetectedAt : null,
     }, "Sniper timing: T7 — enterPosition called, Jupiter buy starting ⚡");
@@ -2008,7 +1780,7 @@ class GraduationSniperService {
     let tokenAmount: number;
     let sizeSol: number;
     try {
-      const result = await jupiterSwapService.buy(mint, cfg.positionSizeSol, cfg.slippageBps, cfg.priorityFeeLamports, preQuote, cfg.jitoTipLamports);
+      const result = await jupiterSwapService.buy(mint, actualPositionSizeSol, cfg.slippageBps, cfg.priorityFeeLamports, preQuote, cfg.jitoTipLamports);
       txSignature = result.txSignature;
       tokenAmount = result.tokenAmount;
       sizeSol     = result.solSpent;
@@ -2130,31 +1902,41 @@ class GraduationSniperService {
       mint,
       symbol,
       name,
-      detectedAt:        graduationDetectedAt ?? nowMs,
-      entryAt:           nowMs,
-      entryPrice:        actualEntryPrice,
-      currentPrice:      actualEntryPrice,
+      detectedAt:         graduationDetectedAt ?? nowMs,
+      entryAt:            nowMs,
+      entryPrice:         actualEntryPrice,
+      currentPrice:       actualEntryPrice,
       sizeSol,
-      tp1Hit:            false,
-      tp2Hit:            false,
-      remainingFraction: 1.0,
-      effectiveSlPrice:  actualEntryPrice * (1 - cfg.slPct / 100),
-      trailingHigh:      actualEntryPrice,
-      status:            "open",
-      realizedPnlSol:    0,
-      unrealizedPnlSol:  0,
-      totalPnlSol:       0,
-      pnlPct:            0,
+      tp1Hit:             false,
+      tp2Hit:             false,
+      tp3Hit:             false,
+      remainingFraction:  1.0,
+      effectiveSlPrice:   actualEntryPrice * (1 - cfg.slPct / 100),
+      trailingHigh:       actualEntryPrice,
+      status:             "open",
+      realizedPnlSol:     0,
+      unrealizedPnlSol:   0,
+      totalPnlSol:        0,
+      pnlPct:             0,
       txSignature,
-      tokenAmount:       actualTokenAmount,
-      entrySig:          txSignature,
-      exitSig:           undefined,
-      tp1RealizedSol:    0,
-      tp2RealizedSol:    0,
-      runnerRealizedSol: 0,
+      tokenAmount:        actualTokenAmount,
+      entrySig:           txSignature,
+      exitSig:            undefined,
+      tp1RealizedSol:     0,
+      tp2RealizedSol:     0,
+      tp3RealizedSol:     0,
+      runnerRealizedSol:  0,
       detectionPrice,
       entryDriftPct,
       msDetectionToFill,
+      // Quality metrics stored at entry for dashboard + analytics
+      qualityScore:       quality?.totalScore      ?? 0,
+      liquiditySol:       quality?.liquiditySol    ?? 0,
+      buyPressureRatio:   quality?.buyPressureRatio ?? 1,
+      uniqueBuyers:       quality?.uniqueBuyers    ?? 0,
+      topHolderPct:       quality?.topHolderPct    ?? 0,
+      whaleDetected:      quality?.whaleDetected   ?? false,
+      positionMultiplier: quality?.positionMultiplier ?? 1,
     };
 
     this.openPositions.set(mint, pos);
@@ -2177,9 +1959,11 @@ class GraduationSniperService {
         `💵 Entry: <b>$${fmtTgPrice(actualEntryPrice)}</b>\n` +
         `💰 Size: <b>${sizeSol.toFixed(4)} SOL</b>\n` +
         `🔗 <a href="https://solscan.io/tx/${txSignature}">View on Solscan</a>\n` +
-        `🛡️ Staged SL: -20% (2m) → -25% peak → -30% peak\n` +
-        `🎯 TP1: $${fmtTgPrice(actualEntryPrice * (1 + cfg.tp1Pct / 100))} (+${cfg.tp1Pct}%)\n` +
-        `🎯 TP2: $${fmtTgPrice(actualEntryPrice * (1 + cfg.tp2Pct / 100))} (+${cfg.tp2Pct}%)\n` +
+        `🛡️ Hard SL: -${cfg.slPct}% from entry ($${fmtTgPrice(actualEntryPrice * (1 - cfg.slPct / 100))})\n` +
+        `🎯 TP1: +${cfg.tp1Pct}% → sell ${cfg.tp1ClosePct}%\n` +
+        `🎯 TP2: +${cfg.tp2Pct}% → sell ${cfg.tp2ClosePct}%\n` +
+        `🔥 TP3: +${cfg.tp3Pct}% → sell ${cfg.tp3ClosePct}% (runner)\n` +
+        `📊 Quality: ${quality?.totalScore ?? 0}/100 × ${((quality?.positionMultiplier ?? 1) * 100).toFixed(0)}% size\n` +
         `🕐 ${toIST(new Date())}`,
       );
     }
@@ -2547,7 +2331,7 @@ class GraduationSniperService {
     closeOriginalFraction: number,
     reason: string,
     currentPrice: number,
-    breakdownKey?: "tp1" | "tp2",
+    breakdownKey?: "tp1" | "tp2" | "tp3",
   ): Promise<void> {
     // Guard: never sell more than what's actually remaining
     const actualFraction = Math.min(closeOriginalFraction, pos.remainingFraction);
@@ -2594,8 +2378,9 @@ class GraduationSniperService {
       pos.exitSig     = exitTxSig;   // mark as verified on-chain sell
     }
 
-    if (breakdownKey === "tp1") pos.tp1RealizedSol += closePnl;
+    if (breakdownKey === "tp1")      pos.tp1RealizedSol += closePnl;
     else if (breakdownKey === "tp2") pos.tp2RealizedSol += closePnl;
+    else if (breakdownKey === "tp3") pos.tp3RealizedSol += closePnl;
 
     void this.persistPosition(pos);
     void this.refreshWalletBalance();
@@ -2726,54 +2511,121 @@ class GraduationSniperService {
     }
   }
 
-  // ── FIX 1: Staged SL evaluator ────────────────────────────────────────────
+  // ── Candle builder ─────────────────────────────────────────────────────────
+  // Observes price for `windowMs` (default 10 000) by polling on-chain reserves
+  // every 3 s. Returns OHLC + buy/sell delta from DexScreener m5 snapshot.
 
-  private async checkStagedSL(pos: SniperPosition, price: number, ageMs: number): Promise<boolean> {
-    const dropFromEntry = (1 - price / pos.entryPrice) * 100;
-    // Always use entryPrice as the floor for peak — if trailingHigh was loaded as 0
-    // from DB (NULL column) the first tick sets it to the crashed price, making
-    // dropFromPeak = 0% forever. entryPrice floor ensures SL always has a valid reference.
-    const peak         = Math.max(pos.trailingHigh, pos.entryPrice);
-    const dropFromPeak = peak > 0 ? (1 - price / peak) * 100 : dropFromEntry;
+  private async buildCandle(
+    mint: string,
+    wsolVaultPubkey: string | null,
+    tokenVaultPubkey: string | null,
+    solUsd: number,
+    windowMs: number,
+  ): Promise<{ open: number; close: number; high: number; low: number; buysDelta: number; sellsDelta: number; isGreen: boolean; isActive: boolean }> {
+    const startMs = Date.now();
 
-    // After TP2: runner is managed by the trailing stop in the main loop
-    if (pos.tp2Hit) return false;
+    // Snapshot DexScreener m5 buys/sells at start of window
+    let startBuys  = 0;
+    let startSells = 0;
+    try {
+      type DexPair = { baseToken: { address: string }; txns?: { m5?: { buys?: number; sells?: number } } };
+      const r = await axios.get<{ pairs?: DexPair[] }>(
+        `${DEXSCREENER_BASE}/latest/dex/tokens/${mint}`, { timeout: 5_000 },
+      );
+      const pair = r.data?.pairs?.[0];
+      startBuys  = pair?.txns?.m5?.buys  ?? 0;
+      startSells = pair?.txns?.m5?.sells ?? 0;
+    } catch { /* non-fatal */ }
 
-    // NOTE: Telegram notifications are intentionally sent INSIDE closePosition
-    // (after on-chain confirmation) — NOT here. Sending before the sell caused
-    // false "SL triggered" messages when Jupiter sell failed.
+    // First price sample = open
+    let openPrice  = 0;
+    let highPrice  = 0;
+    let lowPrice   = Infinity;
+    let closePrice = 0;
 
-    if (pos.tp1Hit) {
-      if (dropFromPeak >= STAGED_SL_AFTER_TP1) {
-        const loss = dropFromPeak.toFixed(0);
-        logger.warn({ mint: pos.mint, symbol: pos.symbol, dropFromPeak: loss }, "Graduation sniper: staged SL — after TP1");
-        await this.closePosition(pos, `Staged SL: -${loss}% from TP1 peak`, price);
-        return true;
+    const samplePrice = async (): Promise<number> => {
+      if (wsolVaultPubkey && tokenVaultPubkey) {
+        try {
+          const res = await this.fetchOnChainPoolReserves(wsolVaultPubkey, tokenVaultPubkey);
+          if (res && res.solBalance > 0 && res.tokenBalanceUi > 0) {
+            return (res.solBalance / res.tokenBalanceUi) * solUsd;
+          }
+        } catch { /* fall through to DexScreener */ }
       }
-      return false;
+      // DexScreener fallback
+      try {
+        const res = await this.fetchPrice(mint);
+        if (res && res.price > 0) return res.price;
+      } catch { /* ignore */ }
+      return 0;
+    };
+
+    // Poll every 3 s until window expires
+    const interval = 3_000;
+    while (Date.now() - startMs < windowMs) {
+      const p = await samplePrice();
+      if (p > 0) {
+        if (openPrice === 0) openPrice = p;
+        if (p > highPrice) highPrice = p;
+        if (p < lowPrice)  lowPrice  = p;
+        closePrice = p;
+      }
+      const remaining = windowMs - (Date.now() - startMs);
+      if (remaining <= 0) break;
+      await new Promise<void>((r) => setTimeout(r, Math.min(interval, remaining)));
     }
 
-    if (ageMs <= STAGED_SL_PHASE1_MS) {
-      if (dropFromEntry >= STAGED_SL_PHASE1_PCT) {
-        const loss = dropFromEntry.toFixed(0);
-        logger.warn({ mint: pos.mint, symbol: pos.symbol, dropFromEntry: loss }, "Graduation sniper: staged SL phase 1 (0-2m)");
-        await this.closePosition(pos, `Staged SL: -${loss}% in first 2m`, price);
-        return true;
-      }
-    } else if (ageMs <= STAGED_SL_PHASE2_MS) {
-      if (dropFromPeak >= STAGED_SL_PHASE2_PCT) {
-        const loss = dropFromPeak.toFixed(0);
-        logger.warn({ mint: pos.mint, symbol: pos.symbol, dropFromPeak: loss }, "Graduation sniper: staged SL phase 2 (2-10m)");
-        await this.closePosition(pos, `Staged SL: -${loss}% from peak (2-10m)`, price);
-        return true;
-      }
-    } else {
-      if (dropFromPeak >= STAGED_SL_PHASE3_PCT) {
-        const loss = dropFromPeak.toFixed(0);
-        logger.warn({ mint: pos.mint, symbol: pos.symbol, dropFromPeak: loss }, "Graduation sniper: staged SL phase 3 (>10m)");
-        await this.closePosition(pos, `Staged SL: -${loss}% from peak (>10m)`, price);
-        return true;
-      }
+    // Snapshot DexScreener m5 buys/sells at end of window
+    let endBuys  = startBuys;
+    let endSells = startSells;
+    try {
+      type DexPair = { baseToken: { address: string }; txns?: { m5?: { buys?: number; sells?: number } } };
+      const r = await axios.get<{ pairs?: DexPair[] }>(
+        `${DEXSCREENER_BASE}/latest/dex/tokens/${mint}`, { timeout: 5_000 },
+      );
+      const pair = r.data?.pairs?.[0];
+      endBuys  = pair?.txns?.m5?.buys  ?? startBuys;
+      endSells = pair?.txns?.m5?.sells ?? startSells;
+    } catch { /* non-fatal */ }
+
+    const buysDelta  = Math.max(0, endBuys  - startBuys);
+    const sellsDelta = Math.max(0, endSells - startSells);
+    const finalClose = closePrice > 0 ? closePrice : openPrice;
+    const finalLow   = lowPrice < Infinity ? lowPrice : openPrice;
+    const finalHigh  = Math.max(highPrice, openPrice, finalClose);
+
+    return {
+      open:       openPrice,
+      close:      finalClose,
+      high:       finalHigh,
+      low:        finalLow,
+      buysDelta,
+      sellsDelta,
+      isGreen:    finalClose > openPrice && openPrice > 0,
+      isActive:   buysDelta > 0,
+    };
+  }
+
+  // ── SL evaluator (pre-TP1 only) ───────────────────────────────────────────
+  // After TP1 hit, SL management moves to the trailing logic in _checkPositionPriceInner.
+
+  private async checkStagedSL(pos: SniperPosition, price: number): Promise<boolean> {
+    // After any TP hit, SL is managed by the trailing stop in the price loop
+    if (pos.tp1Hit || pos.tp2Hit || pos.tp3Hit) return false;
+
+    // Pre-TP1: hard SL at -slPct% from entry price
+    const dropFromEntry = (1 - price / pos.entryPrice) * 100;
+    if (dropFromEntry >= this.config.slPct) {
+      logger.warn(
+        { mint: pos.mint, symbol: pos.symbol, dropFromEntry: dropFromEntry.toFixed(1), threshold: this.config.slPct },
+        "Graduation sniper: hard SL triggered ❌",
+      );
+      await this.closePosition(
+        pos,
+        `SL: -${dropFromEntry.toFixed(1)}% from entry (>${this.config.slPct}% threshold)`,
+        price,
+      );
+      return true;
     }
     return false;
   }
@@ -2947,84 +2799,160 @@ class GraduationSniperService {
     const tp1Frac  = cfg.tp1ClosePct / 100;
     const tp2Frac  = cfg.tp2ClosePct / 100;
 
-    // ── FIX 1: Always update trailing high from PEAK (not just after TP2) ────
-    if (price > pos.trailingHigh) pos.trailingHigh = price;
+    // ── Always update trailing high ────────────────────────────────────────
+    if (price > pos.trailingHigh || pos.trailingHigh === 0) {
+      pos.trailingHigh = price;
+    }
 
-    // ── FIX 1: Staged SL — replaces old single -40% + hard stop ──────────────
-    if (await this.checkStagedSL(pos, price, ageMs)) return;
+    // ── TP3 runner: trailing SL -runnerTrailingPct% from peak ─────────────────
+    if (pos.tp3Hit) {
+      const trailStop = pos.trailingHigh * (1 - cfg.trailingStopPct / 100);
+      pos.effectiveSlPrice = trailStop;
+      if (price <= trailStop) {
+        await this.closePosition(
+          pos,
+          `Runner trailing stop -${cfg.trailingStopPct}% from peak ($${fmtTgPrice(pos.trailingHigh)})`,
+          price,
+        );
+        return;
+      }
+      this.updateLivePnl(pos);
+      void this.persistPosition(pos);
+      return;
+    }
 
-    // ── Dead position exit — open >2h with <5% movement ──────────────────────
-    if (!pos.tp1Hit) {
+    // ── TP2 runner: trailing SL -trailingStopAfterTp2Pct% from peak ──────────
+    if (pos.tp2Hit) {
+      const trailStop = pos.trailingHigh * (1 - cfg.trailingStopAfterTp2Pct / 100);
+      pos.effectiveSlPrice = trailStop;
+      if (price <= trailStop) {
+        await this.closePosition(
+          pos,
+          `TP2 trailing stop -${cfg.trailingStopAfterTp2Pct}% from peak ($${fmtTgPrice(pos.trailingHigh)})`,
+          price,
+        );
+        return;
+      }
+      // ── TP3 check ────────────────────────────────────────────────────────────
+      const tp3Price = pos.entryPrice * (1 + cfg.tp3Pct / 100);
+      const tp3Frac  = cfg.tp3ClosePct / 100;
+      if (!pos.tp3Hit && price >= tp3Price) {
+        pos.tp3Hit = true;
+        try {
+          await this.partialClose(pos, tp3Frac, `TP3 +${cfg.tp3Pct}% — sell ${cfg.tp3ClosePct}%`, price, 'tp3');
+        } catch (err) {
+          pos.tp3Hit = false;
+          logger.error({ mint, symbol: pos.symbol, err: (err as Error).message },
+            'Graduation sniper: TP3 sell FAILED ❌ — reverted, will retry next tick');
+          return;
+        }
+        let tp3Persisted = false;
+        for (let attempt = 0; attempt < 10 && !tp3Persisted; attempt++) {
+          try { await this.persistPosition(pos); tp3Persisted = true; }
+          catch (err) {
+            logger.warn({ mint, attempt, err: (err as Error).message }, 'Graduation sniper: TP3 atomic persist retry');
+            await new Promise((r) => setTimeout(r, 3_000));
+          }
+        }
+        if (!tp3Persisted) logger.error({ mint }, 'Graduation sniper: TP3 persist failed after all retries ⚠️');
+        logger.info({ mint, symbol: pos.symbol, price }, 'Graduation sniper: TP3 hit 🔥 — runner mode active');
+        if (isTelegramConfigured()) {
+          const partialPnl = (price / pos.entryPrice - 1) * pos.sizeSol * tp3Frac;
+          void sendTelegram(
+            `🔥 <b>SNIPER TP3 HIT 🔴 LIVE</b>
+──────────────────────
+` +
+            `🪙 Token: <b>${pos.symbol}</b>
+📋 CA: <code>${pos.mint}</code>
+` +
+            `💵 Price: <b>$${fmtTgPrice(price)}</b> (+${cfg.tp3Pct}%)
+` +
+            `💰 Sold ${cfg.tp3ClosePct}% → ~<b>+${partialPnl.toFixed(4)} SOL</b>
+` +
+            `🏃 Runner mode — trailing stop ${cfg.trailingStopPct}% below peak
+` +
+            `📦 Remaining: ${((pos.remainingFraction) * 100).toFixed(0)}% position
+🕐 ${toIST(new Date())}`,
+          );
+        }
+      }
+      this.updateLivePnl(pos);
+      void this.persistPosition(pos);
+      return;
+    }
+
+    // ── TP1 hit: breakeven SL, then check TP2 ────────────────────────────────
+    if (pos.tp1Hit) {
+      pos.effectiveSlPrice = pos.entryPrice;
+      if (price <= pos.entryPrice) {
+        await this.closePosition(pos, 'Breakeven SL after TP1', price);
+        return;
+      }
+      if (!pos.tp2Hit && price >= tp2Price) {
+        pos.tp2Hit = true;
+        pos.trailingHigh = Math.max(pos.trailingHigh, price);
+        try {
+          await this.partialClose(pos, tp2Frac, `TP2 +${cfg.tp2Pct}% — sell ${cfg.tp2ClosePct}%`, price, 'tp2');
+        } catch (err) {
+          pos.tp2Hit = false;
+          logger.error({ mint, symbol: pos.symbol, err: (err as Error).message },
+            'Graduation sniper: TP2 sell FAILED ❌ — reverted, will retry next tick');
+          return;
+        }
+        let tp2Persisted = false;
+        for (let attempt = 0; attempt < 10 && !tp2Persisted; attempt++) {
+          try { await this.persistPosition(pos); tp2Persisted = true; }
+          catch (err) {
+            logger.warn({ mint, attempt, err: (err as Error).message }, 'Graduation sniper: TP2 atomic persist retry');
+            await new Promise((r) => setTimeout(r, 3_000));
+          }
+        }
+        if (!tp2Persisted) logger.error({ mint }, 'Graduation sniper: TP2 persist failed after all retries ⚠️');
+        logger.info({ mint, symbol: pos.symbol, price }, 'Graduation sniper: TP2 hit 🚀');
+        if (isTelegramConfigured()) {
+          const partialPnl = (price / pos.entryPrice - 1) * pos.sizeSol * tp2Frac;
+          void sendTelegram(
+            `🚀 <b>SNIPER TP2 HIT 🔴 LIVE</b>
+──────────────────────
+` +
+            `🪙 Token: <b>${pos.symbol}</b>
+📋 CA: <code>${pos.mint}</code>
+` +
+            `💵 Price: <b>$${fmtTgPrice(price)}</b> (+${cfg.tp2Pct}%)
+` +
+            `💰 Sold ${cfg.tp2ClosePct}% → ~<b>+${partialPnl.toFixed(4)} SOL</b>
+` +
+            `🎯 Next: TP3 +${cfg.tp3Pct}% — trailing SL -${cfg.trailingStopAfterTp2Pct}% from peak
+` +
+            `📦 Remaining: ${((pos.remainingFraction) * 100).toFixed(0)}% position
+🕐 ${toIST(new Date())}`,
+          );
+        }
+      }
+      this.updateLivePnl(pos);
+      void this.persistPosition(pos);
+      return;
+    }
+
+    // ── Pre-TP1: hard SL check (-slPct% from entry) ───────────────────────────
+    if (await this.checkStagedSL(pos, price)) return;
+
+    // ── Dead position exit (>2h open, <5% move, no TP hit) ───────────────────
+    {
       const movePct = Math.abs((price / pos.entryPrice - 1) * 100);
       if (ageMs >= DEAD_POSITION_MS && movePct < DEAD_MOVE_PCT) {
         logger.info(
           { mint, symbol: pos.symbol, ageH: (ageMs / 3_600_000).toFixed(1), movePct: movePct.toFixed(2) },
-          "Graduation sniper: dead position exit — no momentum",
+          'Graduation sniper: dead position exit — no momentum',
         );
-        // Telegram sent inside closePosition after confirmed sell (not before)
-        await this.closePosition(pos, "Dead — No Momentum", price);
+        await this.closePosition(pos, 'Dead — No Momentum', price);
         return;
       }
     }
 
-    // ── Trailing stop for runner (after TP2) ──────────────────────────────────
-    if (pos.tp2Hit && pos.trailingHigh > 0) {
-      const trailTrigger = pos.trailingHigh * (1 - cfg.trailingStopPct / 100);
-      if (price <= trailTrigger) {
-        await this.closePosition(pos, "Trailing Stop (runner)", price);
-        return;
-      }
-    }
-
-    // ── TP1 — FIX 3: atomic sell + SL update with retry ──────────────────────
+    // ── TP1 check ────────────────────────────────────────────────────────────
     if (!pos.tp1Hit && price >= tp1Price) {
       await this.executeTP1Atomic(pos, price, tp1Frac, cfg.tp1Pct, cfg.tp1ClosePct);
-    }
-
-    // ── TP2 ───────────────────────────────────────────────────────────────────
-    if (pos.tp1Hit && !pos.tp2Hit && price >= tp2Price) {
-      pos.tp2Hit = true;
-      // Use Math.max — if the token retraced back to TP2 after already being higher,
-      // keep the real peak so the trailing stop is measured from the actual high,
-      // not the (lower) TP2 trigger price.
-      pos.trailingHigh = Math.max(pos.trailingHigh, price);
-      try {
-        await this.partialClose(pos, tp2Frac, `TP2 +${cfg.tp2Pct}% — sell ${cfg.tp2ClosePct}%`, price, "tp2");
-      } catch (err) {
-        // Sell failed on-chain — revert tp2Hit so the next price tick retries.
-        pos.tp2Hit = false;
-        logger.error({ mint, symbol: pos.symbol, err: (err as Error).message }, "Graduation sniper: TP2 sell FAILED ❌ — reverted, will retry next tick");
-        return;
-      }
-
-      // Atomic persist with retry — matches TP1 pattern. Without this, a crash between
-      // TP2 sell confirmation and DB write causes TP2 to double-execute on restart.
-      let tp2Persisted = false;
-      for (let attempt = 0; attempt < 10 && !tp2Persisted; attempt++) {
-        try {
-          await this.persistPosition(pos);
-          tp2Persisted = true;
-        } catch (err) {
-          logger.warn({ mint, attempt, err: (err as Error).message }, "Graduation sniper: TP2 atomic persist retry");
-          await new Promise((r) => setTimeout(r, 3_000));
-        }
-      }
-      if (!tp2Persisted) {
-        logger.error({ mint }, "Graduation sniper: TP2 persist failed after all retries ⚠️");
-      }
-
-      logger.info({ mint, symbol: pos.symbol, price }, "Graduation sniper: TP2 hit — runner active");
-      if (isTelegramConfigured()) {
-        const partialPnl = (price / pos.entryPrice - 1) * pos.sizeSol * tp2Frac;
-        void sendTelegram(
-          `🚀 <b>SNIPER TP2 HIT 🔴 LIVE</b>\n──────────────────────\n` +
-          `🪙 Token: <b>${pos.symbol}</b>\n📋 CA: <code>${pos.mint}</code>\n` +
-          `💵 Price: <b>$${fmtTgPrice(price)}</b> (+${cfg.tp2Pct}%)\n` +
-          `💰 Sold ${cfg.tp2ClosePct}% → ~<b>+${partialPnl.toFixed(4)} SOL</b>\n` +
-          `🎯 Runner active — trailing stop ${cfg.trailingStopPct}% below peak\n` +
-          `📦 Remaining: ${((pos.remainingFraction) * 100).toFixed(0)}% position\n🕐 ${toIST(new Date())}`,
-        );
-      }
     }
 
     this.updateLivePnl(pos);
@@ -3352,12 +3280,20 @@ class GraduationSniperService {
           size_sol, tp1_hit, tp2_hit, remaining_fraction, effective_sl_price,
           trailing_high, status, realized_pnl_sol, close_reason, closed_at, exit_price, tx_signature,
           tp1_realized_sol, tp2_realized_sol, runner_realized_sol, token_amount,
-          entry_sig, exit_sig
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)
+          entry_sig, exit_sig,
+          tp3_hit, tp3_realized_sol,
+          quality_score, liquidity_sol, buy_pressure_ratio, unique_buyers,
+          top_holder_pct, whale_detected, position_multiplier
+        ) VALUES (
+          $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,
+          $21,$22,$23,$24,$25,$26,
+          $27,$28,$29,$30,$31,$32,$33,$34,$35
+        )
         ON CONFLICT (id) DO UPDATE SET
           current_price      = EXCLUDED.current_price,
           tp1_hit            = EXCLUDED.tp1_hit,
           tp2_hit            = EXCLUDED.tp2_hit,
+          tp3_hit            = EXCLUDED.tp3_hit,
           remaining_fraction = EXCLUDED.remaining_fraction,
           effective_sl_price = EXCLUDED.effective_sl_price,
           trailing_high      = EXCLUDED.trailing_high,
@@ -3368,11 +3304,19 @@ class GraduationSniperService {
           exit_price         = EXCLUDED.exit_price,
           tp1_realized_sol   = EXCLUDED.tp1_realized_sol,
           tp2_realized_sol   = EXCLUDED.tp2_realized_sol,
+          tp3_realized_sol   = EXCLUDED.tp3_realized_sol,
           runner_realized_sol= EXCLUDED.runner_realized_sol,
           token_amount       = EXCLUDED.token_amount,
           tx_signature       = EXCLUDED.tx_signature,
           entry_sig          = EXCLUDED.entry_sig,
-          exit_sig           = EXCLUDED.exit_sig
+          exit_sig           = EXCLUDED.exit_sig,
+          quality_score      = EXCLUDED.quality_score,
+          liquidity_sol      = EXCLUDED.liquidity_sol,
+          buy_pressure_ratio = EXCLUDED.buy_pressure_ratio,
+          unique_buyers      = EXCLUDED.unique_buyers,
+          top_holder_pct     = EXCLUDED.top_holder_pct,
+          whale_detected     = EXCLUDED.whale_detected,
+          position_multiplier= EXCLUDED.position_multiplier
       `, [
         pos.id, pos.mint, pos.symbol, pos.name, pos.detectedAt, pos.entryAt,
         pos.entryPrice, pos.currentPrice, pos.sizeSol, pos.tp1Hit, pos.tp2Hit,
@@ -3381,6 +3325,10 @@ class GraduationSniperService {
         pos.exitPrice ?? null, pos.txSignature,
         pos.tp1RealizedSol, pos.tp2RealizedSol, pos.runnerRealizedSol, pos.tokenAmount ?? 0,
         pos.entrySig ?? "", pos.exitSig ?? null,
+        pos.tp3Hit ?? false, pos.tp3RealizedSol ?? 0,
+        pos.qualityScore ?? 0, pos.liquiditySol ?? 0, pos.buyPressureRatio ?? 1,
+        pos.uniqueBuyers ?? 0, pos.topHolderPct ?? 0, pos.whaleDetected ?? false,
+        pos.positionMultiplier ?? 1,
       ]);
     } catch (err) {
       logger.warn({ id: pos.id, err: (err as Error).message }, "Graduation sniper: persistPosition failed");
@@ -3639,29 +3587,38 @@ class GraduationSniperService {
       id,
       mint,
       symbol,
-      name:              symbol,
-      detectedAt:        entryAtMs ?? Date.now(),
-      entryAt:           entryAtMs ?? Date.now(),
+      name:               symbol,
+      detectedAt:         entryAtMs ?? Date.now(),
+      entryAt:            entryAtMs ?? Date.now(),
       entryPrice,
       currentPrice,
       sizeSol,
-      tp1Hit:            false,
-      tp2Hit:            false,
-      remainingFraction: 1.0,
-      effectiveSlPrice:  entryPrice * (1 - cfg.slPct / 100),
-      trailingHigh:      Math.max(entryPrice, currentPrice),
-      status:            "open",
-      realizedPnlSol:    0,
-      unrealizedPnlSol:  0,
-      totalPnlSol:       0,
-      pnlPct:            0,
-      txSignature:       "",
-      tokenAmount:       estimatedTokens,
-      entrySig:          "",    // injected manually — no buy tx
-      exitSig:           undefined,
-      tp1RealizedSol:    0,
-      tp2RealizedSol:    0,
-      runnerRealizedSol: 0,
+      tp1Hit:             false,
+      tp2Hit:             false,
+      tp3Hit:             false,
+      remainingFraction:  1.0,
+      effectiveSlPrice:   entryPrice * (1 - cfg.slPct / 100),
+      trailingHigh:       Math.max(entryPrice, currentPrice),
+      status:             "open",
+      realizedPnlSol:     0,
+      unrealizedPnlSol:   0,
+      totalPnlSol:        0,
+      pnlPct:             0,
+      txSignature:        "",
+      tokenAmount:        estimatedTokens,
+      entrySig:           "",
+      exitSig:            undefined,
+      tp1RealizedSol:     0,
+      tp2RealizedSol:     0,
+      tp3RealizedSol:     0,
+      runnerRealizedSol:  0,
+      qualityScore:       0,
+      liquiditySol:       0,
+      buyPressureRatio:   1,
+      uniqueBuyers:       0,
+      topHolderPct:       0,
+      whaleDetected:      false,
+      positionMultiplier: 1,
     };
 
     this.openPositions.set(mint, pos);

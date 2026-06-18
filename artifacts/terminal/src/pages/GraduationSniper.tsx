@@ -485,33 +485,65 @@ function StuckTokensPanel() {
 
 // ── Event row ─────────────────────────────────────────────────────────────────
 
+function qualityColor(score: number): string {
+  if (score >= 85) return "text-emerald-400";
+  if (score >= 70) return "text-yellow-400";
+  return "text-red-400";
+}
+
 function EventRow({ evt }: { evt: SniperEvent }) {
   const deleteEvt = useDeleteSniperEvent();
+  const hasQuality = evt.qualityScore !== undefined && evt.qualityScore > 0;
   return (
-    <div className="flex items-center gap-3 px-4 py-2.5 border-b border-white/5 last:border-0">
-      <div className="flex-shrink-0">
-        {evt.action === "entered"
-          ? <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-          : <XCircle className="w-3.5 h-3.5 text-white/25" />}
-      </div>
-      <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-2">
-          <span className={`text-xs font-bold ${evt.action === "entered" ? "text-white/90" : "text-white/40"}`}>
-            {evt.symbol || mintShort(evt.mint)}
-          </span>
+    <div className="px-4 py-2.5 border-b border-white/5 last:border-0">
+      <div className="flex items-center gap-3">
+        <div className="flex-shrink-0">
           {evt.action === "entered"
-            ? <Badge className="bg-emerald-500/15 text-emerald-400 border-emerald-500/20 text-[9px] px-1 py-0">ENTERED</Badge>
-            : <Badge className="bg-white/5 text-white/30 border-white/10 text-[9px] px-1 py-0">SKIPPED</Badge>}
+            ? <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+            : <XCircle className="w-3.5 h-3.5 text-white/25" />}
         </div>
-        {evt.skipReason && <div className="text-[10px] text-white/30 mt-0.5">{evt.skipReason}</div>}
-        <div className="text-[10px] text-white/20 font-mono">{mintShort(evt.mint)}</div>
-      </div>
-      <div className="flex items-center gap-2">
-        <div className="text-[10px] text-white/30">{timeAgo(evt.detectedAt)}</div>
-        <button onClick={() => deleteEvt.mutate(evt.id)}
-          className="p-1 rounded bg-white/5 hover:bg-red-500/20 text-white/25 hover:text-red-400 transition-colors" title="Delete event">
-          <Trash2 className="w-3 h-3" />
-        </button>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className={`text-xs font-bold ${evt.action === "entered" ? "text-white/90" : "text-white/40"}`}>
+              {evt.symbol || mintShort(evt.mint)}
+            </span>
+            {evt.action === "entered"
+              ? <Badge className="bg-emerald-500/15 text-emerald-400 border-emerald-500/20 text-[9px] px-1 py-0">ENTERED</Badge>
+              : <Badge className="bg-white/5 text-white/30 border-white/10 text-[9px] px-1 py-0">SKIPPED</Badge>}
+            {hasQuality && (
+              <span className={`text-[9px] font-bold ${qualityColor(evt.qualityScore!)}`}>
+                Q:{evt.qualityScore}
+              </span>
+            )}
+          </div>
+          {evt.skipReason && <div className="text-[10px] text-white/30 mt-0.5">{evt.skipReason}</div>}
+          {hasQuality && (
+            <div className="flex gap-2 mt-1 flex-wrap">
+              {evt.liquiditySol !== undefined && evt.liquiditySol > 0 && (
+                <span className="text-[9px] text-white/35">💧 {evt.liquiditySol.toFixed(1)} SOL</span>
+              )}
+              {evt.uniqueBuyers !== undefined && evt.uniqueBuyers > 0 && (
+                <span className="text-[9px] text-white/35">👥 {evt.uniqueBuyers} buyers</span>
+              )}
+              {evt.buyPressureRatio !== undefined && evt.buyPressureRatio > 0 && (
+                <span className="text-[9px] text-white/35">📈 {evt.buyPressureRatio.toFixed(1)}x buy/sell</span>
+              )}
+              {evt.topHolderPct !== undefined && evt.topHolderPct > 0 && (
+                <span className={`text-[9px] ${evt.whaleDetected ? "text-red-400" : "text-white/35"}`}>
+                  🐋 top {evt.topHolderPct.toFixed(1)}%{evt.whaleDetected ? " ⚠️" : ""}
+                </span>
+              )}
+            </div>
+          )}
+          <div className="text-[10px] text-white/20 font-mono">{mintShort(evt.mint)}</div>
+        </div>
+        <div className="flex items-center gap-2">
+          <div className="text-[10px] text-white/30">{timeAgo(evt.detectedAt)}</div>
+          <button onClick={() => deleteEvt.mutate(evt.id)}
+            className="p-1 rounded bg-white/5 hover:bg-red-500/20 text-white/25 hover:text-red-400 transition-colors" title="Delete event">
+            <Trash2 className="w-3 h-3" />
+          </button>
+        </div>
       </div>
     </div>
   );

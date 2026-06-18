@@ -345,11 +345,18 @@ export interface SniperConfig {
   tp1ClosePct: number;
   tp2Pct: number;
   tp2ClosePct: number;
+  tp3Pct: number;
+  tp3ClosePct: number;
   trailingStopPct: number;
+  trailingStopAfterTp2Pct: number;
+  trailingStopAfterTp3Pct: number;
+  runnerTrailingPct: number;
   waitBeforeEntryMs: number;
   slippageBps: number;
   priorityFeeLamports: number;
   jitoTipLamports: number;
+  minQualityScore: number;
+  maxEntryWindowMs: number;
 }
 
 export interface SniperPosition {
@@ -364,6 +371,7 @@ export interface SniperPosition {
   sizeSol: number;
   tp1Hit: boolean;
   tp2Hit: boolean;
+  tp3Hit: boolean;
   remainingFraction: number;
   effectiveSlPrice: number;
   trailingHigh: number;
@@ -380,16 +388,25 @@ export interface SniperPosition {
   exitSig?: string;
   tp1RealizedSol: number;
   tp2RealizedSol: number;
+  tp3RealizedSol: number;
   runnerRealizedSol: number;
   // Runtime-only fields (not persisted to DB) — populated by getOpenPositions()
-  closingAttempt?: number;  // 0 = not closing, 1–N = attempt number
-  isStuck?: boolean;        // true when sell has failed MAX_SELL_FAILS times
-  lastError?: string;       // last sell error message for UI display
-  lastPriceAt?: number;     // timestamp of last successful price update
+  closingAttempt?: number;
+  isStuck?: boolean;
+  lastError?: string;
+  lastPriceAt?: number;
   // Entry drift / latency analysis
-  detectionPrice?: number;   // first DexScreener price ~5s after graduation
-  entryDriftPct?: number;    // (fillPrice - detectionPrice) / detectionPrice × 100
-  msDetectionToFill?: number; // ms from graduation WS event → buy confirmed
+  detectionPrice?: number;
+  entryDriftPct?: number;
+  msDetectionToFill?: number;
+  // Quality metrics at entry
+  qualityScore?: number;
+  liquiditySol?: number;
+  buyPressureRatio?: number;
+  uniqueBuyers?: number;
+  topHolderPct?: number;
+  whaleDetected?: boolean;
+  positionMultiplier?: number;
 }
 
 export interface SniperEvent {
@@ -400,6 +417,13 @@ export interface SniperEvent {
   action: "entered" | "skipped";
   skipReason?: string;
   txSignature: string;
+  // Quality metrics (present for entered + quality-skipped events)
+  qualityScore?: number;
+  liquiditySol?: number;
+  uniqueBuyers?: number;
+  buyPressureRatio?: number;
+  topHolderPct?: number;
+  whaleDetected?: boolean;
 }
 
 export interface SniperStatus {

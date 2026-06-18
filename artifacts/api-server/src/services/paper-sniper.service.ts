@@ -73,6 +73,7 @@ export interface PaperPosition {
   sizeSol: number;
   tp1Hit: boolean;
   tp2Hit: boolean;
+  tp3Hit: boolean;
   remainingFraction: number;
   effectiveSlPrice: number;
   trailingHigh: number;
@@ -86,11 +87,14 @@ export interface PaperPosition {
   exitPrice?: number;
   tp1RealizedSol: number;
   tp2RealizedSol: number;
+  tp3RealizedSol: number;
   runnerRealizedSol: number;
   detectionPrice?: number;
   entryDriftPct?: number;
   msDetectionToFill?: number;
   lastPriceAt?: number;
+  // Quality snapshot
+  qualityScore?: number;
 }
 
 export interface PaperSniperEvent {
@@ -279,7 +283,9 @@ class PaperSniperService {
       exitPrice:         row["exit_price"] ? Number(row["exit_price"]) : undefined,
       tp1RealizedSol:    Number(row["tp1_realized_sol"] ?? 0),
       tp2RealizedSol:    Number(row["tp2_realized_sol"] ?? 0),
+      tp3RealizedSol:    Number(row["tp3_realized_sol"] ?? 0),
       runnerRealizedSol: Number(row["runner_realized_sol"] ?? 0),
+      tp3Hit:            Boolean(row["tp3_hit"]),
       detectionPrice:    row["detection_price"] ? Number(row["detection_price"]) : undefined,
       entryDriftPct:     row["entry_drift_pct"] ? Number(row["entry_drift_pct"]) : undefined,
     };
@@ -599,6 +605,7 @@ class PaperSniperService {
       sizeSol,
       tp1Hit:            false,
       tp2Hit:            false,
+      tp3Hit:            false,
       remainingFraction: 1.0,
       effectiveSlPrice:  execPrice * (1 - cfgNow.slPhase1Pct / 100),
       trailingHigh:      execPrice,
@@ -609,6 +616,7 @@ class PaperSniperService {
       pnlPct:            0,
       tp1RealizedSol:    0,
       tp2RealizedSol:    0,
+      tp3RealizedSol:    0,
       runnerRealizedSol: 0,
       detectionPrice,
       entryDriftPct:     execDriftPct,

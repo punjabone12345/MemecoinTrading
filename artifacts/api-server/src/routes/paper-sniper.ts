@@ -44,7 +44,10 @@ router.post("/paper-sniper/positions/:id/close", (req, res) => {
 router.patch("/paper-sniper/history/:id", async (req, res) => {
   try {
     const updated = await paperSniperService.updateHistoryPosition(req.params.id, req.body as object);
-    if (!updated) return res.status(404).json({ error: "Trade not found in history" });
+    if (!updated) {
+      res.status(404).json({ error: "Trade not found in history" });
+      return;
+    }
     res.json(updated);
   } catch (err) {
     res.status(400).json({ error: (err as Error).message });
