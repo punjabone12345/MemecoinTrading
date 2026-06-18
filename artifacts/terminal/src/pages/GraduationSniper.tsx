@@ -55,7 +55,7 @@ function downloadSniperCsv(history: SniperPosition[]) {
     return [
       p.symbol,
       p.mint,
-      p.entryAt   ? toIST(p.entryAt)   : "",
+      (p.detectedAt ?? p.entryAt) ? toIST(p.detectedAt ?? p.entryAt) : "",
       p.closedAt  ? toIST(p.closedAt)  : "",
       holdMs ? holdTime(holdMs) : "",
       p.detectionPrice != null ? p.detectionPrice.toString() : "",

@@ -2245,7 +2245,7 @@ class GraduationSniperService {
         `💵 Entry: <b>$${fmtTgPrice(actualEntryPrice)}</b>\n` +
         `💰 Size: <b>${sizeSol.toFixed(4)} SOL</b>\n` +
         `🔗 <a href="https://solscan.io/tx/${txSignature}">View on Solscan</a>\n` +
-        `🛡️ Staged SL: -20% (2m) → -25% peak → -30% peak\n` +
+        `🛡️ SL: -${STAGED_SL_PHASE1_PCT}% (2m) → -${STAGED_SL_PHASE2_PCT}% → -${STAGED_SL_PHASE3_PCT}% from peak\n` +
         `🎯 TP1: $${fmtTgPrice(actualEntryPrice * (1 + cfg.tp1Pct / 100))} (+${cfg.tp1Pct}%)\n` +
         `🎯 TP2: $${fmtTgPrice(actualEntryPrice * (1 + cfg.tp2Pct / 100))} (+${cfg.tp2Pct}%)\n` +
         `🕐 ${toIST(new Date())}`,

@@ -68,7 +68,7 @@ function downloadPaperCsv(history: PaperPosition[]) {
     return [
       p.symbol,
       p.mint,
-      p.entryAt  ? toDateTime(p.entryAt)  : "",
+      (p.detectedAt ?? p.entryAt) ? toDateTime(p.detectedAt ?? p.entryAt) : "",
       p.closedAt ? toDateTime(p.closedAt) : "",
       holdMs ? holdStr(holdMs) : "",
       p.entryPrice.toString(),
@@ -656,10 +656,10 @@ function HistoryCard({ pos }: { pos: PaperPosition }) {
 
             {/* Timestamps */}
             <div className="space-y-1">
-              {pos.entryAt > 0 && (
+              {(pos.detectedAt ?? pos.entryAt) > 0 && (
                 <div className="flex justify-between text-[10px]">
                   <span className="text-white/25">Entered</span>
-                  <span className="text-white/45 font-medium tabular-nums">{toDateTime(pos.entryAt)}</span>
+                  <span className="text-white/45 font-medium tabular-nums">{toDateTime(pos.detectedAt ?? pos.entryAt)}</span>
                 </div>
               )}
               {pos.closedAt && (

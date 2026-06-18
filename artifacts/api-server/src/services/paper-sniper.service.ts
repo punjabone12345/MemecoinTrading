@@ -462,7 +462,7 @@ class PaperSniperService {
         symbol,
         name,
         detectedAt,
-        entryAt:           Date.now(),
+        entryAt:           detectedAt, // price was observed at detection time, not at processing time
         entryPrice,
         currentPrice:      entryPrice,
         sizeSol:           fastSizeSol,
