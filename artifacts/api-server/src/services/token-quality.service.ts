@@ -60,7 +60,11 @@ class TokenQualityService {
     );
 
     // Fire all four collection paths simultaneously.
-    // The on-chain vault read is fast (~200 ms) and resolves before DexScreener.
+    // IMPORTANT: fetchOnChainSolBalance is delayed 40s when initialSolReserves=0.
+    // At T0 the Raydium/PumpSwap pool account may not be populated yet — the first
+    // read (inside fetchReservesWithRetry before this call) already showed 0.
+    // Waiting 40s gives the pool time to settle before re-reading, matching the
+    // same pattern as fetchBuyerData (45s delay) and fetchHolderData (20s delay).
     const [dexResult, holderResult, buyerResult, onChainSolRaw] = await Promise.all([
       this.pollDexScreener(mint),
       rpcUrl ? this.fetchHolderData(mint, rpcUrl) : Promise.resolve(null),
@@ -68,7 +72,12 @@ class TokenQualityService {
         ? this.fetchBuyerData(mint, poolPda, heliusApiKey)
         : Promise.resolve(null),
       (wsolVaultPubkey && initialSolReserves === 0)
-        ? this.fetchOnChainSolBalance(wsolVaultPubkey, heliusApiKey)
+        ? (async () => {
+            // Pool accounts need ~30–40s to be populated/indexed after graduation.
+            // Reading immediately (T0) always returns 0 — delay before re-fetching.
+            await new Promise<void>((r) => setTimeout(r, 40_000));
+            return this.fetchOnChainSolBalance(wsolVaultPubkey, heliusApiKey);
+          })()
         : Promise.resolve(null),
     ]);
 
