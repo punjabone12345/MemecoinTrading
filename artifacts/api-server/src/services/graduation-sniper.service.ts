@@ -1142,10 +1142,24 @@ class GraduationSniperService {
       }
 
       // ── T0: on-chain price + SOL/USD (parallel) ────────────────────────────────
+      // Pool accounts are created in the graduation TX but may not be readable
+      // immediately — retry up to 3× with 1.5s delay to let RPC state settle.
+      const fetchReservesWithRetry = async () => {
+        if (!wsolVaultPubkey || !tokenVaultPubkey) return null;
+        for (let attempt = 0; attempt < 3; attempt++) {
+          if (attempt > 0) await new Promise<void>((r) => setTimeout(r, 1_500));
+          const r = await this.fetchOnChainPoolReserves(wsolVaultPubkey, tokenVaultPubkey);
+          if (r && r.solBalance > 0 && r.tokenBalanceUi > 0) {
+            if (attempt > 0) logger.info({ mint, attempt, solBalance: r.solBalance.toFixed(2) }, "Graduation sniper: on-chain reserves settled after retry ✅");
+            return r;
+          }
+        }
+        logger.warn({ mint, wsolVaultPubkey: wsolVaultPubkey.slice(0, 8) }, "Graduation sniper: on-chain reserves still 0 after 3 attempts — falling back to DexScreener");
+        return null;
+      };
+
       const [reserves, solUsd] = await Promise.all([
-        (wsolVaultPubkey && tokenVaultPubkey)
-          ? this.fetchOnChainPoolReserves(wsolVaultPubkey, tokenVaultPubkey)
-          : Promise.resolve(null),
+        fetchReservesWithRetry(),
         this.fetchSolUsdPrice(),
       ]);
 

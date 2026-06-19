@@ -66,19 +66,44 @@ class TokenQualityService {
     // only used when wsolVaultPubkey was unavailable during processGraduation.
     const liquiditySol = initialSolReserves > 0
       ? initialSolReserves
-      : (dexResult ? dexResult.liquidityUsd / 150 : 0);
+      : (dexResult && dexResult.liquidityUsd > 0 ? dexResult.liquidityUsd / 150 : 0);
 
-    const marketCapUsd    = dexResult?.fdv           ?? 0;
+    const marketCapUsd     = dexResult?.fdv            ?? 0;
     const buyPressureRatio = dexResult?.buyPressureRatio ?? 1.0;
-    const uniqueBuyers    = buyerResult?.uniqueBuyers ?? (dexResult?.m5Buys ?? 0);
+    const whaleDetected    = buyerResult?.whaleDetected ?? false;
+
+    // ── Unique buyer count — track data availability ─────────────────────────
+    // buyerResult === null  → Helius unavailable (API key missing or pool not indexed)
+    // buyerResult.uniqueBuyers === 0 with confident=false → no sigs found (not indexed yet)
+    // In both "no data" cases we fall back to DexScreener m5Buys; if that is also
+    // 0 at this early stage, we treat unique buyers as UNKNOWN (neutral, not a hard fail).
+    const buyerDataAvailable = buyerResult !== null && buyerResult.confident;
+    const dexM5Buys = dexResult?.m5Buys ?? 0;
+    const uniqueBuyers = buyerDataAvailable
+      ? (buyerResult?.uniqueBuyers ?? 0)
+      : (dexM5Buys > 0 ? dexM5Buys : -1); // -1 = unknown
+
     // Conservative fallback: if holder data unavailable assume 100% (auto-skip)
     const topHolderPct      = holderResult?.topHolderPct      ?? 0; // 0 = unknown = don't auto-skip on unknown
     const creatorHoldingsPct = holderResult?.creatorHoldingsPct ?? 0;
-    const whaleDetected     = buyerResult?.whaleDetected ?? false;
+
+    // Cross-validation log: both sources for debugging
+    logger.info({
+      mint, symbol,
+      onChainSolReserves: initialSolReserves.toFixed(2),
+      dexLiquidityUsd:    dexResult?.liquidityUsd?.toFixed(0) ?? "n/a",
+      dexLiquiditySol:    dexResult ? (dexResult.liquidityUsd / 150).toFixed(1) : "n/a",
+      resolvedLiqSol:     liquiditySol.toFixed(1),
+      heliusBuyers:       buyerResult?.uniqueBuyers ?? "n/a",
+      dexM5Buys,
+      resolvedBuyers:     uniqueBuyers === -1 ? "unknown" : uniqueBuyers,
+    }, "Quality: cross-validation snapshot 🔍");
 
     // ── Score each dimension (25 pts each, 100 pts total) ───────────────────
     const liquidityScore   = this.scoreLiquidity(liquiditySol);
-    const buyerScore       = this.scoreBuyers(uniqueBuyers);
+    const buyerScore       = uniqueBuyers === -1
+      ? 15   // neutral (15) when buyer data unavailable — don't penalise unknown
+      : this.scoreBuyers(uniqueBuyers);
     const buyPressureScore = this.scoreBuyPressure(buyPressureRatio);
     const holderScore      = topHolderPct > 0
       ? this.scoreHolder(topHolderPct)
@@ -92,7 +117,7 @@ class TokenQualityService {
     if (creatorHoldingsPct > 5)
       autoSkipReason = `Creator holds ${creatorHoldingsPct.toFixed(1)}% — dump risk (>5% threshold)`;
     else if (liquidityScore   === 0) autoSkipReason = `Liquidity ${liquiditySol.toFixed(1)} SOL < 25 SOL minimum`;
-    else if (buyerScore  === 0) autoSkipReason = `Unique buyers ${uniqueBuyers} < 20 minimum`;
+    else if (uniqueBuyers !== -1 && buyerScore === 0) autoSkipReason = `Unique buyers ${uniqueBuyers} < 20 minimum`;
     else if (buyPressureScore === 0) autoSkipReason = `Buy pressure ${buyPressureRatio.toFixed(2)}x < 1.5x minimum`;
     else if (topHolderPct > 0 && holderScore === 0)
       autoSkipReason = `Top holder ${topHolderPct.toFixed(1)}% > 20% maximum`;
@@ -172,7 +197,11 @@ class TokenQualityService {
     buyPressureRatio: number;
     m5Buys:          number;
   } | null> {
+    // best: only updated when we have a result with REAL liquidity (> $100)
+    // This prevents a "token indexed but liquidity not yet calculated" ghost-0 from
+    // locking in as a valid 0-liquidity result on all subsequent polls.
     let best: { liquidityUsd: number; fdv: number; buyPressureRatio: number; m5Buys: number } | null = null;
+    let lastPairSeen: typeof best | null = null; // any result, even 0-liq
 
     for (let attempt = 0; attempt < 4; attempt++) {
       if (attempt > 0) await new Promise<void>((r) => setTimeout(r, 15_000));
@@ -196,6 +225,7 @@ class TokenQualityService {
 
         if (!pair) continue;
 
+        const liqUsd  = pair.liquidity?.usd ?? 0;
         const m5      = pair.txns?.m5;
         const m5Buys  = m5?.buys  ?? 0;
         const m5Sells = m5?.sells ?? 0;
@@ -203,19 +233,27 @@ class TokenQualityService {
           ? m5Buys / m5Sells
           : (m5Buys > 0 ? 5.0 : 1.0);
 
-        best = { liquidityUsd: pair.liquidity?.usd ?? 0, fdv: pair.fdv ?? 0, buyPressureRatio, m5Buys };
+        const candidate = { liquidityUsd: liqUsd, fdv: pair.fdv ?? 0, buyPressureRatio, m5Buys };
+        lastPairSeen = candidate;
 
-        // Stop early once we have real volume data
-        if (m5Buys >= 5 || m5Sells >= 5) {
-          logger.debug({ mint, attempt, m5Buys, m5Sells }, "Quality: DexScreener early stop — data ready");
-          break;
+        // Only lock in as "best" when DexScreener has calculated real liquidity (> $100)
+        // Avoids ghost-0 when the pool is indexed but AMM hasn't populated reserves yet.
+        if (liqUsd > 100) {
+          best = candidate;
+          logger.debug({ mint, attempt, liqUsd: liqUsd.toFixed(0), m5Buys, m5Sells }, "Quality: DexScreener real-liq data ready");
+          // Stop early once we also have real volume data
+          if (m5Buys >= 5 || m5Sells >= 5) break;
+        } else {
+          logger.debug({ mint, attempt, liqUsd, m5Buys }, "Quality: DexScreener found pair but liq=0 — will retry");
         }
       } catch (err) {
         logger.debug({ mint, attempt, err: (err as Error).message }, "Quality: DexScreener poll failed");
       }
     }
 
-    return best;
+    // Last resort: use whatever we saw even if liq=0 — better than null (still
+    // gives us m5Buys as fallback for buyer count)
+    return best ?? lastPairSeen;
   }
 
   // ── pump.fun creator wallet lookup ────────────────────────────────────────
@@ -318,28 +356,39 @@ class TokenQualityService {
     mint:     string,
     poolPda:  string,
     apiKey:   string,
-  ): Promise<{ uniqueBuyers: number; whaleDetected: boolean } | null> {
+  ): Promise<{ uniqueBuyers: number; whaleDetected: boolean; confident: boolean } | null> {
     await new Promise<void>((r) => setTimeout(r, 25_000));
 
     try {
       const rpcUrl = `https://mainnet.helius-rpc.com/?api-key=${apiKey}`;
 
-      // Get recent signatures involving the pool PDA
-      type SigResult = { signature: string; err: unknown };
-      const sigRes = await axios.post<{ result?: SigResult[] }>(rpcUrl, {
-        jsonrpc: "2.0", id: 1,
-        method: "getSignaturesForAddress",
-        params: [poolPda, { limit: 100, commitment: "confirmed" }],
-      }, { timeout: 8_000 });
+      const fetchSigs = async () => {
+        type SigResult = { signature: string; err: unknown };
+        const sigRes = await axios.post<{ result?: SigResult[] }>(rpcUrl, {
+          jsonrpc: "2.0", id: 1,
+          method: "getSignaturesForAddress",
+          params: [poolPda, { limit: 100, commitment: "confirmed" }],
+        }, { timeout: 8_000 });
+        return (sigRes.data?.result ?? [])
+          .filter((s) => !s.err)
+          .map((s) => s.signature)
+          .slice(0, 50);
+      };
 
-      const sigs = (sigRes.data?.result ?? [])
-        .filter((s) => !s.err)
-        .map((s) => s.signature)
-        .slice(0, 50);
+      // First attempt
+      let sigs = await fetchSigs();
+
+      // Retry once after 10s — brand-new pool may not be indexed yet at T+25s
+      if (sigs.length === 0) {
+        logger.debug({ mint, poolPda }, "Quality: no pool sigs at T+25s — retrying at T+35s");
+        await new Promise<void>((r) => setTimeout(r, 10_000));
+        sigs = await fetchSigs();
+      }
 
       if (sigs.length === 0) {
-        logger.debug({ mint, poolPda }, "Quality: no pool signatures yet");
-        return { uniqueBuyers: 0, whaleDetected: false };
+        logger.warn({ mint, poolPda }, "Quality: no pool signatures after retry — buyer count unavailable (not indexed yet)");
+        // Return null (not 0) so caller treats this as DATA UNAVAILABLE, not "0 buyers"
+        return null;
       }
 
       // Parse via Helius Enhanced Transactions API
@@ -379,10 +428,10 @@ class TokenQualityService {
       }
 
       logger.info(
-        { mint, poolPda, uniqueBuyers: uniqueBuyerSet.size, whaleDetected },
+        { mint, poolPda, uniqueBuyers: uniqueBuyerSet.size, whaleDetected, sigsProcessed: txs.length },
         "Quality: buyer data collected ✅",
       );
-      return { uniqueBuyers: uniqueBuyerSet.size, whaleDetected };
+      return { uniqueBuyers: uniqueBuyerSet.size, whaleDetected, confident: true };
     } catch (err) {
       logger.debug({ mint, err: (err as Error).message }, "Quality: buyer data fetch failed");
       return null;

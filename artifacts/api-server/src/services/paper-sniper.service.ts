@@ -13,6 +13,8 @@ export interface PaperConfig {
   tp1ClosePct:        number;
   tp2Pct:             number;
   tp2ClosePct:        number;
+  tp3Pct:             number;  // TP3 at +600%
+  tp3ClosePct:        number;  // % of remaining position to close at TP3 (e.g. 100 = close all)
   trailingStopPct:    number;
   slPhase1Pct:        number;  // SL % during first 2 min
   slPhase2Pct:        number;  // SL % from peak during 2–10 min
@@ -43,6 +45,8 @@ const DEFAULT_PAPER_CONFIG: PaperConfig = {
   tp1ClosePct:        40,   // sell 40% at TP1
   tp2Pct:             400,  // TP2 at +400%
   tp2ClosePct:        40,   // sell 40% at TP2 → 20% runner remains
+  tp3Pct:             600,  // TP3 at +600%
+  tp3ClosePct:        100,  // sell 100% of remaining at TP3 (exits position fully)
   trailingStopPct:    30,   // trailing SL -30% from peak (runner after TP1/TP2)
   slPhase1Pct:        20,   // 0-2m: hard SL -20% from entry (spec: Phase 1)
   slPhase2Pct:        25,   // 2-10m: trailing -25% from peak (spec: Phase 2)
@@ -1057,6 +1061,40 @@ class PaperSniperService {
           `⚡ Runner: ${Math.round(pos.remainingFraction * 100)}% remaining\n` +
           `🕐 ${toIST(new Date())}`,
         );
+      }
+      return;
+    }
+
+    // ── TP3 — full close of remaining runner ──────────────────────────────
+    if (pos.tp1Hit && pos.tp2Hit && !pos.tp3Hit && pct >= cfg.tp3Pct) {
+      const closeFrac   = Math.min(cfg.tp3ClosePct / 100, 1) * pos.remainingFraction;
+      const solReturned = pos.sizeSol * closeFrac * (price / pos.entryPrice);
+      const pnl         = solReturned - pos.sizeSol * closeFrac;
+      pos.tp3Hit            = true;
+      pos.realizedPnlSol   += pnl;
+      pos.tp3RealizedSol    = pnl;
+      pos.remainingFraction -= closeFrac;
+      this.virtualBalance  += solReturned;
+      logger.info({ mint: pos.mint, symbol: pos.symbol, pct: pct.toFixed(1), pnl, solReturned, remainingFraction: pos.remainingFraction },
+        "Paper sniper: TP3 hit 🎯🎯🎯");
+      void this.persistPosition(pos);
+      void this.persistBalance();
+      if (isTelegramConfigured()) {
+        void sendTelegram(
+          `🎯🎯🎯 <b>PAPER TP3 HIT</b>\n` +
+          `──────────────────────\n` +
+          `🪙 Token: <b>${pos.symbol}</b>\n` +
+          `📋 CA: <code>${pos.mint}</code>\n` +
+          `💵 Price: <b>$${price < 0.0001 ? price.toExponential(3) : price.toFixed(8)}</b>\n` +
+          `📈 Gain: <b>+${pct.toFixed(1)}%</b>\n` +
+          `💰 Banked: <b>+${pnl.toFixed(4)} SOL</b>\n` +
+          `⚡ Runner: ${Math.round(pos.remainingFraction * 100)}% remaining\n` +
+          `🕐 ${toIST(new Date())}`,
+        );
+      }
+      // If tp3ClosePct = 100, the position is fully closed — close it now
+      if (pos.remainingFraction <= 0.01) {
+        this.closePaperPosition(pos, `TP3 hit — full exit at +${pct.toFixed(0)}%`, price);
       }
       return;
     }
