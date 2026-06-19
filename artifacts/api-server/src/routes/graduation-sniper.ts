@@ -196,4 +196,9 @@ router.get("/sniper/health-metrics", (_req, res) => {
   res.json({ success: true, data: graduationSniperService.getHealthMetrics() });
 });
 
+// ── Dip-retrace watchers — currently watched tokens waiting for pattern ───────
+router.get("/sniper/dip-watchers", (_req, res) => {
+  res.json({ success: true, data: graduationSniperService.getDipWatchers() });
+});
+
 export default router;

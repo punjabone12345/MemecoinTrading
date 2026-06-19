@@ -336,6 +336,22 @@ export interface PumpfunStatus {
 
 // ── Graduation Sniper ────────────────────────────────────────────────────────
 
+export interface DipWatchEntry {
+  mint: string;
+  symbol: string;
+  name: string;
+  watchStartedAt: number;
+  expiresAt: number;
+  graduationPrice: number;
+  peakHigh: number;
+  dipLow: number;
+  currentPrice: number;
+  state: "pumping" | "dumped" | "retracing" | "entered" | "expired";
+  dumpPct: number;
+  retracePct: number;
+  qualityScore: number;
+}
+
 export interface SniperConfig {
   enabled: boolean;
   positionSizeSol: number;

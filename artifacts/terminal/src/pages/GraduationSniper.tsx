@@ -1,15 +1,15 @@
 import { useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { Target, Wifi, WifiOff, TrendingUp, TrendingDown, RefreshCw, Settings, X, CheckCircle2, XCircle, Clock, Zap, Trash2, Pencil, RotateCcw, AlertTriangle, Download, ExternalLink, Activity, LogOut, Wallet, Copy } from "lucide-react";
+import { Target, Wifi, WifiOff, TrendingUp, TrendingDown, RefreshCw, Settings, X, CheckCircle2, XCircle, Clock, Zap, Trash2, Pencil, RotateCcw, AlertTriangle, Download, ExternalLink, Activity, LogOut, Wallet, Copy, Eye, ArrowDown, ArrowUp } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   useSniperStatus, useSniperPositions, useSniperHistory, useSniperEvents, useUpdateSniperConfig,
   useDeleteSniperPosition, useEditSniperPosition, useDeleteSniperEvent, useResetSniperAccount,
   useRecalculateSniperPnl, useCloseSniperPosition, useWalletBalance, usePurgeUnverifiedHistory,
-  useStuckTokens, useEmergencySell, useWebSocket,
+  useStuckTokens, useEmergencySell, useWebSocket, useDipWatchers,
 } from "@/lib/api";
-import { SniperPosition, SniperEvent, SniperConfig, StuckToken } from "@/lib/types";
+import { SniperPosition, SniperEvent, SniperConfig, StuckToken, DipWatchEntry } from "@/lib/types";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -845,6 +845,7 @@ export default function GraduationSniper() {
   const { data: positions = [] } = useSniperPositions();
   const { data: history = []   } = useSniperHistory();
   const { data: events = []    } = useSniperEvents();
+  const { data: dipWatchers = [] } = useDipWatchers();
   useWebSocket(); // keep query caches warm via server-sent events
 
   const config        = status?.config;
@@ -1025,6 +1026,9 @@ export default function GraduationSniper() {
         {/* ── Stuck tokens (wallet tokens not tracked as positions) ── */}
         <StuckTokensPanel />
 
+        {/* ── Dip-Retrace Watchers ── */}
+        <DipWatchPanel watchers={dipWatchers} />
+
         {/* ── Active positions ── */}
         <Section title="Active Positions" count={positions.length} emptyMsg="No open sniper positions">
           {positions.map((p) => <PositionRow key={p.id} pos={p} />)}
@@ -1046,6 +1050,153 @@ export default function GraduationSniper() {
 }
 
 // ── Sub-components ─────────────────────────────────────────────────────────────
+
+// ── Dip-Retrace Watch Panel ───────────────────────────────────────────────────
+
+function DipWatchPanel({ watchers }: { watchers: DipWatchEntry[] }) {
+  if (watchers.length === 0) return null;
+
+  const stateLabel: Record<DipWatchEntry["state"], string> = {
+    pumping:   "Pumping ↗",
+    dumped:    "Dumped ↘",
+    retracing: "Retracing ↗",
+    entered:   "Triggered ✓",
+    expired:   "Expired",
+  };
+  const stateColor: Record<DipWatchEntry["state"], string> = {
+    pumping:   "text-sky-400",
+    dumped:    "text-red-400",
+    retracing: "text-amber-400",
+    entered:   "text-emerald-400",
+    expired:   "text-white/30",
+  };
+  const stateBg: Record<DipWatchEntry["state"], string> = {
+    pumping:   "bg-sky-500/15 border-sky-500/25",
+    dumped:    "bg-red-500/15 border-red-500/25",
+    retracing: "bg-amber-500/15 border-amber-500/25",
+    entered:   "bg-emerald-500/15 border-emerald-500/25",
+    expired:   "bg-white/5 border-white/10",
+  };
+
+  function fmtTimeLeft(expiresAt: number): string {
+    const ms = expiresAt - Date.now();
+    if (ms <= 0) return "expired";
+    const m = Math.floor(ms / 60_000);
+    const s = Math.floor((ms % 60_000) / 1000);
+    return m > 0 ? `${m}m ${s}s` : `${s}s`;
+  }
+
+  function fmtPrice(p: number): string {
+    if (p === 0) return "—";
+    if (p < 0.0001) return p.toExponential(3);
+    if (p < 1) return p.toFixed(6);
+    return p.toFixed(4);
+  }
+
+  return (
+    <div className="rounded-xl border border-cyan-500/20 bg-gradient-to-br from-cyan-500/5 to-transparent overflow-hidden">
+      <div className="flex items-center justify-between px-4 py-2.5 border-b border-white/8 bg-cyan-500/5">
+        <div className="flex items-center gap-2">
+          <Eye className="w-3.5 h-3.5 text-cyan-400" />
+          <span className="text-[11px] font-bold text-white/70 uppercase tracking-wider">Dip-Retrace Watch</span>
+          <span className="text-[9px] text-cyan-400/60 font-mono">40–60% dump → 60% retrace</span>
+        </div>
+        <Badge className="bg-cyan-500/20 text-cyan-400 border-cyan-500/30 text-[9px] px-1.5 py-0">{watchers.length}</Badge>
+      </div>
+      <div className="divide-y divide-white/5">
+        {watchers.map((w) => (
+          <div key={w.mint} className="px-4 py-3">
+            <div className="flex items-center justify-between mb-2">
+              {/* Token + state badge */}
+              <div className="flex items-center gap-2 min-w-0">
+                <span className="text-[13px] font-black text-white truncate">{w.symbol}</span>
+                <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full border ${stateBg[w.state]} ${stateColor[w.state]}`}>
+                  {stateLabel[w.state]}
+                </span>
+              </div>
+              {/* Time remaining */}
+              <div className="flex items-center gap-1 text-[9px] text-white/35 shrink-0">
+                <Clock className="w-2.5 h-2.5" />
+                <span>{fmtTimeLeft(w.expiresAt)}</span>
+              </div>
+            </div>
+            {/* Price metrics */}
+            <div className="grid grid-cols-4 gap-2 mb-2">
+              <div className="flex flex-col gap-0.5">
+                <span className="text-[8px] text-white/30 uppercase tracking-wide">Grad Price</span>
+                <span className="text-[10px] font-bold text-white/60 font-mono">${fmtPrice(w.graduationPrice)}</span>
+              </div>
+              <div className="flex flex-col gap-0.5">
+                <div className="flex items-center gap-0.5">
+                  <ArrowUp className="w-2 h-2 text-emerald-400" />
+                  <span className="text-[8px] text-white/30 uppercase tracking-wide">Peak</span>
+                </div>
+                <span className="text-[10px] font-bold text-emerald-400/80 font-mono">${fmtPrice(w.peakHigh)}</span>
+              </div>
+              <div className="flex flex-col gap-0.5">
+                <div className="flex items-center gap-0.5">
+                  <ArrowDown className="w-2 h-2 text-red-400" />
+                  <span className="text-[8px] text-white/30 uppercase tracking-wide">Dip Low</span>
+                </div>
+                <span className="text-[10px] font-bold text-red-400/80 font-mono">${fmtPrice(w.dipLow)}</span>
+              </div>
+              <div className="flex flex-col gap-0.5">
+                <span className="text-[8px] text-white/30 uppercase tracking-wide">Current</span>
+                <span className="text-[10px] font-bold text-white/80 font-mono">${fmtPrice(w.currentPrice)}</span>
+              </div>
+            </div>
+            {/* Dip/Retrace progress bars */}
+            <div className="grid grid-cols-2 gap-2">
+              {/* Dump % */}
+              <div>
+                <div className="flex justify-between items-center mb-1">
+                  <span className="text-[8px] text-white/30">Dump from peak</span>
+                  <span className={`text-[9px] font-bold font-mono ${w.dumpPct >= 40 && w.dumpPct <= 60 ? "text-amber-400" : w.dumpPct > 60 ? "text-red-400" : "text-white/50"}`}>
+                    {w.dumpPct.toFixed(1)}%
+                    {w.dumpPct >= 40 && w.dumpPct <= 60 ? " ✓" : ""}
+                  </span>
+                </div>
+                <div className="h-1.5 rounded-full bg-white/8 overflow-hidden">
+                  <div
+                    className={`h-full rounded-full transition-all ${w.dumpPct >= 40 && w.dumpPct <= 60 ? "bg-amber-400" : w.dumpPct > 60 ? "bg-red-500" : "bg-white/20"}`}
+                    style={{ width: `${Math.min(100, w.dumpPct)}%` }}
+                  />
+                </div>
+                <div className="flex justify-between text-[7px] text-white/20 mt-0.5">
+                  <span>0%</span><span className="text-amber-400/50">40–60%</span><span>100%</span>
+                </div>
+              </div>
+              {/* Retrace % */}
+              <div>
+                <div className="flex justify-between items-center mb-1">
+                  <span className="text-[8px] text-white/30">Retrace of dump</span>
+                  <span className={`text-[9px] font-bold font-mono ${w.retracePct >= 60 ? "text-emerald-400" : "text-white/50"}`}>
+                    {w.dumpPct >= 40 ? `${w.retracePct.toFixed(1)}%${w.retracePct >= 60 ? " ✓" : ""}` : "—"}
+                  </span>
+                </div>
+                <div className="h-1.5 rounded-full bg-white/8 overflow-hidden">
+                  <div
+                    className={`h-full rounded-full transition-all ${w.retracePct >= 60 ? "bg-emerald-400" : "bg-white/20"}`}
+                    style={{ width: w.dumpPct >= 40 ? `${Math.min(100, w.retracePct)}%` : "0%" }}
+                  />
+                </div>
+                <div className="flex justify-between text-[7px] text-white/20 mt-0.5">
+                  <span>0%</span><span className="text-emerald-400/50">60%</span><span>100%</span>
+                </div>
+              </div>
+            </div>
+            {/* Quality score */}
+            <div className="mt-2 flex items-center gap-2 text-[8px] text-white/25">
+              <span>Q-score: <span className="text-white/45 font-bold">{w.qualityScore}/100</span></span>
+              <span>·</span>
+              <span className="font-mono text-white/20 truncate">{w.mint.slice(0, 8)}…</span>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 function StatCard({ label, value, sub, icon, accent, valueColor }: {
   label: string; value: string; sub: string; icon: React.ReactNode;

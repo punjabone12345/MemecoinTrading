@@ -150,6 +150,16 @@ const BATCH_DEXSCREENER_MAX     = 30;
 // ── Jupiter Price API (fallback for tokens not yet indexed on DexScreener) ────
 const JUPITER_PRICE_URL         = "https://lite-api.jup.ag/price/v2";
 
+// ── Dip-Retrace entry strategy ────────────────────────────────────────────────
+// After graduation: watch each token for DIP_WATCH_DURATION_MS.
+// Enter only when price dumps DIP_MIN_PCT–DIP_MAX_PCT from its post-graduation
+// peak HIGH and then retraces at least RETRACE_MIN_PCT of that dump.
+// Example: pump 30k→50k, dump 50k→25k (50% dump ✓), retrace to 40k (60% retrace ✓) → BUY
+const DIP_WATCH_DURATION_MS = 30 * 60_000;  // 30-minute watch window
+const DIP_MIN_PCT            = 40;           // min dump from peak to qualify (%)
+const DIP_MAX_PCT            = 60;           // max dump from peak (above = too deep, skip)
+const RETRACE_MIN_PCT        = 60;           // min retrace of dump needed to trigger entry (%)
+
 
 function uid(): string {
   return `snp-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
@@ -307,6 +317,34 @@ export interface SniperStatus {
   config: SniperConfig;
 }
 
+// ── Dip-watch entry (dip-and-retrace strategy) ──────────────────────────────
+
+export interface DipWatchEntry {
+  mint: string;
+  symbol: string;
+  name: string;
+  watchStartedAt: number;   // ms epoch when watcher was created
+  expiresAt: number;         // watchStartedAt + DIP_WATCH_DURATION_MS
+  graduationPrice: number;   // price at graduation detection (initial price)
+  peakHigh: number;          // highest price seen since graduation
+  dipLow: number;            // lowest price after peak dump starts
+  currentPrice: number;      // latest fetched price
+  state: "pumping" | "dumped" | "retracing" | "entered" | "expired";
+  dumpPct: number;           // (peakHigh - dipLow) / peakHigh * 100
+  retracePct: number;        // (currentPrice - dipLow) / (peakHigh - dipLow) * 100
+  qualityScore: number;
+}
+
+// Internal-only extension of DipWatchEntry (holds state that should not leave the service)
+interface DipWatchInternal extends DipWatchEntry {
+  _quality: QualityMetrics;
+  _signature: string;
+  _positionSizeSol: number;
+  _detectedAt: number;
+  _initialPrice: number;
+  _liveOnlySkip: string | null;
+}
+
 // ── Service ──────────────────────────────────────────────────────────────────
 
 class GraduationSniperService {
@@ -316,6 +354,8 @@ class GraduationSniperService {
   private subscriptionId: number | null = null;
   private paperCallback: ((mint: string, entryPrice: number, symbol: string, name: string, detectedAt: number, detectionPrice: number, qualityMeta?: GraduationQualityMeta) => void) | null = null;
   private priceIntervalId: ReturnType<typeof setInterval> | null = null;
+  private dipWatchIntervalId: ReturnType<typeof setInterval> | null = null;
+  private dipWatchMap: Map<string, DipWatchInternal> = new Map();
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private started = false;
   // Stored so the silent-death watchdog can trigger reconnects without having
@@ -965,6 +1005,8 @@ class GraduationSniperService {
     }, PRICE_LOOP_MS);
     this.liquidityIntervalId = setInterval(() => void this.checkAllLiquidity(), LIQUIDITY_CHECK_MS);
     this.externalSellCheckId = setInterval(() => void this.checkExternalSells(), 60_000);
+    // Dip-retrace watcher — runs every 5 s independently of the open-position loop
+    this.dipWatchIntervalId  = setInterval(() => void this.checkDipWatchers(), 5_000);
 
     // ── WebSocket — only needed for detecting new graduations ────────────────
     const apiKey = process.env["HELIUS_API_KEY"];
@@ -984,6 +1026,7 @@ class GraduationSniperService {
     if (this.priceIntervalId)        { clearInterval(this.priceIntervalId);        this.priceIntervalId        = null; }
     if (this.liquidityIntervalId)    { clearInterval(this.liquidityIntervalId);    this.liquidityIntervalId    = null; }
     if (this.externalSellCheckId)    { clearInterval(this.externalSellCheckId);    this.externalSellCheckId    = null; }
+    if (this.dipWatchIntervalId)     { clearInterval(this.dipWatchIntervalId);     this.dipWatchIntervalId     = null; }
     if (this.heartbeatIntervalId)    { clearInterval(this.heartbeatIntervalId);    this.heartbeatIntervalId    = null; }
     if (this.wsPingIntervalId)       { clearInterval(this.wsPingIntervalId);       this.wsPingIntervalId       = null; }
     if (this.detectionWatchdogId)    { clearInterval(this.detectionWatchdogId);    this.detectionWatchdogId    = null; }
@@ -1558,16 +1601,26 @@ class GraduationSniperService {
         onChainPriceConfirmed: true,
       } satisfies GraduationQualityMeta);
 
-      if (liveOnlySkip) {
-        logger.info({ mint, symbol, liveOnlySkip }, 'Graduation sniper: live entry skipped — paper-only');
-        return;
-      }
+      // ── Dip-Retrace strategy: add to dip-watch instead of entering immediately ─
+      // Regardless of liveOnlySkip (paper-only mode), add to dip watch so the
+      // frontend always shows the watching panel. liveOnlySkip is forwarded to
+      // addToDipWatch so the actual enterPosition is skipped in paper-only mode.
+      logger.info({ mint, symbol, entryPrice: entryPrice.toExponential(4) },
+        'Graduation sniper: quality gate passed — adding to dip-retrace watch ✅');
 
-      await this.enterPosition(
-        mint, symbol, name, entryPrice, signature, initialPrice, detectedAt, null,
-        positionSizeSol, quality,
-      );
-      this.addEvent({ ...fullEventBase, action: 'entered', ...qualityEventFields });
+      this.addToDipWatch({
+        mint, symbol, name,
+        graduationPrice: entryPrice,
+        signature,
+        initialPrice,
+        detectedAt,
+        positionSizeSol,
+        quality,
+        liveOnlySkip,
+      });
+      this.addEvent({ ...fullEventBase, action: 'watching', watchStage: undefined,
+        skipReason: `Dip-watch started — monitoring for ${DIP_MIN_PCT}–${DIP_MAX_PCT}% dump + ${RETRACE_MIN_PCT}% retrace (30 min window)`,
+        ...qualityEventFields });
 
 
     } catch (err) {
@@ -4235,6 +4288,192 @@ class GraduationSniperService {
   }
 
   // ── Getters ────────────────────────────────────────────────────────────────
+
+  // ── Dip-Retrace watch methods ──────────────────────────────────────────────
+
+  private addToDipWatch(opts: {
+    mint: string;
+    symbol: string;
+    name: string;
+    graduationPrice: number;
+    signature: string;
+    initialPrice: number;
+    detectedAt: number;
+    positionSizeSol: number;
+    quality: QualityMetrics;
+    liveOnlySkip: string | null;
+  }): void {
+    // Do not add if already watching (e.g. from a duplicate graduation event)
+    if (this.dipWatchMap.has(opts.mint)) return;
+
+    const now = Date.now();
+    const entry: DipWatchInternal = {
+      mint:             opts.mint,
+      symbol:           opts.symbol,
+      name:             opts.name,
+      watchStartedAt:   now,
+      expiresAt:        now + DIP_WATCH_DURATION_MS,
+      graduationPrice:  opts.graduationPrice,
+      peakHigh:         opts.graduationPrice,
+      dipLow:           opts.graduationPrice,
+      currentPrice:     opts.graduationPrice,
+      state:            "pumping",
+      dumpPct:          0,
+      retracePct:       0,
+      qualityScore:     opts.quality.totalScore,
+      _quality:         opts.quality,
+      _signature:       opts.signature,
+      _positionSizeSol: opts.positionSizeSol,
+      _detectedAt:      opts.detectedAt,
+      _initialPrice:    opts.initialPrice,
+      _liveOnlySkip:    opts.liveOnlySkip,
+    };
+
+    // Reserve the mint in seenMints so no other graduation event starts a second watcher
+    this.seenMints.add(opts.mint);
+    this.dipWatchMap.set(opts.mint, entry);
+
+    logger.info(
+      { mint: opts.mint, symbol: opts.symbol, graduationPrice: opts.graduationPrice.toExponential(4), expiresIn: '30m' },
+      `Graduation sniper: dip-retrace watcher started 👀 (${DIP_MIN_PCT}–${DIP_MAX_PCT}% dump + ${RETRACE_MIN_PCT}% retrace triggers entry)`,
+    );
+  }
+
+  private async checkDipWatchers(): Promise<void> {
+    if (this.dipWatchMap.size === 0) return;
+
+    const now = Date.now();
+    const expired: string[] = [];
+
+    for (const [mint, entry] of this.dipWatchMap.entries()) {
+      // ── Expiry check ──────────────────────────────────────────────────────
+      if (now >= entry.expiresAt) {
+        expired.push(mint);
+        entry.state = "expired";
+        logger.info({ mint, symbol: entry.symbol, dumpPct: entry.dumpPct.toFixed(1), peakHigh: entry.peakHigh.toExponential(4) },
+          'Graduation sniper: dip-watch EXPIRED — no pattern in 30 min ⏱');
+        this.addEvent({
+          id: uid(), detectedAt: entry._detectedAt, mint, symbol: entry.symbol,
+          action: 'skipped', txSignature: entry._signature,
+          skipReason: `Dip-watch expired — no ${DIP_MIN_PCT}–${DIP_MAX_PCT}% dump+retrace in 30 min (peak dump was ${entry.dumpPct.toFixed(1)}%)`,
+          qualityScore: entry.qualityScore,
+        });
+        continue;
+      }
+
+      // ── Fetch current price ───────────────────────────────────────────────
+      let price = 0;
+      try {
+        const priceData = await this.fetchPrice(mint);
+        if (priceData && priceData.price > 0) {
+          price = priceData.price;
+          // Update symbol/name if DexScreener returns better data
+          if (priceData.symbol && entry.symbol === mint.slice(0, 8)) entry.symbol = priceData.symbol;
+          if (priceData.name   && entry.name   === mint.slice(0, 8)) entry.name   = priceData.name;
+        }
+      } catch { /* non-fatal — skip this cycle */ }
+
+      if (price <= 0) continue;
+
+      entry.currentPrice = price;
+
+      // ── Update peak high and dip low ─────────────────────────────────────
+      if (price > entry.peakHigh) {
+        entry.peakHigh = price;
+        // Reset dipLow to current price — we're at a new high, fresh dump-tracking
+        entry.dipLow = price;
+      } else if (price < entry.dipLow) {
+        entry.dipLow = price;
+      }
+
+      // ── Compute dip/retrace metrics ───────────────────────────────────────
+      const dumpMagnitude = entry.peakHigh - entry.dipLow;
+      entry.dumpPct    = entry.peakHigh > 0 ? (dumpMagnitude / entry.peakHigh) * 100 : 0;
+      entry.retracePct = dumpMagnitude > 0 ? ((price - entry.dipLow) / dumpMagnitude) * 100 : 0;
+
+      // ── State update ──────────────────────────────────────────────────────
+      const validDump    = entry.dumpPct >= DIP_MIN_PCT && entry.dumpPct <= DIP_MAX_PCT;
+      const validRetrace = entry.retracePct >= RETRACE_MIN_PCT;
+
+      if (price >= entry.peakHigh) {
+        entry.state = "pumping";
+      } else if (entry.dumpPct >= DIP_MIN_PCT) {
+        entry.state = (validDump && validRetrace) ? "retracing" : "dumped";
+      }
+
+      // ── Entry trigger ─────────────────────────────────────────────────────
+      if (validDump && validRetrace) {
+        logger.info({
+          mint, symbol: entry.symbol,
+          dumpPct:    entry.dumpPct.toFixed(1),
+          retracePct: entry.retracePct.toFixed(1),
+          peakHigh:   entry.peakHigh.toExponential(4),
+          dipLow:     entry.dipLow.toExponential(4),
+          entryPrice: price.toExponential(4),
+        }, 'Graduation sniper: DIP-RETRACE TRIGGERED — entering position 🎯');
+
+        // Remove from watch map BEFORE awaiting enterPosition so parallel cycles
+        // don't double-trigger
+        expired.push(mint);
+        entry.state = "entered";
+
+        if (!entry._liveOnlySkip) {
+          void this.enterDipPosition(entry, price);
+        } else {
+          logger.info({ mint, symbol: entry.symbol, skip: entry._liveOnlySkip },
+            'Graduation sniper: dip-retrace triggered — paper-only, skip live entry');
+        }
+
+        this.addEvent({
+          id: uid(), detectedAt: entry._detectedAt, mint, symbol: entry.symbol,
+          action: 'entered', txSignature: entry._signature,
+          qualityScore:     entry.qualityScore,
+          skipReason: undefined,
+        });
+      }
+    }
+
+    // Clean up expired / triggered entries
+    for (const mint of expired) {
+      this.dipWatchMap.delete(mint);
+    }
+
+    if (expired.length > 0) this.broadcast();
+  }
+
+  private async enterDipPosition(entry: DipWatchInternal, triggerPrice: number): Promise<void> {
+    try {
+      await this.enterPosition(
+        entry.mint, entry.symbol, entry.name,
+        triggerPrice, entry._signature,
+        entry._initialPrice, entry._detectedAt,
+        null, entry._positionSizeSol, entry._quality,
+      );
+    } catch (err) {
+      logger.error(
+        { mint: entry.mint, symbol: entry.symbol, err: (err as Error).message },
+        'Graduation sniper: dip-retrace entry FAILED',
+      );
+    }
+  }
+
+  getDipWatchers(): DipWatchEntry[] {
+    return Array.from(this.dipWatchMap.values()).map((e) => ({
+      mint:            e.mint,
+      symbol:          e.symbol,
+      name:            e.name,
+      watchStartedAt:  e.watchStartedAt,
+      expiresAt:       e.expiresAt,
+      graduationPrice: e.graduationPrice,
+      peakHigh:        e.peakHigh,
+      dipLow:          e.dipLow,
+      currentPrice:    e.currentPrice,
+      state:           e.state,
+      dumpPct:         e.dumpPct,
+      retracePct:      e.retracePct,
+      qualityScore:    e.qualityScore,
+    }));
+  }
 
   getStatus(): SniperStatus {
     // Use all-time accumulators (not closedPositions which is capped at MAX_CLOSED)
