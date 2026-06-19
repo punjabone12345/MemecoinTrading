@@ -499,6 +499,8 @@ export interface PaperConfig {
   tp1ClosePct:        number;
   tp2Pct:             number;
   tp2ClosePct:        number;
+  tp3Pct:             number;
+  tp3ClosePct:        number;
   trailingStopPct:    number;
   slPhase1Pct:        number;
   slPhase2Pct:        number;

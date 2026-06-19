@@ -119,6 +119,8 @@ const FIELDS: FieldDef[] = [
   { key: "tp1ClosePct",        label: "TP1 close %",           description: "Portion of position to sell at TP1",          suffix: "%",   min: 1,     max: 100,  step: 1 },
   { key: "tp2Pct",             label: "TP2 target",            description: "Sell more at this gain",                      suffix: "%",   min: 50,    max: 5000, step: 10 },
   { key: "tp2ClosePct",        label: "TP2 close %",           description: "Portion of remaining to sell at TP2",         suffix: "%",   min: 1,     max: 100,  step: 1 },
+  { key: "tp3Pct",             label: "TP3 target",            description: "Exit remaining runner at this gain (e.g. 600 = 6×)",          suffix: "%",   min: 200,   max: 10000, step: 50 },
+  { key: "tp3ClosePct",        label: "TP3 close %",           description: "% of remaining to close at TP3 (100 = full exit)",             suffix: "%",   min: 10,    max: 100,  step: 5 },
   { key: "trailingStopPct",    label: "Trailing stop",         description: "Stop when price drops this % from peak",      suffix: "%",   min: 1,     max: 90,   step: 1 },
   { section: "Stop loss",      key: "slPhase1Pct",      label: "SL phase 1  (0–2 min)", description: "Max drawdown in the first 2 minutes",         suffix: "%",   min: 1,     max: 90,   step: 1 },
   { key: "slPhase2Pct",        label: "SL phase 2  (2–10 min)",description: "Max drawdown from peak, 2–10 min",           suffix: "%",   min: 1,     max: 90,   step: 1 },
@@ -146,7 +148,7 @@ const FIELDS: FieldDef[] = [
 
 const DEFAULT_CFG: PaperConfig = {
   positionSizeSol: 0.001, maxOpenPositions: 8,
-  tp1Pct: 150, tp1ClosePct: 40, tp2Pct: 400, tp2ClosePct: 40,
+  tp1Pct: 150, tp1ClosePct: 40, tp2Pct: 400, tp2ClosePct: 40, tp3Pct: 600, tp3ClosePct: 100,
   trailingStopPct: 30, slPhase1Pct: 20, slPhase2Pct: 25, slPhase3Pct: 30, slAfterTp1Pct: 35,
   simulatedExecDelayMs: 5_500,
   maxFillDriftPct: 15,
