@@ -1425,38 +1425,59 @@ class GraduationSniperService {
         });
       };
 
-      if (quality.autoSkipReason) {
+      // ── Quality gate: split hard-fails from soft-fails ───────────────────────
+      // TRUE hard-fails (irreversible — skip immediately, no watching):
+      //   • Creator holdings > 5%  — rug setup, never recovers
+      //   • Liquidity < 25 SOL     — pool too thin to trade safely
+      // SOFT fails (can recover within 3-10 mins — go through staged watching):
+      //   • Unique buyers < 20     — buyers arrive slowly post-graduation
+      //   • Buy pressure < 1.3x    — can flip as accumulation continues
+      //   • Top holder > 25%       — distribution can improve
+      const isHardFail = quality.creatorHoldingsPct > 5 || quality.liquiditySol < 25;
+
+      if (isHardFail && quality.autoSkipReason) {
         const reason = `Quality: ${quality.autoSkipReason}`;
         this.addEvent({ ...fullEventBase, action: 'skipped', skipReason: reason, ...makeQualityFields(quality) });
-        logger.info({ mint, symbol, reason: quality.autoSkipReason }, 'Graduation sniper: quality auto-skip ❌');
+        logger.info({ mint, symbol, reason: quality.autoSkipReason }, 'Graduation sniper: hard-fail quality skip ❌');
         notifyPaperSkip(quality, reason);
         return;
       }
 
-      // Borderline zone: 50–69 (no hard-fail) → staged watching at T+180s / T+600s
+      // Score too low even to watch — soft fail + low score
       const BORDERLINE_MIN = 50;
-      if (quality.totalScore < this.config.minQualityScore && quality.totalScore >= BORDERLINE_MIN) {
-        logger.info({ mint, symbol, score: quality.totalScore },
-          'Graduation sniper: borderline score — entering staged watching (T+180s, T+600s) 👀');
+      if (quality.totalScore < BORDERLINE_MIN) {
+        const reason = quality.autoSkipReason
+          ? `Quality: ${quality.autoSkipReason} (score ${quality.totalScore}/100 too low to watch)`
+          : `Quality score ${quality.totalScore}/100 < ${BORDERLINE_MIN} (too low to watch)`;
+        this.addEvent({ ...fullEventBase, action: 'skipped', skipReason: reason, ...makeQualityFields(quality) });
+        logger.info({ mint, symbol, score: quality.totalScore, reason: quality.autoSkipReason ?? 'low score' },
+          'Graduation sniper: score too low — permanent skip ❌');
+        notifyPaperSkip(quality, reason);
+        return;
+      }
+
+      // Borderline zone: score 50–69 (including soft-fail metrics that may recover) → staged watching
+      if (quality.totalScore < this.config.minQualityScore) {
+        const watchReason = quality.autoSkipReason
+          ? `Borderline score ${quality.totalScore}/100 with soft-fail (${quality.autoSkipReason}) — watching to T+180s`
+          : `Borderline score ${quality.totalScore}/100 — watching to T+180s`;
+        logger.info({ mint, symbol, score: quality.totalScore, softFail: quality.autoSkipReason ?? 'none' },
+          'Graduation sniper: borderline — entering staged watching (T+180s, T+600s) 👀');
         const watched = await this.stagedReEvaluation(
           mint, symbol, poolPda, heliusKey, wsolVaultPubkey, quality, detectedAt,
         );
         if (!watched) {
-          const reason = `Quality watching: no improvement by T+600s — skip`;
+          const reason = quality.autoSkipReason
+            ? `Quality watching: ${quality.autoSkipReason} — no improvement by T+600s`
+            : `Quality watching: no improvement by T+600s — skip`;
           this.addEvent({ ...fullEventBase, action: 'skipped', skipReason: reason, ...makeQualityFields(quality) });
           notifyPaperSkip(quality, reason);
           return;
         }
-        // Improved enough — promote to entering with updated metrics
+        // Staged re-evaluation passed — promote to entering with improved metrics
         quality = watched;
         logger.info({ mint, symbol, score: quality.totalScore },
           'Graduation sniper: staged re-evaluation PASSED ✅ — entering with improved metrics');
-      } else if (quality.totalScore < BORDERLINE_MIN) {
-        const reason = `Quality score ${quality.totalScore}/100 < ${BORDERLINE_MIN} (too low to watch)`;
-        this.addEvent({ ...fullEventBase, action: 'skipped', skipReason: reason, ...makeQualityFields(quality) });
-        logger.info({ mint, symbol, score: quality.totalScore }, 'Graduation sniper: score too low — permanent skip ❌');
-        notifyPaperSkip(quality, reason);
-        return;
       }
 
       const qualityEventFields = makeQualityFields(quality);
