@@ -32,15 +32,35 @@ Byte offset 171 = pool_quote_token_account = WSOL vault:
 
 Account must be ≥203 bytes.
 
-## How to apply
-In `fetchBatchedPrices`: add `pairAddress?: string` to DexPair type, cache it as
-`pumpswapVaultCache.set('pair:' + mint, pairAddress)`, then use it when `liquidityUsd === 0`.
+## Four-layer liquidity fallback (entry pipeline)
 
-In `fetchPrice`: add `pairAddress?: string` to DexPair type, pass `best.pairAddress` to
-`fetchPumpSwapLiquidityUsd(poolAddress, solUsd)`.
+Applied in `collectQualityData` (token-quality.service.ts):
 
-`fetchPumpSwapLiquidityUsd(poolAddress, solUsd)` — first param is the POOL address (not mint).
-Cache is keyed by poolAddress, NOT mint.
+1. `initialSolReserves` — passed from `fetchReservesWithRetry` in processGraduation; sourced
+   from `fetchOnChainPoolReserves(wsolVaultPubkey, tokenVaultPubkey)` or `fetchOnChainPoolSol(wsolVaultPubkey)`
+   when only the WSOL vault is known (tokenVaultPubkey may be null due to ALT issues).
+2. `onChainSolRaw` — `fetchOnChainSolBalance(wsolVaultPubkey)` called in parallel via Promise.all;
+   tries Helius then public RPC; works even when initialSolReserves=0.
+3. `pairAddressSol` — sequential fallback AFTER the 60s quality window; calls `fetchSolFromPairAddress(pairAddress)`:
+   getAccountInfo(pairAddress) → buf[171:203] = wsolVaultKey → getTokenAccountBalance(wsolVaultKey).
+   Only fires when both layers above return 0 AND dexResult.pairAddress is available.
+4. DexScreener estimate — `dexResult.liquidityUsd / 150`; last resort, often 0 for fresh tokens.
+
+## CRITICAL: tokenVaultPubkey can be null for PumpSwap
+`fetchReservesWithRetry` previously required BOTH `wsolVaultPubkey` AND `tokenVaultPubkey` and
+returned null early if either was null. Fixed: now only requires `wsolVaultPubkey`. When
+`tokenVaultPubkey` is absent, calls `fetchOnChainPoolSol(wsolVaultPubkey)` which returns a
+partial reserves object `{ solBalance, tokenBalanceUi: 0, price: 0 }` — enough for liquidity gate.
+
+## `fetchOnChainPoolSol` RPC fallback
+Was gated on `HELIUS_API_KEY` (returns null if absent). Fixed: tries Helius → api.mainnet-beta.solana.com
+→ solana-mainnet.g.alchemy.com/v2/demo in order. Works in paper mode on Replit (no Helius).
+
+## Position monitoring path (graduation-sniper.service.ts)
+`fetchBatchedPrices` and `fetchPrice` both extract `pairAddress` from DexScreener response,
+cache as `pumpswapVaultCache.set('pair:' + mint, pairAddress)`, then call
+`fetchPumpSwapLiquidityUsd(poolAddress, solUsd)` when `liquidityUsd === 0`.
+First param is the POOL address (not mint). Cache is keyed by poolAddress, NOT mint.
 
 ## On-chain vs DexScreener difference
 On-chain reads only the WSOL (SOL) vault side = ~50% of DexScreener's `liquidity.usd`

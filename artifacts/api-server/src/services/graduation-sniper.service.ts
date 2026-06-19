@@ -1305,17 +1305,33 @@ class GraduationSniperService {
       // ── T0: on-chain price + SOL/USD (parallel) ────────────────────────────────
       // Pool accounts are created in the graduation TX but may not be readable
       // immediately — retry up to 3× with 1.5s delay to let RPC state settle.
+      //
+      // IMPORTANT: We no longer require tokenVaultPubkey to be non-null.
+      // PumpSwap migration TXes often have the token vault accountIndex in the
+      // ALT range that fails to resolve → tokenVaultPubkey = null. But we can
+      // still read wsolVaultPubkey alone for liquiditySol (the critical metric).
+      // If BOTH vaults are present we get a full price; otherwise SOL-balance only.
       const fetchReservesWithRetry = async () => {
-        if (!wsolVaultPubkey || !tokenVaultPubkey) return null;
+        if (!wsolVaultPubkey) return null;
         for (let attempt = 0; attempt < 3; attempt++) {
           if (attempt > 0) await new Promise<void>((r) => setTimeout(r, 1_500));
-          const r = await this.fetchOnChainPoolReserves(wsolVaultPubkey, tokenVaultPubkey);
-          if (r && r.solBalance > 0 && r.tokenBalanceUi > 0) {
-            if (attempt > 0) logger.info({ mint, attempt, solBalance: r.solBalance.toFixed(2) }, "Graduation sniper: on-chain reserves settled after retry ✅");
-            return r;
+          if (tokenVaultPubkey) {
+            // Full reserves — gives us both solBalance and price
+            const r = await this.fetchOnChainPoolReserves(wsolVaultPubkey, tokenVaultPubkey);
+            if (r && r.solBalance > 0 && r.tokenBalanceUi > 0) {
+              if (attempt > 0) logger.info({ mint, attempt, solBalance: r.solBalance.toFixed(2) }, "Graduation sniper: on-chain reserves settled after retry ✅");
+              return r;
+            }
+          } else {
+            // SOL-only read — enough for the liquidity check; price comes from DexScreener later
+            const sol = await this.fetchOnChainPoolSol(wsolVaultPubkey);
+            if (sol && sol > 0) {
+              logger.info({ mint, attempt, solBalance: sol.toFixed(2) }, "Graduation sniper: SOL-only reserve read (no token vault) ✅");
+              return { solBalance: sol, tokenBalanceUi: 0, price: 0 };
+            }
           }
         }
-        logger.warn({ mint, wsolVaultPubkey: wsolVaultPubkey.slice(0, 8) }, "Graduation sniper: on-chain reserves still 0 after 3 attempts — falling back to DexScreener");
+        logger.warn({ mint, wsolVaultPubkey: wsolVaultPubkey.slice(0, 8), hadTokenVault: !!tokenVaultPubkey }, "Graduation sniper: on-chain reserves still 0 after 3 attempts — falling back to DexScreener");
         return null;
       };
 
@@ -1835,40 +1851,34 @@ class GraduationSniperService {
     return null;
   }
 
-  // ── On-chain pool SOL check (FIX 2) ────────────────────────────────────────
-  // Reads the WSOL token account balance directly from Helius RPC.
-  // Returns the SOL amount held in the vault, or null if the call fails.
+  // ── On-chain pool SOL check ─────────────────────────────────────────────────
+  // Reads the WSOL token account balance directly from Helius or public RPC.
+  // Falls back through Helius → public mainnet RPC so it works without Helius key.
   private async fetchOnChainPoolSol(wsolVaultPubkey: string): Promise<number | null> {
     const apiKey = process.env["HELIUS_API_KEY"];
-    if (!apiKey) return null;
-
-    try {
-      type TokenAmountResult = {
-        result?: {
-          value?: {
-            uiAmount?: number | null;
-          };
-        };
-      };
-
-      const res = await axios.post<TokenAmountResult>(
-        `https://mainnet.helius-rpc.com/?api-key=${apiKey}`,
-        {
-          jsonrpc: "2.0",
-          id:      1,
-          method:  "getTokenAccountBalance",
-          params:  [wsolVaultPubkey],
-        },
-        { timeout: 6_000 },
-      );
-
-      const uiAmount = res.data?.result?.value?.uiAmount;
-      if (uiAmount == null) return null;
-      return uiAmount;
-    } catch (err) {
-      logger.warn({ wsolVaultPubkey, err: (err as Error).message }, "Graduation sniper: fetchOnChainPoolSol failed");
-      return null;
+    const rpcUrls = [
+      ...(apiKey ? [`https://mainnet.helius-rpc.com/?api-key=${apiKey}`] : []),
+      "https://api.mainnet-beta.solana.com",
+      "https://solana-mainnet.g.alchemy.com/v2/demo",
+    ];
+    type TokenAmountResult = {
+      result?: { value?: { uiAmount?: number | null } };
+    };
+    for (const rpcUrl of rpcUrls) {
+      try {
+        const res = await axios.post<TokenAmountResult>(
+          rpcUrl,
+          { jsonrpc: "2.0", id: 1, method: "getTokenAccountBalance", params: [wsolVaultPubkey] },
+          { timeout: 6_000 },
+        );
+        const uiAmount = res.data?.result?.value?.uiAmount;
+        if (uiAmount != null && uiAmount > 0) return uiAmount;
+      } catch {
+        // try next RPC
+      }
     }
+    logger.warn({ wsolVaultPubkey: wsolVaultPubkey.slice(0, 8) }, "Graduation sniper: fetchOnChainPoolSol — all RPCs failed");
+    return null;
   }
 
   // ── On-chain pool reserves (both vaults in one parallel RPC pair) ───────────

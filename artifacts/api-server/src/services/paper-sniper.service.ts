@@ -596,6 +596,8 @@ class PaperSniperService {
         pnlPct:            0,
         tp1RealizedSol:    0,
         tp2RealizedSol:    0,
+        tp3Hit:            false,
+        tp3RealizedSol:    0,
         runnerRealizedSol: 0,
         detectionPrice,
         entryDriftPct:     fastDriftPct,
