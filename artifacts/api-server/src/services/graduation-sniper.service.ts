@@ -1441,6 +1441,11 @@ class GraduationSniperService {
               preTokenBalances?:  TokenBalance[];
               postTokenBalances?: TokenBalance[];
               logMessages?:       string[];
+              // v0 versioned transactions: ALT-resolved accounts (indices continue after accountKeys)
+              loadedAddresses?: {
+                writable?: string[];
+                readonly?: string[];
+              };
             };
           } | null;
         };
@@ -1505,10 +1510,27 @@ class GraduationSniperService {
           );
         }
 
-        const accountKeys    = txResult.transaction?.message?.accountKeys ?? [];
+        const staticAccountKeys = txResult.transaction?.message?.accountKeys ?? [];
+        // v0 versioned TXs use Address Lookup Tables (ALTs). The accountIndex in
+        // preTokenBalances / postTokenBalances spans the FULL account list:
+        //   [staticAccountKeys..., loadedAddresses.writable..., loadedAddresses.readonly...]
+        // Without merging, any vault whose accountIndex >= staticAccountKeys.length
+        // resolves to undefined → wsolVaultPubkey = null → liquiditySol = 0.
+        const loadedWritable  = (txResult.meta?.loadedAddresses?.writable ?? []).map((p) => ({ pubkey: p }));
+        const loadedReadonly  = (txResult.meta?.loadedAddresses?.readonly ?? []).map((p) => ({ pubkey: p }));
+        const accountKeys     = [...staticAccountKeys, ...loadedWritable, ...loadedReadonly];
+
         const postBalances   = txResult.meta?.postTokenBalances ?? [];
         const preBalances    = txResult.meta?.preTokenBalances  ?? [];
         const txLogMessages  = txResult.meta?.logMessages ?? [];
+
+        logger.debug({
+          signature,
+          staticKeys:    staticAccountKeys.length,
+          loadedWritable: loadedWritable.length,
+          loadedReadonly: loadedReadonly.length,
+          totalKeys:     accountKeys.length,
+        }, "Graduation sniper: account key counts (static + ALT-resolved)");
 
         // ── Pump.fun migration validator (CRITICAL anti-false-positive gate) ──
         // The PumpSwap AMM subscription (sub 3) fires for ANY PumpSwap TX —
