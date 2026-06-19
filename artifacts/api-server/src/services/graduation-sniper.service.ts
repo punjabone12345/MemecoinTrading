@@ -1183,14 +1183,30 @@ class GraduationSniperService {
     const signature = value["signature"] as string | undefined;
     if (!signature) return;
 
-    // ── Migration wallet subscription only ────────────────────────────────────
-    // Only one subscription is registered (migration wallet 39azUY…).
-    // Every TX from this wallet is a pump.fun graduation — no instruction filter
-    // needed. extractMintFromTx is the final gate (returns null if it can't find
-    // a valid AMM pool token balance, i.e. not a real graduation TX).
+    // ── Migration wallet + migrate instruction pre-filter (LAYER 2 gate) ─────
+    // The Helius subscription already limits delivery to TXes mentioning 39azUY…
+    // but that wallet could theoretically sign non-migration TXes too.
+    // We require the TX logs to also contain the pump.fun Anchor instruction name
+    // ("Instruction: Migrate" or "MigrateV2") before processing further.
+    // The WS logsNotification includes the full logs array — no extra RPC call needed.
     const txLogs = value["logs"] as string[] | undefined;
+    const hasMigrateLog = (txLogs ?? []).some((l) => {
+      const lower = l.toLowerCase();
+      return lower.includes("instruction: migrate")
+          || lower.includes("migrate_v2")
+          || lower.includes("migratev2");
+    });
+
+    if (!hasMigrateLog) {
+      logger.debug(
+        { signature, logCount: txLogs?.length ?? 0 },
+        "Graduation sniper: migration wallet TX skipped — no migrate instruction in logs ⛔",
+      );
+      return; // not a pump.fun graduation — discard without spawning processGraduation
+    }
+
     logger.info({ signature, logCount: txLogs?.length ?? 0 },
-      "Graduation sniper: migration wallet TX — processing ⚡");
+      "Graduation sniper: migration wallet TX + migrate instruction confirmed ⚡");
 
     // ── Signature-level dedup ─────────────────────────────────────────────────
     if (this.seenSignatures.has(signature)) {
@@ -1668,20 +1684,25 @@ class GraduationSniperService {
         }, "Graduation sniper: account key counts (static + ALT-resolved)");
 
         // ── Pump.fun migration validator (CRITICAL anti-false-positive gate) ──
-        // The PumpSwap AMM subscription (sub 3) fires for ANY PumpSwap TX —
-        // including tokens created directly on PumpSwap (not from pump.fun) and
-        // already-migrated tokens that are actively trading. These must be
-        // rejected before they reach the paper/live sniper.
+        // Both conditions MUST be true for a genuine pump.fun graduation TX:
         //
-        // A genuine pump.fun graduation TX satisfies AT LEAST ONE of:
         //   1. MIGRATION_WALLET (39azUY…) appears in the TX account keys —
         //      pump.fun's dedicated migration signer is present for EVERY
-        //      graduation and NEVER appears in random PumpSwap TXes.
-        //   2. TX logs contain "Instruction: Migrate" or "MigrateV2" —
-        //      Anchor emits this line only when the pump.fun bonding-curve
-        //      "migrate" or "migrate_v2" instruction executes.
+        //      official graduation and NEVER appears in non-graduation TXes.
         //
-        // If neither condition is met → not a pump.fun graduation → discard.
+        //   2. TX logs contain "Instruction: Migrate" or "MigrateV2" —
+        //      Anchor emits this line ONLY when the pump.fun bonding-curve
+        //      "migrate" or "migrate_v2" instruction executes. No random
+        //      PumpSwap TX contains this log line.
+        //
+        // Requiring BOTH (AND, not OR) means:
+        //   • A TX from the migration wallet that is NOT a migrate call → rejected
+        //   • A migrate instruction from a DIFFERENT wallet → rejected
+        //   • Only the official pump.fun migration wallet + official migrate
+        //     instruction combination is accepted.
+        //
+        // This is the deepest guard (layer 3). Layers 1+2 already filter
+        // to this wallet + instruction before this code is reached.
         const hasMigrationWallet = accountKeys.some(
           (k) => k.pubkey === MIGRATION_WALLET,
         );
@@ -1692,17 +1713,28 @@ class GraduationSniperService {
               || lower.includes("migratev2");
         });
 
-        if (!hasMigrationWallet && !hasMigrateInstruction) {
+        if (!hasMigrationWallet || !hasMigrateInstruction) {
           logger.warn(
-            { signature, attempt: attempt + 1, accountKeyCount: accountKeys.length, logCount: txLogMessages.length },
-            "Graduation sniper: NOT a pump.fun graduation — no migration wallet & no migrate instruction ⛔",
+            {
+              signature,
+              attempt:          attempt + 1,
+              hasMigrationWallet,
+              hasMigrateInstruction,
+              accountKeyCount:  accountKeys.length,
+              logCount:         txLogMessages.length,
+            },
+            hasMigrationWallet
+              ? "Graduation sniper: NOT a pump.fun graduation — migration wallet present but no migrate instruction ⛔"
+              : hasMigrateInstruction
+                ? "Graduation sniper: NOT a pump.fun graduation — migrate instruction found but wrong wallet ⛔"
+                : "Graduation sniper: NOT a pump.fun graduation — missing both migration wallet and migrate instruction ⛔",
           );
           return null; // definitive reject — retry won't help
         }
 
         logger.info(
           { signature, hasMigrationWallet, hasMigrateInstruction },
-          "Graduation sniper: pump.fun migration confirmed ✅",
+          "Graduation sniper: pump.fun migration confirmed — wallet ✅ + instruction ✅",
         );
 
         // ── Mint extraction — LP-token-safe for migrate_v2 ────────────────────
