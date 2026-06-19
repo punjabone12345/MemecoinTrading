@@ -12,3 +12,4 @@
 - [Old migration re-trading bugs](old-migration-trading-bugs.md) — backfill fires on boot (not just reconnect), no blockTime pre-filter, wrong vault extraction, one-sided drift guards; all fixed
 - [Strategy overhaul: quality filter + 4-stage TP](strategy-overhaul.md) — 60s parallel data collection, 4-dim scoring, 10s candle entry, SL-12%/TP1+100%/TP2+300%/TP3+600%/runner trailing; DB columns added
 - [PumpSwap ALT vault extraction bug](pumpswap-alt-vault-bug.md) — graduation TX is v0 versioned; vault accountIndex falls in ALT range; must merge loadedAddresses into accountKeys before indexing
+- [PumpSwap on-chain liquidity fix](pumpswap-liquidity-fix.md) — PumpSwap pools are keypair-based (NOT PDAs); use DexScreener pairAddress directly, not findProgramAddressSync; WSOL vault at byte offset 171

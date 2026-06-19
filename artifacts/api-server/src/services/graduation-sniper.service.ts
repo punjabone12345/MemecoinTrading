@@ -408,6 +408,14 @@ class GraduationSniperService {
   // ── Per-position error tracking (for UI badge display) ────────────────────
   private positionLastError: Map<string, string> = new Map();
 
+  // ── PumpSwap on-chain liquidity cache ─────────────────────────────────────
+  // Caches the WSOL vault pubkey per mint so we only read the pool account once.
+  private pumpswapVaultCache: Map<string, string> = new Map();
+  // Cached SOL/USD price (refreshed every 30s) to avoid repeated DexScreener calls
+  // inside the already-batched price loop.
+  private cachedSolUsd     = 0;
+  private solUsdCachedAt   = 0;
+
   // ── Init ───────────────────────────────────────────────────────────────────
 
   async init(): Promise<void> {
@@ -546,6 +554,133 @@ class GraduationSniperService {
     } catch {
       return null;
     }
+  }
+
+  // ── Cached SOL/USD price (30-second TTL) ─────────────────────────────────
+  // Prevents a redundant DexScreener call for every token in the price loop
+  // when we need SOL/USD to convert on-chain vault balances to USD liquidity.
+  private async fetchCachedSolUsd(): Promise<number> {
+    const SOL_USD_CACHE_TTL = 30_000;
+    if (this.cachedSolUsd > 0 && Date.now() - this.solUsdCachedAt < SOL_USD_CACHE_TTL) {
+      return this.cachedSolUsd;
+    }
+    const price = await this.fetchSolUsdPrice();
+    if (price && price > 0) {
+      this.cachedSolUsd   = price;
+      this.solUsdCachedAt = Date.now();
+    }
+    return this.cachedSolUsd;
+  }
+
+  // ── PumpSwap on-chain liquidity fallback ──────────────────────────────────
+  // DexScreener takes 3–5 minutes to populate liquidity.usd for freshly
+  // graduated PumpSwap tokens, so it reports 0 during the critical early window.
+  //
+  // Proof-tested approach (PDA derivation does NOT work — PumpSwap pool accounts
+  // are keypair-based, not PDAs). Instead we use the pool address directly:
+  //   1. Caller passes the pool address (pairAddress from DexScreener response).
+  //   2. Read pool account (base64) and extract the WSOL vault pubkey at
+  //      byte offset 171 (8 discriminator + 1 bump + 2 index + 32 creator +
+  //      32 base_mint + 32 quote_mint + 32 lp_mint + 32 pool_base_token_account).
+  //   3. getTokenAccountBalance on the WSOL vault → SOL amount.
+  //   4. Return SOL × solUsd.
+  //
+  // The vault pubkey is cached per poolAddress so step 2 hits RPC only once.
+  private async fetchPumpSwapLiquidityUsd(poolAddress: string, solUsd: number): Promise<number> {
+    if (solUsd <= 0 || !poolAddress) return 0;
+
+    const apiKey  = process.env["HELIUS_API_KEY"];
+    const rpcUrls = apiKey
+      ? [
+          `https://mainnet.helius-rpc.com/?api-key=${apiKey}`,
+          "https://api.mainnet-beta.solana.com",
+        ]
+      : ["https://api.mainnet-beta.solana.com"];
+
+    try {
+      // ── Step 1: Resolve WSOL vault pubkey (cached per pool address) ───────
+      let wsolVault = this.pumpswapVaultCache.get(poolAddress) ?? null;
+
+      if (!wsolVault) {
+        for (const rpcUrl of rpcUrls) {
+          try {
+            type AccInfo = {
+              result?: { value?: { data?: [string, string] } | null };
+            };
+            const res = await axios.post<AccInfo>(
+              rpcUrl,
+              {
+                jsonrpc: "2.0", id: 1,
+                method: "getAccountInfo",
+                params: [poolAddress, { encoding: "base64" }],
+              },
+              { timeout: 5_000 },
+            );
+            const b64 = res.data?.result?.value?.data?.[0];
+            if (!b64) continue;
+            const buf = Buffer.from(b64, "base64");
+            // PumpSwap Pool layout (all pubkeys are 32 bytes):
+            // [0-7]   discriminator (8)
+            // [8]     pool_bump     (1)
+            // [9-10]  index         (2)
+            // [11-42] creator       (32)
+            // [43-74] base_mint     (32)
+            // [75-106] quote_mint   (32)
+            // [107-138] lp_mint     (32)
+            // [139-170] pool_base_token_account (32)
+            // [171-202] pool_quote_token_account = WSOL vault (32) ← here
+            if (buf.length < 203) continue;
+            wsolVault = new PublicKey(buf.subarray(171, 203)).toBase58();
+            this.pumpswapVaultCache.set(poolAddress, wsolVault);
+            logger.debug(
+              { pool: poolAddress.slice(0, 8), wsolVault: wsolVault.slice(0, 8) },
+              "PumpSwap liquidity: WSOL vault resolved from pool account ✅",
+            );
+            break;
+          } catch {
+            continue;
+          }
+        }
+      }
+
+      if (!wsolVault) return 0;
+
+      // ── Step 2: Read WSOL vault balance ───────────────────────────────────
+      for (const rpcUrl of rpcUrls) {
+        try {
+          type BalResp = {
+            result?: { value?: { uiAmount?: number | null } };
+          };
+          const res = await axios.post<BalResp>(
+            rpcUrl,
+            {
+              jsonrpc: "2.0", id: 2,
+              method: "getTokenAccountBalance",
+              params: [wsolVault],
+            },
+            { timeout: 5_000 },
+          );
+          const solBalance = res.data?.result?.value?.uiAmount ?? 0;
+          if (solBalance > 0) {
+            const liquidityUsd = solBalance * solUsd;
+            logger.info(
+              { pool: poolAddress.slice(0, 8), wsolVault: wsolVault.slice(0, 8), solBalance: solBalance.toFixed(2), liquidityUsd: liquidityUsd.toFixed(0) },
+              "PumpSwap liquidity: on-chain WSOL vault → liquidityUsd ✅",
+            );
+            return liquidityUsd;
+          }
+        } catch {
+          continue;
+        }
+      }
+    } catch (err) {
+      logger.debug(
+        { pool: poolAddress.slice(0, 8), err: (err as Error).message },
+        "PumpSwap liquidity: on-chain fallback failed",
+      );
+    }
+
+    return 0;
   }
 
   // ── Startup phantom-position cleanup ─────────────────────────────────────
@@ -1769,6 +1904,7 @@ class GraduationSniperService {
     try {
       type DexPair = {
         priceUsd: string;
+        pairAddress?: string;
         baseToken: { symbol: string; name: string };
         liquidity?: { usd?: number };
         dexId?: string;
@@ -1784,7 +1920,7 @@ class GraduationSniperService {
       // Pump.fun now graduates to PumpSwap, so include it alongside Raydium.
       // Bonding-curve "pumpfun" pairs are deprioritised — their price is the last
       // curve price, which may not reflect the current AMM pool price.
-      const AMM_DEXES = new Set(["raydium", "pumpswap", "orca", "meteora"]);
+      const AMM_DEXES = new Set(["raydium", "pumpswap", "pump-amm", "orca", "meteora"]);
       const sorted = [...pairs].sort((a, b) => {
         const aAmm = AMM_DEXES.has(a.dexId ?? "") ? 1 : 0;
         const bAmm = AMM_DEXES.has(b.dexId ?? "") ? 1 : 0;
@@ -1794,8 +1930,22 @@ class GraduationSniperService {
 
       const best         = sorted[0]!;
       const price        = parseFloat(best.priceUsd) || 0;
-      const liquidityUsd = best.liquidity?.usd ?? 0;
+      let   liquidityUsd = best.liquidity?.usd ?? 0;
       if (price <= 0) return null;
+
+      // ── On-chain liquidity fallback ─────────────────────────────────────────
+      // DexScreener takes 3–5 min to index liquidity for new PumpSwap graduates.
+      // When it returns 0, use the pairAddress from the DexScreener response to
+      // read the pool's WSOL vault balance directly from chain.
+      // PumpSwap pools are keypair-based (NOT PDAs), so pairAddress is the only
+      // reliable way to locate the pool account on-chain.
+      if (liquidityUsd === 0 && best.pairAddress) {
+        const solUsd = await this.fetchCachedSolUsd();
+        if (solUsd > 0) {
+          const onChainLiq = await this.fetchPumpSwapLiquidityUsd(best.pairAddress, solUsd);
+          if (onChainLiq > 0) liquidityUsd = onChainLiq;
+        }
+      }
 
       return {
         price,
@@ -3198,6 +3348,7 @@ class GraduationSniperService {
       try {
         type DexPair = {
           baseToken: { address: string };
+          pairAddress?: string;
           priceUsd: string;
           liquidity?: { usd?: number };
           dexId?: string;
@@ -3211,7 +3362,7 @@ class GraduationSniperService {
         );
         const pairs = Array.isArray(res.data) ? res.data : [];
 
-        // Group pairs by their base token address; pick highest-liquidity Raydium pair
+        // Group pairs by their base token address; pick highest-liquidity AMM pair
         const byMint = new Map<string, DexPair[]>();
         for (const pair of pairs) {
           const mint = pair.baseToken?.address;
@@ -3222,10 +3373,11 @@ class GraduationSniperService {
         }
 
         for (const [mint, pairGroup] of byMint) {
+          const AMM_DEXES = new Set(["raydium", "pumpswap", "pump-amm", "orca", "meteora"]);
           const sorted = [...pairGroup].sort((a, b) => {
-            const aRay = a.dexId === "raydium" ? 1 : 0;
-            const bRay = b.dexId === "raydium" ? 1 : 0;
-            if (bRay !== aRay) return bRay - aRay;
+            const aAmm = AMM_DEXES.has(a.dexId ?? "") ? 1 : 0;
+            const bAmm = AMM_DEXES.has(b.dexId ?? "") ? 1 : 0;
+            if (bAmm !== aAmm) return bAmm - aAmm;
             return (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0);
           });
           const best  = sorted[0]!;
@@ -3237,6 +3389,10 @@ class GraduationSniperService {
               buysM5:  best.txns?.m5?.buys  ?? 0,
               sellsM5: best.txns?.m5?.sells ?? 0,
             });
+            // Cache pool address → used by on-chain liquidity fallback below
+            if (best.pairAddress) {
+              this.pumpswapVaultCache.set(`pair:${mint}`, best.pairAddress);
+            }
           }
         }
       } catch (err) {
@@ -3246,6 +3402,34 @@ class GraduationSniperService {
         );
       }
     }
+
+    // ── On-chain liquidity fallback for tokens with 0 DexScreener liquidity ──
+    // DexScreener takes 3–5 min to populate liquidity.usd for newly graduated
+    // PumpSwap tokens. When it's 0, use the DexScreener pairAddress (also in
+    // the response) to read the pool's WSOL vault balance directly from chain.
+    // PumpSwap pool accounts are keypair-based (NOT PDAs), so we use the pair
+    // address directly rather than trying to derive it.
+    const zeroLiqMints = [...result.entries()]
+      .filter(([, d]) => d.liquidityUsd === 0)
+      .map(([m]) => m);
+
+    if (zeroLiqMints.length > 0) {
+      const solUsd = await this.fetchCachedSolUsd();
+      if (solUsd > 0) {
+        await Promise.all(
+          zeroLiqMints.map(async (mint) => {
+            const poolAddr = this.pumpswapVaultCache.get(`pair:${mint}`) ?? null;
+            if (!poolAddr) return;
+            const onChainLiq = await this.fetchPumpSwapLiquidityUsd(poolAddr, solUsd);
+            if (onChainLiq > 0) {
+              const existing = result.get(mint)!;
+              result.set(mint, { ...existing, liquidityUsd: onChainLiq });
+            }
+          }),
+        );
+      }
+    }
+
     return result;
   }
 
