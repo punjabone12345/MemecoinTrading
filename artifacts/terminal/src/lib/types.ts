@@ -520,6 +520,11 @@ export interface PaperConfig {
   maxCreatorHoldingsPct:    number;
   enableSellPressureExit:   boolean;
   enableWhaleDumpExit:      boolean;
+  // Quality scoring thresholds (paper-configurable)
+  minUniqueBuyers:          number;
+  minBuyPressureRatio:      number;
+  maxTopHolderPct:          number;
+  minLiquiditySolQuality:   number;
 }
 
 export interface PaperSniperStatus {

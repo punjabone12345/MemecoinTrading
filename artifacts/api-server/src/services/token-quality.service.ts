@@ -93,9 +93,9 @@ class TokenQualityService {
       autoSkipReason = `Creator holds ${creatorHoldingsPct.toFixed(1)}% — dump risk (>5% threshold)`;
     else if (liquidityScore   === 0) autoSkipReason = `Liquidity ${liquiditySol.toFixed(1)} SOL < 25 SOL minimum`;
     else if (buyerScore  === 0) autoSkipReason = `Unique buyers ${uniqueBuyers} < 20 minimum`;
-    else if (buyPressureScore === 0) autoSkipReason = `Buy pressure ${buyPressureRatio.toFixed(2)}x < 1.5x minimum`;
+    else if (buyPressureScore === 0) autoSkipReason = `Buy pressure ${buyPressureRatio.toFixed(2)}x < 1.3x minimum`;
     else if (topHolderPct > 0 && holderScore === 0)
-      autoSkipReason = `Top holder ${topHolderPct.toFixed(1)}% > 20% maximum`;
+      autoSkipReason = `Top holder ${topHolderPct.toFixed(1)}% > 25% maximum`;
 
     // Position multiplier from total score
     let positionMultiplier = 0;
@@ -152,14 +152,14 @@ class TokenQualityService {
   private scoreBuyPressure(ratio: number): number {
     if (ratio >= 3.0) return 25;
     if (ratio >= 2.0) return 20;
-    if (ratio >= 1.5) return 15;
+    if (ratio >= 1.3) return 15;
     return 0;
   }
 
   private scoreHolder(topPct: number): number {
     if (topPct <  10) return 25;
     if (topPct <  15) return 20;
-    if (topPct <  20) return 15;
+    if (topPct <  25) return 15;
     return 0;
   }
 

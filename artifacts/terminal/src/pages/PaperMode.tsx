@@ -130,6 +130,10 @@ const FIELDS: FieldDef[] = [
   { key: "deadCoinMinMovePct",   label: "Min movement required",     description: "Peak must exceed this % from entry or coin is dead", suffix: "%",   min: 1,  max: 50, step: 1 },
   { section: "Quality filters",  key: "enableLiquidityFilter",    type: "boolean", label: "Min liquidity filter",       description: "Skip tokens with pool liquidity below threshold at graduation", suffix: "", min: 0, max: 1, step: 1 },
   { key: "minLiquidityUsd",      label: "Min liquidity",               description: "Skip graduation if pool < this USD (e.g. 5000)",              suffix: "$",   min: 100,   max: 50_000, step: 100, toggleKey: "enableLiquidityFilter" },
+  { key: "minLiquiditySolQuality", label: "Min SOL liquidity (scoring)", description: "Quality gate: skip if on-chain pool SOL < this (scoring threshold, default 25)", suffix: "SOL", min: 5, max: 500, step: 5 },
+  { key: "minUniqueBuyers",      label: "Min unique buyers",            description: "Quality gate: skip if unique buyers in first 60s < this count",                    suffix: "",    min: 0,     max: 200,    step: 1   },
+  { key: "minBuyPressureRatio",  label: "Min buy pressure",            description: "Quality gate: skip if buys/sells ratio < this (1.3 = 30% more buys than sells)",  suffix: "x",   min: 0.5,   max: 5,      step: 0.1 },
+  { key: "maxTopHolderPct",      label: "Max top holder %",            description: "Quality gate: skip if single wallet holds more than this % of supply",            suffix: "%",   min: 5,     max: 50,     step: 1   },
   { key: "enableBondingCurveFilter", type: "boolean", label: "Bonding curve speed filter", description: "Skip tokens whose bonding curve took too long to complete", suffix: "", min: 0, max: 1, step: 1 },
   { key: "maxBondingCurveMinutes",   label: "Max bonding curve time",     description: "Skip if curve took longer than N minutes to graduate (e.g. 30)", suffix: "min", min: 5, max: 240, step: 5, toggleKey: "enableBondingCurveFilter" },
   { key: "enableHolderFilter",   type: "boolean", label: "Min holder count filter",     description: "Skip tokens with too few holders at graduation",              suffix: "", min: 0, max: 1, step: 1 },
@@ -153,6 +157,7 @@ const DEFAULT_CFG: PaperConfig = {
   enableCreatorFilter: true, maxCreatorHoldingsPct: 5,
   enableSellPressureExit: true,
   enableWhaleDumpExit: true,
+  minUniqueBuyers: 20, minBuyPressureRatio: 1.3, maxTopHolderPct: 25, minLiquiditySolQuality: 25,
 };
 
 function SettingsModal({ onClose }: { onClose: () => void }) {

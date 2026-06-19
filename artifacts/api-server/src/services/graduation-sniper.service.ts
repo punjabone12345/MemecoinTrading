@@ -1340,9 +1340,13 @@ class GraduationSniperService {
       // ── Paper sniper tap-in (always fires when quality passes) ───────────────
       this.paperCallback?.(mint, entryPrice, symbol, name, detectedAt, initialPrice, {
         poolLiquidityUsd:     quality ? quality.liquiditySol * 150 : undefined,
+        liquiditySol:         quality?.liquiditySol,
+        uniqueBuyers:         quality?.uniqueBuyers,
+        buyPressureRatio:     quality?.buyPressureRatio,
         creatorHoldingsPct:   quality?.creatorHoldingsPct,
         topHolderPct:         quality?.topHolderPct,
         whaleDetected:        quality?.whaleDetected,
+        qualityScore:         quality?.totalScore,
         onChainPriceConfirmed: true,
       } satisfies GraduationQualityMeta);
 

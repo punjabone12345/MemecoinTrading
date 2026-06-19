@@ -34,6 +34,11 @@ export interface PaperConfig {
   maxCreatorHoldingsPct:    number;  // creator holdings % threshold (default 5%)
   enableSellPressureExit:   boolean; // emergency exit when sells > buys×1.5 for ≥60s (pre-TP1)
   enableWhaleDumpExit:      boolean; // emergency exit when liquidity drops 20–39% in 30s AND ≥5 SOL (pre-TP1)
+  // ── Quality scoring thresholds (independent from live sniper) ─────────────
+  minUniqueBuyers:     number;  // skip if unique buyers < this (default 20)
+  minBuyPressureRatio: number;  // skip if buy pressure < this multiple (default 1.3)
+  maxTopHolderPct:     number;  // skip if top holder > this % (default 25)
+  minLiquiditySolQuality: number; // skip if on-chain SOL liquidity < this (default 25)
 }
 
 const DEFAULT_PAPER_CONFIG: PaperConfig = {
@@ -64,6 +69,11 @@ const DEFAULT_PAPER_CONFIG: PaperConfig = {
   maxCreatorHoldingsPct:    5,      // creator rug-risk threshold
   enableSellPressureExit:   true,   // emergency exit on sustained sell pressure (≥60s)
   enableWhaleDumpExit:      true,   // emergency exit on whale liquidity pull (pre-TP1)
+  // Quality scoring thresholds (paper-configurable, defaults match live sniper)
+  minUniqueBuyers:          20,     // unique buyers minimum
+  minBuyPressureRatio:      1.3,    // buy pressure minimum (buys/sells ratio)
+  maxTopHolderPct:          25,     // top holder concentration maximum %
+  minLiquiditySolQuality:   25,     // min SOL liquidity for quality gate
 };
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -334,11 +344,69 @@ class PaperSniperService {
     const cfg = this.paperConfig;
 
     // ── Quality auto-skip relay from graduation sniper ────────────────────────
-    // When the graduation sniper already determined a quality skip reason, relay
-    // it to the paper sniper event feed so users can see what's being evaluated
-    // and rejected, even when the live sniper gate fires before paper entry.
+    // The live sniper rejected this token on quality grounds, but paper mode
+    // has its own (independently configurable) quality thresholds.  If the raw
+    // quality metrics pass the paper config thresholds we override the skip and
+    // proceed to entry.  Creator rug-risk is a hard block — always skipped.
     if (qualityMeta?.autoSkipReason) {
-      if (this.seenMints.has(mint)) return; // already logged
+      if (this.seenMints.has(mint)) return;
+
+      const metaLiq     = qualityMeta.liquiditySol     ?? -1;
+      const metaBuyers  = qualityMeta.uniqueBuyers      ?? -1;
+      const metaPress   = qualityMeta.buyPressureRatio  ?? -1;
+      const metaTopH    = qualityMeta.topHolderPct      ?? -1;
+      const metaCreator = qualityMeta.creatorHoldingsPct ?? 0;
+
+      // Creator dump risk / whale detected are always hard blocks
+      const hardBlock = (qualityMeta.whaleDetected ?? false)
+        || (cfg.enableCreatorFilter && metaCreator > 0 && metaCreator > cfg.maxCreatorHoldingsPct);
+
+      // Only re-evaluate if we have at least one raw quality metric to compare
+      const hasRawData = metaLiq >= 0 || metaBuyers >= 0 || metaPress >= 0 || metaTopH >= 0;
+
+      if (hasRawData && !hardBlock) {
+        const passLiq    = metaLiq    < 0 || metaLiq    >= cfg.minLiquiditySolQuality;
+        const passBuyers = metaBuyers < 0 || metaBuyers >= cfg.minUniqueBuyers;
+        const passPress  = metaPress  < 0 || metaPress  >= cfg.minBuyPressureRatio;
+        const passTopH   = metaTopH   < 0 || metaTopH   <= cfg.maxTopHolderPct;
+
+        if (passLiq && passBuyers && passPress && passTopH) {
+          // Paper config overrides the live sniper rejection — proceed to entry
+          this.seenMints.add(mint);
+          logger.info(
+            { mint, symbol, liveSkipReason: qualityMeta.autoSkipReason,
+              metaLiq, metaBuyers, metaPress, metaTopH,
+              cfgLiq: cfg.minLiquiditySolQuality, cfgBuyers: cfg.minUniqueBuyers,
+              cfgPress: cfg.minBuyPressureRatio, cfgTopH: cfg.maxTopHolderPct },
+            "Paper sniper: paper-config overrides live quality skip → scheduling entry ✅",
+          );
+          void this.scheduleDelayedEntry(mint, 0, symbol, name, detectedAt, detectionPrice, {
+            ...qualityMeta,
+            autoSkipReason:        undefined,   // clear so fast path is not skipped
+            onChainPriceConfirmed: false,        // force slow-path price discovery
+          });
+          return;
+        }
+
+        // Paper config also rejects — use a paper-specific skip reason
+        const paperReason = !passLiq
+          ? `Liquidity ${metaLiq.toFixed(1)} SOL < ${cfg.minLiquiditySolQuality} SOL (paper min)`
+          : !passBuyers
+          ? `Unique buyers ${metaBuyers} < ${cfg.minUniqueBuyers} (paper min)`
+          : !passPress
+          ? `Buy pressure ${metaPress.toFixed(2)}x < ${cfg.minBuyPressureRatio}x (paper min)`
+          : !passTopH
+          ? `Top holder ${metaTopH.toFixed(1)}% > ${cfg.maxTopHolderPct}% (paper max)`
+          : qualityMeta.autoSkipReason;
+
+        this.seenMints.add(mint);
+        this.addEvent({ id: uid(), detectedAt, mint, symbol, action: "skipped",
+          skipReason: paperReason });
+        this.broadcast();
+        return;
+      }
+
+      // No raw data or hard block — relay the live sniper's skip reason verbatim
       this.seenMints.add(mint);
       this.addEvent({ id: uid(), detectedAt, mint, symbol, action: "skipped",
         skipReason: qualityMeta.autoSkipReason });
