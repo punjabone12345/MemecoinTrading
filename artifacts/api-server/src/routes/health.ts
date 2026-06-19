@@ -1,3 +1,4 @@
+import axios from "axios";
 import { type Request, type Response, Router, type IRouter } from "express";
 import { analyseTokenWithAi } from "../services/ai-analysis.service.js";
 
@@ -31,6 +32,61 @@ router.get("/debug/env", (_req, res) => {
 
   const allKeys = Object.keys(process.env).sort();
   res.json({ message: "Env diagnostic — values are masked for safety", aiVars: vars, allKeyNames: allKeys });
+});
+
+// ─── WSOL vault balance test — proves on-chain liquidity reading works ────────
+// GET /api/debug/vault-test?pubkey=<vault_pubkey>
+// Calls getTokenAccountBalance on the given vault pubkey using the same
+// multi-RPC fallback logic as the token quality service.
+// Usage: test with a real Raydium CPMM vault pubkey from a pump.fun graduation.
+router.get("/debug/vault-test", async (req: Request, res: Response) => {
+  const pubkey = req.query["pubkey"] as string | undefined;
+  if (!pubkey) {
+    res.status(400).json({ error: "?pubkey= query param required" });
+    return;
+  }
+
+  const HELIUS_KEY = process.env["HELIUS_API_KEY"] ?? null;
+  const endpoints: string[] = [
+    ...(HELIUS_KEY ? [`https://mainnet.helius-rpc.com/?api-key=${HELIUS_KEY}`] : []),
+    "https://api.mainnet-beta.solana.com",
+    "https://solana-mainnet.g.alchemy.com/v2/demo",
+  ];
+
+  const results: Record<string, unknown> = {};
+
+  for (const endpoint of endpoints) {
+    try {
+      type TokenBalResp = { result?: { value?: { uiAmount?: number | null; uiAmountString?: string; amount?: string; decimals?: number } }; error?: unknown };
+      const r = await axios.post<TokenBalResp>(
+        endpoint,
+        { jsonrpc: "2.0", id: 1, method: "getTokenAccountBalance", params: [pubkey] },
+        { timeout: 6_000 },
+      );
+      if (r.data?.error) {
+        results[endpoint.replace("https://","").split("/")[0]] = { error: r.data.error };
+      } else {
+        const val = r.data?.result?.value;
+        results[endpoint.replace("https://","").split("/")[0]] = val ?? null;
+        if (val?.uiAmount != null && val.uiAmount > 0) {
+          res.json({
+            ok: true,
+            pubkey,
+            uiAmount: val.uiAmount,
+            solBalance: val.uiAmount,
+            endpoint: endpoint.replace("https://","").split("/")[0],
+            allResults: results,
+            message: `✅ On-chain vault balance: ${val.uiAmount.toFixed(2)} SOL — fix is working!`,
+          });
+          return;
+        }
+      }
+    } catch (e) {
+      results[endpoint.replace("https://","").split("/")[0]] = { error: (e as Error).message };
+    }
+  }
+
+  res.json({ ok: false, pubkey, allResults: results, message: "All RPC endpoints returned 0 or error for this pubkey" });
 });
 
 // ─── Live AI test endpoint ─────────────────────────────────────────────────────

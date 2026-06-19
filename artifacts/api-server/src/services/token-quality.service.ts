@@ -33,13 +33,21 @@ export interface QualityMetrics {
 
 // ── Service ──────────────────────────────────────────────────────────────────
 
+// Public Solana RPC endpoints used as fallback when Helius key is absent.
+// getTokenAccountBalance is a read-only call well within free-tier rate limits.
+const PUBLIC_RPC_ENDPOINTS = [
+  "https://api.mainnet-beta.solana.com",
+  "https://solana-mainnet.g.alchemy.com/v2/demo",
+];
+
 class TokenQualityService {
   async collectQualityData(
-    mint:             string,
-    symbol:           string,
-    poolPda:          string | null,
+    mint:               string,
+    symbol:             string,
+    poolPda:            string | null,
     initialSolReserves: number,
-    heliusApiKey:     string | null,
+    heliusApiKey:       string | null,
+    wsolVaultPubkey:    string | null = null,
   ): Promise<QualityMetrics> {
     const t0     = Date.now();
     const rpcUrl = heliusApiKey
@@ -47,26 +55,36 @@ class TokenQualityService {
       : null;
 
     logger.info(
-      { mint, symbol, initialSolReserves: initialSolReserves.toFixed(2) },
+      { mint, symbol, initialSolReserves: initialSolReserves.toFixed(2), wsolVault: wsolVaultPubkey?.slice(0, 8) ?? "none" },
       "Quality: starting 60s parallel data collection ⏱",
     );
 
-    // Fire all three collection paths simultaneously — each has its own
-    // internal timing and waits so they finish at different points within 60s.
-    const [dexResult, holderResult, buyerResult] = await Promise.all([
+    // Fire all four collection paths simultaneously.
+    // The on-chain vault read is fast (~200 ms) and resolves before DexScreener.
+    const [dexResult, holderResult, buyerResult, onChainSolRaw] = await Promise.all([
       this.pollDexScreener(mint),
       rpcUrl ? this.fetchHolderData(mint, rpcUrl) : Promise.resolve(null),
       (heliusApiKey && poolPda)
         ? this.fetchBuyerData(mint, poolPda, heliusApiKey)
         : Promise.resolve(null),
+      (wsolVaultPubkey && initialSolReserves === 0)
+        ? this.fetchOnChainSolBalance(wsolVaultPubkey, heliusApiKey)
+        : Promise.resolve(null),
     ]);
 
     // ── Aggregate raw metrics ────────────────────────────────────────────────
-    // On-chain liquidity (exact) beats DexScreener estimate; DexScreener is
-    // only used when wsolVaultPubkey was unavailable during processGraduation.
-    const liquiditySol = initialSolReserves > 0
-      ? initialSolReserves
+    // Priority: initialSolReserves (passed from sniper) > on-chain vault read
+    // (fetched here in parallel) > DexScreener liquidity estimate.
+    // DexScreener reports liquidity=0 for 3–5 min after graduation — unreliable.
+    const liquiditySol =
+      initialSolReserves > 0                      ? initialSolReserves
+      : (onChainSolRaw != null && onChainSolRaw > 0) ? onChainSolRaw
       : (dexResult ? dexResult.liquidityUsd / 150 : 0);
+
+    if (onChainSolRaw != null && onChainSolRaw > 0 && initialSolReserves === 0) {
+      logger.info({ mint, symbol, onChainSolRaw: onChainSolRaw.toFixed(2) },
+        "Quality: on-chain WSOL vault balance used for liquiditySol ✅");
+    }
 
     const marketCapUsd    = dexResult?.fdv           ?? 0;
     const buyPressureRatio = dexResult?.buyPressureRatio ?? 1.0;
@@ -161,6 +179,48 @@ class TokenQualityService {
     if (topPct <  15) return 20;
     if (topPct <  25) return 15;
     return 0;
+  }
+
+  // ── On-chain WSOL vault balance (instant, no indexer needed) ────────────────
+  // Reads the Raydium CPMM pool's WSOL vault token account balance directly via
+  // Solana RPC.  This is available within milliseconds of pool creation and is
+  // the single source of truth for SOL liquidity — DexScreener takes 3–5 min.
+  // Falls back through Helius → public mainnet RPC endpoints.
+  private async fetchOnChainSolBalance(
+    wsolVaultPubkey: string,
+    heliusApiKey:    string | null,
+  ): Promise<number | null> {
+    const endpoints: string[] = [
+      ...(heliusApiKey ? [`https://mainnet.helius-rpc.com/?api-key=${heliusApiKey}`] : []),
+      ...PUBLIC_RPC_ENDPOINTS,
+    ];
+
+    for (const endpoint of endpoints) {
+      try {
+        type TokenAmountResp = {
+          result?: { value?: { uiAmount?: number | null } };
+          error?:  unknown;
+        };
+        const res = await axios.post<TokenAmountResp>(
+          endpoint,
+          { jsonrpc: "2.0", id: 1, method: "getTokenAccountBalance", params: [wsolVaultPubkey] },
+          { timeout: 5_000 },
+        );
+        if (res.data?.error) continue;
+        const uiAmount = res.data?.result?.value?.uiAmount;
+        if (uiAmount != null && uiAmount > 0) {
+          logger.debug({ wsolVault: wsolVaultPubkey.slice(0, 8), uiAmount: uiAmount.toFixed(2), endpoint },
+            "Quality: on-chain WSOL vault balance fetched ✅");
+          return uiAmount;
+        }
+      } catch {
+        // try next endpoint
+      }
+    }
+
+    logger.debug({ wsolVault: wsolVaultPubkey.slice(0, 8) },
+      "Quality: on-chain WSOL vault balance unavailable — all RPC endpoints failed");
+    return null;
   }
 
   // ── DexScreener polling (4 polls over ~45s) ───────────────────────────────

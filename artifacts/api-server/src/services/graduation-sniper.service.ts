@@ -1222,7 +1222,7 @@ class GraduationSniperService {
       // ── QUALITY COLLECTION (parallel, ~60s window) ────────────────────────────
       const heliusKey = process.env['HELIUS_API_KEY'] ?? null;
       const quality = await tokenQualityService.collectQualityData(
-        mint, symbol, poolPda, initialPoolSol, heliusKey,
+        mint, symbol, poolPda, initialPoolSol, heliusKey, wsolVaultPubkey,
       );
 
       // ── Quality gate ─────────────────────────────────────────────────────────
