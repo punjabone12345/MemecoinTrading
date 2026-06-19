@@ -1447,76 +1447,62 @@ class GraduationSniperService {
       // Variable position size based on quality score
       const positionSizeSol = this.config.positionSizeSol * quality.positionMultiplier;
 
-      // ── CANDLE ENTRY (10s candles) ────────────────────────────────────────────
+      // ── IMMEDIATE ENTRY (quality gate already passed — no candle wait) ─────────
+      // Candle-based entry (wait for green candle 1 + breakout above c1.high)
+      // was removed — it caused unreliable rejections on strong tokens when the
+      // DexScreener m5 snapshot showed 0 buys despite real on-chain activity.
+      // Quality scoring (liquidity / buyers / buy-pressure / holders) provides
+      // sufficient signal; candle confirmation added latency without improving accuracy.
+
       const maxEntryAt = detectedAt + this.config.maxEntryWindowMs;
 
       if (Date.now() > maxEntryAt) {
         this.addEvent({ ...fullEventBase, action: 'skipped',
           skipReason: 'Entry window expired (quality check took too long)', ...qualityEventFields });
-        logger.warn({ mint, symbol }, 'Graduation sniper: candle entry window expired ⏱❌');
+        logger.warn({ mint, symbol }, 'Graduation sniper: entry window expired ⏱❌');
         return;
       }
 
-      // Candle 1: 10s observation window
-      const c1 = await this.buildCandle(mint, wsolVaultPubkey, tokenVaultPubkey, effectiveSolUsd, 10_000);
-
-      if (Date.now() > maxEntryAt) {
-        this.addEvent({ ...fullEventBase, action: 'skipped',
-          skipReason: 'Entry window expired after candle 1', ...qualityEventFields });
-        return;
-      }
-
-      if (!c1.isGreen) {
-        this.addEvent({ ...fullEventBase, action: 'skipped',
-          skipReason: `Candle 1 bearish (open ${c1.open.toExponential(3)} → close ${c1.close.toExponential(3)})`,
-          ...qualityEventFields });
-        logger.info({ mint, symbol, c1Open: c1.open, c1Close: c1.close },
-          'Graduation sniper: candle 1 bearish — skip ❌');
-        return;
-      }
-
-      if (!c1.isActive) {
-        this.addEvent({ ...fullEventBase, action: 'skipped',
-          skipReason: `Candle 1 inactive (buys: ${c1.buysDelta})`, ...qualityEventFields });
-        logger.info({ mint, symbol, buysDelta: c1.buysDelta },
-          'Graduation sniper: candle 1 inactive — skip ❌');
-        return;
-      }
-
-      logger.info({
-        mint, symbol,
-        c1Open: c1.open.toExponential(4), c1Close: c1.close.toExponential(4),
-        c1High: c1.high.toExponential(4), c1Buys: c1.buysDelta, c1Sells: c1.sellsDelta,
-      }, 'Graduation sniper: candle 1 GREEN ✅ — watching candle 2 for breakout above c1.high');
-
-      // Candle 2: poll every 3s — enter on breakout above c1.high
+      // Fetch current price — on-chain reserves first, DexScreener as fallback
       let entryPrice = 0;
-      const c2Deadline = Math.min(Date.now() + 10_000, maxEntryAt);
-      while (Date.now() < c2Deadline) {
-        if (wsolVaultPubkey && tokenVaultPubkey) {
-          try {
-            const r = await this.fetchOnChainPoolReserves(wsolVaultPubkey, tokenVaultPubkey);
-            if (r && r.solBalance > 0 && r.tokenBalanceUi > 0) {
-              const p = (r.solBalance / r.tokenBalanceUi) * effectiveSolUsd;
-              if (p > c1.high) {
-                entryPrice = p;
-                logger.info({ mint, symbol, price: p.toExponential(4), c1High: c1.high.toExponential(4) },
-                  'Graduation sniper: candle 2 BREAKOUT ✅ — entering position');
-                break;
-              }
-            }
-          } catch { /* retry next interval */ }
-        }
-        const waitMs = Math.min(3_000, c2Deadline - Date.now());
-        if (waitMs > 0) await new Promise<void>((r) => setTimeout(r, waitMs));
+      if (wsolVaultPubkey && tokenVaultPubkey) {
+        try {
+          const r = await this.fetchOnChainPoolReserves(wsolVaultPubkey, tokenVaultPubkey);
+          if (r && r.solBalance > 0 && r.tokenBalanceUi > 0) {
+            entryPrice = (r.solBalance / r.tokenBalanceUi) * effectiveSolUsd;
+          }
+        } catch { /* fall through to DexScreener */ }
+      }
+      if (!entryPrice) {
+        try {
+          const dex = await this.fetchPrice(mint);
+          if (dex && dex.price > 0) entryPrice = dex.price;
+        } catch { /* non-fatal */ }
       }
 
       if (!entryPrice) {
         this.addEvent({ ...fullEventBase, action: 'skipped',
-          skipReason: `Candle 2 no breakout above ${c1.high.toExponential(3)}`, ...qualityEventFields });
-        logger.info({ mint, symbol, c1High: c1.high }, 'Graduation sniper: candle 2 no breakout — skip ❌');
+          skipReason: 'Could not determine entry price (on-chain + DexScreener both unavailable)',
+          ...qualityEventFields });
+        logger.warn({ mint, symbol }, 'Graduation sniper: no entry price available — skip ❌');
         return;
       }
+
+      // Entry drift filter — skip if price already ran > 8% from detection baseline
+      if (initialPrice > 0) {
+        const driftPct = ((entryPrice - initialPrice) / initialPrice) * 100;
+        if (driftPct > ENTRY_DRIFT_ABORT_PCT) {
+          this.addEvent({ ...fullEventBase, action: 'skipped',
+            skipReason: `Entry drift ${driftPct.toFixed(1)}% > ${ENTRY_DRIFT_ABORT_PCT}% max — missed entry`,
+            ...qualityEventFields });
+          logger.info({ mint, symbol, driftPct: driftPct.toFixed(1), initialPrice, entryPrice },
+            'Graduation sniper: entry drift exceeded — skip ❌');
+          return;
+        }
+      }
+
+      logger.info({ mint, symbol, entryPrice: entryPrice.toExponential(4) },
+        'Graduation sniper: quality gate passed — entering immediately ✅');
 
       // ── Paper sniper tap-in (always fires when quality passes) ───────────────
       this.paperCallback?.(mint, entryPrice, symbol, name, detectedAt, initialPrice, {
