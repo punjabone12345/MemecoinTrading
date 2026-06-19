@@ -423,6 +423,11 @@ export interface SniperPosition {
   topHolderPct?: number;
   whaleDetected?: boolean;
   positionMultiplier?: number;
+  // Dip-retrace entry context (set when position was entered via dip-watch)
+  dipPeakHigh?: number;
+  dipDipLow?: number;
+  dipDumpPct?: number;
+  dipRetracePct?: number;
 }
 
 export interface SniperEvent {
@@ -499,6 +504,18 @@ export interface PaperPosition {
   entryDriftPct?: number;
   msDetectionToFill?: number;
   lastPriceAt?: number;
+  // Quality snapshot
+  qualityScore?: number;
+  liquiditySol?: number;
+  buyPressureRatio?: number;
+  uniqueBuyers?: number;
+  topHolderPct?: number;
+  whaleDetected?: boolean;
+  // Dip-retrace entry context (set when position was entered via dip-watch)
+  dipPeakHigh?: number;
+  dipDipLow?: number;
+  dipDumpPct?: number;
+  dipRetracePct?: number;
 }
 
 export interface PaperSniperEvent {

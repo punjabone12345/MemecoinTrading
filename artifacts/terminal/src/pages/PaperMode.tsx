@@ -402,6 +402,37 @@ function OpenPositionCard({ pos }: { pos: PaperPosition }) {
         </a>
       </div>
 
+      {/* Entry filter stats */}
+      {(pos.qualityScore != null || pos.liquiditySol != null || pos.uniqueBuyers != null || pos.buyPressureRatio != null || pos.dipDumpPct != null) && (
+        <div className="rounded-xl bg-white/3 border border-white/6 px-3 py-2 mb-2.5">
+          <p className="text-[8px] font-black text-white/20 uppercase tracking-widest mb-1.5">Entry Filters</p>
+          <div className="flex flex-wrap gap-x-3 gap-y-1 text-[9px] text-white/30">
+            {pos.qualityScore != null && (
+              <span>Q-score: <span className={`font-bold ${pos.qualityScore >= 70 ? "text-yellow-400/80" : "text-white/40"}`}>{pos.qualityScore}/100</span></span>
+            )}
+            {pos.liquiditySol != null && (
+              <span>Liquidity: <span className="font-bold text-white/50">{pos.liquiditySol.toFixed(1)} SOL</span></span>
+            )}
+            {pos.uniqueBuyers != null && (
+              <span>Buyers: <span className="font-bold text-white/50">{pos.uniqueBuyers}</span></span>
+            )}
+            {pos.buyPressureRatio != null && (
+              <span>Buy/Sell: <span className={`font-bold ${pos.buyPressureRatio >= 1.5 ? "text-emerald-400/70" : "text-white/40"}`}>{pos.buyPressureRatio.toFixed(1)}×</span></span>
+            )}
+            {pos.topHolderPct != null && (
+              <span>Top holder: <span className={`font-bold ${pos.topHolderPct > 20 ? "text-red-400/70" : "text-white/40"}`}>{pos.topHolderPct.toFixed(0)}%</span></span>
+            )}
+            {pos.whaleDetected && <span className="text-red-400/70 font-bold">⚠ Whale detected</span>}
+            {pos.dipDumpPct != null && pos.dipRetracePct != null && (
+              <span className="text-cyan-400/60">
+                Dip entry: <span className="font-bold">{pos.dipDumpPct.toFixed(0)}% dump</span> → <span className="font-bold">{pos.dipRetracePct.toFixed(0)}% retrace</span>
+                {pos.dipPeakHigh != null && <span className="text-white/25"> (peak ${pos.dipPeakHigh < 0.0001 ? pos.dipPeakHigh.toExponential(3) : pos.dipPeakHigh.toFixed(6)})</span>}
+              </span>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* P&L breakdown — unrealized + realized split */}
       {(pos.tp1Hit || pos.tp2Hit || pos.realizedPnlSol > 0) && (
         <div className="mt-2.5 pt-2.5 border-t border-white/5 rounded-xl bg-white/2 p-2.5 space-y-1">

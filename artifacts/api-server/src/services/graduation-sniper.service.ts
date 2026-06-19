@@ -35,6 +35,14 @@ export interface GraduationQualityMeta {
   buyPressureRatio?: number;
   /** Liquidity in SOL */
   liquiditySol?: number;
+  /** Dip-retrace entry context — price high before dump */
+  dipPeakHigh?: number;
+  /** Dip-retrace entry context — lowest price of the dump */
+  dipDipLow?: number;
+  /** Dip-retrace entry context — dump % from peak that qualified */
+  dipDumpPct?: number;
+  /** Dip-retrace entry context — retrace % of dump that triggered entry */
+  dipRetracePct?: number;
 }
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -1588,20 +1596,11 @@ class GraduationSniperService {
       logger.info({ mint, symbol, entryPrice: entryPrice.toExponential(4) },
         'Graduation sniper: quality gate passed — entering immediately ✅');
 
-      // ── Paper sniper tap-in (always fires when quality passes) ───────────────
-      this.paperCallback?.(mint, entryPrice, symbol, name, detectedAt, initialPrice, {
-        poolLiquidityUsd:     quality ? quality.liquiditySol * 150 : undefined,
-        liquiditySol:         quality?.liquiditySol,
-        uniqueBuyers:         quality?.uniqueBuyers,
-        buyPressureRatio:     quality?.buyPressureRatio,
-        creatorHoldingsPct:   quality?.creatorHoldingsPct,
-        topHolderPct:         quality?.topHolderPct,
-        whaleDetected:        quality?.whaleDetected,
-        qualityScore:         quality?.totalScore,
-        onChainPriceConfirmed: true,
-      } satisfies GraduationQualityMeta);
-
       // ── Dip-Retrace strategy: add to dip-watch instead of entering immediately ─
+      // NOTE: paperCallback is intentionally NOT fired here — it fires later in
+      // enterDipPosition() when the dip-retrace pattern actually triggers, so the
+      // paper position opens at the same price as the live bot's entry (not at
+      // graduation price). This keeps paper and live modes in sync.
       // Regardless of liveOnlySkip (paper-only mode), add to dip watch so the
       // frontend always shows the watching panel. liveOnlySkip is forwarded to
       // addToDipWatch so the actual enterPosition is skipped in paper-only mode.
@@ -4362,9 +4361,13 @@ class GraduationSniperService {
       }
 
       // ── Fetch current price ───────────────────────────────────────────────
+      // Use fetchPriceFast (races Jupiter + DexScreener) so the dip-watch loop
+      // gets the freshest possible price. DexScreener alone can lag 30–60 s on
+      // new tokens which causes peakHigh to be recorded lower than the actual
+      // peak, skewing dump% calculations.
       let price = 0;
       try {
-        const priceData = await this.fetchPrice(mint);
+        const priceData = await this.fetchPriceFast(mint);
         if (priceData && priceData.price > 0) {
           price = priceData.price;
           // Update symbol/name if DexScreener returns better data
@@ -4417,12 +4420,9 @@ class GraduationSniperService {
         expired.push(mint);
         entry.state = "entered";
 
-        if (!entry._liveOnlySkip) {
-          void this.enterDipPosition(entry, price);
-        } else {
-          logger.info({ mint, symbol: entry.symbol, skip: entry._liveOnlySkip },
-            'Graduation sniper: dip-retrace triggered — paper-only, skip live entry');
-        }
+        // Always call enterDipPosition — it handles both paper callback and live
+        // entry internally, gating the live trade on _liveOnlySkip.
+        void this.enterDipPosition(entry, price);
 
         this.addEvent({
           id: uid(), detectedAt: entry._detectedAt, mint, symbol: entry.symbol,
@@ -4442,18 +4442,45 @@ class GraduationSniperService {
   }
 
   private async enterDipPosition(entry: DipWatchInternal, triggerPrice: number): Promise<void> {
-    try {
-      await this.enterPosition(
-        entry.mint, entry.symbol, entry.name,
-        triggerPrice, entry._signature,
-        entry._initialPrice, entry._detectedAt,
-        null, entry._positionSizeSol, entry._quality,
-      );
-    } catch (err) {
-      logger.error(
-        { mint: entry.mint, symbol: entry.symbol, err: (err as Error).message },
-        'Graduation sniper: dip-retrace entry FAILED',
-      );
+    // Build quality meta with dip-retrace context so paper positions (and future
+    // position records) capture exactly what conditions triggered the entry.
+    const qualityMeta: GraduationQualityMeta = {
+      poolLiquidityUsd:    entry._quality ? entry._quality.liquiditySol * 150 : undefined,
+      liquiditySol:        entry._quality?.liquiditySol,
+      uniqueBuyers:        entry._quality?.uniqueBuyers,
+      buyPressureRatio:    entry._quality?.buyPressureRatio,
+      creatorHoldingsPct:  entry._quality?.creatorHoldingsPct,
+      topHolderPct:        entry._quality?.topHolderPct,
+      whaleDetected:       entry._quality?.whaleDetected,
+      qualityScore:        entry._quality?.totalScore,
+      onChainPriceConfirmed: true,
+      dipPeakHigh:   entry.peakHigh,
+      dipDipLow:     entry.dipLow,
+      dipDumpPct:    entry.dumpPct,
+      dipRetracePct: entry.retracePct,
+    };
+
+    // Always fire paper callback at trigger time — paper position opens at
+    // the dip-retrace entry price (same as the live bot), not at graduation price.
+    this.paperCallback?.(
+      entry.mint, triggerPrice, entry.symbol, entry.name,
+      entry._detectedAt, entry._initialPrice, qualityMeta,
+    );
+
+    if (!entry._liveOnlySkip) {
+      try {
+        await this.enterPosition(
+          entry.mint, entry.symbol, entry.name,
+          triggerPrice, entry._signature,
+          entry._initialPrice, entry._detectedAt,
+          null, entry._positionSizeSol, entry._quality,
+        );
+      } catch (err) {
+        logger.error(
+          { mint: entry.mint, symbol: entry.symbol, err: (err as Error).message },
+          'Graduation sniper: dip-retrace entry FAILED',
+        );
+      }
     }
   }
 

@@ -318,6 +318,32 @@ function PositionRow({ pos }: { pos: SniperPosition }) {
                 )}
               </div>
             )}
+            {/* Entry filter stats row */}
+            {(pos.qualityScore != null || pos.liquiditySol != null || pos.uniqueBuyers != null || pos.buyPressureRatio != null || pos.dipDumpPct != null) && (
+              <div className="text-[9px] text-white/30 mt-1 flex flex-wrap gap-x-2 gap-y-0.5">
+                {pos.qualityScore != null && (
+                  <span>Q: <span className={`font-bold ${pos.qualityScore >= 70 ? "text-yellow-400/70" : "text-white/40"}`}>{pos.qualityScore}/100</span></span>
+                )}
+                {pos.liquiditySol != null && (
+                  <span>Liq: <span className="font-bold text-white/50">{pos.liquiditySol.toFixed(1)} SOL</span></span>
+                )}
+                {pos.uniqueBuyers != null && (
+                  <span>Buyers: <span className="font-bold text-white/50">{pos.uniqueBuyers}</span></span>
+                )}
+                {pos.buyPressureRatio != null && (
+                  <span>B/S: <span className={`font-bold ${pos.buyPressureRatio >= 1.5 ? "text-emerald-400/70" : "text-white/40"}`}>{pos.buyPressureRatio.toFixed(1)}×</span></span>
+                )}
+                {pos.topHolderPct != null && (
+                  <span>Top: <span className={`font-bold ${pos.topHolderPct > 20 ? "text-red-400/70" : "text-white/40"}`}>{pos.topHolderPct.toFixed(0)}%</span></span>
+                )}
+                {pos.whaleDetected && <span className="text-red-400/70 font-bold">⚠ Whale</span>}
+                {pos.dipDumpPct != null && pos.dipRetracePct != null && (
+                  <span className="text-cyan-400/60">
+                    Dip: <span className="font-bold">{pos.dipDumpPct.toFixed(0)}%↓</span> → <span className="font-bold">{pos.dipRetracePct.toFixed(0)}%↑</span>
+                  </span>
+                )}
+              </div>
+            )}
             <div className="text-[10px] text-white/40">
               SL ${fmtPrice(pos.effectiveSlPrice)}{pos.tp1Hit && " (breakeven)"}
               {pos.tp2Hit && ` · Peak $${fmtPrice(pos.trailingHigh)}`}
@@ -1185,11 +1211,18 @@ function DipWatchPanel({ watchers }: { watchers: DipWatchEntry[] }) {
                 </div>
               </div>
             </div>
-            {/* Quality score */}
-            <div className="mt-2 flex items-center gap-2 text-[8px] text-white/25">
-              <span>Q-score: <span className="text-white/45 font-bold">{w.qualityScore}/100</span></span>
-              <span>·</span>
-              <span className="font-mono text-white/20 truncate">{w.mint.slice(0, 8)}…</span>
+            {/* Quality score + DexScreener link */}
+            <div className="mt-2 flex items-center justify-between gap-2 text-[8px] text-white/25">
+              <div className="flex items-center gap-2">
+                <span>Q-score: <span className="text-white/45 font-bold">{w.qualityScore}/100</span></span>
+                <span>·</span>
+                <span className="font-mono text-white/20 truncate">{w.mint.slice(0, 8)}…</span>
+              </div>
+              <a href={`https://dexscreener.com/solana/${w.mint}`} target="_blank" rel="noreferrer"
+                className="flex items-center gap-0.5 text-violet-400/40 hover:text-violet-400 transition-colors shrink-0">
+                <ExternalLink className="w-2.5 h-2.5" />
+                <span className="text-[7px]">Chart</span>
+              </a>
             </div>
           </div>
         ))}

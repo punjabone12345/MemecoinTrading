@@ -134,6 +134,16 @@ export interface PaperPosition {
   lastPriceAt?: number;
   // Quality snapshot
   qualityScore?: number;
+  liquiditySol?: number;
+  buyPressureRatio?: number;
+  uniqueBuyers?: number;
+  topHolderPct?: number;
+  whaleDetected?: boolean;
+  // Dip-retrace entry context (set when position was entered via dip-watch)
+  dipPeakHigh?: number;
+  dipDipLow?: number;
+  dipDumpPct?: number;
+  dipRetracePct?: number;
 }
 
 export interface PaperSniperEvent {
@@ -601,6 +611,16 @@ class PaperSniperService {
         runnerRealizedSol: 0,
         detectionPrice,
         entryDriftPct:     fastDriftPct,
+        qualityScore:      qualityMeta?.qualityScore,
+        liquiditySol:      qualityMeta?.liquiditySol,
+        buyPressureRatio:  qualityMeta?.buyPressureRatio,
+        uniqueBuyers:      qualityMeta?.uniqueBuyers,
+        topHolderPct:      qualityMeta?.topHolderPct,
+        whaleDetected:     qualityMeta?.whaleDetected,
+        dipPeakHigh:       qualityMeta?.dipPeakHigh,
+        dipDipLow:         qualityMeta?.dipDipLow,
+        dipDumpPct:        qualityMeta?.dipDumpPct,
+        dipRetracePct:     qualityMeta?.dipRetracePct,
       };
       this.virtualBalance -= fastSizeSol;
       this.openPositions.set(mint, fastPos);
