@@ -48,6 +48,7 @@ class TokenQualityService {
     initialSolReserves: number,
     heliusApiKey:       string | null,
     wsolVaultPubkey:    string | null = null,
+    fastMode:           boolean = false,
   ): Promise<QualityMetrics> {
     const t0     = Date.now();
     const rpcUrl = heliusApiKey
@@ -55,32 +56,32 @@ class TokenQualityService {
       : null;
 
     logger.info(
-      { mint, symbol, initialSolReserves: initialSolReserves.toFixed(2), wsolVault: wsolVaultPubkey?.slice(0, 8) ?? "none" },
-      "Quality: starting 60s parallel data collection ⏱",
+      { mint, symbol, initialSolReserves: initialSolReserves.toFixed(2), wsolVault: wsolVaultPubkey?.slice(0, 8) ?? "none", fastMode },
+      fastMode ? "Quality: fast re-check (no delays — pool fully indexed) ⚡" : "Quality: starting 60s parallel data collection ⏱",
     );
 
     // Fire all four collection paths simultaneously.
-    // IMPORTANT: fetchOnChainSolBalance is delayed 40s when initialSolReserves=0.
-    // At T0 the Raydium/PumpSwap pool account may not be populated yet — the first
-    // read (inside fetchReservesWithRetry before this call) already showed 0.
-    // Waiting 40s gives the pool time to settle before re-reading, matching the
-    // same pattern as fetchBuyerData (45s delay) and fetchHolderData (20s delay).
+    // fastMode=true: all delays skipped — used for T+180s/T+600s staged re-checks
+    //   when pool is fully indexed and all data sources are immediately available.
+    // fastMode=false (default): delays are applied so T0 reads don't get stale data.
     const [dexResult, holderResult, buyerResult, onChainSolRaw] = await Promise.all([
       this.pollDexScreener(mint),
-      rpcUrl ? this.fetchHolderData(mint, rpcUrl) : Promise.resolve(null),
+      rpcUrl ? this.fetchHolderData(mint, rpcUrl, fastMode) : Promise.resolve(null),
       // Use wsolVaultPubkey as the primary address for signature lookup.
       // PumpSwap pools are keypair-based (not PDAs), so the derived poolPda is
       // WRONG — getSignaturesForAddress(wrongPDA) always returns 0 signatures.
       // The WSOL vault is touched by every buy/sell swap, making it the correct
       // and reliable address. Fall back to poolPda only if vault is unavailable.
       (heliusApiKey && (wsolVaultPubkey || poolPda))
-        ? this.fetchBuyerData(mint, wsolVaultPubkey ?? poolPda!, heliusApiKey)
+        ? this.fetchBuyerData(mint, wsolVaultPubkey ?? poolPda!, heliusApiKey, fastMode)
         : Promise.resolve(null),
       (wsolVaultPubkey && initialSolReserves === 0)
         ? (async () => {
-            // Pool accounts need ~30–40s to be populated/indexed after graduation.
-            // Reading immediately (T0) always returns 0 — delay before re-fetching.
-            await new Promise<void>((r) => setTimeout(r, 40_000));
+            if (!fastMode) {
+              // Pool accounts need ~30–40s to be populated/indexed after graduation.
+              // Reading immediately (T0) always returns 0 — delay before re-fetching.
+              await new Promise<void>((r) => setTimeout(r, 40_000));
+            }
             return this.fetchOnChainSolBalance(wsolVaultPubkey, heliusApiKey);
           })()
         : Promise.resolve(null),
@@ -394,11 +395,13 @@ class TokenQualityService {
   // ── Helius RPC: top token holder % + creator holdings % ──────────────────
   // Wait 20s before querying — new tokens take 15-30s to appear in RPC indices.
   // Also fetches creator wallet from pump.fun API and checks their holdings %.
+  // fastMode=true: skip the 20s delay (used for T+180s/T+600s re-checks).
   private async fetchHolderData(
-    mint:   string,
-    rpcUrl: string,
+    mint:     string,
+    rpcUrl:   string,
+    fastMode: boolean = false,
   ): Promise<{ topHolderPct: number; creatorHoldingsPct: number } | null> {
-    await new Promise<void>((r) => setTimeout(r, 20_000));
+    if (!fastMode) await new Promise<void>((r) => setTimeout(r, 20_000));
 
     try {
       type LargestAccount = { address?: string; uiAmount: number | null };
@@ -474,12 +477,14 @@ class TokenQualityService {
   // 30-60s of confirmation. Waiting 45s (near the end of the 60s window) gives
   // the indexer time to accumulate real buyer transactions. 25s was too early
   // and returned 0 buyers even for tokens with 100+ SOL of liquidity.
+  // fastMode=true: skip the 45s delay (used for T+180s/T+600s re-checks).
   private async fetchBuyerData(
     mint:     string,
     poolPda:  string,
     apiKey:   string,
+    fastMode: boolean = false,
   ): Promise<{ uniqueBuyers: number; whaleDetected: boolean } | null> {
-    await new Promise<void>((r) => setTimeout(r, 45_000));
+    if (!fastMode) await new Promise<void>((r) => setTimeout(r, 45_000));
 
     try {
       const rpcUrl = `https://mainnet.helius-rpc.com/?api-key=${apiKey}`;

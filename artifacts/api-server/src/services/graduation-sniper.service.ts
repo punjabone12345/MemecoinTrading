@@ -1388,58 +1388,74 @@ class GraduationSniperService {
 
       // ── QUALITY COLLECTION (parallel, ~60s window) ────────────────────────────
       const heliusKey = process.env['HELIUS_API_KEY'] ?? null;
-      const quality = await tokenQualityService.collectQualityData(
+      let quality = await tokenQualityService.collectQualityData(
         mint, symbol, poolPda, initialPoolSol, heliusKey, wsolVaultPubkey,
       );
 
-      // ── Quality gate ─────────────────────────────────────────────────────────
-      const qualityEventFields = {
-        qualityScore:      quality.totalScore,
-        liquiditySol:      quality.liquiditySol,
-        uniqueBuyers:      quality.uniqueBuyers,
-        buyPressureRatio:  quality.buyPressureRatio,
-        topHolderPct:      quality.topHolderPct,
-        creatorHoldingsPct: quality.creatorHoldingsPct,
-        whaleDetected:     quality.whaleDetected,
+      // ── Quality gate (staged re-evaluation) ───────────────────────────────────
+      // Hard-fail auto-skip (creator >5%, liq <25 SOL, buyers <20, etc.) → permanent skip.
+      // Score ≥ minQualityScore (70) → enter immediately.
+      // Score 50–69 (borderline, no hard-fail) → staged watching: T+180s then T+600s re-check.
+      // Score < 50 → too low, skip permanently.
+
+      const makeQualityFields = (q: typeof quality) => ({
+        qualityScore:      q.totalScore,
+        liquiditySol:      q.liquiditySol,
+        uniqueBuyers:      q.uniqueBuyers,
+        buyPressureRatio:  q.buyPressureRatio,
+        topHolderPct:      q.topHolderPct,
+        creatorHoldingsPct: q.creatorHoldingsPct,
+        whaleDetected:     q.whaleDetected,
+      });
+
+      const notifyPaperSkip = (q: typeof quality, reason: string) => {
+        this.paperCallback?.(mint, 0, symbol, name, detectedAt, initialPrice, {
+          autoSkipReason: reason,
+          qualityScore:      q.totalScore,
+          liquiditySol:      q.liquiditySol,
+          uniqueBuyers:      q.uniqueBuyers,
+          buyPressureRatio:  q.buyPressureRatio,
+          topHolderPct:      q.topHolderPct,
+          creatorHoldingsPct: q.creatorHoldingsPct,
+          whaleDetected:     q.whaleDetected,
+        });
       };
 
       if (quality.autoSkipReason) {
-        this.addEvent({ ...fullEventBase, action: 'skipped',
-          skipReason: `Quality: ${quality.autoSkipReason}`, ...qualityEventFields });
+        const reason = `Quality: ${quality.autoSkipReason}`;
+        this.addEvent({ ...fullEventBase, action: 'skipped', skipReason: reason, ...makeQualityFields(quality) });
         logger.info({ mint, symbol, reason: quality.autoSkipReason }, 'Graduation sniper: quality auto-skip ❌');
-        // Notify paper sniper so it can show this skip in its events feed
-        this.paperCallback?.(mint, 0, symbol, name, detectedAt, initialPrice, {
-          autoSkipReason: `Quality: ${quality.autoSkipReason}`,
-          qualityScore:      quality.totalScore,
-          liquiditySol:      quality.liquiditySol,
-          uniqueBuyers:      quality.uniqueBuyers,
-          buyPressureRatio:  quality.buyPressureRatio,
-          topHolderPct:      quality.topHolderPct,
-          creatorHoldingsPct: quality.creatorHoldingsPct,
-          whaleDetected:     quality.whaleDetected,
-        });
+        notifyPaperSkip(quality, reason);
         return;
       }
 
-      if (quality.totalScore < this.config.minQualityScore) {
-        this.addEvent({ ...fullEventBase, action: 'skipped',
-          skipReason: `Quality score ${quality.totalScore}/100 < min ${this.config.minQualityScore}`,
-          ...qualityEventFields });
-        logger.info({ mint, symbol, score: quality.totalScore, min: this.config.minQualityScore },
-          'Graduation sniper: quality score below threshold ❌');
-        // Notify paper sniper so it can show this skip in its events feed
-        this.paperCallback?.(mint, 0, symbol, name, detectedAt, initialPrice, {
-          autoSkipReason: `Quality score ${quality.totalScore}/100 < min ${this.config.minQualityScore}`,
-          qualityScore:      quality.totalScore,
-          liquiditySol:      quality.liquiditySol,
-          uniqueBuyers:      quality.uniqueBuyers,
-          buyPressureRatio:  quality.buyPressureRatio,
-          topHolderPct:      quality.topHolderPct,
-          creatorHoldingsPct: quality.creatorHoldingsPct,
-          whaleDetected:     quality.whaleDetected,
-        });
+      // Borderline zone: 50–69 (no hard-fail) → staged watching at T+180s / T+600s
+      const BORDERLINE_MIN = 50;
+      if (quality.totalScore < this.config.minQualityScore && quality.totalScore >= BORDERLINE_MIN) {
+        logger.info({ mint, symbol, score: quality.totalScore },
+          'Graduation sniper: borderline score — entering staged watching (T+180s, T+600s) 👀');
+        const watched = await this.stagedReEvaluation(
+          mint, symbol, poolPda, heliusKey, wsolVaultPubkey, quality, detectedAt,
+        );
+        if (!watched) {
+          const reason = `Quality watching: no improvement by T+600s — skip`;
+          this.addEvent({ ...fullEventBase, action: 'skipped', skipReason: reason, ...makeQualityFields(quality) });
+          notifyPaperSkip(quality, reason);
+          return;
+        }
+        // Improved enough — promote to entering with updated metrics
+        quality = watched;
+        logger.info({ mint, symbol, score: quality.totalScore },
+          'Graduation sniper: staged re-evaluation PASSED ✅ — entering with improved metrics');
+      } else if (quality.totalScore < BORDERLINE_MIN) {
+        const reason = `Quality score ${quality.totalScore}/100 < ${BORDERLINE_MIN} (too low to watch)`;
+        this.addEvent({ ...fullEventBase, action: 'skipped', skipReason: reason, ...makeQualityFields(quality) });
+        logger.info({ mint, symbol, score: quality.totalScore }, 'Graduation sniper: score too low — permanent skip ❌');
+        notifyPaperSkip(quality, reason);
         return;
       }
+
+      const qualityEventFields = makeQualityFields(quality);
 
       logger.info({ mint, symbol, score: quality.totalScore, multiplier: quality.positionMultiplier },
         `Graduation sniper: quality gate PASSED ✅ — score ${quality.totalScore}/100 → ${(quality.positionMultiplier * 100).toFixed(0)}% size`);
@@ -1544,6 +1560,117 @@ class GraduationSniperService {
       // processingGraduations is only the in-flight concurrency gate.
       if (reservedMint) this.processingGraduations.delete(reservedMint);
     }
+  }
+
+  // ── Staged re-evaluation for borderline tokens (score 50–69) ─────────────────
+  // Waits to T+180s then T+600s from graduation detection, re-checks quality with
+  // fast mode (no delays — pool fully indexed), and enters only if metrics are
+  // ACTIVELY IMPROVING vs the T+60s baseline. A flat or declining token is skipped.
+  //
+  // "Improving" = score ≥ minQualityScore(70) AND at least one of:
+  //   • uniqueBuyers grew vs baseline (more traders joining)
+  //   • liquiditySol held or grew (LP not being removed)
+  //
+  // At T+180s: still borderline (50–69) but buyers/liq growing → keep watching.
+  // At T+600s: final gate — must hit ≥70 with improvement, else permanent skip.
+  private async stagedReEvaluation(
+    mint:            string,
+    symbol:          string,
+    poolPda:         string | null,
+    heliusKey:       string | null,
+    wsolVaultPubkey: string | null,
+    baseline:        QualityMetrics,
+    detectedAt:      number,
+  ): Promise<QualityMetrics | null> {
+
+    const isImproving = (q: QualityMetrics): boolean =>
+      q.uniqueBuyers > baseline.uniqueBuyers ||
+      q.liquiditySol > baseline.liquiditySol * 0.95;
+
+    // ── T+180s re-check ───────────────────────────────────────────────────────
+    const wait180 = Math.max(0, (detectedAt + 180_000) - Date.now());
+    if (wait180 > 0) {
+      logger.info({ mint, symbol, waitMs: Math.round(wait180) },
+        'Graduation sniper: watching — waiting for T+180s re-check 🕐');
+      await new Promise<void>((r) => setTimeout(r, wait180));
+    }
+
+    const q180 = await tokenQualityService.collectQualityData(
+      mint, symbol, poolPda, 0, heliusKey, wsolVaultPubkey, /* fastMode */ true,
+    );
+
+    logger.info({
+      mint, symbol,
+      score180: q180.totalScore,
+      liq180:   q180.liquiditySol.toFixed(1),
+      buyers180: q180.uniqueBuyers,
+      bpr180:   q180.buyPressureRatio.toFixed(2),
+      improving: isImproving(q180),
+      hardFail: q180.autoSkipReason ?? 'none',
+    }, 'Graduation sniper: T+180s re-check result');
+
+    // Hard-fail at re-check (e.g. creator dumped, LP removed) → permanent skip
+    if (q180.autoSkipReason) {
+      logger.info({ mint, symbol, reason: q180.autoSkipReason },
+        'Graduation sniper: T+180s hard-fail — permanent skip ❌');
+      return null;
+    }
+
+    // Passes threshold AND improving → enter now
+    if (q180.totalScore >= this.config.minQualityScore && isImproving(q180)) {
+      logger.info({ mint, symbol, score: q180.totalScore },
+        'Graduation sniper: T+180s quality improved past threshold — ENTER ✅');
+      return q180;
+    }
+
+    // Flat or declining even in borderline range → skip
+    if (!isImproving(q180)) {
+      logger.info({ mint, symbol, score: q180.totalScore },
+        'Graduation sniper: T+180s metrics flat/declining — permanent skip ❌');
+      return null;
+    }
+
+    // Still borderline (50–69) but improving trend → watch to T+600s
+    logger.info({ mint, symbol, score: q180.totalScore },
+      'Graduation sniper: T+180s borderline but improving — watching to T+600s 🕐');
+
+    // ── T+600s final re-check ─────────────────────────────────────────────────
+    const wait600 = Math.max(0, (detectedAt + 600_000) - Date.now());
+    if (wait600 > 0) {
+      logger.info({ mint, symbol, waitMs: Math.round(wait600) },
+        'Graduation sniper: watching — waiting for T+600s final re-check 🕐');
+      await new Promise<void>((r) => setTimeout(r, wait600));
+    }
+
+    const q600 = await tokenQualityService.collectQualityData(
+      mint, symbol, poolPda, 0, heliusKey, wsolVaultPubkey, /* fastMode */ true,
+    );
+
+    logger.info({
+      mint, symbol,
+      score600: q600.totalScore,
+      liq600:   q600.liquiditySol.toFixed(1),
+      buyers600: q600.uniqueBuyers,
+      bpr600:   q600.buyPressureRatio.toFixed(2),
+      improving: isImproving(q600),
+      hardFail: q600.autoSkipReason ?? 'none',
+    }, 'Graduation sniper: T+600s final re-check result');
+
+    if (q600.autoSkipReason) {
+      logger.info({ mint, symbol, reason: q600.autoSkipReason },
+        'Graduation sniper: T+600s hard-fail — permanent skip ❌');
+      return null;
+    }
+
+    if (q600.totalScore >= this.config.minQualityScore && isImproving(q600)) {
+      logger.info({ mint, symbol, score: q600.totalScore },
+        'Graduation sniper: T+600s quality improved past threshold — ENTER ✅');
+      return q600;
+    }
+
+    logger.info({ mint, symbol, score: q600.totalScore },
+      'Graduation sniper: T+600s no improvement — permanent skip ❌');
+    return null;
   }
 
   private checkSkipReason(mint: string): string | null {
