@@ -25,6 +25,16 @@ export interface GraduationQualityMeta {
   whaleDetected?: boolean;
   /** Whether an on-chain price was confirmed before entry */
   onChainPriceConfirmed?: boolean;
+  /** Quality auto-skip reason — when set, the paper sniper should log this as a skipped event */
+  autoSkipReason?: string;
+  /** Raw quality score (0-100) */
+  qualityScore?: number;
+  /** Unique buyer count from Helius */
+  uniqueBuyers?: number;
+  /** Buy pressure ratio (buys/sells) */
+  buyPressureRatio?: number;
+  /** Liquidity in SOL */
+  liquiditySol?: number;
 }
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -1230,6 +1240,17 @@ class GraduationSniperService {
         this.addEvent({ ...fullEventBase, action: 'skipped',
           skipReason: `Quality: ${quality.autoSkipReason}`, ...qualityEventFields });
         logger.info({ mint, symbol, reason: quality.autoSkipReason }, 'Graduation sniper: quality auto-skip ❌');
+        // Notify paper sniper so it can show this skip in its events feed
+        this.paperCallback?.(mint, 0, symbol, name, detectedAt, initialPrice, {
+          autoSkipReason: `Quality: ${quality.autoSkipReason}`,
+          qualityScore:      quality.totalScore,
+          liquiditySol:      quality.liquiditySol,
+          uniqueBuyers:      quality.uniqueBuyers,
+          buyPressureRatio:  quality.buyPressureRatio,
+          topHolderPct:      quality.topHolderPct,
+          creatorHoldingsPct: quality.creatorHoldingsPct,
+          whaleDetected:     quality.whaleDetected,
+        });
         return;
       }
 
@@ -1239,6 +1260,17 @@ class GraduationSniperService {
           ...qualityEventFields });
         logger.info({ mint, symbol, score: quality.totalScore, min: this.config.minQualityScore },
           'Graduation sniper: quality score below threshold ❌');
+        // Notify paper sniper so it can show this skip in its events feed
+        this.paperCallback?.(mint, 0, symbol, name, detectedAt, initialPrice, {
+          autoSkipReason: `Quality score ${quality.totalScore}/100 < min ${this.config.minQualityScore}`,
+          qualityScore:      quality.totalScore,
+          liquiditySol:      quality.liquiditySol,
+          uniqueBuyers:      quality.uniqueBuyers,
+          buyPressureRatio:  quality.buyPressureRatio,
+          topHolderPct:      quality.topHolderPct,
+          creatorHoldingsPct: quality.creatorHoldingsPct,
+          whaleDetected:     quality.whaleDetected,
+        });
         return;
       }
 
