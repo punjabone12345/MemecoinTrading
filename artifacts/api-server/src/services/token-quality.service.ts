@@ -68,8 +68,13 @@ class TokenQualityService {
     const [dexResult, holderResult, buyerResult, onChainSolRaw] = await Promise.all([
       this.pollDexScreener(mint),
       rpcUrl ? this.fetchHolderData(mint, rpcUrl) : Promise.resolve(null),
-      (heliusApiKey && poolPda)
-        ? this.fetchBuyerData(mint, poolPda, heliusApiKey)
+      // Use wsolVaultPubkey as the primary address for signature lookup.
+      // PumpSwap pools are keypair-based (not PDAs), so the derived poolPda is
+      // WRONG — getSignaturesForAddress(wrongPDA) always returns 0 signatures.
+      // The WSOL vault is touched by every buy/sell swap, making it the correct
+      // and reliable address. Fall back to poolPda only if vault is unavailable.
+      (heliusApiKey && (wsolVaultPubkey || poolPda))
+        ? this.fetchBuyerData(mint, wsolVaultPubkey ?? poolPda!, heliusApiKey)
         : Promise.resolve(null),
       (wsolVaultPubkey && initialSolReserves === 0)
         ? (async () => {
