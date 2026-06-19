@@ -270,7 +270,7 @@ export interface SniperEvent {
   detectedAt: number;
   mint: string;
   symbol: string;
-  action: "entered" | "skipped";
+  action: "entered" | "skipped" | "watching";
   skipReason?: string;
   txSignature: string;
   // Quality metrics (present for entered + quality-skipped events)
@@ -281,6 +281,10 @@ export interface SniperEvent {
   topHolderPct?: number;
   creatorHoldingsPct?: number;
   whaleDetected?: boolean;
+  // Staged re-evaluation fields (present for watching events)
+  watchStage?: "T+180s" | "T+600s";   // which checkpoint we are waiting for
+  baselineBuyers?: number;             // buyers at T+60s when borderline detected
+  baselineLiq?: number;                // liquidity (SOL) at T+60s when borderline detected
 }
 
 export interface SniperStatus {
@@ -1587,6 +1591,24 @@ class GraduationSniperService {
       q.uniqueBuyers > baseline.uniqueBuyers ||
       q.liquiditySol > baseline.liquiditySol * 0.95;
 
+    // Emit a "watching" event so it appears in the frontend events feed immediately.
+    const watchBase = {
+      id:          crypto.randomUUID(),
+      detectedAt:  detectedAt,
+      mint,
+      symbol,
+      txSignature: "",
+      qualityScore:   baseline.totalScore,
+      liquiditySol:   baseline.liquiditySol,
+      uniqueBuyers:   baseline.uniqueBuyers,
+      buyPressureRatio: baseline.buyPressureRatio,
+      baselineBuyers: baseline.uniqueBuyers,
+      baselineLiq:    baseline.liquiditySol,
+    } as const;
+
+    this.addEvent({ ...watchBase, action: "watching", watchStage: "T+180s",
+      skipReason: `Borderline score ${baseline.totalScore}/100 — watching metrics to T+180s` });
+
     // ── T+180s re-check ───────────────────────────────────────────────────────
     const wait180 = Math.max(0, (detectedAt + 180_000) - Date.now());
     if (wait180 > 0) {
@@ -1633,6 +1655,16 @@ class GraduationSniperService {
     // Still borderline (50–69) but improving trend → watch to T+600s
     logger.info({ mint, symbol, score: q180.totalScore },
       'Graduation sniper: T+180s borderline but improving — watching to T+600s 🕐');
+
+    // Emit a watching event showing we are extending to T+600s
+    this.addEvent({
+      ...watchBase, action: "watching", watchStage: "T+600s",
+      qualityScore:     q180.totalScore,
+      liquiditySol:     q180.liquiditySol,
+      uniqueBuyers:     q180.uniqueBuyers,
+      buyPressureRatio: q180.buyPressureRatio,
+      skipReason: `T+180s borderline (score ${q180.totalScore}/100, ${q180.uniqueBuyers} buyers) — still improving, watching to T+600s`,
+    });
 
     // ── T+600s final re-check ─────────────────────────────────────────────────
     const wait600 = Math.max(0, (detectedAt + 600_000) - Date.now());

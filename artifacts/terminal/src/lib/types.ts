@@ -414,7 +414,7 @@ export interface SniperEvent {
   detectedAt: number;
   mint: string;
   symbol: string;
-  action: "entered" | "skipped";
+  action: "entered" | "skipped" | "watching";
   skipReason?: string;
   txSignature: string;
   // Quality metrics (present for entered + quality-skipped events)
@@ -425,6 +425,10 @@ export interface SniperEvent {
   topHolderPct?: number;
   creatorHoldingsPct?: number;
   whaleDetected?: boolean;
+  // Staged re-evaluation fields (present for watching events)
+  watchStage?: "T+180s" | "T+600s";
+  baselineBuyers?: number;
+  baselineLiq?: number;
 }
 
 export interface SniperStatus {
@@ -486,10 +490,16 @@ export interface PaperSniperEvent {
   detectedAt: number;
   mint: string;
   symbol: string;
-  action: "entered" | "skipped" | "closed";
+  action: "entered" | "skipped" | "closed" | "watching";
   skipReason?: string;
   closeReason?: string;
   pnlSol?: number;
+  watchStage?: "T+180s" | "T+600s";
+  baselineBuyers?: number;
+  baselineLiq?: number;
+  qualityScore?: number;
+  uniqueBuyers?: number;
+  liquiditySol?: number;
 }
 
 export interface PaperConfig {

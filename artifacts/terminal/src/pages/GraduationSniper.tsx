@@ -494,30 +494,80 @@ function qualityColor(score: number): string {
 function EventRow({ evt }: { evt: SniperEvent }) {
   const deleteEvt = useDeleteSniperEvent();
   const hasQuality = evt.qualityScore !== undefined && evt.qualityScore > 0;
+  const isWatching = evt.action === "watching";
+  const isEntered  = evt.action === "entered";
+
+  // For watching events, compute buyer/liq delta vs baseline if available
+  const buyerDelta = isWatching && evt.baselineBuyers !== undefined && evt.uniqueBuyers !== undefined
+    ? evt.uniqueBuyers - evt.baselineBuyers
+    : null;
+  const liqDelta = isWatching && evt.baselineLiq !== undefined && evt.liquiditySol !== undefined
+    ? evt.liquiditySol - evt.baselineLiq
+    : null;
+
   return (
-    <div className="px-4 py-2.5 border-b border-white/5 last:border-0">
+    <div className={`px-4 py-2.5 border-b border-white/5 last:border-0 ${isWatching ? "bg-amber-500/3" : ""}`}>
       <div className="flex items-center gap-3">
         <div className="flex-shrink-0">
-          {evt.action === "entered"
-            ? <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-            : <XCircle className="w-3.5 h-3.5 text-white/25" />}
+          {isEntered   && <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />}
+          {isWatching  && <Clock className="w-3.5 h-3.5 text-amber-400 animate-pulse" />}
+          {!isEntered && !isWatching && <XCircle className="w-3.5 h-3.5 text-white/25" />}
         </div>
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2 flex-wrap">
-            <span className={`text-xs font-bold ${evt.action === "entered" ? "text-white/90" : "text-white/40"}`}>
+            <span className={`text-xs font-bold ${isEntered ? "text-white/90" : isWatching ? "text-amber-300/80" : "text-white/40"}`}>
               {evt.symbol || mintShort(evt.mint)}
             </span>
-            {evt.action === "entered"
-              ? <Badge className="bg-emerald-500/15 text-emerald-400 border-emerald-500/20 text-[9px] px-1 py-0">ENTERED</Badge>
-              : <Badge className="bg-white/5 text-white/30 border-white/10 text-[9px] px-1 py-0">SKIPPED</Badge>}
+            {isEntered  && <Badge className="bg-emerald-500/15 text-emerald-400 border-emerald-500/20 text-[9px] px-1 py-0">ENTERED</Badge>}
+            {isWatching && (
+              <Badge className="bg-amber-500/15 text-amber-300 border-amber-500/25 text-[9px] px-1 py-0">
+                WATCHING {evt.watchStage ?? ""}
+              </Badge>
+            )}
+            {!isEntered && !isWatching && <Badge className="bg-white/5 text-white/30 border-white/10 text-[9px] px-1 py-0">SKIPPED</Badge>}
             {hasQuality && (
               <span className={`text-[9px] font-bold ${qualityColor(evt.qualityScore!)}`}>
                 Q:{evt.qualityScore}
               </span>
             )}
           </div>
-          {evt.skipReason && <div className="text-[10px] text-white/30 mt-0.5">{evt.skipReason}</div>}
-          {hasQuality && (
+
+          {/* Watching detail row: baseline vs current metrics */}
+          {isWatching && (
+            <div className="flex items-center gap-2 mt-1 flex-wrap">
+              {evt.baselineBuyers !== undefined && (
+                <span className="text-[9px] text-white/35">
+                  👥 baseline {evt.baselineBuyers} buyers
+                  {buyerDelta !== null && buyerDelta !== 0 && (
+                    <span className={buyerDelta > 0 ? " text-emerald-400" : " text-red-400"}>
+                      {" "}{buyerDelta > 0 ? "+" : ""}{buyerDelta}
+                    </span>
+                  )}
+                </span>
+              )}
+              {evt.baselineLiq !== undefined && (
+                <span className="text-[9px] text-white/35">
+                  💧 {evt.baselineLiq.toFixed(1)} SOL
+                  {liqDelta !== null && Math.abs(liqDelta) > 0.5 && (
+                    <span className={liqDelta > 0 ? " text-emerald-400" : " text-red-400"}>
+                      {" "}{liqDelta > 0 ? "+" : ""}{liqDelta.toFixed(1)}
+                    </span>
+                  )}
+                </span>
+              )}
+              <span className="text-[9px] text-amber-400/50">
+                ⏱ re-check at {evt.watchStage ?? "T+180s"}
+              </span>
+            </div>
+          )}
+
+          {/* Skip/watch reason */}
+          {evt.skipReason && !isWatching && (
+            <div className="text-[10px] text-white/30 mt-0.5">{evt.skipReason}</div>
+          )}
+
+          {/* Full quality metrics for entered/skipped */}
+          {hasQuality && !isWatching && (
             <div className="flex gap-2 mt-1 flex-wrap">
               {evt.liquiditySol !== undefined && evt.liquiditySol > 0 && (
                 <span className="text-[9px] text-white/35">💧 {evt.liquiditySol.toFixed(1)} SOL</span>
