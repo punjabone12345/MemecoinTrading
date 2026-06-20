@@ -1071,7 +1071,20 @@ function WatchedGradRow({ grad }: { grad: WatchedGrad }) {
         </div>
         <div className="flex items-center gap-1.5 shrink-0">
           {isStale && <span className="text-[9px] text-amber-400/60">stale</span>}
-          <span className="text-[10px] text-white/30">{timeAgo(grad.addedAt)}</span>
+          {!grad.phase3Triggered && (() => {
+            const elapsed = Date.now() - grad.addedAt;
+            const remaining = 30 * 60_000 - elapsed;
+            if (remaining <= 0) return <span className="text-[9px] text-red-400/70 font-semibold">expiring…</span>;
+            const mins = Math.floor(remaining / 60_000);
+            const secs = Math.floor((remaining % 60_000) / 1000);
+            const urgent = remaining < 5 * 60_000;
+            return (
+              <span className={`text-[9px] font-mono font-semibold ${urgent ? "text-red-400/80" : "text-white/35"}`}>
+                {mins}:{secs.toString().padStart(2, "0")}
+              </span>
+            );
+          })()}
+          <span className="text-[10px] text-white/25">{timeAgo(grad.addedAt)}</span>
         </div>
       </div>
 
