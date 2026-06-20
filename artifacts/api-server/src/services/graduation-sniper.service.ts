@@ -1515,10 +1515,8 @@ class GraduationSniperService {
       }
 
       // Borderline zone: score 50–69 (including soft-fail metrics that may recover) → staged watching
+      let passedStagedReEval = false;
       if (quality.totalScore < this.config.minQualityScore) {
-        const watchReason = quality.autoSkipReason
-          ? `Borderline score ${quality.totalScore}/100 with soft-fail (${quality.autoSkipReason}) — watching to T+180s`
-          : `Borderline score ${quality.totalScore}/100 — watching to T+180s`;
         logger.info({ mint, symbol, score: quality.totalScore, softFail: quality.autoSkipReason ?? 'none' },
           'Graduation sniper: borderline — entering staged watching (T+180s, T+600s) 👀');
         const watched = await this.stagedReEvaluation(
@@ -1534,6 +1532,7 @@ class GraduationSniperService {
         }
         // Staged re-evaluation passed — promote to entering with improved metrics
         quality = watched;
+        passedStagedReEval = true;
         logger.info({ mint, symbol, score: quality.totalScore },
           'Graduation sniper: staged re-evaluation PASSED ✅ — entering with improved metrics');
       }
@@ -1553,13 +1552,20 @@ class GraduationSniperService {
       // Quality scoring (liquidity / buyers / buy-pressure / holders) provides
       // sufficient signal; candle confirmation added latency without improving accuracy.
 
+      // Entry window guard — skip if too much time elapsed since graduation detection.
+      // EXCEPTION: tokens that passed staged re-evaluation are exempt — they deliberately
+      // waited to T+180s or T+600s and the entry drift check below already guards against
+      // price-already-pumped scenarios for those tokens.
       const maxEntryAt = detectedAt + this.config.maxEntryWindowMs;
-
-      if (Date.now() > maxEntryAt) {
+      if (!passedStagedReEval && Date.now() > maxEntryAt) {
         this.addEvent({ ...fullEventBase, action: 'skipped',
           skipReason: 'Entry window expired (quality check took too long)', ...qualityEventFields });
         logger.warn({ mint, symbol }, 'Graduation sniper: entry window expired ⏱❌');
         return;
+      }
+      if (passedStagedReEval) {
+        logger.info({ mint, symbol, elapsedMs: Date.now() - detectedAt },
+          'Graduation sniper: entry window bypassed — token passed staged re-evaluation ✅');
       }
 
       // Fetch current price — on-chain reserves first, DexScreener as fallback
