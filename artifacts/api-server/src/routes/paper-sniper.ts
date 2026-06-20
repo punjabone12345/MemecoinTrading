@@ -68,9 +68,11 @@ router.post("/paper-sniper/reset", async (_req, res) => {
 // ── Test Phase 3 trigger — fires a fake buy signal so you can verify paper trades work ──
 router.post("/paper-sniper/test-phase3", async (_req, res) => {
   try {
-    // Use a real recently-graduated token mint as a dummy, with a plausible price
-    const fakeMint   = "So11111111111111111111111111111111111111112"; // WSOL — always on Jupiter
-    const fakeSymbol = "TEST";
+    // Use a unique fake mint per request so repeated test presses never conflict.
+    // Suffix with a timestamp so each is a distinct "token" in openPositions.
+    const fakeId   = Date.now().toString(36).slice(-5).toUpperCase();
+    const fakeMint   = `TEST${fakeId}111111111111111111111111111111111111111`; // 44 chars, valid-length
+    const fakeSymbol = `TEST`;
     // Fetch the current SOL/USD price from Jupiter so the position has a real price
     let testPrice = 0.000050; // default ~$50k mcap price
     try {

@@ -4197,7 +4197,10 @@ class GraduationSniperService {
         });
       }
     } else {
-      logger.warn({ mint, symbol }, "3-phase watch: ⚠️ phase3PaperCallback is NULL — paper trade skipped (wiring missing!)");
+      // This must NEVER happen in a correctly deployed server — the callback is
+      // set in index.ts BEFORE start() is called.  If you see this in logs,
+      // the server is running old code or the startup order was changed.
+      logger.error({ mint, symbol }, "3-phase watch: 🔥 phase3PaperCallback is NULL — paper trade LOST (check index.ts startup order!)");
     }
 
     if (!walletReady) {

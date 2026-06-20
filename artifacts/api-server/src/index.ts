@@ -223,8 +223,9 @@ if (process.env["DATABASE_URL"]) {
 
 // ── Start services ────────────────────────────────────────────────────────────
 await graduationSniperService.init();
-graduationSniperService.start();
 await paperSniperService.init();
+// ⚠️  CRITICAL: set callbacks BEFORE calling start() so they are ALWAYS
+// available before the WebSocket opens and any graduation/Phase-3 event fires.
 graduationSniperService.setPaperSniperCallback(
   (mint, entryPrice, symbol, name, detectedAt, detectionPrice, qualityMeta) => {
     void paperSniperService.onGraduation(mint, entryPrice, symbol, name, detectedAt, detectionPrice, qualityMeta);
@@ -235,6 +236,7 @@ graduationSniperService.setPhase3PaperCallback(
     return paperSniperService.enterPhase3Trade(mint, symbol, price, p1Pct, p2Pct, p3Pct);
   },
 );
+graduationSniperService.start();
 
 server.listen(port, () => {
   logger.info({ port }, "Memecoin Sniper — server listening");

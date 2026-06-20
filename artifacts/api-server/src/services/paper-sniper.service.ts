@@ -1371,28 +1371,32 @@ class PaperSniperService {
       "Paper sniper [phase3]: enterPhase3Trade called 🔔",
     );
 
+    // ── Duplicate guard: skip if already tracking this mint ───────────────────
     if (this.openPositions.has(mint)) {
-      logger.info({ mint, symbol }, "Paper sniper [phase3]: position already open, skipping");
+      logger.info({ mint, symbol }, "Paper sniper [phase3]: position already open for this mint — skipping duplicate signal");
+      return; // silent skip — not a user-facing event, just a duplicate Phase 3 callback
+    }
+
+    // ── Position cap: paper mode allows up to 2× the configured max ──────────
+    // We never hard-block Phase 3 paper trades — they are the ONLY source of
+    // paper entries. The soft cap is doubled so a fully-loaded live side doesn't
+    // prevent paper trading (paper has its own separate position count).
+    const PAPER_PHASE3_MAX = Math.max(cfg.maxOpenPositions * 2, 20);
+    if (this.openPositions.size >= PAPER_PHASE3_MAX) {
+      logger.warn({ mint, symbol, openCount: this.openPositions.size, cap: PAPER_PHASE3_MAX },
+        "Paper sniper [phase3]: soft position cap reached — skipping");
       this.addEvent({ id: uid(), detectedAt: now2, mint, symbol, action: "skipped",
-        skipReason: "Phase 3 signal — position already open for this mint" });
+        skipReason: `Phase 3 signal — position cap (${this.openPositions.size}/${PAPER_PHASE3_MAX})` });
       this.broadcast();
       return;
     }
 
-    if (this.openPositions.size >= cfg.maxOpenPositions) {
-      logger.info({ mint, symbol, openCount: this.openPositions.size, maxOpenPositions: cfg.maxOpenPositions },
-        "Paper sniper [phase3]: max open positions reached, skipping");
-      this.addEvent({ id: uid(), detectedAt: now2, mint, symbol, action: "skipped",
-        skipReason: `Phase 3 signal — max open positions (${this.openPositions.size}/${cfg.maxOpenPositions})` });
-      this.broadcast();
-      return;
-    }
-
+    // ── Balance: ALWAYS auto-top-up so balance NEVER blocks a paper trade ─────
+    // Virtual balance is not real money — entering a trade must always succeed.
     const sizeSol = cfg.positionSizeSol;
-    // Auto-heal balance: if depleted below position size, reset to STARTING_BALANCE
     if (this.virtualBalance < sizeSol) {
       logger.warn({ mint, symbol, virtualBalance: this.virtualBalance, sizeSol },
-        "Paper sniper [phase3]: balance below position size — auto-resetting to starting balance");
+        "Paper sniper [phase3]: virtual balance depleted — auto-resetting to starting balance (paper mode always trades)");
       this.virtualBalance = STARTING_BALANCE;
       void this.persistBalance();
     }
