@@ -356,6 +356,7 @@ export interface DipWatchEntry {
 
 export interface SniperConfig {
   enabled: boolean;
+  paperOnly: boolean;
   positionSizeSol: number;
   maxOpenPositions: number;
   slPct: number;

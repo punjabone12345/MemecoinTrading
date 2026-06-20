@@ -187,6 +187,7 @@ function fmtTgPrice(p: number): string {
 
 export interface SniperConfig {
   enabled: boolean;
+  paperOnly: boolean;      // when true: skip live swaps, run paper trades only
   positionSizeSol: number;
   maxOpenPositions: number;
   // Stop-loss
@@ -216,6 +217,7 @@ export interface SniperConfig {
 
 const DEFAULT_CONFIG: SniperConfig = {
   enabled:              true,
+  paperOnly:            true,   // safe default: no real money until explicitly disabled
   positionSizeSol:      0.001,  // spec: 0.001 SOL base position size
   maxOpenPositions:     5,
   // Staged SL — displayed value matches Phase 1 threshold
@@ -1303,7 +1305,8 @@ class GraduationSniperService {
     let catchEventBase: { id: string; detectedAt: number; mint: string; symbol: string; txSignature: string } | null = null;
     // Set when the live sniper must skip (wallet/balance/positions) but we still
     // want to run the full quality-filter pipeline so paper mode can trade.
-    let liveOnlySkip: string | null = null;
+    // paperOnly config also forces this — live swaps are never executed.
+    let liveOnlySkip: string | null = this.config.paperOnly ? "Paper-only mode — live trading disabled" : null;
     try {
       const extracted = await this.extractMintFromTx(signature);
       if (!extracted) {

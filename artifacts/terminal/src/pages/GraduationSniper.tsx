@@ -94,6 +94,7 @@ interface SettingsField {
 
 const SETTINGS_FIELDS: SettingsField[] = [
   { key: "enabled",           label: "Enable Sniper",          description: "Master switch — starts/stops catching graduations", type: "boolean" },
+  { key: "paperOnly",         label: "Paper Only Mode",        description: "When ON: all trades are simulated (no real SOL spent). Turn OFF only when ready for live trading on Render.", type: "boolean" },
   { key: "positionSizeSol",      label: "Position Size (SOL)",    description: "SOL per live trade",                   type: "number", min: 0.01, max: 10,     step: 0.01  },
   { key: "maxOpenPositions",     label: "Max Open Positions",     description: "Halt entries above this count",        type: "number", min: 1,    max: 20,     step: 1     },
   { key: "slPct",                label: "Stop Loss %",            description: "Exit whole position at this loss",     type: "number", min: 5,    max: 90,     step: 1     },
@@ -908,7 +909,14 @@ export default function GraduationSniper() {
             </div>
             <div>
               <h1 className="text-sm font-black text-white leading-none">Graduation Sniper</h1>
-              <p className="text-[9px] text-white/35 leading-none mt-0.5">Pump.fun → Raydium · {wallet?.ready ? <span className="text-emerald-400/80 font-bold">🔴 LIVE</span> : "Wallet not configured"}</p>
+              <p className="text-[9px] text-white/35 leading-none mt-0.5">
+                Pump.fun → Raydium ·{" "}
+                {config?.paperOnly
+                  ? <span className="text-amber-400/90 font-bold">📄 PAPER ONLY</span>
+                  : wallet?.ready
+                    ? <span className="text-emerald-400/80 font-bold">🔴 LIVE</span>
+                    : "Wallet not configured"}
+              </p>
             </div>
           </div>
           <div className="flex items-center gap-2">
