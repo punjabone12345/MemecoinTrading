@@ -231,7 +231,16 @@ class PaperSniperService {
       );
       if (rows.length > 0) {
         const saved = JSON.parse(rows[0]!.value) as Partial<PaperConfig>;
-        this.paperConfig = { ...DEFAULT_PAPER_CONFIG, ...saved };
+        const merged = { ...DEFAULT_PAPER_CONFIG, ...saved };
+        // Sanitize critical values — a 0 or negative would silently block all trades
+        if (!merged.maxOpenPositions || merged.maxOpenPositions < 1) merged.maxOpenPositions = DEFAULT_PAPER_CONFIG.maxOpenPositions;
+        if (!merged.positionSizeSol  || merged.positionSizeSol  <= 0) merged.positionSizeSol  = DEFAULT_PAPER_CONFIG.positionSizeSol;
+        if (!merged.tp1Pct           || merged.tp1Pct           <= 0) merged.tp1Pct           = DEFAULT_PAPER_CONFIG.tp1Pct;
+        if (!merged.tp2Pct           || merged.tp2Pct           <= 0) merged.tp2Pct           = DEFAULT_PAPER_CONFIG.tp2Pct;
+        if (!merged.tp3Pct           || merged.tp3Pct           <= 0) merged.tp3Pct           = DEFAULT_PAPER_CONFIG.tp3Pct;
+        if (!merged.slPhase1Pct      || merged.slPhase1Pct      <= 0) merged.slPhase1Pct      = DEFAULT_PAPER_CONFIG.slPhase1Pct;
+        this.paperConfig = merged;
+        logger.info({ positionSizeSol: merged.positionSizeSol, maxOpenPositions: merged.maxOpenPositions }, "Paper sniper: config loaded from DB");
       }
     } catch { /* table may not exist yet */ }
   }
@@ -1332,28 +1341,52 @@ class PaperSniperService {
     phase2DumpPct: number,
     phase3RetracePct: number,
   ): Promise<void> {
-    const cfg = this.paperConfig;
+    try {
+    const cfg  = this.paperConfig;
+    const now2 = Date.now();
+
+    logger.info(
+      { mint, symbol, price, openCount: this.openPositions.size, maxOpen: cfg.maxOpenPositions,
+        balance: this.virtualBalance, sizeSol: cfg.positionSizeSol },
+      "Paper sniper [phase3]: enterPhase3Trade called 🔔",
+    );
 
     if (this.openPositions.has(mint)) {
       logger.info({ mint, symbol }, "Paper sniper [phase3]: position already open, skipping");
+      this.addEvent({ id: uid(), detectedAt: now2, mint, symbol, action: "skipped",
+        skipReason: "Phase 3 signal — position already open for this mint" });
+      this.broadcast();
       return;
     }
 
     if (this.openPositions.size >= cfg.maxOpenPositions) {
       logger.info({ mint, symbol, openCount: this.openPositions.size, maxOpenPositions: cfg.maxOpenPositions },
         "Paper sniper [phase3]: max open positions reached, skipping");
+      this.addEvent({ id: uid(), detectedAt: now2, mint, symbol, action: "skipped",
+        skipReason: `Phase 3 signal — max open positions (${this.openPositions.size}/${cfg.maxOpenPositions})` });
+      this.broadcast();
       return;
     }
 
     const sizeSol = cfg.positionSizeSol;
+    // Auto-heal balance: if depleted below position size, reset to STARTING_BALANCE
     if (this.virtualBalance < sizeSol) {
       logger.warn({ mint, symbol, virtualBalance: this.virtualBalance, sizeSol },
-        "Paper sniper [phase3]: insufficient paper balance, skipping");
-      return;
+        "Paper sniper [phase3]: balance below position size — auto-resetting to starting balance");
+      this.virtualBalance = STARTING_BALANCE;
+      void this.persistBalance();
     }
 
     // Fetch a fresh live price at the moment of entry for realistic execution
     const entryPrice = await this.fetchLivePriceForPhase3(mint, price);
+
+    if (!(entryPrice > 0)) {
+      logger.warn({ mint, symbol, price }, "Paper sniper [phase3]: could not determine entry price, skipping");
+      this.addEvent({ id: uid(), detectedAt: now2, mint, symbol, action: "skipped",
+        skipReason: "Phase 3 signal — price unavailable (DexScreener + Jupiter both failed)" });
+      this.broadcast();
+      return;
+    }
 
     const now = Date.now();
     const pos: PaperPosition = {
@@ -1426,6 +1459,12 @@ class PaperSniperService {
         `💼 Balance: <b>${this.virtualBalance.toFixed(4)} SOL</b>\n` +
         `🔗 <a href="https://dexscreener.com/solana/${mint}">DexScreener</a>  |  🕐 ${toIST(new Date())}`
       );
+    }
+    } catch (err) {
+      logger.error({ mint, symbol, err: (err as Error).message }, "Paper sniper [phase3]: enterPhase3Trade threw unexpectedly 🔥");
+      if (isTelegramConfigured()) {
+        void sendTelegram(`🔥 <b>PAPER TRADE ERROR</b>\n🪙 ${symbol}\n<code>${mint.slice(0,8)}…</code>\nError: ${(err as Error).message}`);
+      }
     }
   }
 

@@ -4187,8 +4187,17 @@ class GraduationSniperService {
 
     // ── Always fire paper trade (runs alongside live, never as a mere fallback) ──
     if (this.phase3PaperCallback) {
-      logger.info({ mint, symbol, currentPrice }, "3-phase watch: 📄 firing paper trade (always-on)");
-      void this.phase3PaperCallback(mint, symbol, currentPrice, grad.phase1PumpPct, grad.phase2DumpPct, grad.phase3PumpPct);
+      logger.info({ mint, symbol, currentPrice, phase1: grad.phase1PumpPct, phase2: grad.phase2DumpPct, phase3: grad.phase3PumpPct },
+        "3-phase watch: 📄 firing paper trade callback (always-on)");
+      const paperResult = this.phase3PaperCallback(mint, symbol, currentPrice, grad.phase1PumpPct, grad.phase2DumpPct, grad.phase3PumpPct);
+      // If async, catch and log errors that would otherwise be silently swallowed
+      if (paperResult && typeof (paperResult as Promise<void>).catch === "function") {
+        (paperResult as Promise<void>).catch((err: unknown) => {
+          logger.error({ mint, symbol, err: (err as Error).message }, "3-phase watch: paper trade callback threw 🔥");
+        });
+      }
+    } else {
+      logger.warn({ mint, symbol }, "3-phase watch: ⚠️ phase3PaperCallback is NULL — paper trade skipped (wiring missing!)");
     }
 
     if (!walletReady) {
