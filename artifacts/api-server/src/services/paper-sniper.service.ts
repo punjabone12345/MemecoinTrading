@@ -14,12 +14,13 @@ export interface PaperConfig {
   tp2Pct:             number;
   tp2ClosePct:        number;
   tp3Pct:             number;  // TP3 at +600%
-  tp3ClosePct:        number;  // % of remaining position to close at TP3 (e.g. 100 = close all)
-  trailingStopPct:    number;
-  slPhase1Pct:        number;  // SL % during first 2 min
-  slPhase2Pct:        number;  // SL % from peak during 2–10 min
-  slPhase3Pct:        number;  // SL % from peak after 10 min
-  slAfterTp1Pct:      number;  // trailing SL % from peak after TP1
+  tp3ClosePct:        number;  // % of remaining position to close at TP3
+  trailingStopPct:    number;  // trailing SL % from peak after TP3 (runner)
+  slPhase1Pct:        number;  // fixed SL % from ENTRY before TP1 (default -30%)
+  slPhase2Pct:        number;  // (legacy — unused in new SL model)
+  slPhase3Pct:        number;  // (legacy — unused in new SL model)
+  slAfterTp1Pct:      number;  // (legacy — breakeven applied automatically at TP1)
+  slAfterTp2Pct:      number;  // trailing SL % from peak after TP2 (default 20)
   deadCoinWindowMs:     number;  // ms to wait before dead-coin check (default 2h)
   deadCoinMinMovePct:   number;  // min peak move % required — if not reached, close as dead
   maxFillDriftPct:      number;  // skip entry if price already moved > this % from detection baseline
@@ -44,19 +45,20 @@ export interface PaperConfig {
 }
 
 const DEFAULT_PAPER_CONFIG: PaperConfig = {
-  positionSizeSol:    0.001,  // spec: match live sniper base position size
+  positionSizeSol:    0.001,
   maxOpenPositions:   8,
-  tp1Pct:             150,  // TP1 at +150%
-  tp1ClosePct:        40,   // sell 40% at TP1
-  tp2Pct:             400,  // TP2 at +400%
-  tp2ClosePct:        40,   // sell 40% at TP2 → 20% runner remains
-  tp3Pct:             600,  // TP3 at +600%
-  tp3ClosePct:        100,  // sell 100% of remaining at TP3 (exits position fully)
-  trailingStopPct:    30,   // trailing SL -30% from peak (runner after TP1/TP2)
-  slPhase1Pct:        20,   // 0-2m: hard SL -20% from entry (spec: Phase 1)
-  slPhase2Pct:        25,   // 2-10m: trailing -25% from peak (spec: Phase 2)
-  slPhase3Pct:        30,   // >10m: trailing -30% from peak (spec: Phase 3)
-  slAfterTp1Pct:      35,   // trailing SL -35% from peak after TP1
+  tp1Pct:             100,  // TP1 at +100% → sell 30%
+  tp1ClosePct:        30,   // sell 30% at TP1 → 70% remaining
+  tp2Pct:             300,  // TP2 at +300% → sell 40% of original (57% of remaining 70%)
+  tp2ClosePct:        57,   // 57% of remaining 70% ≈ 40% of original
+  tp3Pct:             600,  // TP3 at +600% → sell 20% of original (67% of remaining 30%)
+  tp3ClosePct:        67,   // 67% of remaining 30% ≈ 20% of original → 10% runner
+  trailingStopPct:    10,   // runner trailing -10% from peak after TP3
+  slPhase1Pct:        30,   // fixed hard SL -30% from entry (before TP1)
+  slPhase2Pct:        30,   // (legacy, not used in new SL logic)
+  slPhase3Pct:        30,   // (legacy, not used in new SL logic)
+  slAfterTp1Pct:      0,    // (legacy, breakeven is hardcoded after TP1)
+  slAfterTp2Pct:      20,   // trailing -20% from peak after TP2
   deadCoinWindowMs:     2 * 60 * 60_000,  // 2 hours
   deadCoinMinMovePct:   5,                // must move >5% from entry
   maxFillDriftPct:      15,               // spec: skip if exec price > 15% above detection baseline
@@ -455,10 +457,6 @@ class PaperSniperService {
         uniqueBuyers:      qualityMeta?.uniqueBuyers,
         topHolderPct:      qualityMeta?.topHolderPct,
         whaleDetected:     qualityMeta?.whaleDetected,
-        dipPeakHigh:       qualityMeta?.dipPeakHigh,
-        dipDipLow:         qualityMeta?.dipDipLow,
-        dipDumpPct:        qualityMeta?.dipDumpPct,
-        dipRetracePct:     qualityMeta?.dipRetracePct,
       };
       this.virtualBalance -= fastSizeSol;
       this.openPositions.set(mint, fastPos);
@@ -986,7 +984,7 @@ class PaperSniperService {
       pos.realizedPnlSol   += pnl;
       pos.tp2RealizedSol    = pnl;
       pos.remainingFraction -= closeFrac;
-      pos.effectiveSlPrice  = price * (1 - cfg.trailingStopPct / 100);
+      pos.effectiveSlPrice  = pos.trailingHigh * (1 - (cfg.slAfterTp2Pct ?? 20) / 100);
       this.virtualBalance  += solReturned;
       logger.info({ mint: pos.mint, symbol: pos.symbol, pct: pct.toFixed(1), pnl, solReturned, virtualBalance: this.virtualBalance },
         "Paper sniper: TP2 hit 🎯🎯");
@@ -1042,10 +1040,15 @@ class PaperSniperService {
       return;
     }
 
-    // ── Trailing stop (after TP1) ─────────────────────────────────────────
-    if (pos.tp1Hit) {
-      const trailPrice = pos.trailingHigh * (1 - cfg.trailingStopPct / 100);
+    // ── Update trailing SL based on TP stage ─────────────────────────────
+    if (pos.tp2Hit) {
+      // After TP2 (and TP3): ratchet-up trailing stop
+      const trailPct   = pos.tp3Hit ? cfg.trailingStopPct : (cfg.slAfterTp2Pct ?? 20);
+      const trailPrice = pos.trailingHigh * (1 - trailPct / 100);
       pos.effectiveSlPrice = Math.max(pos.effectiveSlPrice, trailPrice);
+    } else if (pos.tp1Hit) {
+      // After TP1, before TP2: hold at breakeven (never below entry)
+      pos.effectiveSlPrice = Math.max(pos.effectiveSlPrice, pos.entryPrice);
     }
 
     // ── Sell pressure emergency exit (pre-TP1 only, enabled toggle) ──────────
@@ -1084,28 +1087,22 @@ class PaperSniperService {
       }
     }
 
-    // ── Staged SL ─────────────────────────────────────────────────────────
-    const slDropPct = pos.tp1Hit
-      ? cfg.slAfterTp1Pct
-      : ageMs < STAGED_SL_PHASE1_MS
-        ? cfg.slPhase1Pct
-        : ageMs < STAGED_SL_PHASE2_MS
-          ? cfg.slPhase2Pct
-          : cfg.slPhase3Pct;
-
-    const slThreshold = pos.tp1Hit
-      ? pos.effectiveSlPrice
-      : pos.trailingHigh * (1 - slDropPct / 100);
-
-    if (price <= slThreshold) {
-      const reason = pos.tp1Hit
-        ? `Trailing SL (runner -${cfg.trailingStopPct}% from peak)`
-        : ageMs < STAGED_SL_PHASE1_MS
-          ? `Staged SL Ph1 — -${cfg.slPhase1Pct}% (${(ageMs / 60_000).toFixed(1)}m)`
-          : ageMs < STAGED_SL_PHASE2_MS
-            ? `Staged SL Ph2 — -${cfg.slPhase2Pct}% from peak`
-            : `Staged SL Ph3 — -${cfg.slPhase3Pct}% from peak`;
-      this.closePaperPosition(pos, reason, price);
+    // ── SL check ─────────────────────────────────────────────────────────────
+    if (!pos.tp1Hit) {
+      // Before TP1: hard fixed SL at -slPhase1Pct% from entry (NOT trailing)
+      const hardSl = pos.entryPrice * (1 - cfg.slPhase1Pct / 100);
+      pos.effectiveSlPrice = hardSl;
+      if (price <= hardSl) {
+        this.closePaperPosition(pos, `SL -${cfg.slPhase1Pct}% from entry (${(ageMs / 60_000).toFixed(1)}m)`, price);
+      }
+    } else if (price <= pos.effectiveSlPrice) {
+      // After TP1: effectiveSlPrice is breakeven → -20% trailing → -10% runner
+      const stage = pos.tp3Hit
+        ? `runner trailing -${cfg.trailingStopPct}% from peak`
+        : pos.tp2Hit
+          ? `trailing -${cfg.slAfterTp2Pct ?? 20}% from peak`
+          : `breakeven`;
+      this.closePaperPosition(pos, `SL hit — ${stage}`, price);
     }
   }
 
@@ -1202,15 +1199,16 @@ class PaperSniperService {
       await execute(
         `INSERT INTO paper_sniper_positions
            (id, mint, symbol, name, detected_at, entry_at, entry_price, current_price,
-            size_sol, tp1_hit, tp2_hit, remaining_fraction, effective_sl_price, trailing_high,
+            size_sol, tp1_hit, tp2_hit, tp3_hit, remaining_fraction, effective_sl_price, trailing_high,
             status, realized_pnl_sol, close_reason, closed_at, exit_price,
-            tp1_realized_sol, tp2_realized_sol, runner_realized_sol,
+            tp1_realized_sol, tp2_realized_sol, tp3_realized_sol, runner_realized_sol,
             detection_price, entry_drift_pct)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)
          ON CONFLICT (id) DO UPDATE SET
            current_price      = EXCLUDED.current_price,
            tp1_hit            = EXCLUDED.tp1_hit,
            tp2_hit            = EXCLUDED.tp2_hit,
+           tp3_hit            = EXCLUDED.tp3_hit,
            remaining_fraction = EXCLUDED.remaining_fraction,
            effective_sl_price = EXCLUDED.effective_sl_price,
            trailing_high      = EXCLUDED.trailing_high,
@@ -1221,15 +1219,16 @@ class PaperSniperService {
            exit_price         = EXCLUDED.exit_price,
            tp1_realized_sol   = EXCLUDED.tp1_realized_sol,
            tp2_realized_sol   = EXCLUDED.tp2_realized_sol,
+           tp3_realized_sol   = EXCLUDED.tp3_realized_sol,
            runner_realized_sol= EXCLUDED.runner_realized_sol`,
         [
           pos.id, pos.mint, pos.symbol, pos.name,
           pos.detectedAt, pos.entryAt, pos.entryPrice, pos.currentPrice,
-          pos.sizeSol, pos.tp1Hit, pos.tp2Hit, pos.remainingFraction,
+          pos.sizeSol, pos.tp1Hit, pos.tp2Hit, pos.tp3Hit ?? false, pos.remainingFraction,
           pos.effectiveSlPrice, pos.trailingHigh,
           pos.status, pos.realizedPnlSol, pos.closeReason ?? null,
           pos.closedAt ?? null, pos.exitPrice ?? null,
-          pos.tp1RealizedSol, pos.tp2RealizedSol, pos.runnerRealizedSol,
+          pos.tp1RealizedSol, pos.tp2RealizedSol, pos.tp3RealizedSol ?? 0, pos.runnerRealizedSol,
           pos.detectionPrice ?? null, pos.entryDriftPct ?? null,
         ],
       );
@@ -1296,6 +1295,12 @@ class PaperSniperService {
 
     if (this.openPositions.has(mint)) {
       logger.info({ mint, symbol }, "Paper sniper [phase3]: position already open, skipping");
+      return;
+    }
+
+    if (this.openPositions.size >= cfg.maxOpenPositions) {
+      logger.info({ mint, symbol, openCount: this.openPositions.size, maxOpenPositions: cfg.maxOpenPositions },
+        "Paper sniper [phase3]: max open positions reached, skipping");
       return;
     }
 

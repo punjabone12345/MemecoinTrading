@@ -193,6 +193,7 @@ if (process.env["DATABASE_URL"]) {
           size_sol DOUBLE PRECISION,
           tp1_hit BOOLEAN DEFAULT FALSE,
           tp2_hit BOOLEAN DEFAULT FALSE,
+          tp3_hit BOOLEAN DEFAULT FALSE,
           remaining_fraction DOUBLE PRECISION DEFAULT 1.0,
           effective_sl_price DOUBLE PRECISION,
           trailing_high DOUBLE PRECISION,
@@ -203,11 +204,14 @@ if (process.env["DATABASE_URL"]) {
           exit_price DOUBLE PRECISION,
           tp1_realized_sol DOUBLE PRECISION DEFAULT 0,
           tp2_realized_sol DOUBLE PRECISION DEFAULT 0,
+          tp3_realized_sol DOUBLE PRECISION DEFAULT 0,
           runner_realized_sol DOUBLE PRECISION DEFAULT 0,
           detection_price DOUBLE PRECISION,
           entry_drift_pct DOUBLE PRECISION
         )
       `);
+      await migClient.query(`ALTER TABLE paper_sniper_positions ADD COLUMN IF NOT EXISTS tp3_hit BOOLEAN DEFAULT FALSE`);
+      await migClient.query(`ALTER TABLE paper_sniper_positions ADD COLUMN IF NOT EXISTS tp3_realized_sol DOUBLE PRECISION DEFAULT 0`);
       logger.info("DB migration: all tables ready");
     } finally {
       migClient.release();

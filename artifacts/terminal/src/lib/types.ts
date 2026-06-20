@@ -488,6 +488,7 @@ export interface PaperPosition {
   sizeSol: number;
   tp1Hit: boolean;
   tp2Hit: boolean;
+  tp3Hit: boolean;
   remainingFraction: number;
   effectiveSlPrice: number;
   trailingHigh: number;
@@ -501,6 +502,7 @@ export interface PaperPosition {
   exitPrice?: number;
   tp1RealizedSol: number;
   tp2RealizedSol: number;
+  tp3RealizedSol: number;
   runnerRealizedSol: number;
   detectionPrice?: number;
   entryDriftPct?: number;
@@ -546,11 +548,12 @@ export interface PaperConfig {
   tp2ClosePct:        number;
   tp3Pct:             number;
   tp3ClosePct:        number;
-  trailingStopPct:    number;
-  slPhase1Pct:        number;
-  slPhase2Pct:        number;
-  slPhase3Pct:        number;
-  slAfterTp1Pct:      number;
+  trailingStopPct:    number;  // runner trailing % from peak after TP3
+  slPhase1Pct:        number;  // fixed hard SL % from entry before TP1
+  slPhase2Pct:        number;  // (legacy)
+  slPhase3Pct:        number;  // (legacy)
+  slAfterTp1Pct:      number;  // (legacy)
+  slAfterTp2Pct:      number;  // trailing SL % from peak after TP2
   deadCoinWindowMs:     number;
   deadCoinMinMovePct:   number;
   maxFillDriftPct:      number;
