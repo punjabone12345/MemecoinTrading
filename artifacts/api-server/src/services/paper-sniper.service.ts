@@ -1402,17 +1402,58 @@ class PaperSniperService {
 
   // ── Public API ────────────────────────────────────────────────────────────
 
+  // Fetches the best live price for a token from DexScreener (highest-liquidity
+  // AMM pair) with Jupiter as fallback. Used by enterPhase3Trade to guarantee
+  // a realistic entry price at the moment Phase 3 fires.
+  private async fetchLivePriceForPhase3(mint: string, fallbackPrice: number): Promise<number> {
+    try {
+      type DexPair = { baseToken?: { address: string }; priceUsd: string; liquidity?: { usd?: number }; dexId?: string };
+      const res = await axios.get<DexPair[]>(
+        `${DEXSCREENER_BASE}/tokens/v1/solana/${mint}`,
+        { timeout: 5_000 },
+      );
+      const pairs = Array.isArray(res.data) ? res.data : [];
+      let bestPrice = 0;
+      let bestLiq = -1;
+      for (const pair of pairs) {
+        const p = parseFloat(pair.priceUsd);
+        const liq = pair.liquidity?.usd ?? 0;
+        if (p > 0 && liq > bestLiq) { bestPrice = p; bestLiq = liq; }
+      }
+      if (bestPrice > 0) {
+        logger.info({ mint, price: bestPrice, source: "dexscreener" }, "Paper sniper [phase3]: live price fetched");
+        return bestPrice;
+      }
+    } catch { /* fall through to Jupiter */ }
+
+    try {
+      type JupResp = { data: Record<string, { price: number }> };
+      const res = await axios.get<JupResp>(
+        `https://lite-api.jup.ag/price/v2?ids=${mint}`,
+        { timeout: 4_000 },
+      );
+      const p = res.data?.data?.[mint]?.price;
+      if (p && p > 0) {
+        logger.info({ mint, price: p, source: "jupiter" }, "Paper sniper [phase3]: live price fetched (Jupiter fallback)");
+        return p;
+      }
+    } catch { /* fall through to fallback */ }
+
+    logger.warn({ mint, fallbackPrice }, "Paper sniper [phase3]: live price fetch failed — using signal price as fallback");
+    return fallbackPrice;
+  }
+
   // Called by the graduation sniper when Phase 3 triggers but the live wallet
   // is unavailable (or the live buy fails). Bypasses all graduation quality
   // checks — the 3-phase state machine already validated the setup.
-  enterPhase3Trade(
+  async enterPhase3Trade(
     mint: string,
     symbol: string,
     price: number,
     phase1PumpPct: number,
     phase2DumpPct: number,
     phase3RetracePct: number,
-  ): void {
+  ): Promise<void> {
     const cfg = this.paperConfig;
 
     if (this.openPositions.has(mint)) {
@@ -1427,6 +1468,9 @@ class PaperSniperService {
       return;
     }
 
+    // Fetch a fresh live price at the moment of entry for realistic execution
+    const entryPrice = await this.fetchLivePriceForPhase3(mint, price);
+
     const now = Date.now();
     const pos: PaperPosition = {
       id:                `p3-${now.toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
@@ -1435,15 +1479,15 @@ class PaperSniperService {
       name:              symbol,
       detectedAt:        now,
       entryAt:           now,
-      entryPrice:        price,
-      currentPrice:      price,
+      entryPrice:        entryPrice,
+      currentPrice:      entryPrice,
       sizeSol,
       tp1Hit:            false,
       tp2Hit:            false,
       tp3Hit:            false,
       remainingFraction: 1.0,
-      effectiveSlPrice:  price * (1 - cfg.slPhase1Pct / 100),
-      trailingHigh:      price,
+      effectiveSlPrice:  entryPrice * (1 - cfg.slPhase1Pct / 100),
+      trailingHigh:      entryPrice,
       status:            "open",
       realizedPnlSol:    0,
       unrealizedPnlSol:  0,
@@ -1453,7 +1497,7 @@ class PaperSniperService {
       tp2RealizedSol:    0,
       tp3RealizedSol:    0,
       runnerRealizedSol: 0,
-      detectionPrice:    price,
+      detectionPrice:    entryPrice,
       entryDriftPct:     0,
     };
 
@@ -1467,7 +1511,7 @@ class PaperSniperService {
     this.broadcast();
 
     logger.info(
-      { mint, symbol, price, phase1PumpPct, phase2DumpPct, phase3RetracePct, sizeSol, virtualBalance: this.virtualBalance },
+      { mint, symbol, signalPrice: price, entryPrice, phase1PumpPct, phase2DumpPct, phase3RetracePct, sizeSol, virtualBalance: this.virtualBalance },
       "Paper sniper: PHASE 3 paper position entered 📄🎯",
     );
 
@@ -1479,7 +1523,7 @@ class PaperSniperService {
         `📈 P1 pump:    <b>+${phase1PumpPct.toFixed(1)}%</b>\n` +
         `📉 P2 dump:    <b>-${phase2DumpPct.toFixed(1)}%</b>\n` +
         `🔄 P3 retrace: <b>+${phase3RetracePct.toFixed(1)}%</b>\n` +
-        `💰 Entry: <b>${price.toFixed(8)}</b> · Size: <b>${sizeSol} SOL (paper)</b>\n` +
+        `💰 Entry: <b>${entryPrice.toFixed(8)}</b> · Size: <b>${sizeSol} SOL (paper)</b>\n` +
         `🔗 <a href="https://dexscreener.com/solana/${mint}">DexScreener</a>`
       );
     }

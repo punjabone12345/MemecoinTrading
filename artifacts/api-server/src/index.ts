@@ -228,7 +228,7 @@ graduationSniperService.setPaperSniperCallback(
 );
 graduationSniperService.setPhase3PaperCallback(
   (mint, symbol, price, p1Pct, p2Pct, p3Pct) => {
-    paperSniperService.enterPhase3Trade(mint, symbol, price, p1Pct, p2Pct, p3Pct);
+    return paperSniperService.enterPhase3Trade(mint, symbol, price, p1Pct, p2Pct, p3Pct);
   },
 );
 

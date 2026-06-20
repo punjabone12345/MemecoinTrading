@@ -347,7 +347,7 @@ class GraduationSniperService {
   private wsReconnects = 0;
   private subscriptionId: number | null = null;
   private paperCallback: ((mint: string, entryPrice: number, symbol: string, name: string, detectedAt: number, detectionPrice: number, qualityMeta?: GraduationQualityMeta) => void) | null = null;
-  private phase3PaperCallback: ((mint: string, symbol: string, price: number, p1Pct: number, p2Pct: number, p3Pct: number) => void) | null = null;
+  private phase3PaperCallback: ((mint: string, symbol: string, price: number, p1Pct: number, p2Pct: number, p3Pct: number) => void | Promise<void>) | null = null;
   private priceIntervalId: ReturnType<typeof setInterval> | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private started = false;
@@ -3952,7 +3952,7 @@ class GraduationSniperService {
   }
 
   setPhase3PaperCallback(
-    fn: (mint: string, symbol: string, price: number, p1Pct: number, p2Pct: number, p3Pct: number) => void,
+    fn: (mint: string, symbol: string, price: number, p1Pct: number, p2Pct: number, p3Pct: number) => void | Promise<void>,
   ): void {
     this.phase3PaperCallback = fn;
   }
@@ -4186,7 +4186,7 @@ class GraduationSniperService {
 
     const doPaperFallback = (reason: string) => {
       logger.info({ mint, symbol, currentPrice, reason }, "3-phase watch: falling back to PAPER trade");
-      this.phase3PaperCallback?.(mint, symbol, currentPrice, grad.phase1PumpPct, grad.phase2DumpPct, grad.phase3PumpPct);
+      void this.phase3PaperCallback?.(mint, symbol, currentPrice, grad.phase1PumpPct, grad.phase2DumpPct, grad.phase3PumpPct);
     };
 
     if (!walletReady) {
