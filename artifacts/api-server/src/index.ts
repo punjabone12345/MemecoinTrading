@@ -226,6 +226,11 @@ graduationSniperService.setPaperSniperCallback(
     void paperSniperService.onGraduation(mint, entryPrice, symbol, name, detectedAt, detectionPrice, qualityMeta);
   },
 );
+graduationSniperService.setPhase3PaperCallback(
+  (mint, symbol, price, p1Pct, p2Pct, p3Pct) => {
+    paperSniperService.enterPhase3Trade(mint, symbol, price, p1Pct, p2Pct, p3Pct);
+  },
+);
 
 server.listen(port, () => {
   logger.info({ port }, "Memecoin Sniper — server listening");

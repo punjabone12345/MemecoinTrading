@@ -8,7 +8,6 @@ import { sendTelegram, isTelegramConfigured, toIST } from "../lib/telegram.js";
 import { solanaWalletService } from "./solana-wallet.service.js";
 import { jupiterSwapService } from "./jupiter-swap.service.js";
 import { tokenQualityService, type QualityMetrics } from "./token-quality.service.js";
-import { paperSniperService } from "./paper-sniper.service.js";
 
 // ── Quality meta passed to paper sniper at entry ──────────────────────────────
 export interface GraduationQualityMeta {
@@ -348,6 +347,7 @@ class GraduationSniperService {
   private wsReconnects = 0;
   private subscriptionId: number | null = null;
   private paperCallback: ((mint: string, entryPrice: number, symbol: string, name: string, detectedAt: number, detectionPrice: number, qualityMeta?: GraduationQualityMeta) => void) | null = null;
+  private phase3PaperCallback: ((mint: string, symbol: string, price: number, p1Pct: number, p2Pct: number, p3Pct: number) => void) | null = null;
   private priceIntervalId: ReturnType<typeof setInterval> | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private started = false;
@@ -3951,6 +3951,12 @@ class GraduationSniperService {
     this.paperCallback = fn;
   }
 
+  setPhase3PaperCallback(
+    fn: (mint: string, symbol: string, price: number, p1Pct: number, p2Pct: number, p3Pct: number) => void,
+  ): void {
+    this.phase3PaperCallback = fn;
+  }
+
   // ── Dip-Retrace Watch ────────────────────────────────────────────────────────
 
   private addToWatchList(
@@ -4170,27 +4176,24 @@ class GraduationSniperService {
 
   // Executes a buy when Phase 3 triggers.
   // Live wallet: calls enterPosition normally.
-  // No wallet / any issue: falls back to a paper trade automatically.
+  // No wallet / any issue: fires phase3PaperCallback → paper trade.
   private triggerPhase3Buy(mint: string, symbol: string, currentPrice: number, grad: WatchedGrad): void {
     const walletReady = solanaWalletService.isReady();
 
+    const doPaperFallback = (reason: string) => {
+      logger.info({ mint, symbol, currentPrice, reason }, "3-phase watch: falling back to PAPER trade");
+      this.phase3PaperCallback?.(mint, symbol, currentPrice, grad.phase1PumpPct, grad.phase2DumpPct, grad.phase3PumpPct);
+    };
+
     if (!walletReady) {
-      logger.info({ mint, symbol, currentPrice }, "3-phase watch: wallet not ready — falling back to PAPER trade");
-      paperSniperService.enterPhase3Trade(
-        mint, symbol, currentPrice,
-        grad.phase1PumpPct, grad.phase2DumpPct, grad.phase3PumpPct,
-      );
+      doPaperFallback("wallet not configured");
       return;
     }
 
     // Guard: no duplicate live open position
     const alreadyOpen = Array.from(this.openPositions.values()).some(p => p.mint === mint);
     if (alreadyOpen) {
-      logger.info({ mint, symbol }, "3-phase watch: live position already open — falling back to PAPER trade");
-      paperSniperService.enterPhase3Trade(
-        mint, symbol, currentPrice,
-        grad.phase1PumpPct, grad.phase2DumpPct, grad.phase3PumpPct,
-      );
+      doPaperFallback("live position already open for this mint");
       return;
     }
 
@@ -4209,10 +4212,7 @@ class GraduationSniperService {
     // If the live buy throws, fall back to paper so the signal is never wasted
     void Promise.resolve(buyPromise).catch((err: unknown) => {
       logger.error({ mint, symbol, err: (err as Error).message }, "3-phase watch: live buy failed — falling back to PAPER trade");
-      paperSniperService.enterPhase3Trade(
-        mint, symbol, currentPrice,
-        grad.phase1PumpPct, grad.phase2DumpPct, grad.phase3PumpPct,
-      );
+      this.phase3PaperCallback?.(mint, symbol, currentPrice, grad.phase1PumpPct, grad.phase2DumpPct, grad.phase3PumpPct);
     });
   }
 
