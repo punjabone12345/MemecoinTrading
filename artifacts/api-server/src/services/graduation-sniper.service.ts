@@ -8,6 +8,7 @@ import { sendTelegram, isTelegramConfigured, toIST } from "../lib/telegram.js";
 import { solanaWalletService } from "./solana-wallet.service.js";
 import { jupiterSwapService } from "./jupiter-swap.service.js";
 import { tokenQualityService, type QualityMetrics } from "./token-quality.service.js";
+import { paperSniperService } from "./paper-sniper.service.js";
 
 // ── Quality meta passed to paper sniper at entry ──────────────────────────────
 export interface GraduationQualityMeta {
@@ -4167,31 +4168,34 @@ class GraduationSniperService {
     }
   }
 
-  // Executes a buy when Phase 3 triggers. Uses same enterPosition as normal sniper.
+  // Executes a buy when Phase 3 triggers.
+  // Live wallet: calls enterPosition normally.
+  // No wallet / any issue: falls back to a paper trade automatically.
   private triggerPhase3Buy(mint: string, symbol: string, currentPrice: number, grad: WatchedGrad): void {
     const walletReady = solanaWalletService.isReady();
+
     if (!walletReady) {
-      logger.info({ mint, symbol, currentPrice, phase2Low: grad.phase2LowPrice }, "3-phase watch: Phase 3 buy signal — wallet not configured, skipping live buy");
-      if (isTelegramConfigured()) {
-        void sendTelegram(
-          `⚠️ <b>PHASE 3 SIGNAL (no wallet)</b>\n` +
-          `🪙 <b>${symbol}</b> — <code>${mint}</code>\n` +
-          `Wallet not configured — live buy skipped.\n` +
-          `🔗 <a href="https://dexscreener.com/solana/${mint}">DexScreener</a>`
-        );
-      }
+      logger.info({ mint, symbol, currentPrice }, "3-phase watch: wallet not ready — falling back to PAPER trade");
+      paperSniperService.enterPhase3Trade(
+        mint, symbol, currentPrice,
+        grad.phase1PumpPct, grad.phase2DumpPct, grad.phase3PumpPct,
+      );
       return;
     }
 
-    // Guard: no duplicate open position
+    // Guard: no duplicate live open position
     const alreadyOpen = Array.from(this.openPositions.values()).some(p => p.mint === mint);
     if (alreadyOpen) {
-      logger.info({ mint, symbol }, "3-phase watch: Phase 3 buy signal — position already open, skipping");
+      logger.info({ mint, symbol }, "3-phase watch: live position already open — falling back to PAPER trade");
+      paperSniperService.enterPhase3Trade(
+        mint, symbol, currentPrice,
+        grad.phase1PumpPct, grad.phase2DumpPct, grad.phase3PumpPct,
+      );
       return;
     }
 
-    logger.info({ mint, symbol, currentPrice }, "3-phase watch: 🚀 Executing Phase 3 BUY NOW");
-    void this.enterPosition(
+    logger.info({ mint, symbol, currentPrice }, "3-phase watch: 🚀 Executing Phase 3 LIVE BUY");
+    const buyPromise = this.enterPosition(
       mint, symbol, symbol,
       currentPrice,
       "phase3-dip-retrace",
@@ -4201,6 +4205,15 @@ class GraduationSniperService {
       undefined,
       null,
     );
+
+    // If the live buy throws, fall back to paper so the signal is never wasted
+    void Promise.resolve(buyPromise).catch((err: unknown) => {
+      logger.error({ mint, symbol, err: (err as Error).message }, "3-phase watch: live buy failed — falling back to PAPER trade");
+      paperSniperService.enterPhase3Trade(
+        mint, symbol, currentPrice,
+        grad.phase1PumpPct, grad.phase2DumpPct, grad.phase3PumpPct,
+      );
+    });
   }
 
   getWatchedGrads(): WatchedGrad[] {

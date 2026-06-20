@@ -1402,6 +1402,89 @@ class PaperSniperService {
 
   // ── Public API ────────────────────────────────────────────────────────────
 
+  // Called by the graduation sniper when Phase 3 triggers but the live wallet
+  // is unavailable (or the live buy fails). Bypasses all graduation quality
+  // checks — the 3-phase state machine already validated the setup.
+  enterPhase3Trade(
+    mint: string,
+    symbol: string,
+    price: number,
+    phase1PumpPct: number,
+    phase2DumpPct: number,
+    phase3RetracePct: number,
+  ): void {
+    const cfg = this.paperConfig;
+
+    if (this.openPositions.has(mint)) {
+      logger.info({ mint, symbol }, "Paper sniper [phase3]: position already open, skipping");
+      return;
+    }
+
+    const sizeSol = cfg.positionSizeSol;
+    if (this.virtualBalance < sizeSol) {
+      logger.warn({ mint, symbol, virtualBalance: this.virtualBalance, sizeSol },
+        "Paper sniper [phase3]: insufficient paper balance, skipping");
+      return;
+    }
+
+    const now = Date.now();
+    const pos: PaperPosition = {
+      id:                `p3-${now.toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
+      mint,
+      symbol,
+      name:              symbol,
+      detectedAt:        now,
+      entryAt:           now,
+      entryPrice:        price,
+      currentPrice:      price,
+      sizeSol,
+      tp1Hit:            false,
+      tp2Hit:            false,
+      tp3Hit:            false,
+      remainingFraction: 1.0,
+      effectiveSlPrice:  price * (1 - cfg.slPhase1Pct / 100),
+      trailingHigh:      price,
+      status:            "open",
+      realizedPnlSol:    0,
+      unrealizedPnlSol:  0,
+      totalPnlSol:       0,
+      pnlPct:            0,
+      tp1RealizedSol:    0,
+      tp2RealizedSol:    0,
+      tp3RealizedSol:    0,
+      runnerRealizedSol: 0,
+      detectionPrice:    price,
+      entryDriftPct:     0,
+    };
+
+    this.virtualBalance -= sizeSol;
+    this.openPositions.set(mint, pos);
+    this.seenMints.add(mint);
+
+    void this.persistPosition(pos);
+    void this.persistBalance();
+    this.addEvent({ id: uid(), detectedAt: now, mint, symbol, action: "entered" });
+    this.broadcast();
+
+    logger.info(
+      { mint, symbol, price, phase1PumpPct, phase2DumpPct, phase3RetracePct, sizeSol, virtualBalance: this.virtualBalance },
+      "Paper sniper: PHASE 3 paper position entered 📄🎯",
+    );
+
+    if (isTelegramConfigured()) {
+      void sendTelegram(
+        `📄 <b>PAPER TRADE — PHASE 3 BUY</b>\n` +
+        `🪙 <b>${symbol}</b>\n` +
+        `📋 <code>${mint}</code>\n\n` +
+        `📈 P1 pump:    <b>+${phase1PumpPct.toFixed(1)}%</b>\n` +
+        `📉 P2 dump:    <b>-${phase2DumpPct.toFixed(1)}%</b>\n` +
+        `🔄 P3 retrace: <b>+${phase3RetracePct.toFixed(1)}%</b>\n` +
+        `💰 Entry: <b>${price.toFixed(8)}</b> · Size: <b>${sizeSol} SOL (paper)</b>\n` +
+        `🔗 <a href="https://dexscreener.com/solana/${mint}">DexScreener</a>`
+      );
+    }
+  }
+
   closePositionById(id: string): boolean {
     // openPositions is keyed by mint, not id — search by value
     const pos = [...this.openPositions.values()].find((p) => p.id === id);
