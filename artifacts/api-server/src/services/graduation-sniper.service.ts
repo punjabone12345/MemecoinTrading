@@ -1349,6 +1349,52 @@ class GraduationSniperService {
       this.processingGraduations.add(mint);
       reservedMint = mint;
 
+      // ── EARLIEST possible graduation price capture (T≈0) ──────────────────────
+      // Fired immediately after dedup guard, BEFORE any delays or quality checks.
+      // On-chain reserves right after the pool creation TX are the truest reflection
+      // of the graduation price (before market-makers pump it). We do a single-attempt
+      // read (no retries, no delay) so we get in as fast as possible.
+      // Jupiter quote is also fired in parallel as a second source.
+      // The result is stored as earlyGraduationPrice and used for the dip-watch
+      // graduationPrice baseline instead of initialPrice (which arrives ~60s later).
+      let earlyGraduationPrice = 0;
+      {
+        const earlyStart = Date.now();
+        try {
+          const [earlyReserves, earlySolUsd, earlyJupPrice] = await Promise.all([
+            // Single-attempt on-chain read — no retries so we don't stall
+            (async () => {
+              if (!wsolVaultPubkey || !tokenVaultPubkey) return null;
+              try { return await this.fetchOnChainPoolReserves(wsolVaultPubkey, tokenVaultPubkey); }
+              catch { return null; }
+            })(),
+            this.fetchSolUsdPrice(),
+            // Jupiter quote as second source — real-time AMM spot
+            (async () => {
+              try { return await this.fetchJupiterPriceFallback(mint); }
+              catch { return null; }
+            })(),
+          ]);
+          const solUsdForEarly = earlySolUsd ?? 150;
+          const onChainPrice = (earlyReserves && earlyReserves.solBalance > 0 && earlyReserves.tokenBalanceUi > 0)
+            ? (earlyReserves.solBalance / earlyReserves.tokenBalanceUi) * solUsdForEarly
+            : 0;
+          const jupPrice = earlyJupPrice ?? 0;
+          // Use the LOWEST non-zero price — closest to the true graduation price
+          // before any pump. If both are available, take the min.
+          if (onChainPrice > 0 && jupPrice > 0) {
+            earlyGraduationPrice = Math.min(onChainPrice, jupPrice);
+          } else {
+            earlyGraduationPrice = onChainPrice > 0 ? onChainPrice : jupPrice;
+          }
+          logger.info({ mint, onChainPrice: onChainPrice.toExponential(4), jupPrice: jupPrice.toExponential(4),
+            earlyGraduationPrice: earlyGraduationPrice.toExponential(4), elapsedMs: Date.now() - earlyStart },
+            'Graduation sniper: early graduation price captured ⚡');
+        } catch {
+          logger.warn({ mint }, 'Graduation sniper: early price capture failed — will use initialPrice fallback');
+        }
+      }
+
       // Confirmed unique graduation — count it now (after dedup guards so each
       // mint is counted exactly once, not once per TX signature from Helius).
       this.resetDailyCounterIfNeeded();
@@ -1624,9 +1670,16 @@ class GraduationSniperService {
       // (on-chain reserves, before the 60 s quality window) so it reflects the
       // actual pool price at graduation. entryPrice comes 60+ s later and has
       // already moved significantly from the true graduation price.
+      // graduationPrice priority: earlyGraduationPrice (captured at T≈0, before
+      // market-maker pump) > initialPrice (captured ~5s in) > entryPrice (60s+).
+      // earlyGraduationPrice gives the most accurate pump-gate baseline.
+      const dipWatchGradPrice = earlyGraduationPrice > 0
+        ? earlyGraduationPrice
+        : (initialPrice > 0 ? initialPrice : entryPrice);
+
       this.addToDipWatch({
         mint, symbol, name,
-        graduationPrice: initialPrice > 0 ? initialPrice : entryPrice,
+        graduationPrice: dipWatchGradPrice,
         signature,
         initialPrice,
         detectedAt,
@@ -4470,8 +4523,10 @@ class GraduationSniperService {
         const pumpThreshold = entry.graduationPrice * (1 + PUMP_MIN_PCT / 100);
         if (price >= pumpThreshold) {
           entry.pumpConfirmed = true;
-          entry.peakHigh      = price;
-          entry.dipLow        = price;
+          // Use highestPrice (max across all sources) so the peak is accurate.
+          // dipLow starts AT the confirmed peak — all dump tracking is from here.
+          entry.peakHigh      = highestPrice;
+          entry.dipLow        = highestPrice;
           entry.state         = "pumping";
           logger.info({
             mint, symbol: entry.symbol,
@@ -4491,8 +4546,10 @@ class GraduationSniperService {
       // spikes one source saw but the other missed. Use lowestPrice for dip low.
       if (highestPrice > entry.peakHigh) {
         entry.peakHigh = highestPrice;
-        // Reset dipLow to current price — we're at a new high, fresh dump-tracking
-        entry.dipLow = price;
+        // Reset dipLow to the new peak itself — dump tracking starts fresh FROM
+        // this confirmed high. Using `price` (a potentially lower current quote)
+        // would show a phantom dump that never happened vs the actual peak.
+        entry.dipLow = highestPrice;
       } else if (lowestPrice < entry.dipLow) {
         entry.dipLow = lowestPrice;
       }
