@@ -4179,25 +4179,27 @@ class GraduationSniperService {
   }
 
   // Executes a buy when Phase 3 triggers.
-  // Live wallet: calls enterPosition normally.
-  // No wallet / any issue: fires phase3PaperCallback → paper trade.
+  // Paper callback ALWAYS fires unconditionally — paper mode tracks every signal
+  // regardless of whether the live wallet is configured or the live buy succeeds.
+  // Live wallet: additionally calls enterPosition for a real trade.
   private triggerPhase3Buy(mint: string, symbol: string, currentPrice: number, grad: WatchedGrad): void {
     const walletReady = solanaWalletService.isReady();
 
-    const doPaperFallback = (reason: string) => {
-      logger.info({ mint, symbol, currentPrice, reason }, "3-phase watch: falling back to PAPER trade");
-      void this.phase3PaperCallback?.(mint, symbol, currentPrice, grad.phase1PumpPct, grad.phase2DumpPct, grad.phase3PumpPct);
-    };
+    // ── Always fire paper trade (runs alongside live, never as a mere fallback) ──
+    if (this.phase3PaperCallback) {
+      logger.info({ mint, symbol, currentPrice }, "3-phase watch: 📄 firing paper trade (always-on)");
+      void this.phase3PaperCallback(mint, symbol, currentPrice, grad.phase1PumpPct, grad.phase2DumpPct, grad.phase3PumpPct);
+    }
 
     if (!walletReady) {
-      doPaperFallback("wallet not configured");
+      logger.info({ mint, symbol }, "3-phase watch: wallet not configured — paper trade only");
       return;
     }
 
     // Guard: no duplicate live open position
     const alreadyOpen = Array.from(this.openPositions.values()).some(p => p.mint === mint);
     if (alreadyOpen) {
-      doPaperFallback("live position already open for this mint");
+      logger.info({ mint, symbol }, "3-phase watch: live position already open — skipping live buy (paper already fired)");
       return;
     }
 
@@ -4213,10 +4215,8 @@ class GraduationSniperService {
       null,
     );
 
-    // If the live buy throws, fall back to paper so the signal is never wasted
     void Promise.resolve(buyPromise).catch((err: unknown) => {
-      logger.error({ mint, symbol, err: (err as Error).message }, "3-phase watch: live buy failed — falling back to PAPER trade");
-      this.phase3PaperCallback?.(mint, symbol, currentPrice, grad.phase1PumpPct, grad.phase2DumpPct, grad.phase3PumpPct);
+      logger.error({ mint, symbol, err: (err as Error).message }, "3-phase watch: live buy failed");
     });
   }
 
