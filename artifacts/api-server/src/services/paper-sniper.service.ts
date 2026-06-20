@@ -961,15 +961,17 @@ class PaperSniperService {
       void this.persistBalance();
       if (isTelegramConfigured()) {
         void sendTelegram(
-          `🎯 <b>PAPER TP1 HIT</b>\n` +
-          `──────────────────────\n` +
-          `🪙 Token: <b>${pos.symbol}</b>\n` +
-          `📋 CA: <code>${pos.mint}</code>\n` +
-          `💵 Price: <b>$${price < 0.0001 ? price.toExponential(3) : price.toFixed(8)}</b>\n` +
-          `📈 Gain: <b>+${pct.toFixed(1)}%</b>\n` +
-          `💰 Banked: <b>+${pnl.toFixed(4)} SOL</b> (${cfg.tp1ClosePct}% of position)\n` +
-          `⚡ Runner: ${Math.round(pos.remainingFraction * 100)}% remaining\n` +
-          `🕐 ${toIST(new Date())}`,
+          `🎯 <b>PAPER TP1 HIT</b>  +${pct.toFixed(0)}%\n` +
+          `━━━━━━━━━━━━━━━━━━━━━━━\n` +
+          `🪙 <b>${pos.symbol}</b>  <code>${pos.mint.slice(0,8)}…</code>\n\n` +
+          `  💵 Price:    <b>$${price < 0.0001 ? price.toExponential(3) : price.toFixed(8)}</b>\n` +
+          `  📈 Gain:     <b>+${pct.toFixed(1)}%</b>\n` +
+          `  💰 Banked:   <b>+${pnl.toFixed(4)} SOL</b> (${cfg.tp1ClosePct}% sold)\n` +
+          `  ⚡ Rem:      <b>${Math.round(pos.remainingFraction * 100)}%</b> still riding\n\n` +
+          `<b>SL updated → breakeven</b>\n` +
+          `  🛑 New SL:   <b>$${pos.entryPrice < 0.0001 ? pos.entryPrice.toExponential(3) : pos.entryPrice.toFixed(8)}</b>\n` +
+          `  🎯 Next:     TP2 at +${cfg.tp2Pct}%\n\n` +
+          `🔗 <a href="https://dexscreener.com/solana/${pos.mint}">DexScreener</a>  |  🕐 ${toIST(new Date())}`,
         );
       }
       return;
@@ -991,16 +993,21 @@ class PaperSniperService {
       void this.persistPosition(pos);
       void this.persistBalance();
       if (isTelegramConfigured()) {
+        const totalBanked = (pos.tp1RealizedSol ?? 0) + pnl;
+        const newSlPx     = pos.trailingHigh * (1 - (cfg.slAfterTp2Pct ?? 20) / 100);
         void sendTelegram(
-          `🎯🎯 <b>PAPER TP2 HIT</b>\n` +
-          `──────────────────────\n` +
-          `🪙 Token: <b>${pos.symbol}</b>\n` +
-          `📋 CA: <code>${pos.mint}</code>\n` +
-          `💵 Price: <b>$${price < 0.0001 ? price.toExponential(3) : price.toFixed(8)}</b>\n` +
-          `📈 Gain: <b>+${pct.toFixed(1)}%</b>\n` +
-          `💰 Banked: <b>+${pnl.toFixed(4)} SOL</b>\n` +
-          `⚡ Runner: ${Math.round(pos.remainingFraction * 100)}% remaining\n` +
-          `🕐 ${toIST(new Date())}`,
+          `🎯🎯 <b>PAPER TP2 HIT</b>  +${pct.toFixed(0)}%\n` +
+          `━━━━━━━━━━━━━━━━━━━━━━━\n` +
+          `🪙 <b>${pos.symbol}</b>  <code>${pos.mint.slice(0,8)}…</code>\n\n` +
+          `  💵 Price:    <b>$${price < 0.0001 ? price.toExponential(3) : price.toFixed(8)}</b>\n` +
+          `  📈 Gain:     <b>+${pct.toFixed(1)}%</b>\n` +
+          `  💰 This TP:  <b>+${pnl.toFixed(4)} SOL</b> (${cfg.tp2ClosePct}% rem sold)\n` +
+          `  📦 Banked:   <b>+${totalBanked.toFixed(4)} SOL</b> total so far\n` +
+          `  ⚡ Rem:      <b>${Math.round(pos.remainingFraction * 100)}%</b> still riding\n\n` +
+          `<b>SL updated → trailing -${cfg.slAfterTp2Pct ?? 20}% from peak</b>\n` +
+          `  🛑 New SL:   <b>$${newSlPx < 0.0001 ? newSlPx.toExponential(3) : newSlPx.toFixed(8)}</b>\n` +
+          `  🎯 Next:     TP3 at +${cfg.tp3Pct}%\n\n` +
+          `🔗 <a href="https://dexscreener.com/solana/${pos.mint}">DexScreener</a>  |  🕐 ${toIST(new Date())}`,
         );
       }
       return;
@@ -1021,16 +1028,20 @@ class PaperSniperService {
       void this.persistPosition(pos);
       void this.persistBalance();
       if (isTelegramConfigured()) {
+        const totalBanked3 = (pos.tp1RealizedSol ?? 0) + (pos.tp2RealizedSol ?? 0) + pnl;
+        const runnerPct    = Math.round(pos.remainingFraction * 100);
         void sendTelegram(
-          `🎯🎯🎯 <b>PAPER TP3 HIT</b>\n` +
-          `──────────────────────\n` +
-          `🪙 Token: <b>${pos.symbol}</b>\n` +
-          `📋 CA: <code>${pos.mint}</code>\n` +
-          `💵 Price: <b>$${price < 0.0001 ? price.toExponential(3) : price.toFixed(8)}</b>\n` +
-          `📈 Gain: <b>+${pct.toFixed(1)}%</b>\n` +
-          `💰 Banked: <b>+${pnl.toFixed(4)} SOL</b>\n` +
-          `⚡ Runner: ${Math.round(pos.remainingFraction * 100)}% remaining\n` +
-          `🕐 ${toIST(new Date())}`,
+          `🎯🎯🎯 <b>PAPER TP3 HIT</b>  +${pct.toFixed(0)}%\n` +
+          `━━━━━━━━━━━━━━━━━━━━━━━\n` +
+          `🪙 <b>${pos.symbol}</b>  <code>${pos.mint.slice(0,8)}…</code>\n\n` +
+          `  💵 Price:    <b>$${price < 0.0001 ? price.toExponential(3) : price.toFixed(8)}</b>\n` +
+          `  📈 Gain:     <b>+${pct.toFixed(1)}%</b>\n` +
+          `  💰 This TP:  <b>+${pnl.toFixed(4)} SOL</b> (${cfg.tp3ClosePct}% rem sold)\n` +
+          `  📦 Banked:   <b>+${totalBanked3.toFixed(4)} SOL</b> total so far\n` +
+          (runnerPct > 1
+            ? `  🏃 Runner:   <b>${runnerPct}%</b> riding with trailing -${cfg.trailingStopPct}%\n`
+            : `  ✅ Position fully closed at TP3\n`) +
+          `\n🔗 <a href="https://dexscreener.com/solana/${pos.mint}">DexScreener</a>  |  🕐 ${toIST(new Date())}`,
         );
       }
       // If tp3ClosePct = 100, the position is fully closed — close it now
@@ -1145,27 +1156,57 @@ class PaperSniperService {
     );
 
     if (isTelegramConfigured()) {
-      const isWin     = pos.realizedPnlSol >= 0;
-      const pnlSign   = isWin ? "+" : "";
-      const emoji     = isWin ? "✅" : "❌";
-      const pnlPctStr = ((exitPrice / pos.entryPrice - 1) * 100).toFixed(1);
-      const holdMs    = (pos.closedAt ?? Date.now()) - pos.entryAt;
-      const holdStr   = holdMs < 60_000
+      const isWin      = pos.realizedPnlSol >= 0;
+      const pnlSign    = isWin ? "+" : "";
+      const holdMs     = (pos.closedAt ?? Date.now()) - pos.entryAt;
+      const holdStr    = holdMs < 60_000
         ? `${Math.floor(holdMs / 1000)}s`
         : holdMs < 3_600_000
-          ? `${Math.floor(holdMs / 60_000)}m`
-          : `${Math.floor(holdMs / 3_600_000)}h`;
+          ? `${Math.floor(holdMs / 60_000)}m ${Math.floor((holdMs % 3_600_000) / 60_000 % 60)}s`
+          : `${Math.floor(holdMs / 3_600_000)}h ${Math.floor((holdMs % 3_600_000) / 60_000)}m`;
+      const peakGainPct = pos.trailingHigh > 0
+        ? ((pos.trailingHigh / pos.entryPrice - 1) * 100).toFixed(1)
+        : "0.0";
+      const exitGainPct = ((exitPrice / pos.entryPrice - 1) * 100).toFixed(1);
+
+      const isPerfect   = pos.tp1Hit && pos.tp2Hit && pos.tp3Hit && isWin;
+      const header      = isPerfect
+        ? `🏆 <b>PERFECT TRADE — ALL TPs HIT!</b>`
+        : isWin ? `✅ <b>PAPER CLOSE — WIN</b>` : `❌ <b>PAPER CLOSE — LOSS</b>`;
+
+      // TP milestone badges
+      const tp1Badge = pos.tp1Hit ? "🎯 TP1" : "⬜ TP1";
+      const tp2Badge = pos.tp2Hit ? "🎯 TP2" : "⬜ TP2";
+      const tp3Badge = pos.tp3Hit ? "🎯 TP3" : "⬜ TP3";
+
+      // P&L breakdown lines
+      let breakdown = "";
+      if (pos.tp1RealizedSol) breakdown += `  🎯 TP1:    <b>+${pos.tp1RealizedSol.toFixed(4)} SOL</b>\n`;
+      if (pos.tp2RealizedSol) breakdown += `  🎯 TP2:    <b>+${pos.tp2RealizedSol.toFixed(4)} SOL</b>\n`;
+      if (pos.tp3RealizedSol) breakdown += `  🎯 TP3:    <b>+${pos.tp3RealizedSol.toFixed(4)} SOL</b>\n`;
+      const runnerPnl = pos.runnerRealizedSol ?? 0;
+      if (Math.abs(runnerPnl) > 0.00001) {
+        const runnerSign = runnerPnl >= 0 ? "+" : "";
+        breakdown += `  🏃 Runner: <b>${runnerSign}${runnerPnl.toFixed(4)} SOL</b>\n`;
+      }
+
       void sendTelegram(
-        `${emoji} <b>PAPER CLOSE</b>\n` +
-        `──────────────────────\n` +
-        `🪙 Token: <b>${pos.symbol}</b>\n` +
-        `📋 CA: <code>${pos.mint}</code>\n` +
-        `💵 Exit: <b>$${exitPrice < 0.0001 ? exitPrice.toExponential(3) : exitPrice.toFixed(8)}</b>\n` +
-        `📊 P&L: <b>${pnlSign}${pos.realizedPnlSol.toFixed(4)} SOL (${pnlSign}${pnlPctStr}%)</b>\n` +
-        `🏷️ Reason: ${reason}\n` +
-        `⏱️ Hold: ${holdStr}\n` +
-        `💰 Balance: <b>${this.virtualBalance.toFixed(4)} SOL</b>\n` +
-        `🕐 ${toIST(new Date())}`,
+        `${header}\n` +
+        `━━━━━━━━━━━━━━━━━━━━━━━\n` +
+        `🪙 <b>${pos.symbol}</b>  <code>${pos.mint.slice(0,8)}…</code>\n\n` +
+        `  ${tp1Badge}  ${tp2Badge}  ${tp3Badge}\n\n` +
+        `<b>Exit summary</b>\n` +
+        `  💵 Entry:    <b>$${pos.entryPrice < 0.0001 ? pos.entryPrice.toExponential(3) : pos.entryPrice.toFixed(8)}</b>\n` +
+        `  💵 Exit:     <b>$${exitPrice < 0.0001 ? exitPrice.toExponential(3) : exitPrice.toFixed(8)}</b>\n` +
+        `  📈 Peak:     <b>+${peakGainPct}%</b>  |  Exit: <b>${Number(exitGainPct) >= 0 ? "+" : ""}${exitGainPct}%</b>\n` +
+        `  ⏱️ Held:     <b>${holdStr}</b>\n` +
+        `  🏷️ Reason:  ${reason}\n\n` +
+        `<b>P&L breakdown</b>\n` +
+        breakdown +
+        `  ──────────────────\n` +
+        `  📊 Total:   <b>${pnlSign}${pos.realizedPnlSol.toFixed(4)} SOL</b>\n\n` +
+        `💼 Balance: <b>${this.virtualBalance.toFixed(4)} SOL</b>\n` +
+        `🔗 <a href="https://dexscreener.com/solana/${pos.mint}">DexScreener</a>  |  🕐 ${toIST(new Date())}`,
       );
     }
 
@@ -1364,15 +1405,26 @@ class PaperSniperService {
     );
 
     if (isTelegramConfigured()) {
+      const cfg2   = this.paperConfig;
+      const slPx   = entryPrice * (1 - cfg2.slPhase1Pct / 100);
       void sendTelegram(
-        `📄 <b>PAPER TRADE — PHASE 3 BUY</b>\n` +
-        `🪙 <b>${symbol}</b>\n` +
-        `📋 <code>${mint}</code>\n\n` +
-        `📈 P1 pump:    <b>+${phase1PumpPct.toFixed(1)}%</b>\n` +
-        `📉 P2 dump:    <b>-${phase2DumpPct.toFixed(1)}%</b>\n` +
-        `🔄 P3 retrace: <b>+${phase3RetracePct.toFixed(1)}%</b>\n` +
-        `💰 Entry: <b>${entryPrice.toFixed(8)}</b> · Size: <b>${sizeSol} SOL (paper)</b>\n` +
-        `🔗 <a href="https://dexscreener.com/solana/${mint}">DexScreener</a>`
+        `📄 <b>PAPER TRADE — PHASE 3 ENTRY</b>\n` +
+        `━━━━━━━━━━━━━━━━━━━━━━━\n` +
+        `🪙 <b>${symbol}</b>  <code>${mint.slice(0,8)}…</code>\n\n` +
+        `<b>Phase pattern</b>\n` +
+        `  📈 Pump:    <b>+${phase1PumpPct.toFixed(1)}%</b>\n` +
+        `  📉 Dump:    <b>-${phase2DumpPct.toFixed(1)}%</b>\n` +
+        `  🔄 Retrace: <b>+${phase3RetracePct.toFixed(1)}%</b>\n\n` +
+        `<b>Trade setup</b>\n` +
+        `  💵 Entry:   <b>$${entryPrice < 0.0001 ? entryPrice.toExponential(3) : entryPrice.toFixed(8)}</b>\n` +
+        `  💰 Size:    <b>${sizeSol} SOL</b> (paper)\n` +
+        `  🛑 SL:      <b>$${slPx < 0.0001 ? slPx.toExponential(3) : slPx.toFixed(8)}</b> (-${cfg2.slPhase1Pct}%)\n\n` +
+        `<b>TP targets</b>\n` +
+        `  🎯 TP1: +${cfg2.tp1Pct}% → sell ${cfg2.tp1ClosePct}%\n` +
+        `  🎯 TP2: +${cfg2.tp2Pct}% → sell ${cfg2.tp2ClosePct}% rem\n` +
+        `  🎯 TP3: +${cfg2.tp3Pct}% → sell ${cfg2.tp3ClosePct}% rem\n\n` +
+        `💼 Balance: <b>${this.virtualBalance.toFixed(4)} SOL</b>\n` +
+        `🔗 <a href="https://dexscreener.com/solana/${mint}">DexScreener</a>  |  🕐 ${toIST(new Date())}`
       );
     }
   }
