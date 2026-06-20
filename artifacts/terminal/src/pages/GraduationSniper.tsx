@@ -7,9 +7,9 @@ import {
   useSniperStatus, useSniperPositions, useSniperHistory, useSniperEvents, useUpdateSniperConfig,
   useDeleteSniperPosition, useEditSniperPosition, useDeleteSniperEvent, useResetSniperAccount,
   useRecalculateSniperPnl, useCloseSniperPosition, useWalletBalance, usePurgeUnverifiedHistory,
-  useStuckTokens, useEmergencySell, useWebSocket,
+  useStuckTokens, useEmergencySell, useWebSocket, useWatchedGrads,
 } from "@/lib/api";
-import { SniperPosition, SniperEvent, SniperConfig, StuckToken } from "@/lib/types";
+import { SniperPosition, SniperEvent, SniperConfig, StuckToken, WatchedGrad } from "@/lib/types";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -795,6 +795,7 @@ export default function GraduationSniper() {
   const { data: positions = [] } = useSniperPositions();
   const { data: history = []   } = useSniperHistory();
   const { data: events = []    } = useSniperEvents();
+  const { data: watchedGrads = [] } = useWatchedGrads();
   useWebSocket(); // keep query caches warm via server-sent events
 
   const config        = status?.config;
@@ -980,6 +981,20 @@ export default function GraduationSniper() {
           {positions.map((p) => <PositionRow key={p.id} pos={p} />)}
         </Section>
 
+        {/* ── Dip-Retrace Watch ── */}
+        {watchedGrads.length > 0 && (
+          <div className="rounded-xl border border-violet-500/20 bg-[#0d0d18] overflow-hidden">
+            <div className="flex items-center justify-between px-4 py-2.5 border-b border-violet-500/15 bg-violet-500/4">
+              <div className="flex items-center gap-2">
+                <span className="text-[11px] font-bold text-violet-300/80 uppercase tracking-wider">DIP-RETRACE WATCH</span>
+                <Badge className="bg-violet-500/20 text-violet-400 border-violet-500/30 text-[9px] px-1.5 py-0">{watchedGrads.length}</Badge>
+              </div>
+              <span className="text-[9px] text-white/25">+30% pump → dump → retrace · live 2s</span>
+            </div>
+            {watchedGrads.map((g) => <WatchedGradRow key={g.mint} grad={g} />)}
+          </div>
+        )}
+
         {/* ── Event feed ── */}
         <Section title="Recent Graduations Detected" count={events.length} emptyMsg="Waiting for pump.fun graduations…">
           {events.slice(0, 15).map((e) => <EventRow key={e.id} evt={e} />)}
@@ -996,6 +1011,91 @@ export default function GraduationSniper() {
 }
 
 // ── Sub-components ─────────────────────────────────────────────────────────────
+
+function WatchedGradRow({ grad }: { grad: WatchedGrad }) {
+  const pumpPct  = grad.gradPrice > 0 ? ((grad.peakPrice / grad.gradPrice) - 1) * 100 : 0;
+  const dumpPct  = grad.peakPrice > 0 ? ((1 - grad.currentPrice / grad.peakPrice)) * 100 : 0;
+  const retracePct = (grad.dipLow < grad.peakPrice && grad.peakPrice > grad.dipLow)
+    ? ((grad.currentPrice - grad.dipLow) / (grad.peakPrice - grad.dipLow)) * 100
+    : 0;
+
+  const statusColor: Record<string, string> = {
+    watching:  "bg-white/8 text-white/40 border-white/10",
+    pumping:   "bg-emerald-500/15 text-emerald-400 border-emerald-500/25",
+    dumped:    "bg-red-500/15 text-red-400 border-red-500/25",
+    retracing: "bg-amber-500/15 text-amber-400 border-amber-500/25",
+  };
+  const statusLabel: Record<string, string> = {
+    watching:  "watching",
+    pumping:   "PUMPING",
+    dumped:    "DUMPED",
+    retracing: "RETRACING",
+  };
+
+  const staleMs = Date.now() - grad.lastUpdatedAt;
+  const isStale = staleMs > 10_000;
+
+  return (
+    <div className="px-4 py-2.5 border-b border-white/5 last:border-0">
+      <div className="flex items-center justify-between gap-2 mb-1.5">
+        <div className="flex items-center gap-2 min-w-0">
+          <a href={`https://dexscreener.com/solana/${grad.mint}`} target="_blank" rel="noreferrer"
+            className="text-[11px] font-bold text-white/80 hover:text-white truncate">{grad.symbol}</a>
+          <span className={`text-[8px] font-bold px-1.5 py-0.5 rounded-full border ${statusColor[grad.status] ?? statusColor.watching}`}>
+            {statusLabel[grad.status] ?? grad.status}
+          </span>
+          {grad.qualityScore !== undefined && (
+            <span className={`text-[9px] font-bold ${grad.qualityScore >= 70 ? "text-emerald-400" : grad.qualityScore >= 50 ? "text-amber-400" : "text-red-400"}`}>
+              Q:{grad.qualityScore}
+            </span>
+          )}
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          {isStale && <span className="text-[8px] text-amber-400/60">stale</span>}
+          <span className="text-[9px] text-white/25">{timeAgo(grad.addedAt)}</span>
+        </div>
+      </div>
+      <div className="grid grid-cols-4 gap-2">
+        <div>
+          <div className="text-[8px] text-white/30 uppercase tracking-wide mb-0.5">GRAD</div>
+          <div className="text-[10px] font-mono text-white/60">${fmtPrice(grad.gradPrice).replace("$","")}</div>
+        </div>
+        <div>
+          <div className="text-[8px] text-white/30 uppercase tracking-wide mb-0.5">PEAK</div>
+          <div className="text-[10px] font-mono text-emerald-400 font-semibold">
+            ${fmtPrice(grad.peakPrice).replace("$","")}
+            {pumpPct > 1 && <span className="text-[8px] text-emerald-400/60 ml-0.5">+{pumpPct.toFixed(0)}%</span>}
+          </div>
+        </div>
+        <div>
+          <div className="text-[8px] text-white/30 uppercase tracking-wide mb-0.5">DIP LOW</div>
+          <div className="text-[10px] font-mono text-red-400/80">
+            {grad.dipLow < grad.peakPrice && grad.dipLow > 0
+              ? `$${fmtPrice(grad.dipLow).replace("$","")}`
+              : "—"}
+            {dumpPct > 5 && grad.status !== "watching" && (
+              <span className="text-[8px] text-red-400/50 ml-0.5">-{dumpPct.toFixed(0)}%</span>
+            )}
+          </div>
+        </div>
+        <div>
+          <div className="text-[8px] text-white/30 uppercase tracking-wide mb-0.5">NOW</div>
+          <div className={`text-[10px] font-mono font-bold ${
+            grad.status === "retracing" ? "text-amber-400" :
+            grad.status === "pumping"   ? "text-emerald-400" :
+            grad.status === "dumped"    ? "text-red-400" :
+            "text-white/70"
+          }`}>
+            ${fmtPrice(grad.currentPrice).replace("$","")}
+            {grad.status === "retracing" && retracePct > 0 && (
+              <span className="text-[8px] text-amber-400/60 ml-0.5">{retracePct.toFixed(0)}% ret</span>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function StatCard({ label, value, sub, icon, accent, valueColor }: {
   label: string; value: string; sub: string; icon: React.ReactNode;

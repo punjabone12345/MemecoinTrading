@@ -336,6 +336,20 @@ export interface PumpfunStatus {
 
 // ── Graduation Sniper ────────────────────────────────────────────────────────
 
+export interface WatchedGrad {
+  mint: string;
+  symbol: string;
+  gradPrice: number;
+  peakPrice: number;
+  peakAt: number;
+  dipLow: number;
+  currentPrice: number;
+  addedAt: number;
+  lastUpdatedAt: number;
+  qualityScore?: number;
+  status: "watching" | "pumping" | "dumped" | "retracing";
+}
+
 export interface SniperConfig {
   enabled: boolean;
   positionSizeSol: number;

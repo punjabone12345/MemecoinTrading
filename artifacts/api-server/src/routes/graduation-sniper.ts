@@ -196,4 +196,9 @@ router.get("/sniper/health-metrics", (_req, res) => {
   res.json({ success: true, data: graduationSniperService.getHealthMetrics() });
 });
 
+// ── Dip-Retrace Watch — all recently graduated tokens with live price tracking
+router.get("/sniper/watched", (_req, res) => {
+  res.json({ success: true, data: graduationSniperService.getWatchedGrads() });
+});
+
 export default router;

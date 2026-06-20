@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { SniperStatus, SniperPosition, SniperEvent, SniperConfig, StuckToken, SniperHealthMetrics, PaperSniperStatus, PaperPosition, PaperSniperEvent, PaperConfig } from "./types";
+import { SniperStatus, SniperPosition, SniperEvent, SniperConfig, StuckToken, SniperHealthMetrics, PaperSniperStatus, PaperPosition, PaperSniperEvent, PaperConfig, WatchedGrad } from "./types";
 import { useToast } from "@/hooks/use-toast";
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, "") ?? "";
@@ -130,6 +130,18 @@ export function useSniperEvents() {
       return json.data;
     },
     refetchInterval: 5000,
+  });
+}
+
+export function useWatchedGrads() {
+  return useQuery<WatchedGrad[]>({
+    queryKey: ["sniper-watched"],
+    queryFn: async () => {
+      const res = await fetch(apiUrl("/api/sniper/watched"));
+      const json = await res.json() as { data: WatchedGrad[] };
+      return json.data ?? [];
+    },
+    refetchInterval: 2_000,
   });
 }
 

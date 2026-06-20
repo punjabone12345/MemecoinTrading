@@ -303,6 +303,23 @@ export interface SniperStatus {
   config: SniperConfig;
 }
 
+// ── Dip-Retrace Watch ─────────────────────────────────────────────────────────
+// Tracks every graduated token for pump→dump→retrace patterns.
+// Price is polled every 2 s via Jupiter batch API (fastest available source).
+export interface WatchedGrad {
+  mint: string;
+  symbol: string;
+  gradPrice: number;      // on-chain price at graduation detection
+  peakPrice: number;      // highest price seen since graduation
+  peakAt: number;         // timestamp of the peak
+  dipLow: number;         // lowest price after a post-grad pump
+  currentPrice: number;   // latest fetched price
+  addedAt: number;        // when we started watching this token
+  lastUpdatedAt: number;  // last successful price fetch
+  qualityScore?: number;  // quality score from the quality gate (if run)
+  status: "watching" | "pumping" | "dumped" | "retracing";
+}
+
 // ── Service ──────────────────────────────────────────────────────────────────
 
 class GraduationSniperService {
@@ -393,6 +410,9 @@ class GraduationSniperService {
   private rateWindowStart           = Date.now();
   private heartbeatIntervalId: ReturnType<typeof setInterval> | null = null;
   private wsPingIntervalId: ReturnType<typeof setInterval> | null = null;  // WS-level ping keepalive
+  // ── Dip-Retrace Watch ───────────────────────────────────────────────────────
+  private watchedGrads: Map<string, WatchedGrad> = new Map();
+  private watchPriceIntervalId: ReturnType<typeof setInterval> | null = null;
   private startedAt                 = Date.now();
   // Unix timestamp (seconds) of when THIS server process started.
   // Used to reject Helius WebSocket replay events (migrations that were
@@ -824,8 +844,9 @@ class GraduationSniperService {
       void this.refreshWalletBalance();
       void this.checkAllPrices();
     }, PRICE_LOOP_MS);
-    this.liquidityIntervalId = setInterval(() => void this.checkAllLiquidity(), LIQUIDITY_CHECK_MS);
-    this.externalSellCheckId = setInterval(() => void this.checkExternalSells(), 60_000);
+    this.liquidityIntervalId  = setInterval(() => void this.checkAllLiquidity(), LIQUIDITY_CHECK_MS);
+    this.externalSellCheckId  = setInterval(() => void this.checkExternalSells(), 60_000);
+    this.watchPriceIntervalId = setInterval(() => void this.pollWatchedGradPrices(), 2_000);
 
     // ── WebSocket — only needed for detecting new graduations ────────────────
     const apiKey = process.env["HELIUS_API_KEY"];
@@ -848,6 +869,7 @@ class GraduationSniperService {
     if (this.heartbeatIntervalId)    { clearInterval(this.heartbeatIntervalId);    this.heartbeatIntervalId    = null; }
     if (this.wsPingIntervalId)       { clearInterval(this.wsPingIntervalId);       this.wsPingIntervalId       = null; }
     if (this.detectionWatchdogId)    { clearInterval(this.detectionWatchdogId);    this.detectionWatchdogId    = null; }
+    if (this.watchPriceIntervalId)   { clearInterval(this.watchPriceIntervalId);   this.watchPriceIntervalId   = null; }
     if (this.reconnectTimer)         { clearTimeout(this.reconnectTimer);          this.reconnectTimer         = null; }
     this.ws?.close();
   }
@@ -1235,6 +1257,12 @@ class GraduationSniperService {
         creatorHoldingsPct: quality.creatorHoldingsPct,
         whaleDetected:     quality.whaleDetected,
       };
+
+      // ── Dip-Retrace Watch: add this token to the watch list ─────────────────
+      // Run regardless of whether we enter — we want to track ALL graduates.
+      // initialPrice is the on-chain reserve-ratio price at graduation.
+      this.addToWatchList(mint, symbol, initialPrice, quality.totalScore,
+        wsolVaultPubkey ?? undefined, tokenVaultPubkey ?? undefined);
 
       if (quality.autoSkipReason) {
         this.addEvent({ ...fullEventBase, action: 'skipped',
@@ -3895,6 +3923,113 @@ class GraduationSniperService {
     fn: (mint: string, entryPrice: number, symbol: string, name: string, detectedAt: number, detectionPrice: number, qualityMeta?: GraduationQualityMeta) => void,
   ): void {
     this.paperCallback = fn;
+  }
+
+  // ── Dip-Retrace Watch ────────────────────────────────────────────────────────
+
+  private addToWatchList(
+    mint: string,
+    symbol: string,
+    gradPrice: number,
+    qualityScore?: number,
+    _wsolVaultPubkey?: string,
+    _tokenVaultPubkey?: string,
+  ): void {
+    if (this.watchedGrads.has(mint)) return; // already watching this token
+    const now = Date.now();
+    const safeGrad = gradPrice > 0 ? gradPrice : 0;
+    this.watchedGrads.set(mint, {
+      mint,
+      symbol,
+      gradPrice:    safeGrad,
+      peakPrice:    safeGrad,
+      peakAt:       now,
+      dipLow:       safeGrad,
+      currentPrice: safeGrad,
+      addedAt:      now,
+      lastUpdatedAt: now,
+      qualityScore,
+      status: "watching",
+    });
+    logger.debug({ mint, symbol, gradPrice: safeGrad }, "Graduation sniper: added to dip-retrace watch");
+  }
+
+  // Polls all watched tokens in a single batched Jupiter price call (fastest source).
+  // Runs every 2 s — much faster than DexScreener (1-2 s per call).
+  private async pollWatchedGradPrices(): Promise<void> {
+    if (this.watchedGrads.size === 0) return;
+
+    const now = Date.now();
+    const TTL = 2 * 60 * 60_000; // expire after 2 hours
+
+    // Expire old entries first
+    for (const [mint, grad] of this.watchedGrads) {
+      if (now - grad.addedAt > TTL) this.watchedGrads.delete(mint);
+    }
+    if (this.watchedGrads.size === 0) return;
+
+    // Single Jupiter batch call for ALL watched tokens (one round-trip regardless of count)
+    const mints = Array.from(this.watchedGrads.keys());
+    try {
+      type JupBatch = { data: Record<string, { price: string } | null> };
+      const res = await axios.get<JupBatch>(
+        `${JUPITER_PRICE_URL}?ids=${mints.join(",")}`,
+        { timeout: 5_000 },
+      );
+      const data = res.data?.data ?? {};
+
+      for (const [mint, grad] of this.watchedGrads) {
+        const entry = data[mint];
+        if (!entry) continue;
+        const price = parseFloat(entry.price);
+        if (!(price > 0)) continue;
+
+        grad.currentPrice  = price;
+        grad.lastUpdatedAt = now;
+
+        // Update peak
+        if (price > grad.peakPrice || grad.peakPrice === 0) {
+          grad.peakPrice = price;
+          grad.peakAt    = now;
+        }
+
+        // Initialise gradPrice from first real price when on-chain wasn't available
+        if (grad.gradPrice === 0) {
+          grad.gradPrice = price;
+          grad.dipLow    = price;
+        }
+
+        // Track dip low once the token has pumped ≥25% from grad price
+        const hasPumped = grad.gradPrice > 0 && grad.peakPrice >= grad.gradPrice * 1.25;
+        if (hasPumped && (price < grad.dipLow || grad.dipLow === grad.gradPrice)) {
+          grad.dipLow = price;
+        }
+
+        // ── Status transitions ──────────────────────────────────────────────────
+        const gainFromGradPct = grad.gradPrice > 0 ? (grad.peakPrice / grad.gradPrice - 1) * 100 : 0;
+        const dropFromPeakPct = grad.peakPrice > 0 ? (1 - price / grad.peakPrice) * 100 : 0;
+        const pumped30        = gainFromGradPct >= 30;
+        const dumped40        = pumped30 && dropFromPeakPct >= 40;
+
+        if (dumped40) {
+          const range      = grad.peakPrice - grad.dipLow;
+          const retracePct = range > 0 ? (price - grad.dipLow) / range * 100 : 0;
+          grad.status = retracePct >= 60 ? "retracing" : "dumped";
+        } else if (pumped30 || (grad.gradPrice > 0 && price >= grad.gradPrice * 1.25)) {
+          grad.status = "pumping";
+        } else {
+          grad.status = "watching";
+        }
+      }
+    } catch (err) {
+      logger.debug({ err: (err as Error).message }, "Graduation sniper: watch price poll failed (non-fatal)");
+    }
+  }
+
+  getWatchedGrads(): WatchedGrad[] {
+    return Array.from(this.watchedGrads.values())
+      .sort((a, b) => b.addedAt - a.addedAt)
+      .slice(0, 30);
   }
 }
 
