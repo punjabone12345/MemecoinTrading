@@ -3307,22 +3307,28 @@ class GraduationSniperService {
     });
   }
 
-  // ── Jupiter price API — fallback for tokens not yet indexed on DexScreener ──
-  // Faster than DexScreener for very new tokens (graduates appear on Jupiter in <5s).
-  // Only called when DexScreener batch missed the token — keeps Jupiter call count minimal.
+  // ── DexScreener price fallback — single token lookup ────────────────────────
+  // Used when the batch DexScreener call misses a token (e.g. very newly listed).
   private async fetchJupiterPriceFallback(mint: string): Promise<number | null> {
     try {
       this.jupiterCallsThisMinute++;
       this.jupiterCallsTotal++;
-      type JupPrice = { data: Record<string, { price: string } | null> };
-      const res = await axios.get<JupPrice>(
-        `${JUPITER_PRICE_URL}?ids=${mint}`,
+      type DexPair = { baseToken: { address: string }; priceUsd: string; liquidity?: { usd?: number } };
+      const res = await axios.get<DexPair[]>(
+        `${DEXSCREENER_BASE}/tokens/v1/solana/${mint}`,
         { timeout: 5_000 },
       );
-      const entry = res.data?.data?.[mint];
-      if (!entry) return null;
-      const price = parseFloat(entry.price);
-      return price > 0 ? price : null;
+      const pairs = Array.isArray(res.data) ? res.data : [];
+      // Pick highest-liquidity pair
+      let best: number | null = null;
+      let bestLiq = -1;
+      for (const pair of pairs) {
+        const p = parseFloat(pair.priceUsd);
+        if (!(p > 0)) continue;
+        const liq = pair.liquidity?.usd ?? 0;
+        if (liq > bestLiq) { bestLiq = liq; best = p; }
+      }
+      return best;
     } catch {
       return null;
     }
@@ -3954,8 +3960,8 @@ class GraduationSniperService {
     logger.debug({ mint, symbol, gradPrice: safeGrad }, "Graduation sniper: added to dip-retrace watch");
   }
 
-  // Polls all watched tokens in a single batched Jupiter price call (fastest source).
-  // Runs every 2 s — much faster than DexScreener (1-2 s per call).
+  // Polls all watched tokens in a single batched DexScreener price call (fastest available source).
+  // Runs every 2 s. Groups pairs by base token address, picks highest-liquidity pair per token.
   private async pollWatchedGradPrices(): Promise<void> {
     if (this.watchedGrads.size === 0) return;
 
@@ -3968,21 +3974,35 @@ class GraduationSniperService {
     }
     if (this.watchedGrads.size === 0) return;
 
-    // Single Jupiter batch call for ALL watched tokens (one round-trip regardless of count)
+    // Single DexScreener batch call for ALL watched tokens (up to 30 per request)
     const mints = Array.from(this.watchedGrads.keys());
     try {
-      type JupBatch = { data: Record<string, { price: string } | null> };
-      const res = await axios.get<JupBatch>(
-        `${JUPITER_PRICE_URL}?ids=${mints.join(",")}`,
+      type DexPair = {
+        baseToken: { address: string };
+        priceUsd: string;
+        liquidity?: { usd?: number };
+      };
+      const res = await axios.get<DexPair[]>(
+        `${DEXSCREENER_BASE}/tokens/v1/solana/${mints.slice(0, 30).join(",")}`,
         { timeout: 5_000 },
       );
-      const data = res.data?.data ?? {};
+      const pairs = Array.isArray(res.data) ? res.data : [];
+
+      // Build mint→bestPriceUsd map: pick highest-liquidity pair per token
+      const priceByMint = new Map<string, number>();
+      for (const pair of pairs) {
+        const mint = pair.baseToken?.address;
+        if (!mint) continue;
+        const p = parseFloat(pair.priceUsd);
+        if (!(p > 0)) continue;
+        const liq = pair.liquidity?.usd ?? 0;
+        const existing = priceByMint.get(mint);
+        if (existing === undefined || liq > 0) priceByMint.set(mint, p);
+      }
 
       for (const [mint, grad] of this.watchedGrads) {
-        const entry = data[mint];
-        if (!entry) continue;
-        const price = parseFloat(entry.price);
-        if (!(price > 0)) continue;
+        const price = priceByMint.get(mint);
+        if (!(price! > 0)) continue;
 
         grad.currentPrice  = price;
         grad.lastUpdatedAt = now;

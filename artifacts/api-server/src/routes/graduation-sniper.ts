@@ -197,7 +197,10 @@ router.get("/sniper/health-metrics", (_req, res) => {
 });
 
 // ── Dip-Retrace Watch — all recently graduated tokens with live price tracking
+// No-cache: prices update every 2s so ETags must never suppress fresh data.
 router.get("/sniper/watched", (_req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  res.setHeader("ETag", `"${Date.now()}"`);
   res.json({ success: true, data: graduationSniperService.getWatchedGrads() });
 });
 
