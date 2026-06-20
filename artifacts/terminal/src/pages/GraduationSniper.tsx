@@ -24,6 +24,20 @@ function timeAgo(ts: number): string {
 function mintShort(mint: string): string { return `${mint.slice(0, 4)}…${mint.slice(-4)}`; }
 function solscanUrl(mint: string): string { return `https://solscan.io/token/${mint}`; }
 function fmtPrice(p: number): string { return p < 0.0001 ? p.toExponential(3) : fmt(p, 6); }
+function fmtPriceSafe(p: number): string {
+  if (!p || p === 0) return "—";
+  if (p < 0.000001) return "$" + p.toFixed(9).replace(/0+$/, "").replace(/\.$/, "");
+  if (p < 0.0001)   return "$" + p.toFixed(7).replace(/0+$/, "").replace(/\.$/, "");
+  if (p < 0.01)     return "$" + p.toFixed(6);
+  if (p < 1)        return "$" + p.toFixed(5);
+  return "$" + p.toFixed(4);
+}
+function fmtMcap(mcap: number): string {
+  if (!mcap || mcap === 0) return "—";
+  if (mcap >= 1_000_000) return "$" + (mcap / 1_000_000).toFixed(2) + "M";
+  if (mcap >= 1_000)     return "$" + (mcap / 1_000).toFixed(1) + "K";
+  return "$" + mcap.toFixed(0);
+}
 function holdTime(ms: number): string {
   if (ms <= 0) return "—";
   const s = Math.floor(ms / 1000);
@@ -1036,59 +1050,74 @@ function WatchedGradRow({ grad }: { grad: WatchedGrad }) {
   const isStale = staleMs > 10_000;
 
   return (
-    <div className="px-4 py-2.5 border-b border-white/5 last:border-0">
-      <div className="flex items-center justify-between gap-2 mb-1.5">
+    <div className="px-3 py-3 border-b border-white/5 last:border-0">
+      {/* Row 1: Symbol + status + age */}
+      <div className="flex items-center justify-between gap-2 mb-2">
         <div className="flex items-center gap-2 min-w-0">
           <a href={`https://dexscreener.com/solana/${grad.mint}`} target="_blank" rel="noreferrer"
-            className="text-[11px] font-bold text-white/80 hover:text-white truncate">{grad.symbol}</a>
-          <span className={`text-[8px] font-bold px-1.5 py-0.5 rounded-full border ${statusColor[grad.status] ?? statusColor.watching}`}>
+            className="text-[13px] font-bold text-white hover:text-violet-300 truncate">{grad.symbol}</a>
+          <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border ${statusColor[grad.status] ?? statusColor.watching}`}>
             {statusLabel[grad.status] ?? grad.status}
           </span>
           {grad.qualityScore !== undefined && (
-            <span className={`text-[9px] font-bold ${grad.qualityScore >= 70 ? "text-emerald-400" : grad.qualityScore >= 50 ? "text-amber-400" : "text-red-400"}`}>
+            <span className={`text-[11px] font-bold ${grad.qualityScore >= 70 ? "text-emerald-400" : grad.qualityScore >= 50 ? "text-amber-400" : "text-red-400"}`}>
               Q:{grad.qualityScore}
             </span>
           )}
         </div>
-        <div className="flex items-center gap-2 shrink-0">
-          {isStale && <span className="text-[8px] text-amber-400/60">stale</span>}
-          <span className="text-[9px] text-white/25">{timeAgo(grad.addedAt)}</span>
+        <div className="flex items-center gap-1.5 shrink-0">
+          {isStale && <span className="text-[9px] text-amber-400/70 font-medium">stale</span>}
+          <span className="text-[10px] text-white/30">{timeAgo(grad.addedAt)}</span>
         </div>
       </div>
-      <div className="grid grid-cols-4 gap-2">
-        <div>
-          <div className="text-[8px] text-white/30 uppercase tracking-wide mb-0.5">GRAD</div>
-          <div className="text-[10px] font-mono text-white/60">${fmtPrice(grad.gradPrice).replace("$","")}</div>
+
+      {/* Row 2: Price grid — 2 cols × 2 rows for breathing room */}
+      <div className="grid grid-cols-2 gap-x-3 gap-y-2">
+        {/* GRAD PRICE */}
+        <div className="bg-white/4 rounded-lg px-2.5 py-1.5">
+          <div className="text-[9px] text-white/35 uppercase tracking-wide mb-0.5">Grad Price</div>
+          <div className="text-[12px] font-mono font-semibold text-white/70">{fmtPriceSafe(grad.gradPrice)}</div>
         </div>
-        <div>
-          <div className="text-[8px] text-white/30 uppercase tracking-wide mb-0.5">PEAK</div>
-          <div className="text-[10px] font-mono text-emerald-400 font-semibold">
-            ${fmtPrice(grad.peakPrice).replace("$","")}
-            {pumpPct > 1 && <span className="text-[8px] text-emerald-400/60 ml-0.5">+{pumpPct.toFixed(0)}%</span>}
+
+        {/* PEAK */}
+        <div className="bg-emerald-500/8 rounded-lg px-2.5 py-1.5">
+          <div className="text-[9px] text-white/35 uppercase tracking-wide mb-0.5">Peak</div>
+          <div className="text-[12px] font-mono font-semibold text-emerald-400">
+            {fmtPriceSafe(grad.peakPrice)}
+            {pumpPct > 1 && <span className="text-[10px] text-emerald-400/60 ml-1">+{pumpPct.toFixed(0)}%</span>}
           </div>
         </div>
-        <div>
-          <div className="text-[8px] text-white/30 uppercase tracking-wide mb-0.5">DIP LOW</div>
-          <div className="text-[10px] font-mono text-red-400/80">
-            {grad.dipLow < grad.peakPrice && grad.dipLow > 0
-              ? `$${fmtPrice(grad.dipLow).replace("$","")}`
+
+        {/* DIP LOW */}
+        <div className="bg-red-500/6 rounded-lg px-2.5 py-1.5">
+          <div className="text-[9px] text-white/35 uppercase tracking-wide mb-0.5">Dip Low</div>
+          <div className="text-[12px] font-mono font-semibold text-red-400/90">
+            {grad.dipLow > 0 && grad.dipLow < grad.peakPrice
+              ? fmtPriceSafe(grad.dipLow)
               : "—"}
             {dumpPct > 5 && grad.status !== "watching" && (
-              <span className="text-[8px] text-red-400/50 ml-0.5">-{dumpPct.toFixed(0)}%</span>
+              <span className="text-[10px] text-red-400/50 ml-1">-{dumpPct.toFixed(0)}%</span>
             )}
           </div>
         </div>
-        <div>
-          <div className="text-[8px] text-white/30 uppercase tracking-wide mb-0.5">NOW</div>
-          <div className={`text-[10px] font-mono font-bold ${
+
+        {/* NOW */}
+        <div className={`rounded-lg px-2.5 py-1.5 ${
+          grad.status === "retracing" ? "bg-amber-500/10" :
+          grad.status === "pumping"   ? "bg-emerald-500/10" :
+          grad.status === "dumped"    ? "bg-red-500/8" :
+          "bg-white/4"
+        }`}>
+          <div className="text-[9px] text-white/35 uppercase tracking-wide mb-0.5">Now</div>
+          <div className={`text-[12px] font-mono font-bold ${
             grad.status === "retracing" ? "text-amber-400" :
             grad.status === "pumping"   ? "text-emerald-400" :
             grad.status === "dumped"    ? "text-red-400" :
-            "text-white/70"
+            "text-white/80"
           }`}>
-            ${fmtPrice(grad.currentPrice).replace("$","")}
+            {fmtPriceSafe(grad.currentPrice)}
             {grad.status === "retracing" && retracePct > 0 && (
-              <span className="text-[8px] text-amber-400/60 ml-0.5">{retracePct.toFixed(0)}% ret</span>
+              <span className="text-[10px] text-amber-400/60 ml-1">{retracePct.toFixed(0)}% ret</span>
             )}
           </div>
         </div>
