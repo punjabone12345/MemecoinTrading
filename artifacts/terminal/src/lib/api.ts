@@ -561,6 +561,26 @@ export function useResetPaperAccount() {
   });
 }
 
+export function useTestPaperPhase3() {
+  const queryClient = useQueryClient();
+  const { toast } = useToast();
+  return useMutation({
+    mutationFn: async () => {
+      const res = await fetch(apiUrl("/api/paper-sniper/test-phase3"), { method: "POST" });
+      const data = await res.json() as { success?: boolean; message?: string; error?: string };
+      if (!res.ok) throw new Error(data.error ?? "Test failed");
+      return data;
+    },
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ["paper-sniper-positions"] });
+      queryClient.invalidateQueries({ queryKey: ["paper-sniper-status"] });
+      queryClient.invalidateQueries({ queryKey: ["paper-sniper-events"] });
+      toast({ title: "✅ Test trade fired!", description: data.message ?? "Check the Open tab for the TEST position." });
+    },
+    onError: (err: Error) => toast({ title: "Test failed", description: err.message, variant: "destructive" }),
+  });
+}
+
 export function useResetSniperAccount() {
   const queryClient = useQueryClient();
   const { toast } = useToast();

@@ -65,4 +65,43 @@ router.post("/paper-sniper/reset", async (_req, res) => {
   res.json({ success: true });
 });
 
+// ── Test Phase 3 trigger — fires a fake buy signal so you can verify paper trades work ──
+router.post("/paper-sniper/test-phase3", async (_req, res) => {
+  try {
+    // Use a real recently-graduated token mint as a dummy, with a plausible price
+    const fakeMint   = "So11111111111111111111111111111111111111112"; // WSOL — always on Jupiter
+    const fakeSymbol = "TEST";
+    // Fetch the current SOL/USD price from Jupiter so the position has a real price
+    let testPrice = 0.000050; // default ~$50k mcap price
+    try {
+      const { default: axios } = await import("axios");
+      const r = await axios.get<{ data: Record<string, { price: number }> }>(
+        "https://lite-api.jup.ag/price/v2?ids=So11111111111111111111111111111111111111112",
+        { timeout: 3_000 }
+      );
+      const p = r.data?.data?.["So11111111111111111111111111111111111111112"]?.price;
+      if (p && p > 0) testPrice = p / 1_000_000; // scale down so it looks like a memecoin price
+    } catch { /* use default */ }
+
+    await paperSniperService.enterPhase3Trade(
+      fakeMint,
+      fakeSymbol,
+      testPrice,
+      48.0,   // phase1PumpPct  — simulated +48% pump
+      32.0,   // phase2DumpPct  — simulated -32% dump
+      73.0,   // phase3RetracePct — simulated +73% retrace (above 40% threshold)
+    );
+
+    res.json({
+      success: true,
+      message: "Test Phase 3 signal fired — check Paper tab for a new TEST position",
+      mint: fakeMint,
+      symbol: fakeSymbol,
+      price: testPrice,
+    });
+  } catch (err) {
+    res.status(500).json({ error: (err as Error).message });
+  }
+});
+
 export default router;

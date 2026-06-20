@@ -3,13 +3,13 @@ import {
   FileText, Settings, X, TrendingUp, TrendingDown, RotateCcw,
   AlertTriangle, Wallet, ChevronRight, ExternalLink,
   BarChart2, Clock, Target, Shield, Sliders, Check, Download,
-  ChevronDown, ChevronUp, Pencil, Trash2, Eye,
+  ChevronDown, ChevronUp, Pencil, Trash2, Eye, FlaskConical,
 } from "lucide-react";
 import {
   usePaperSniperStatus, usePaperSniperPositions, usePaperSniperHistory,
   usePaperSniperEvents, useResetPaperAccount,
   usePaperSniperConfig, useUpdatePaperSniperConfig, useClosePaperPosition,
-  useEditHistoryPosition, useDeleteHistoryPosition,
+  useEditHistoryPosition, useDeleteHistoryPosition, useTestPaperPhase3,
 } from "@/lib/api";
 import { PaperConfig, PaperPosition, PaperSniperEvent } from "@/lib/types";
 
@@ -949,6 +949,7 @@ export default function PaperMode() {
   const { data: events = []    } = usePaperSniperEvents();
   const { data: config }         = usePaperSniperConfig();
   const resetMutation            = useResetPaperAccount();
+  const testPhase3               = useTestPaperPhase3();
 
   const realizedPnl   = status?.totalRealizedPnlSol   ?? 0;
   const unrealizedPnl = status?.totalUnrealizedPnlSol ?? 0;
@@ -1088,7 +1089,7 @@ export default function PaperMode() {
         {tab === "open" && (
           <div className="space-y-3">
             {positions.length === 0 ? (
-              <div className="flex flex-col items-center justify-center py-16 gap-4">
+              <div className="flex flex-col items-center justify-center py-12 gap-4">
                 <div className="w-14 h-14 rounded-2xl bg-amber-500/8 border border-amber-500/15 flex items-center justify-center">
                   <Target size={24} className="text-amber-400/40" />
                 </div>
@@ -1096,6 +1097,22 @@ export default function PaperMode() {
                   <p className="text-sm font-bold text-white/25">Watching for dip-retrace signals…</p>
                   <p className="text-[11px] text-white/15 mt-1 max-w-xs">
                     Paper trades fire on Phase 3 dip-retrace signals only — no wallet needed.
+                  </p>
+                </div>
+                {/* ── Test button ── */}
+                <div className="flex flex-col items-center gap-2">
+                  <button
+                    onClick={() => testPhase3.mutate()}
+                    disabled={testPhase3.isPending}
+                    className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-cyan-500/12 hover:bg-cyan-500/22 border border-cyan-500/25 hover:border-cyan-500/45 text-cyan-300 text-xs font-bold transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {testPhase3.isPending
+                      ? <span className="w-3.5 h-3.5 rounded-full border-2 border-cyan-300/30 border-t-cyan-300 animate-spin" />
+                      : <FlaskConical size={13} />}
+                    {testPhase3.isPending ? "Firing test trade…" : "Fire Test Phase 3 Trade"}
+                  </button>
+                  <p className="text-[10px] text-white/15 text-center max-w-xs">
+                    Simulates a Phase 3 buy signal → a TEST position should appear above immediately
                   </p>
                 </div>
               </div>
