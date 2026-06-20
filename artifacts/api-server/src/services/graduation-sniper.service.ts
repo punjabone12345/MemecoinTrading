@@ -4169,6 +4169,27 @@ class GraduationSniperService {
             anyPhaseChange = true;
             logger.info({ mint, symbol: grad.symbol, retracePct: grad.phase3PumpPct.toFixed(1), phase2Low: grad.phase2LowPrice, currentPrice: price }, "3-phase watch: 🚀 PHASE 3 triggered — BUY SIGNAL");
 
+            // ── PAPER TRADE: fire directly here, unconditionally ─────────────
+            // This is the authoritative paper-trade trigger. It runs BEFORE any
+            // live-wallet logic so a live wallet, RPC failure, or old code path
+            // can NEVER prevent the paper position from being entered.
+            if (this.phase3PaperCallback) {
+              logger.info({ mint, symbol: grad.symbol, price }, "3-phase watch: 📄 DIRECT paper trade call (Phase 3)");
+              const pr = this.phase3PaperCallback(
+                mint, grad.symbol, price!,
+                grad.phase1PumpPct, grad.phase2DumpPct, grad.phase3PumpPct,
+              );
+              if (pr && typeof (pr as Promise<void>).catch === "function") {
+                (pr as Promise<void>).catch((err: unknown) => {
+                  logger.error({ mint, symbol: grad.symbol, err: (err as Error).message },
+                    "3-phase watch: DIRECT paper callback threw — trade LOST 🔥");
+                });
+              }
+            } else {
+              logger.error({ mint, symbol: grad.symbol },
+                "3-phase watch: phase3PaperCallback is NULL at Phase 3 trigger — check index.ts startup order!");
+            }
+
             // ── Telegram: Phase 3 signal detected ───────────────────────────
             if (isTelegramConfigured()) {
               void sendTelegram(
@@ -4182,7 +4203,7 @@ class GraduationSniperService {
               );
             }
 
-            // ── Trigger buy ─────────────────────────────────────────────────
+            // ── Live wallet buy (runs in addition to paper, never instead of) ─
             void this.triggerPhase3Buy(mint, grad.symbol, price!, grad);
           }
         }
