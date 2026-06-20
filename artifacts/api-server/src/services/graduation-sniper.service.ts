@@ -4138,8 +4138,21 @@ class GraduationSniperService {
             anyPhaseChange = true;
             logger.info({ mint, symbol: grad.symbol, retracePct: grad.phase3PumpPct.toFixed(1), phase2Low: grad.phase2LowPrice, currentPrice: price }, "3-phase watch: 🚀 PHASE 3 triggered — BUY SIGNAL");
 
+            // ── Telegram: Phase 3 signal detected ───────────────────────────
+            if (isTelegramConfigured()) {
+              void sendTelegram(
+                `🎯 <b>PHASE 3 SIGNAL — DIP-RETRACE BUY</b>\n` +
+                `🪙 <b>${grad.symbol}</b>\n` +
+                `📋 <code>${mint}</code>\n\n` +
+                `📈 Phase 1 pump:  <b>+${grad.phase1PumpPct.toFixed(1)}%</b> (peak ${grad.phase1PeakPrice.toFixed(8)})\n` +
+                `📉 Phase 2 dump:  <b>-${grad.phase2DumpPct.toFixed(1)}%</b> (low ${grad.phase2LowPrice.toFixed(8)})\n` +
+                `🔄 Phase 3 retrace: <b>+${grad.phase3PumpPct.toFixed(1)}%</b> → <b>BUY NOW @ ${price!.toFixed(8)}</b>\n\n` +
+                `🔗 <a href="https://dexscreener.com/solana/${mint}">DexScreener</a>`
+              );
+            }
+
             // ── Trigger buy ─────────────────────────────────────────────────
-            void this.triggerPhase3Buy(mint, grad.symbol, price!, grad.phase2LowPrice);
+            void this.triggerPhase3Buy(mint, grad.symbol, price!, grad);
           }
         }
 
@@ -4155,10 +4168,18 @@ class GraduationSniperService {
   }
 
   // Executes a buy when Phase 3 triggers. Uses same enterPosition as normal sniper.
-  private triggerPhase3Buy(mint: string, symbol: string, currentPrice: number, phase2Low: number): void {
+  private triggerPhase3Buy(mint: string, symbol: string, currentPrice: number, grad: WatchedGrad): void {
     const walletReady = solanaWalletService.isReady();
     if (!walletReady) {
-      logger.info({ mint, symbol, currentPrice, phase2Low }, "3-phase watch: Phase 3 buy signal — wallet not configured, skipping live buy (paper mode)");
+      logger.info({ mint, symbol, currentPrice, phase2Low: grad.phase2LowPrice }, "3-phase watch: Phase 3 buy signal — wallet not configured, skipping live buy");
+      if (isTelegramConfigured()) {
+        void sendTelegram(
+          `⚠️ <b>PHASE 3 SIGNAL (no wallet)</b>\n` +
+          `🪙 <b>${symbol}</b> — <code>${mint}</code>\n` +
+          `Wallet not configured — live buy skipped.\n` +
+          `🔗 <a href="https://dexscreener.com/solana/${mint}">DexScreener</a>`
+        );
+      }
       return;
     }
 
