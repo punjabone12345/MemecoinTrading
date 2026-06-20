@@ -313,6 +313,7 @@ function OpenPositionCard({ pos }: { pos: PaperPosition }) {
           <div>
             <div className="flex items-center gap-1.5 flex-wrap">
               <span className="text-sm font-black text-white">{pos.symbol}</span>
+              <span className="text-[8px] px-1.5 py-0.5 rounded-full bg-cyan-500/20 text-cyan-300 font-bold border border-cyan-500/20">DIP-RETRACE</span>
               {pos.tp1Hit && <span className="text-[8px] px-1.5 py-0.5 rounded-full bg-violet-500/20 text-violet-300 font-bold border border-violet-500/20">TP1</span>}
               {pos.tp2Hit && <span className="text-[8px] px-1.5 py-0.5 rounded-full bg-amber-500/20 text-amber-300 font-bold border border-amber-500/20">TP2</span>}
               {atPeak    && <span className="text-[8px] px-1.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 font-bold border border-emerald-500/20">ATH</span>}
@@ -402,31 +403,30 @@ function OpenPositionCard({ pos }: { pos: PaperPosition }) {
         </a>
       </div>
 
-      {/* Entry filter stats */}
-      {(pos.qualityScore != null || pos.liquiditySol != null || pos.uniqueBuyers != null || pos.buyPressureRatio != null || pos.dipDumpPct != null) && (
-        <div className="rounded-xl bg-white/3 border border-white/6 px-3 py-2 mb-2.5">
-          <p className="text-[8px] font-black text-white/20 uppercase tracking-widest mb-1.5">Entry Filters</p>
-          <div className="flex flex-wrap gap-x-3 gap-y-1 text-[9px] text-white/30">
-            {pos.qualityScore != null && (
-              <span>Q-score: <span className={`font-bold ${pos.qualityScore >= 70 ? "text-yellow-400/80" : "text-white/40"}`}>{pos.qualityScore}/100</span></span>
+      {/* Phase 3 dip-retrace entry context */}
+      {(pos.phase1PumpPct != null || pos.dipDumpPct != null || pos.dipRetracePct != null) && (
+        <div className="rounded-xl bg-cyan-500/6 border border-cyan-500/20 px-3 py-2.5 mb-2.5">
+          <p className="text-[8px] font-black text-cyan-400/60 uppercase tracking-widest mb-2">Dip-Retrace Signal</p>
+          <div className="flex items-center gap-1.5 flex-wrap">
+            {pos.phase1PumpPct != null && (
+              <span className="text-[10px] font-bold bg-emerald-500/15 border border-emerald-500/25 text-emerald-300 px-2 py-1 rounded-lg">
+                P1 +{pos.phase1PumpPct.toFixed(0)}% pump
+              </span>
             )}
-            {pos.liquiditySol != null && (
-              <span>Liquidity: <span className="font-bold text-white/50">{pos.liquiditySol.toFixed(1)} SOL</span></span>
+            {pos.phase1PumpPct != null && pos.dipDumpPct != null && (
+              <span className="text-white/20 text-[10px]">→</span>
             )}
-            {pos.uniqueBuyers != null && (
-              <span>Buyers: <span className="font-bold text-white/50">{pos.uniqueBuyers}</span></span>
+            {pos.dipDumpPct != null && (
+              <span className="text-[10px] font-bold bg-red-500/15 border border-red-500/25 text-red-300 px-2 py-1 rounded-lg">
+                P2 -{pos.dipDumpPct.toFixed(0)}% dump
+              </span>
             )}
-            {pos.buyPressureRatio != null && (
-              <span>Buy/Sell: <span className={`font-bold ${pos.buyPressureRatio >= 1.5 ? "text-emerald-400/70" : "text-white/40"}`}>{pos.buyPressureRatio.toFixed(1)}×</span></span>
-            )}
-            {pos.topHolderPct != null && (
-              <span>Top holder: <span className={`font-bold ${pos.topHolderPct > 20 ? "text-red-400/70" : "text-white/40"}`}>{pos.topHolderPct.toFixed(0)}%</span></span>
-            )}
-            {pos.whaleDetected && <span className="text-red-400/70 font-bold">⚠ Whale detected</span>}
             {pos.dipDumpPct != null && pos.dipRetracePct != null && (
-              <span className="text-cyan-400/60">
-                Dip entry: <span className="font-bold">{pos.dipDumpPct.toFixed(0)}% dump</span> → <span className="font-bold">{pos.dipRetracePct.toFixed(0)}% retrace</span>
-                {pos.dipPeakHigh != null && <span className="text-white/25"> (peak ${pos.dipPeakHigh < 0.0001 ? pos.dipPeakHigh.toExponential(3) : pos.dipPeakHigh.toFixed(6)})</span>}
+              <span className="text-white/20 text-[10px]">→</span>
+            )}
+            {pos.dipRetracePct != null && (
+              <span className="text-[10px] font-bold bg-cyan-500/15 border border-cyan-500/25 text-cyan-300 px-2 py-1 rounded-lg">
+                P3 +{pos.dipRetracePct.toFixed(0)}% retrace ✓
               </span>
             )}
           </div>
@@ -592,6 +592,7 @@ function HistoryCard({ pos }: { pos: PaperPosition }) {
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-1.5 flex-wrap">
               <span className="text-xs font-black text-white">{pos.symbol}</span>
+              <span className="text-[8px] px-1.5 py-0.5 rounded-full bg-cyan-500/18 text-cyan-300 font-bold border border-cyan-500/20">P3</span>
               {pos.tp1Hit && <span className="text-[8px] px-1.5 py-0.5 rounded-full bg-violet-500/18 text-violet-300 font-bold border border-violet-500/20">TP1</span>}
               {pos.tp2Hit && <span className="text-[8px] px-1.5 py-0.5 rounded-full bg-amber-500/18 text-amber-300 font-bold border border-amber-500/20">TP2</span>}
               {holdMs > 0 && <span className="text-[9px] text-white/25 font-medium">{holdStr(holdMs)}</span>}
@@ -634,6 +635,20 @@ function HistoryCard({ pos }: { pos: PaperPosition }) {
               <div className="flex items-center justify-between text-[10px]">
                 <span className="text-white/30">Peak gain from entry</span>
                 <span className="text-amber-300 font-bold">{fmtPct2(peakPct)}</span>
+              </div>
+            )}
+
+            {/* Dip-retrace entry chain */}
+            {(pos.phase1PumpPct != null || pos.dipDumpPct != null || pos.dipRetracePct != null) && (
+              <div className="rounded-xl bg-cyan-500/6 border border-cyan-500/18 px-3 py-2">
+                <p className="text-[8px] font-black text-cyan-400/50 uppercase tracking-widest mb-1.5">Dip-Retrace Signal</p>
+                <div className="flex items-center gap-1.5 text-[9px] font-bold flex-wrap">
+                  {pos.phase1PumpPct != null && <span className="text-emerald-300/70">P1 +{pos.phase1PumpPct.toFixed(0)}% pump</span>}
+                  {pos.phase1PumpPct != null && <span className="text-white/20">→</span>}
+                  {pos.dipDumpPct != null && <span className="text-red-300/70">P2 -{pos.dipDumpPct.toFixed(0)}% dump</span>}
+                  {pos.dipDumpPct != null && <span className="text-white/20">→</span>}
+                  {pos.dipRetracePct != null && <span className="text-cyan-300/70">P3 +{pos.dipRetracePct.toFixed(0)}% retrace</span>}
+                </div>
               </div>
             )}
 
@@ -811,7 +826,7 @@ function EventRow({ e }: { e: PaperSniperEvent }) {
             : isClose    ? "bg-violet-500/15 text-violet-300"
             : "bg-white/6 text-white/35"
           }`}>
-            {isWatching ? `WATCHING ${e.watchStage ?? ""}` : e.action.toUpperCase()}
+            {isWatching ? `WATCHING ${e.watchStage ?? ""}` : isEnter ? "DIP-RETRACE" : e.action.toUpperCase()}
           </span>
           {e.qualityScore !== undefined && e.qualityScore > 0 && (
             <span className={`text-[8px] font-bold ${e.qualityScore >= 70 ? "text-yellow-400" : "text-white/35"}`}>
@@ -852,6 +867,17 @@ function EventRow({ e }: { e: PaperSniperEvent }) {
           </div>
         )}
 
+        {/* Phase 3 dip-retrace details for entered events */}
+        {isEnter && e.phase1PumpPct != null && (
+          <div className="flex items-center gap-1.5 mt-1 flex-wrap">
+            <span className="text-[8px] bg-emerald-500/12 border border-emerald-500/20 text-emerald-300/70 px-1.5 py-0.5 rounded font-bold">P1 +{e.phase1PumpPct.toFixed(0)}%</span>
+            <span className="text-white/15 text-[8px]">→</span>
+            {e.phase2DumpPct != null && <span className="text-[8px] bg-red-500/12 border border-red-500/20 text-red-300/70 px-1.5 py-0.5 rounded font-bold">P2 -{e.phase2DumpPct.toFixed(0)}%</span>}
+            <span className="text-white/15 text-[8px]">→</span>
+            {e.phase3RetracePct != null && <span className="text-[8px] bg-cyan-500/12 border border-cyan-500/20 text-cyan-300/70 px-1.5 py-0.5 rounded font-bold">P3 +{e.phase3RetracePct.toFixed(0)}%</span>}
+            {e.entryPrice != null && <span className="text-[8px] text-white/25 ml-1">@ {fmtPrice(e.entryPrice)}</span>}
+          </div>
+        )}
         {!isWatching && (e.skipReason || e.closeReason) && (
           <p className="text-[10px] text-white/25 mt-0.5 truncate">{e.skipReason ?? e.closeReason}</p>
         )}
@@ -1052,9 +1078,9 @@ export default function PaperMode() {
                   <Target size={24} className="text-amber-400/40" />
                 </div>
                 <div className="text-center">
-                  <p className="text-sm font-bold text-white/25">Watching for graduations…</p>
+                  <p className="text-sm font-bold text-white/25">Watching for dip-retrace signals…</p>
                   <p className="text-[11px] text-white/15 mt-1 max-w-xs">
-                    Paper trades fire automatically alongside live signals — no wallet needed.
+                    Paper trades fire on Phase 3 dip-retrace signals only — no wallet needed.
                   </p>
                 </div>
               </div>

@@ -144,6 +144,7 @@ export interface PaperPosition {
   dipDipLow?: number;
   dipDumpPct?: number;
   dipRetracePct?: number;
+  phase1PumpPct?: number;
 }
 
 export interface PaperSniperEvent {
@@ -155,6 +156,11 @@ export interface PaperSniperEvent {
   skipReason?: string;
   closeReason?: string;
   pnlSol?: number;
+  // Phase 3 dip-retrace entry context (populated when action === "entered")
+  phase1PumpPct?: number;
+  phase2DumpPct?: number;
+  phase3RetracePct?: number;
+  entryPrice?: number;
 }
 
 export interface PaperSniperStatus {
@@ -347,184 +353,16 @@ class PaperSniperService {
   // ── Entry point ───────────────────────────────────────────────────────────
 
   onGraduation(
-    mint: string,
-    entryPrice: number,
-    symbol: string,
-    name: string,
-    detectedAt: number,
-    detectionPrice: number,
-    qualityMeta?: GraduationQualityMeta,
+    _mint: string,
+    _entryPrice: number,
+    _symbol: string,
+    _name: string,
+    _detectedAt: number,
+    _detectionPrice: number,
+    _qualityMeta?: GraduationQualityMeta,
   ): void {
-    const cfg = this.paperConfig;
-
-    // ── Quality auto-skip relay from graduation sniper ────────────────────────
-    // The live sniper rejected this token on quality grounds, but paper mode
-    // has its own (independently configurable) quality thresholds.  If the raw
-    // quality metrics pass the paper config thresholds we override the skip and
-    // proceed to entry.  Creator rug-risk is a hard block — always skipped.
-    if (qualityMeta?.autoSkipReason) {
-      if (this.seenMints.has(mint)) return;
-
-      const metaLiq     = qualityMeta.liquiditySol     ?? -1;
-      const metaBuyers  = qualityMeta.uniqueBuyers      ?? -1;
-      const metaPress   = qualityMeta.buyPressureRatio  ?? -1;
-      const metaTopH    = qualityMeta.topHolderPct      ?? -1;
-      const metaCreator = qualityMeta.creatorHoldingsPct ?? 0;
-
-      // Creator dump risk / whale detected are always hard blocks
-      const hardBlock = (qualityMeta.whaleDetected ?? false)
-        || (cfg.enableCreatorFilter && metaCreator > 0 && metaCreator > cfg.maxCreatorHoldingsPct);
-
-      // Only re-evaluate if we have at least one raw quality metric to compare
-      const hasRawData = metaLiq >= 0 || metaBuyers >= 0 || metaPress >= 0 || metaTopH >= 0;
-
-      if (hasRawData && !hardBlock) {
-        const passLiq    = metaLiq    < 0 || metaLiq    >= cfg.minLiquiditySolQuality;
-        const passBuyers = metaBuyers < 0 || metaBuyers >= cfg.minUniqueBuyers;
-        const passPress  = metaPress  < 0 || metaPress  >= cfg.minBuyPressureRatio;
-        const passTopH   = metaTopH   < 0 || metaTopH   <= cfg.maxTopHolderPct;
-
-        if (passLiq && passBuyers && passPress && passTopH) {
-          // Paper config overrides the live sniper rejection — proceed to entry
-          this.seenMints.add(mint);
-          logger.info(
-            { mint, symbol, liveSkipReason: qualityMeta.autoSkipReason,
-              metaLiq, metaBuyers, metaPress, metaTopH,
-              cfgLiq: cfg.minLiquiditySolQuality, cfgBuyers: cfg.minUniqueBuyers,
-              cfgPress: cfg.minBuyPressureRatio, cfgTopH: cfg.maxTopHolderPct },
-            "Paper sniper: paper-config overrides live quality skip → scheduling entry ✅",
-          );
-          void this.scheduleDelayedEntry(mint, 0, symbol, name, detectedAt, detectionPrice, {
-            ...qualityMeta,
-            autoSkipReason:        undefined,   // clear so fast path is not skipped
-            onChainPriceConfirmed: false,        // force slow-path price discovery
-          });
-          return;
-        }
-
-        // Paper config also rejects — use a paper-specific skip reason
-        const paperReason = !passLiq
-          ? `Liquidity ${metaLiq.toFixed(1)} SOL < ${cfg.minLiquiditySolQuality} SOL (paper min)`
-          : !passBuyers
-          ? `Unique buyers ${metaBuyers} < ${cfg.minUniqueBuyers} (paper min)`
-          : !passPress
-          ? `Buy pressure ${metaPress.toFixed(2)}x < ${cfg.minBuyPressureRatio}x (paper min)`
-          : !passTopH
-          ? `Top holder ${metaTopH.toFixed(1)}% > ${cfg.maxTopHolderPct}% (paper max)`
-          : qualityMeta.autoSkipReason;
-
-        this.seenMints.add(mint);
-        this.addEvent({ id: uid(), detectedAt, mint, symbol, action: "skipped",
-          skipReason: paperReason });
-        this.broadcast();
-        return;
-      }
-
-      // No raw data or hard block — relay the live sniper's skip reason verbatim
-      this.seenMints.add(mint);
-      this.addEvent({ id: uid(), detectedAt, mint, symbol, action: "skipped",
-        skipReason: qualityMeta.autoSkipReason });
-      this.broadcast();
-      return;
-    }
-
-    if (this.seenMints.has(mint)) {
-      logger.debug({ mint }, "Paper sniper: mint already seen — skip");
-      return;
-    }
-
-    const openCount = this.openPositions.size;
-    if (openCount >= cfg.maxOpenPositions) {
-      this.addEvent({ id: uid(), detectedAt, mint, symbol, action: "skipped",
-        skipReason: `Max positions reached (${openCount}/${cfg.maxOpenPositions})` });
-      this.broadcast();
-      return;
-    }
-
-    if (this.virtualBalance < cfg.positionSizeSol) {
-      this.addEvent({ id: uid(), detectedAt, mint, symbol, action: "skipped",
-        skipReason: `Insufficient paper balance (${this.virtualBalance.toFixed(4)} SOL < ${cfg.positionSizeSol} SOL)` });
-      this.broadcast();
-      return;
-    }
-
-    // ── Quality pre-entry filters ────────────────────────────────────────────
-    // Filter 1: Minimum pool liquidity at graduation ($5k default)
-    if (cfg.enableLiquidityFilter) {
-      if (qualityMeta?.poolLiquidityUsd != null) {
-        if (qualityMeta.poolLiquidityUsd < cfg.minLiquidityUsd) {
-          const reason = `Low liquidity — $${qualityMeta.poolLiquidityUsd.toFixed(0)} < $${cfg.minLiquidityUsd} min (quality filter)`;
-          this.addEvent({ id: uid(), detectedAt, mint, symbol, action: "skipped", skipReason: reason });
-          logger.info({ mint, symbol, poolLiquidityUsd: qualityMeta.poolLiquidityUsd, minLiquidityUsd: cfg.minLiquidityUsd }, "Paper sniper: quality filter — low liquidity ❌");
-          this.broadcast();
-          return;
-        }
-      } else {
-        logger.debug({ mint }, "Paper sniper: liquidity filter active but no pool USD data — passing through");
-      }
-    }
-
-    // Filter 2: Bonding curve completion speed (<30 min default = enter, >2h = skip)
-    if (cfg.enableBondingCurveFilter) {
-      if (qualityMeta?.bondingCurveMinutes != null) {
-        if (qualityMeta.bondingCurveMinutes > cfg.maxBondingCurveMinutes) {
-          const reason = `Slow bonding curve — ${qualityMeta.bondingCurveMinutes.toFixed(1)} min > ${cfg.maxBondingCurveMinutes} min limit (quality filter)`;
-          this.addEvent({ id: uid(), detectedAt, mint, symbol, action: "skipped", skipReason: reason });
-          logger.info({ mint, symbol, bondingCurveMinutes: qualityMeta.bondingCurveMinutes, maxBondingCurveMinutes: cfg.maxBondingCurveMinutes }, "Paper sniper: quality filter — bonding curve too slow ❌");
-          this.broadcast();
-          return;
-        }
-      } else {
-        logger.debug({ mint }, "Paper sniper: bonding-curve filter active but no duration data — passing through");
-      }
-    }
-
-    // Filter 3: Minimum holder count at graduation (≥150 default)
-    if (cfg.enableHolderFilter) {
-      if (qualityMeta?.holderCount != null) {
-        if (qualityMeta.holderCount < cfg.minHolderCount) {
-          const reason = `Low holder count — ${qualityMeta.holderCount} < ${cfg.minHolderCount} min holders (quality filter)`;
-          this.addEvent({ id: uid(), detectedAt, mint, symbol, action: "skipped", skipReason: reason });
-          logger.info({ mint, symbol, holderCount: qualityMeta.holderCount, minHolderCount: cfg.minHolderCount }, "Paper sniper: quality filter — insufficient holders ❌");
-          this.broadcast();
-          return;
-        }
-      } else {
-        logger.debug({ mint }, "Paper sniper: holder filter active but no holder data — passing through");
-      }
-    }
-
-    // Filter 4: Creator holdings rug-risk filter (>5% threshold by default)
-    if (cfg.enableCreatorFilter) {
-      if (qualityMeta?.creatorHoldingsPct != null && qualityMeta.creatorHoldingsPct > cfg.maxCreatorHoldingsPct) {
-        const reason = `Creator holds ${qualityMeta.creatorHoldingsPct.toFixed(1)}% — dump risk (>${cfg.maxCreatorHoldingsPct}% threshold)`;
-        this.addEvent({ id: uid(), detectedAt, mint, symbol, action: "skipped", skipReason: reason });
-        logger.info({ mint, symbol, creatorHoldingsPct: qualityMeta.creatorHoldingsPct, max: cfg.maxCreatorHoldingsPct }, "Paper sniper: creator filter — rug risk ❌");
-        this.broadcast();
-        return;
-      }
-    }
-
-    // Fast-fail: if price already exceeds drift threshold before the exec delay
-    const instantDriftPct = detectionPrice > 0
-      ? ((entryPrice / detectionPrice) - 1) * 100
-      : 0;
-    if (detectionPrice > 0 && instantDriftPct > cfg.maxFillDriftPct) {
-      const reason = `Fill drift abort — price +${instantDriftPct.toFixed(1)}% above baseline at detection (>${cfg.maxFillDriftPct}% threshold)`;
-      this.addEvent({ id: uid(), detectedAt, mint, symbol, action: "skipped", skipReason: reason });
-      logger.info({ mint, symbol, instantDriftPct: instantDriftPct.toFixed(1) }, "Paper sniper: fast-fail — drift already exceeded at detection");
-      this.broadcast();
-      return;
-    }
-
-    // Reserve this mint so no duplicate fires during the exec delay
-    this.seenMints.add(mint);
-
-    // Simulate real execution latency: wait simulatedExecDelayMs, then re-fetch
-    // price and check drift again before entering — matches live bot's ~5s checks.
-    // Fast-path: when on-chain price is confirmed by graduation sniper, skip all
-    // polling and enter immediately with the validated price.
-    void this.scheduleDelayedEntry(mint, entryPrice, symbol, name, detectedAt, detectionPrice, qualityMeta);
+    // Paper mode only executes Phase 3 dip-retrace trades.
+    // Graduation-based entry is disabled — use enterPhase3Trade() instead.
   }
 
   private async scheduleDelayedEntry(
@@ -1499,6 +1337,10 @@ class PaperSniperService {
       runnerRealizedSol: 0,
       detectionPrice:    entryPrice,
       entryDriftPct:     0,
+      // Phase 3 dip-retrace entry context
+      phase1PumpPct,
+      dipDumpPct:        phase2DumpPct,
+      dipRetracePct:     phase3RetracePct,
     };
 
     this.virtualBalance -= sizeSol;
@@ -1507,7 +1349,8 @@ class PaperSniperService {
 
     void this.persistPosition(pos);
     void this.persistBalance();
-    this.addEvent({ id: uid(), detectedAt: now, mint, symbol, action: "entered" });
+    this.addEvent({ id: uid(), detectedAt: now, mint, symbol, action: "entered",
+      phase1PumpPct, phase2DumpPct, phase3RetracePct, entryPrice });
     this.broadcast();
 
     logger.info(

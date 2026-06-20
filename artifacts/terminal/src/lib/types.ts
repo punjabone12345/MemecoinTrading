@@ -506,6 +506,19 @@ export interface PaperPosition {
   entryDriftPct?: number;
   msDetectionToFill?: number;
   lastPriceAt?: number;
+  // Dip-retrace entry context (phase3 trades)
+  dipPeakHigh?: number;
+  dipDipLow?: number;
+  dipDumpPct?: number;
+  dipRetracePct?: number;
+  phase1PumpPct?: number;
+  // Quality snapshot
+  qualityScore?: number;
+  liquiditySol?: number;
+  buyPressureRatio?: number;
+  uniqueBuyers?: number;
+  topHolderPct?: number;
+  whaleDetected?: boolean;
 }
 
 export interface PaperSniperEvent {
@@ -517,6 +530,11 @@ export interface PaperSniperEvent {
   skipReason?: string;
   closeReason?: string;
   pnlSol?: number;
+  // Phase 3 dip-retrace entry context
+  phase1PumpPct?: number;
+  phase2DumpPct?: number;
+  phase3RetracePct?: number;
+  entryPrice?: number;
 }
 
 export interface PaperConfig {
