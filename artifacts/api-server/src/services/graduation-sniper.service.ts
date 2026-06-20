@@ -312,7 +312,10 @@ export interface SniperStatus {
 export interface WatchedGrad {
   mint: string;
   symbol: string;
-  gradPrice: number;         // USD price at graduation detection (from on-chain or first DexScreener price)
+  // USD price at graduation (on-chain estimate initially; overwritten by first real DexScreener price)
+  gradPrice: number;
+  // true once gradPrice has been confirmed by a DexScreener reading (locks it against further overwrite)
+  gradPriceLocked: boolean;
 
   // Phase 0 → Phase 1: track lowest seen and pump from it
   lowestSeen: number;        // lowest price seen at any point (reset if price goes lower pre-phase1)
@@ -3976,6 +3979,9 @@ class GraduationSniperService {
       mint,
       symbol,
       gradPrice:          safeGrad,
+      // gradPriceLocked stays false until first DexScreener tick confirms the real price.
+      // On-chain reserve math can be off by 2–3× versus actual AMM price discovery.
+      gradPriceLocked:    false,
       lowestSeen:         safeGrad,   // updated to lower if price dips pre-phase1
       phase1PeakPrice:    safeGrad,
       phase1PeakAt:       now,
@@ -4054,12 +4060,26 @@ class GraduationSniperService {
         grad.currentPrice  = price!;
         grad.lastUpdatedAt = now;
 
-        // ── Bootstrap: first real price sets gradPrice / lowestSeen ─────────
-        if (grad.gradPrice === 0) {
+        // ── Bootstrap / correct gradPrice from first real DexScreener reading ─
+        // On-chain reserve math runs before the AMM is fully settled and can be
+        // off by 2–3× versus the actual AMM price. The first DexScreener tick
+        // (real market price) overwrites gradPrice and resets all phase baselines
+        // so Phase 1/2/3 thresholds are computed against the true graduation price.
+        if (!grad.gradPriceLocked) {
+          const oldGrad = grad.gradPrice;
           grad.gradPrice       = price!;
+          grad.gradPriceLocked = true;
+          // Always reset baselines to the real DexScreener price so Phase 1
+          // pump % is measured from the actual market price at graduation.
           grad.lowestSeen      = price!;
           grad.phase1PeakPrice = price!;
           grad.phase2LowPrice  = price!;
+          if (oldGrad > 0 && Math.abs(price! / oldGrad - 1) > 0.1) {
+            logger.info(
+              { mint, symbol: grad.symbol, onChainPrice: oldGrad, dexPrice: price!, diffPct: ((price! / oldGrad - 1) * 100).toFixed(1) + "%" },
+              "3-phase watch: gradPrice corrected from on-chain → DexScreener real price 🔄",
+            );
+          }
         }
 
         const prevPhase = grad.phase;

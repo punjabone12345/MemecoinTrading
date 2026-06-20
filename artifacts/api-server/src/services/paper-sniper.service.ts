@@ -398,14 +398,13 @@ class PaperSniperService {
     if (qualityMeta?.onChainPriceConfirmed && entryPrice > 0) {
       logger.info({ mint, symbol, entryPrice, detectionPrice },
         "Paper sniper: ⚡ FAST PATH — on-chain price confirmed, skipping gate + price poll");
-      // Re-check capacity after quality-filter pipeline
       const cfgFast = this.paperConfig;
+      // ── Balance: ALWAYS auto-top-up — virtual balance must never block entry ─
       if (this.virtualBalance < cfgFast.positionSizeSol) {
-        this.addEvent({ id: uid(), detectedAt, mint, symbol, action: "skipped",
-          skipReason: `Insufficient balance (${this.virtualBalance.toFixed(4)} SOL < ${cfgFast.positionSizeSol} SOL)` });
-        this.seenMints.delete(mint);
-        this.broadcast();
-        return;
+        logger.warn({ mint, symbol, virtualBalance: this.virtualBalance },
+          "Paper sniper [fast]: balance depleted — auto-resetting to starting balance");
+        this.virtualBalance = STARTING_BALANCE;
+        void this.persistBalance();
       }
       if (this.openPositions.size >= cfgFast.maxOpenPositions) {
         this.addEvent({ id: uid(), detectedAt, mint, symbol, action: "skipped",
@@ -506,13 +505,12 @@ class PaperSniperService {
     const cfgNow = this.paperConfig;
     const sizeSol = cfgNow.positionSizeSol;
 
-    // Re-check capacity after delay
+    // ── Balance: ALWAYS auto-top-up — virtual balance must never block entry ────
     if (this.virtualBalance < sizeSol) {
-      this.addEvent({ id: uid(), detectedAt, mint, symbol, action: "skipped",
-        skipReason: `Insufficient balance after ${(delayMs / 1000).toFixed(0)}s exec delay (${this.virtualBalance.toFixed(4)} SOL < ${sizeSol} SOL)` });
-      this.seenMints.delete(mint);
-      this.broadcast();
-      return;
+      logger.warn({ mint, symbol, virtualBalance: this.virtualBalance, sizeSol },
+        "Paper sniper [slow]: balance depleted — auto-resetting to starting balance");
+      this.virtualBalance = STARTING_BALANCE;
+      void this.persistBalance();
     }
     if (this.openPositions.size >= cfgNow.maxOpenPositions) {
       this.addEvent({ id: uid(), detectedAt, mint, symbol, action: "skipped",
