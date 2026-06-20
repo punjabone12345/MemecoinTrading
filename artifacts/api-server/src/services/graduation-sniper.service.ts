@@ -1316,7 +1316,7 @@ class GraduationSniperService {
         return;
       }
 
-      const { mint, wsolVaultPubkey, tokenVaultPubkey } = extracted;
+      const { mint, wsolVaultPubkey, tokenVaultPubkey, txInitialSolDeposit, txInitialTokenDeposit } = extracted;
       const skipReason = this.checkSkipReason(mint);
       const eventBase  = { id: uid(), detectedAt, mint, symbol: mint.slice(0, 8), txSignature: signature };
       catchEventBase   = eventBase; // expose to catch block
@@ -1349,49 +1349,72 @@ class GraduationSniperService {
       this.processingGraduations.add(mint);
       reservedMint = mint;
 
-      // ── EARLIEST possible graduation price capture (T≈0) ──────────────────────
-      // Fired immediately after dedup guard, BEFORE any delays or quality checks.
-      // On-chain reserves right after the pool creation TX are the truest reflection
-      // of the graduation price (before market-makers pump it). We do a single-attempt
-      // read (no retries, no delay) so we get in as fast as possible.
-      // Jupiter quote is also fired in parallel as a second source.
-      // The result is stored as earlyGraduationPrice and used for the dip-watch
-      // graduationPrice baseline instead of initialPrice (which arrives ~60s later).
+      // ── Graduation open-price capture ─────────────────────────────────────────
+      // Priority (highest accuracy first):
+      //
+      //  1. TX-derived open price — computed from the initial deposit amounts in the
+      //     graduation TX's postTokenBalances. This is the pool creation price: the
+      //     literal open of the first candle, before any buy/sell hits the pool.
+      //     Zero latency, zero market-maker contamination — the true "open price".
+      //
+      //  2. Early on-chain + Jupiter parallel read (T≈0, single attempt, no retries)
+      //     Arrives within ~300ms. Slightly post-open but still much earlier than
+      //     initialPrice which is captured after up to 4.5s of reserve retries.
+      //
+      //  3. initialPrice — fallback set later in this function (captured ~5s after
+      //     detection via fetchReservesWithRetry).
+      //
+      // earlyGraduationPrice is passed to addToDipWatch as the pump-gate baseline.
       let earlyGraduationPrice = 0;
       {
         const earlyStart = Date.now();
         try {
-          const [earlyReserves, earlySolUsd, earlyJupPrice] = await Promise.all([
-            // Single-attempt on-chain read — no retries so we don't stall
-            (async () => {
-              if (!wsolVaultPubkey || !tokenVaultPubkey) return null;
-              try { return await this.fetchOnChainPoolReserves(wsolVaultPubkey, tokenVaultPubkey); }
-              catch { return null; }
-            })(),
-            this.fetchSolUsdPrice(),
-            // Jupiter quote as second source — real-time AMM spot
-            (async () => {
-              try { return await this.fetchJupiterPriceFallback(mint); }
-              catch { return null; }
-            })(),
-          ]);
-          const solUsdForEarly = earlySolUsd ?? 150;
-          const onChainPrice = (earlyReserves && earlyReserves.solBalance > 0 && earlyReserves.tokenBalanceUi > 0)
-            ? (earlyReserves.solBalance / earlyReserves.tokenBalanceUi) * solUsdForEarly
-            : 0;
-          const jupPrice = earlyJupPrice ?? 0;
-          // Use the LOWEST non-zero price — closest to the true graduation price
-          // before any pump. If both are available, take the min.
-          if (onChainPrice > 0 && jupPrice > 0) {
-            earlyGraduationPrice = Math.min(onChainPrice, jupPrice);
-          } else {
-            earlyGraduationPrice = onChainPrice > 0 ? onChainPrice : jupPrice;
+          // Source 1: TX open price (from pool creation deposit amounts)
+          const solUsdForTx = await this.fetchSolUsdPrice();
+          const solUsd = solUsdForTx ?? 150;
+          if (txInitialSolDeposit > 0 && txInitialTokenDeposit > 0) {
+            const txOpenPrice = (txInitialSolDeposit / txInitialTokenDeposit) * solUsd;
+            if (txOpenPrice > 0) {
+              earlyGraduationPrice = txOpenPrice;
+              logger.info({
+                mint, txInitialSolDeposit: txInitialSolDeposit.toFixed(2),
+                txInitialTokenDeposit: txInitialTokenDeposit.toExponential(4),
+                txOpenPrice: txOpenPrice.toExponential(4), elapsedMs: Date.now() - earlyStart,
+              }, 'Graduation sniper: TX open price captured (true pool creation price) ⚡');
+            }
           }
-          logger.info({ mint, onChainPrice: onChainPrice.toExponential(4), jupPrice: jupPrice.toExponential(4),
-            earlyGraduationPrice: earlyGraduationPrice.toExponential(4), elapsedMs: Date.now() - earlyStart },
-            'Graduation sniper: early graduation price captured ⚡');
+
+          // Source 2: parallel on-chain + Jupiter (only needed if TX source unavailable)
+          if (earlyGraduationPrice === 0) {
+            const [earlyReserves, earlyJupPrice] = await Promise.all([
+              (async () => {
+                if (!wsolVaultPubkey || !tokenVaultPubkey) return null;
+                try { return await this.fetchOnChainPoolReserves(wsolVaultPubkey, tokenVaultPubkey); }
+                catch { return null; }
+              })(),
+              (async () => {
+                try { return await this.fetchJupiterPriceFallback(mint); }
+                catch { return null; }
+              })(),
+            ]);
+            const onChainPrice = (earlyReserves && earlyReserves.solBalance > 0 && earlyReserves.tokenBalanceUi > 0)
+              ? (earlyReserves.solBalance / earlyReserves.tokenBalanceUi) * solUsd
+              : 0;
+            const jupPrice = earlyJupPrice ?? 0;
+            // Take lowest non-zero — closest to open when trades have already landed
+            if (onChainPrice > 0 && jupPrice > 0) {
+              earlyGraduationPrice = Math.min(onChainPrice, jupPrice);
+            } else {
+              earlyGraduationPrice = onChainPrice > 0 ? onChainPrice : jupPrice;
+            }
+            logger.info({ mint, onChainPrice: onChainPrice.toExponential(4),
+              jupPrice: jupPrice.toExponential(4),
+              earlyGraduationPrice: earlyGraduationPrice.toExponential(4),
+              elapsedMs: Date.now() - earlyStart },
+              'Graduation sniper: early graduation price (on-chain+jup fallback) ⚡');
+          }
         } catch {
-          logger.warn({ mint }, 'Graduation sniper: early price capture failed — will use initialPrice fallback');
+          logger.warn({ mint }, 'Graduation sniper: graduation price capture failed — will use initialPrice fallback');
         }
       }
 
@@ -1862,7 +1885,15 @@ class GraduationSniperService {
     return null;
   }
 
-  private async extractMintFromTx(signature: string): Promise<{ mint: string; wsolVaultPubkey: string | null; tokenVaultPubkey: string | null } | null> {
+  private async extractMintFromTx(signature: string): Promise<{
+    mint: string;
+    wsolVaultPubkey: string | null;
+    tokenVaultPubkey: string | null;
+    /** Initial SOL deposited into the pool vault at creation (from TX postTokenBalances).
+     *  Together with txInitialTokenDeposit this gives the true open price before any trade. */
+    txInitialSolDeposit: number;
+    txInitialTokenDeposit: number;
+  } | null> {
     const apiKey = process.env["HELIUS_API_KEY"];
     if (!apiKey) return null;
 
@@ -2114,13 +2145,22 @@ class GraduationSniperService {
             newTokenCount: newTokenEntries.length,
           }, "Graduation sniper: vault extraction strategy");
 
+          // ── TX open-price extraction ──────────────────────────────────────
+          // The postTokenBalances of newly-created vault accounts contain the
+          // INITIAL deposit amounts — exactly what went into the pool at creation,
+          // before any buy/sell. This gives the true open price of the first candle.
+          const txInitialSolDeposit   = wsolEntry?.uiTokenAmount?.uiAmount  ?? 0;
+          const txInitialTokenDeposit = tokenEntry?.uiTokenAmount?.uiAmount ?? 0;
+
           logger.info({
             signature, mint,
-            wsolVaultPubkey:  wsolVaultPubkey?.slice(0, 8) ?? null,
-            tokenVaultPubkey: tokenVaultPubkey?.slice(0, 8) ?? null,
+            wsolVaultPubkey:       wsolVaultPubkey?.slice(0, 8) ?? null,
+            tokenVaultPubkey:      tokenVaultPubkey?.slice(0, 8) ?? null,
+            txInitialSolDeposit:   txInitialSolDeposit.toFixed(2),
+            txInitialTokenDeposit: txInitialTokenDeposit > 0 ? txInitialTokenDeposit.toExponential(4) : 0,
             attempt: attempt + 1,
           }, "Graduation sniper: mint + both vaults extracted ✅");
-          return { mint, wsolVaultPubkey, tokenVaultPubkey };
+          return { mint, wsolVaultPubkey, tokenVaultPubkey, txInitialSolDeposit, txInitialTokenDeposit };
         }
 
         logger.info(
