@@ -84,8 +84,9 @@ const DEFAULT_PAPER_CONFIG: PaperConfig = {
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DEXSCREENER_BASE    = "https://api.dexscreener.com";
-const PRICE_LOOP_MS       = 3_000;
-const STALE_PRICE_MS      = 5_000;
+const JUPITER_PRICE_BASE  = "https://lite-api.jup.ag/price/v2";
+const PRICE_LOOP_MS       = 1_500;
+const STALE_PRICE_MS      = 4_000;
 const BATCH_MAX           = 30;
 const STARTING_BALANCE    = 0.1;
 const MAX_EVENTS          = 100;
@@ -879,65 +880,82 @@ class PaperSniperService {
     for (let i = 0; i < positions.length; i += BATCH_MAX) {
       const batch = positions.slice(i, i + BATCH_MAX);
       const mints = batch.map((p) => p.mint).join(",");
-      try {
-        type DexPair = {
-          baseToken: { address: string };
-          priceUsd: string;
-          liquidity?: { usd?: number };
-          txns?: { m5?: { buys?: number; sells?: number } };
-        };
-        const res = await axios.get<DexPair[]>(
-          `${DEXSCREENER_BASE}/tokens/v1/solana/${mints}`,
-          { timeout: 6_000 },
-        );
-        const pairs = res.data ?? [];
-        const priceMap = new Map<string, number>();
-        const liqMap   = new Map<string, number>();
-        const buysMap  = new Map<string, number>();
-        const sellsMap = new Map<string, number>();
+
+      const priceMap = new Map<string, number>();
+      const liqMap   = new Map<string, number>();
+      const buysMap  = new Map<string, number>();
+      const sellsMap = new Map<string, number>();
+
+      // ── Fire Jupiter (real-time AMM) and DexScreener in parallel ─────────
+      type DexPair = {
+        baseToken: { address: string };
+        priceUsd: string;
+        liquidity?: { usd?: number };
+        txns?: { m5?: { buys?: number; sells?: number } };
+      };
+      type JupResp = { data: Record<string, { price: number }> };
+
+      const [jupResult, dexResult] = await Promise.allSettled([
+        axios.get<JupResp>(`${JUPITER_PRICE_BASE}?ids=${mints}`, { timeout: 3_000 }),
+        axios.get<DexPair[]>(`${DEXSCREENER_BASE}/tokens/v1/solana/${mints}`, { timeout: 5_000 }),
+      ]);
+
+      // Jupiter gives most real-time AMM prices — use as primary
+      if (jupResult.status === "fulfilled") {
+        const jupData = jupResult.value.data?.data ?? {};
+        for (const mint of batch.map(p => p.mint)) {
+          const p = jupData[mint]?.price;
+          if (p && p > 0) priceMap.set(mint, p);
+        }
+      }
+
+      // DexScreener fills in liq/txn data and prices for any mint Jupiter missed
+      if (dexResult.status === "fulfilled") {
+        const pairs = dexResult.value.data ?? [];
         for (const pair of pairs) {
           const addr = pair.baseToken.address;
           const p = parseFloat(pair.priceUsd);
-          if (p > 0) priceMap.set(addr, p);
+          // Only use DexScreener price if Jupiter didn't return one for this mint
+          if (p > 0 && !priceMap.has(addr)) priceMap.set(addr, p);
           if (pair.liquidity?.usd != null) liqMap.set(addr, pair.liquidity.usd);
           if (pair.txns?.m5) {
             buysMap.set(addr,  pair.txns.m5.buys  ?? 0);
             sellsMap.set(addr, pair.txns.m5.sells ?? 0);
           }
         }
+      }
 
-        for (const pos of batch) {
-          const price = priceMap.get(pos.mint);
-          if (!price || price <= 0) continue;
-          pos.currentPrice = price;
-          pos.lastPriceAt  = now;
-          if (price > pos.trailingHigh) pos.trailingHigh = price;
+      for (const pos of batch) {
+        const price = priceMap.get(pos.mint);
+        if (!price || price <= 0) continue;
+        pos.currentPrice = price;
+        pos.lastPriceAt  = now;
+        if (price > pos.trailingHigh) pos.trailingHigh = price;
 
-          // ── Whale dump detection (pre-TP1, enabled toggle) ──────────────────
-          if (cfg.enableWhaleDumpExit && !pos.tp1Hit) {
-            const liqUsd = liqMap.get(pos.mint);
-            if (liqUsd != null && liqUsd > 0) {
-              const prev = this.lastPositionLiquidityUsd.get(pos.mint);
-              this.lastPositionLiquidityUsd.set(pos.mint, liqUsd);
-              if (prev != null && prev > 0) {
-                const dropPct = (1 - liqUsd / prev) * 100;
-                const prevSolEst = prev / (price > 0 ? price * 150 : 1);
-                const solDropEst = prevSolEst * (dropPct / 100);
-                if (dropPct >= 20 && dropPct < 40 && solDropEst >= 5) {
-                  logger.warn({ mint: pos.mint, symbol: pos.symbol, dropPct: dropPct.toFixed(1), solDropEst: solDropEst.toFixed(1) },
-                    "Paper sniper: WHALE DUMP detected — emergency exit 🐋");
-                  this.closePaperPosition(pos, `Whale dump: -${dropPct.toFixed(0)}% liquidity (~${solDropEst.toFixed(1)} SOL)`, price);
-                  continue;
-                }
+        // ── Whale dump detection (pre-TP1, enabled toggle) ──────────────────
+        if (cfg.enableWhaleDumpExit && !pos.tp1Hit) {
+          const liqUsd = liqMap.get(pos.mint);
+          if (liqUsd != null && liqUsd > 0) {
+            const prev = this.lastPositionLiquidityUsd.get(pos.mint);
+            this.lastPositionLiquidityUsd.set(pos.mint, liqUsd);
+            if (prev != null && prev > 0) {
+              const dropPct = (1 - liqUsd / prev) * 100;
+              const prevSolEst = prev / (price > 0 ? price * 150 : 1);
+              const solDropEst = prevSolEst * (dropPct / 100);
+              if (dropPct >= 20 && dropPct < 40 && solDropEst >= 5) {
+                logger.warn({ mint: pos.mint, symbol: pos.symbol, dropPct: dropPct.toFixed(1), solDropEst: solDropEst.toFixed(1) },
+                  "Paper sniper: WHALE DUMP detected — emergency exit 🐋");
+                this.closePaperPosition(pos, `Whale dump: -${dropPct.toFixed(0)}% liquidity (~${solDropEst.toFixed(1)} SOL)`, price);
+                continue;
               }
             }
           }
-
-          const buysM5  = buysMap.get(pos.mint)  ?? 0;
-          const sellsM5 = sellsMap.get(pos.mint) ?? 0;
-          this.checkTpSl(pos, cfg, buysM5, sellsM5);
         }
-      } catch { /* non-fatal */ }
+
+        const buysM5  = buysMap.get(pos.mint)  ?? 0;
+        const sellsM5 = sellsMap.get(pos.mint) ?? 0;
+        this.checkTpSl(pos, cfg, buysM5, sellsM5);
+      }
     }
 
     this.updateUnrealizedPnl();
@@ -1293,11 +1311,26 @@ class PaperSniperService {
   // AMM pair) with Jupiter as fallback. Used by enterPhase3Trade to guarantee
   // a realistic entry price at the moment Phase 3 fires.
   private async fetchLivePriceForPhase3(mint: string, fallbackPrice: number): Promise<number> {
+    // Try Jupiter first — it returns real-time AMM prices in ~200ms
+    try {
+      type JupResp = { data: Record<string, { price: number }> };
+      const res = await axios.get<JupResp>(
+        `${JUPITER_PRICE_BASE}?ids=${mint}`,
+        { timeout: 2_000 },
+      );
+      const p = res.data?.data?.[mint]?.price;
+      if (p && p > 0) {
+        logger.info({ mint, price: p, source: "jupiter" }, "Paper sniper [phase3]: live price fetched (Jupiter)");
+        return p;
+      }
+    } catch { /* fall through to DexScreener */ }
+
+    // DexScreener fallback — slower but has liquidity data
     try {
       type DexPair = { baseToken?: { address: string }; priceUsd: string; liquidity?: { usd?: number }; dexId?: string };
       const res = await axios.get<DexPair[]>(
         `${DEXSCREENER_BASE}/tokens/v1/solana/${mint}`,
-        { timeout: 5_000 },
+        { timeout: 4_000 },
       );
       const pairs = Array.isArray(res.data) ? res.data : [];
       let bestPrice = 0;
@@ -1308,21 +1341,8 @@ class PaperSniperService {
         if (p > 0 && liq > bestLiq) { bestPrice = p; bestLiq = liq; }
       }
       if (bestPrice > 0) {
-        logger.info({ mint, price: bestPrice, source: "dexscreener" }, "Paper sniper [phase3]: live price fetched");
+        logger.info({ mint, price: bestPrice, source: "dexscreener" }, "Paper sniper [phase3]: live price fetched (DexScreener)");
         return bestPrice;
-      }
-    } catch { /* fall through to Jupiter */ }
-
-    try {
-      type JupResp = { data: Record<string, { price: number }> };
-      const res = await axios.get<JupResp>(
-        `https://lite-api.jup.ag/price/v2?ids=${mint}`,
-        { timeout: 4_000 },
-      );
-      const p = res.data?.data?.[mint]?.price;
-      if (p && p > 0) {
-        logger.info({ mint, price: p, source: "jupiter" }, "Paper sniper [phase3]: live price fetched (Jupiter fallback)");
-        return p;
       }
     } catch { /* fall through to fallback */ }
 
@@ -1377,13 +1397,24 @@ class PaperSniperService {
       void this.persistBalance();
     }
 
-    // Fetch a fresh live price at the moment of entry for realistic execution
-    const entryPrice = await this.fetchLivePriceForPhase3(mint, price);
+    // Use the signal price directly — it comes from the graduation sniper's
+    // 1-second real-time poller and is already the live AMM price.
+    // We fire a Jupiter refresh in parallel just to log, but never block on it.
+    let entryPrice = price;
+    axios.get<{ data: Record<string, { price: number }> }>(
+      `${JUPITER_PRICE_BASE}?ids=${mint}`, { timeout: 2_000 }
+    ).then(res => {
+      const jp = res.data?.data?.[mint]?.price;
+      if (jp && jp > 0) {
+        logger.info({ mint, symbol, signalPrice: price, jupiterPrice: jp },
+          "Paper sniper [phase3]: Jupiter confirms live price ✅");
+      }
+    }).catch(() => { /* non-fatal — we already have the signal price */ });
 
     if (!(entryPrice > 0)) {
-      logger.warn({ mint, symbol, price }, "Paper sniper [phase3]: could not determine entry price, skipping");
+      logger.warn({ mint, symbol, price }, "Paper sniper [phase3]: signal price is zero, skipping");
       this.addEvent({ id: uid(), detectedAt: now2, mint, symbol, action: "skipped",
-        skipReason: "Phase 3 signal — price unavailable (DexScreener + Jupiter both failed)" });
+        skipReason: "Phase 3 signal — price unavailable" });
       this.broadcast();
       return;
     }
