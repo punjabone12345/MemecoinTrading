@@ -1003,7 +1003,7 @@ export default function GraduationSniper() {
                 <span className="text-[11px] font-bold text-violet-300/80 uppercase tracking-wider">DIP-RETRACE WATCH</span>
                 <Badge className="bg-violet-500/20 text-violet-400 border-violet-500/30 text-[9px] px-1.5 py-0">{watchedGrads.length}</Badge>
               </div>
-              <span className="text-[9px] text-white/25">+30% pump → dump → retrace · live 2s</span>
+              <span className="text-[9px] text-white/25">P1: +40% pump · P2: -30% dump · P3: +40% retrace → BUY · live 1s</span>
             </div>
             {watchedGrads.map((g) => <WatchedGradRow key={g.mint} grad={g} />)}
           </div>
@@ -1026,38 +1026,42 @@ export default function GraduationSniper() {
 
 // ── Sub-components ─────────────────────────────────────────────────────────────
 
+// ── Phase config ──────────────────────────────────────────────────────────────
+const PHASE1_PUMP_TRIGGER  = 40; // % pump from lowest needed to pass Phase 1
+const PHASE2_DUMP_TRIGGER  = 30; // % dump from P1 peak needed to pass Phase 2
+const PHASE3_RETRACE_TRIGGER = 40; // % pump from P2 low needed to trigger buy
+
+function PhaseBar({ value, max, color }: { value: number; max: number; color: string }) {
+  const pct = Math.min(100, (value / max) * 100);
+  return (
+    <div className="h-1 w-full rounded-full bg-white/8 overflow-hidden">
+      <div className={`h-full rounded-full transition-all duration-500 ${color}`} style={{ width: `${pct}%` }} />
+    </div>
+  );
+}
+
 function WatchedGradRow({ grad }: { grad: WatchedGrad }) {
-  const pumpPct  = grad.gradPrice > 0 ? ((grad.peakPrice / grad.gradPrice) - 1) * 100 : 0;
-  const dumpPct  = grad.peakPrice > 0 ? ((1 - grad.currentPrice / grad.peakPrice)) * 100 : 0;
-  const retracePct = (grad.dipLow < grad.peakPrice && grad.peakPrice > grad.dipLow)
-    ? ((grad.currentPrice - grad.dipLow) / (grad.peakPrice - grad.dipLow)) * 100
-    : 0;
+  const isStale = Date.now() - grad.lastUpdatedAt > 12_000;
 
-  const statusColor: Record<string, string> = {
-    watching:  "bg-white/8 text-white/40 border-white/10",
-    pumping:   "bg-emerald-500/15 text-emerald-400 border-emerald-500/25",
-    dumped:    "bg-red-500/15 text-red-400 border-red-500/25",
-    retracing: "bg-amber-500/15 text-amber-400 border-amber-500/25",
-  };
-  const statusLabel: Record<string, string> = {
-    watching:  "watching",
-    pumping:   "PUMPING",
-    dumped:    "DUMPED",
-    retracing: "RETRACING",
-  };
-
-  const staleMs = Date.now() - grad.lastUpdatedAt;
-  const isStale = staleMs > 10_000;
+  // Phase badge config
+  const phaseConfig = {
+    0: { label: "WATCHING", bg: "bg-white/8 text-white/50 border-white/10", dot: "bg-white/30" },
+    1: { label: "P1 PUMPED ✓", bg: "bg-emerald-500/15 text-emerald-400 border-emerald-500/30", dot: "bg-emerald-400" },
+    2: { label: "P2 DUMPED ✓", bg: "bg-red-500/15 text-red-400 border-red-500/30", dot: "bg-red-400" },
+    3: { label: grad.phase3Triggered ? "🚀 BUYING" : "P3 RETRACING", bg: "bg-amber-500/20 text-amber-300 border-amber-500/40", dot: "bg-amber-400" },
+  }[grad.phase] ?? { label: "—", bg: "bg-white/8 text-white/40 border-white/10", dot: "bg-white/20" };
 
   return (
     <div className="px-3 py-3 border-b border-white/5 last:border-0">
-      {/* Row 1: Symbol + status + age */}
-      <div className="flex items-center justify-between gap-2 mb-2">
+
+      {/* ── Header row ── */}
+      <div className="flex items-center justify-between gap-2 mb-2.5">
         <div className="flex items-center gap-2 min-w-0">
           <a href={`https://dexscreener.com/solana/${grad.mint}`} target="_blank" rel="noreferrer"
-            className="text-[13px] font-bold text-white hover:text-violet-300 truncate">{grad.symbol}</a>
-          <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border ${statusColor[grad.status] ?? statusColor.watching}`}>
-            {statusLabel[grad.status] ?? grad.status}
+            className="text-[14px] font-bold text-white hover:text-violet-300 truncate">{grad.symbol}</a>
+          <span className={`text-[9px] font-bold px-2 py-0.5 rounded-full border flex items-center gap-1 ${phaseConfig.bg}`}>
+            <span className={`w-1.5 h-1.5 rounded-full ${phaseConfig.dot}`} />
+            {phaseConfig.label}
           </span>
           {grad.qualityScore !== undefined && (
             <span className={`text-[11px] font-bold ${grad.qualityScore >= 70 ? "text-emerald-400" : grad.qualityScore >= 50 ? "text-amber-400" : "text-red-400"}`}>
@@ -1066,62 +1070,97 @@ function WatchedGradRow({ grad }: { grad: WatchedGrad }) {
           )}
         </div>
         <div className="flex items-center gap-1.5 shrink-0">
-          {isStale && <span className="text-[9px] text-amber-400/70 font-medium">stale</span>}
+          {isStale && <span className="text-[9px] text-amber-400/60">stale</span>}
           <span className="text-[10px] text-white/30">{timeAgo(grad.addedAt)}</span>
         </div>
       </div>
 
-      {/* Row 2: Price grid — 2 cols × 2 rows for breathing room */}
-      <div className="grid grid-cols-2 gap-x-3 gap-y-2">
-        {/* GRAD PRICE */}
+      {/* ── Price row: Grad · Now ── */}
+      <div className="grid grid-cols-2 gap-2 mb-2.5">
         <div className="bg-white/4 rounded-lg px-2.5 py-1.5">
-          <div className="text-[9px] text-white/35 uppercase tracking-wide mb-0.5">Grad Price</div>
-          <div className="text-[12px] font-mono font-semibold text-white/70">{fmtPriceSafe(grad.gradPrice)}</div>
+          <div className="text-[9px] text-white/30 uppercase tracking-wide mb-0.5">Grad Price</div>
+          <div className="text-[12px] font-mono font-semibold text-white/65">{fmtPriceSafe(grad.gradPrice)}</div>
         </div>
-
-        {/* PEAK */}
-        <div className="bg-emerald-500/8 rounded-lg px-2.5 py-1.5">
-          <div className="text-[9px] text-white/35 uppercase tracking-wide mb-0.5">Peak</div>
-          <div className="text-[12px] font-mono font-semibold text-emerald-400">
-            {fmtPriceSafe(grad.peakPrice)}
-            {pumpPct > 1 && <span className="text-[10px] text-emerald-400/60 ml-1">+{pumpPct.toFixed(0)}%</span>}
-          </div>
-        </div>
-
-        {/* DIP LOW */}
-        <div className="bg-red-500/6 rounded-lg px-2.5 py-1.5">
-          <div className="text-[9px] text-white/35 uppercase tracking-wide mb-0.5">Dip Low</div>
-          <div className="text-[12px] font-mono font-semibold text-red-400/90">
-            {grad.dipLow > 0 && grad.dipLow < grad.peakPrice
-              ? fmtPriceSafe(grad.dipLow)
-              : "—"}
-            {dumpPct > 5 && grad.status !== "watching" && (
-              <span className="text-[10px] text-red-400/50 ml-1">-{dumpPct.toFixed(0)}%</span>
-            )}
-          </div>
-        </div>
-
-        {/* NOW */}
         <div className={`rounded-lg px-2.5 py-1.5 ${
-          grad.status === "retracing" ? "bg-amber-500/10" :
-          grad.status === "pumping"   ? "bg-emerald-500/10" :
-          grad.status === "dumped"    ? "bg-red-500/8" :
-          "bg-white/4"
-        }`}>
-          <div className="text-[9px] text-white/35 uppercase tracking-wide mb-0.5">Now</div>
-          <div className={`text-[12px] font-mono font-bold ${
-            grad.status === "retracing" ? "text-amber-400" :
-            grad.status === "pumping"   ? "text-emerald-400" :
-            grad.status === "dumped"    ? "text-red-400" :
-            "text-white/80"
-          }`}>
+          grad.phase === 3 ? "bg-amber-500/12" : grad.phase === 2 ? "bg-red-500/8" :
+          grad.phase === 1 ? "bg-emerald-500/8" : "bg-white/4"}`}>
+          <div className="text-[9px] text-white/30 uppercase tracking-wide mb-0.5">Now</div>
+          <div className={`text-[13px] font-mono font-bold ${
+            grad.phase === 3 ? "text-amber-300" : grad.phase === 2 ? "text-red-400" :
+            grad.phase === 1 ? "text-emerald-400" : "text-white/80"}`}>
             {fmtPriceSafe(grad.currentPrice)}
-            {grad.status === "retracing" && retracePct > 0 && (
-              <span className="text-[10px] text-amber-400/60 ml-1">{retracePct.toFixed(0)}% ret</span>
-            )}
           </div>
         </div>
       </div>
+
+      {/* ── Phase 1: Pump tracker ── */}
+      <div className={`mb-1.5 rounded-lg px-2.5 py-2 ${grad.phase1Triggered ? "bg-emerald-500/8 border border-emerald-500/20" : "bg-white/3 border border-white/6"}`}>
+        <div className="flex items-center justify-between mb-1">
+          <span className={`text-[9px] font-bold uppercase tracking-wide ${grad.phase1Triggered ? "text-emerald-400" : "text-white/40"}`}>
+            {grad.phase1Triggered ? "✓ Phase 1: Pumped" : "Phase 1: Waiting for +40% pump"}
+          </span>
+          <span className={`text-[10px] font-mono font-bold ${grad.phase1Triggered ? "text-emerald-400" : "text-white/50"}`}>
+            {grad.phase1PumpPct > 0 ? `+${grad.phase1PumpPct.toFixed(1)}%` : "—"}
+            {!grad.phase1Triggered && grad.phase1PumpPct > 0 && (
+              <span className="text-[9px] text-white/30 ml-1">/ {PHASE1_PUMP_TRIGGER}%</span>
+            )}
+          </span>
+        </div>
+        <PhaseBar value={grad.phase1PumpPct} max={PHASE1_PUMP_TRIGGER} color={grad.phase1Triggered ? "bg-emerald-400" : "bg-emerald-500/50"} />
+        {grad.phase1Triggered && grad.phase1PeakPrice > 0 && (
+          <div className="flex gap-3 mt-1">
+            <span className="text-[9px] text-white/30">Low {fmtPriceSafe(grad.lowestSeen)}</span>
+            <span className="text-[9px] text-emerald-400/70">Peak {fmtPriceSafe(grad.phase1PeakPrice)}</span>
+          </div>
+        )}
+      </div>
+
+      {/* ── Phase 2: Dump tracker (only show after phase 1) ── */}
+      {grad.phase >= 1 && (
+        <div className={`mb-1.5 rounded-lg px-2.5 py-2 ${grad.phase2Triggered ? "bg-red-500/8 border border-red-500/20" : "bg-white/3 border border-white/6"}`}>
+          <div className="flex items-center justify-between mb-1">
+            <span className={`text-[9px] font-bold uppercase tracking-wide ${grad.phase2Triggered ? "text-red-400" : "text-white/40"}`}>
+              {grad.phase2Triggered ? "✓ Phase 2: Dumped" : "Phase 2: Waiting for -30% dump"}
+            </span>
+            <span className={`text-[10px] font-mono font-bold ${grad.phase2Triggered ? "text-red-400" : "text-white/50"}`}>
+              {grad.phase2DumpPct > 0 ? `-${grad.phase2DumpPct.toFixed(1)}%` : "—"}
+              {!grad.phase2Triggered && grad.phase2DumpPct > 0 && (
+                <span className="text-[9px] text-white/30 ml-1">/ {PHASE2_DUMP_TRIGGER}%</span>
+              )}
+            </span>
+          </div>
+          <PhaseBar value={grad.phase2DumpPct} max={PHASE2_DUMP_TRIGGER} color={grad.phase2Triggered ? "bg-red-400" : "bg-red-500/50"} />
+          {grad.phase2Triggered && (
+            <div className="flex gap-3 mt-1">
+              <span className="text-[9px] text-red-400/70">Phase 2 Low {fmtPriceSafe(grad.phase2LowPrice)}</span>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── Phase 3: Retrace → BUY (only show after phase 2) ── */}
+      {grad.phase >= 2 && (
+        <div className={`rounded-lg px-2.5 py-2 ${grad.phase3Triggered ? "bg-amber-500/15 border border-amber-400/40" : "bg-white/3 border border-white/6"}`}>
+          <div className="flex items-center justify-between mb-1">
+            <span className={`text-[9px] font-bold uppercase tracking-wide ${grad.phase3Triggered ? "text-amber-300" : "text-white/40"}`}>
+              {grad.phase3Triggered ? "🚀 Phase 3: BUY TRIGGERED" : "Phase 3: Waiting for +40% retrace → BUY"}
+            </span>
+            <span className={`text-[10px] font-mono font-bold ${grad.phase3Triggered ? "text-amber-300" : "text-white/50"}`}>
+              {grad.phase3PumpPct > 0 ? `+${grad.phase3PumpPct.toFixed(1)}%` : "—"}
+              {!grad.phase3Triggered && grad.phase3PumpPct > 0 && (
+                <span className="text-[9px] text-white/30 ml-1">/ {PHASE3_RETRACE_TRIGGER}%</span>
+              )}
+            </span>
+          </div>
+          <PhaseBar value={grad.phase3PumpPct} max={PHASE3_RETRACE_TRIGGER} color={grad.phase3Triggered ? "bg-amber-400" : "bg-amber-500/50"} />
+          {grad.phase >= 2 && grad.phase2LowPrice > 0 && (
+            <div className="flex gap-3 mt-1">
+              <span className="text-[9px] text-white/30">P2 Low {fmtPriceSafe(grad.phase2LowPrice)}</span>
+              {grad.phase3PumpPct > 0 && <span className="text-[9px] text-amber-400/70">+{grad.phase3PumpPct.toFixed(1)}% recovery</span>}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

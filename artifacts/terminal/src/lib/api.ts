@@ -37,6 +37,7 @@ export function useWebSocket() {
             queryClient.invalidateQueries({ queryKey: ["sniper-history"] });
             queryClient.invalidateQueries({ queryKey: ["sniper-wallet"] });
             queryClient.invalidateQueries({ queryKey: ["sniper-stuck-tokens"] });
+            queryClient.invalidateQueries({ queryKey: ["sniper-watched"] });
           }
           if (data.type === "paper_sniper_update") {
             queryClient.invalidateQueries({ queryKey: ["paper-sniper-status"] });

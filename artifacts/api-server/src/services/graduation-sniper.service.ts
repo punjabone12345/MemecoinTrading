@@ -304,20 +304,39 @@ export interface SniperStatus {
 }
 
 // ── Dip-Retrace Watch ─────────────────────────────────────────────────────────
-// Tracks every graduated token for pump→dump→retrace patterns.
-// Price is polled every 2 s via Jupiter batch API (fastest available source).
+// Tracks every graduated token for 3-phase pump→dump→retrace entry patterns.
+// Phase 1: price pumps ≥40% from any low (grad price or lower) → phase1 triggered
+// Phase 2: price dumps ≥30% from phase1 peak → phase2 triggered
+// Phase 3: price pumps ≥40% from phase2 low → BUY instantly
+// Price polled every 1 s via DexScreener batch (fastest available source).
 export interface WatchedGrad {
   mint: string;
   symbol: string;
-  gradPrice: number;      // on-chain price at graduation detection
-  peakPrice: number;      // highest price seen since graduation
-  peakAt: number;         // timestamp of the peak
-  dipLow: number;         // lowest price after a post-grad pump
-  currentPrice: number;   // latest fetched price
-  addedAt: number;        // when we started watching this token
-  lastUpdatedAt: number;  // last successful price fetch
-  qualityScore?: number;  // quality score from the quality gate (if run)
-  status: "watching" | "pumping" | "dumped" | "retracing";
+  gradPrice: number;         // USD price at graduation detection (from on-chain or first DexScreener price)
+
+  // Phase 0 → Phase 1: track lowest seen and pump from it
+  lowestSeen: number;        // lowest price seen at any point (reset if price goes lower pre-phase1)
+  phase1PeakPrice: number;   // highest price during the phase 1 pump run
+  phase1PeakAt: number;
+  phase1Triggered: boolean;
+  phase1PumpPct: number;     // live: (phase1PeakPrice / lowestSeen - 1) * 100
+
+  // Phase 1 → Phase 2: track dump from phase1 peak
+  phase2LowPrice: number;    // lowest price after phase1 peak (tracks live until phase2 triggers)
+  phase2LowAt: number;
+  phase2Triggered: boolean;
+  phase2DumpPct: number;     // live: (1 - phase2LowPrice / phase1PeakPrice) * 100
+
+  // Phase 2 → Phase 3: track retrace from phase2 low
+  phase3PumpPct: number;     // live: (currentPrice / phase2LowPrice - 1) * 100
+  phase3Triggered: boolean;  // buy has been triggered
+
+  currentPrice: number;
+  addedAt: number;
+  lastUpdatedAt: number;
+  qualityScore?: number;
+  phase: 0 | 1 | 2 | 3;     // 0=watching, 1=pumped, 2=dumped, 3=bought/retracing
+  status: "watching" | "phase1_pumped" | "phase2_dumped" | "phase3_retracing" | "bought";
 }
 
 // ── Service ──────────────────────────────────────────────────────────────────
@@ -846,7 +865,7 @@ class GraduationSniperService {
     }, PRICE_LOOP_MS);
     this.liquidityIntervalId  = setInterval(() => void this.checkAllLiquidity(), LIQUIDITY_CHECK_MS);
     this.externalSellCheckId  = setInterval(() => void this.checkExternalSells(), 60_000);
-    this.watchPriceIntervalId = setInterval(() => void this.pollWatchedGradPrices(), 2_000);
+    this.watchPriceIntervalId = setInterval(() => void this.pollWatchedGradPrices(), 1_000);
 
     // ── WebSocket — only needed for detecting new graduations ────────────────
     const apiKey = process.env["HELIUS_API_KEY"];
@@ -3943,107 +3962,224 @@ class GraduationSniperService {
   ): void {
     if (this.watchedGrads.has(mint)) return; // already watching this token
     const now = Date.now();
+    // gradPrice may be 0 if on-chain reserves weren't readable yet —
+    // first DexScreener price will initialise it during pollWatchedGradPrices.
     const safeGrad = gradPrice > 0 ? gradPrice : 0;
     this.watchedGrads.set(mint, {
       mint,
       symbol,
-      gradPrice:    safeGrad,
-      peakPrice:    safeGrad,
-      peakAt:       now,
-      dipLow:       safeGrad,
-      currentPrice: safeGrad,
-      addedAt:      now,
-      lastUpdatedAt: now,
+      gradPrice:          safeGrad,
+      lowestSeen:         safeGrad,   // updated to lower if price dips pre-phase1
+      phase1PeakPrice:    safeGrad,
+      phase1PeakAt:       now,
+      phase1Triggered:    false,
+      phase1PumpPct:      0,
+      phase2LowPrice:     safeGrad,
+      phase2LowAt:        now,
+      phase2Triggered:    false,
+      phase2DumpPct:      0,
+      phase3PumpPct:      0,
+      phase3Triggered:    false,
+      currentPrice:       safeGrad,
+      addedAt:            now,
+      lastUpdatedAt:      now,
       qualityScore,
-      status: "watching",
+      phase:              0,
+      status:             "watching",
     });
-    logger.debug({ mint, symbol, gradPrice: safeGrad }, "Graduation sniper: added to dip-retrace watch");
+    logger.info({ mint, symbol, gradPrice: safeGrad }, "Graduation sniper: added to 3-phase dip-retrace watch 👁️");
   }
 
-  // Polls all watched tokens in a single batched DexScreener price call (fastest available source).
-  // Runs every 2 s. Groups pairs by base token address, picks highest-liquidity pair per token.
+  // ── 3-Phase Pump→Dump→Retrace Price Poller ────────────────────────────────
+  // Runs every 1 s. Single DexScreener batch call for all watched tokens.
+  // Phase 1: price pumps ≥40% from lowest seen → lock phase1 peak
+  // Phase 2: price dumps ≥30% from phase1 peak → lock phase2 low
+  // Phase 3: price pumps ≥40% from phase2 low → execute buy immediately
   private async pollWatchedGradPrices(): Promise<void> {
     if (this.watchedGrads.size === 0) return;
 
     const now = Date.now();
     const TTL = 2 * 60 * 60_000; // expire after 2 hours
 
-    // Expire old entries first
+    // Expire old entries
     for (const [mint, grad] of this.watchedGrads) {
       if (now - grad.addedAt > TTL) this.watchedGrads.delete(mint);
     }
     if (this.watchedGrads.size === 0) return;
 
-    // Single DexScreener batch call for ALL watched tokens (up to 30 per request)
+    // Batch DexScreener call — up to 30 tokens per request
     const mints = Array.from(this.watchedGrads.keys());
     try {
       type DexPair = {
         baseToken: { address: string };
         priceUsd: string;
         liquidity?: { usd?: number };
+        fdv?: number;
       };
       const res = await axios.get<DexPair[]>(
         `${DEXSCREENER_BASE}/tokens/v1/solana/${mints.slice(0, 30).join(",")}`,
-        { timeout: 5_000 },
+        { timeout: 4_000 },
       );
       const pairs = Array.isArray(res.data) ? res.data : [];
 
-      // Build mint→bestPriceUsd map: pick highest-liquidity pair per token
+      // Build mint→bestPrice map — pick highest-liquidity pair per token
       const priceByMint = new Map<string, number>();
       for (const pair of pairs) {
-        const mint = pair.baseToken?.address;
-        if (!mint) continue;
+        const m = pair.baseToken?.address;
+        if (!m) continue;
         const p = parseFloat(pair.priceUsd);
         if (!(p > 0)) continue;
         const liq = pair.liquidity?.usd ?? 0;
-        const existing = priceByMint.get(mint);
-        if (existing === undefined || liq > 0) priceByMint.set(mint, p);
+        const prev = priceByMint.get(m);
+        if (prev === undefined || liq > 0) priceByMint.set(m, p);
       }
+
+      let anyPhaseChange = false;
 
       for (const [mint, grad] of this.watchedGrads) {
         const price = priceByMint.get(mint);
         if (!(price! > 0)) continue;
 
-        grad.currentPrice  = price;
+        grad.currentPrice  = price!;
         grad.lastUpdatedAt = now;
 
-        // Update peak
-        if (price > grad.peakPrice || grad.peakPrice === 0) {
-          grad.peakPrice = price;
-          grad.peakAt    = now;
-        }
-
-        // Initialise gradPrice from first real price when on-chain wasn't available
+        // ── Bootstrap: first real price sets gradPrice / lowestSeen ─────────
         if (grad.gradPrice === 0) {
-          grad.gradPrice = price;
-          grad.dipLow    = price;
+          grad.gradPrice       = price!;
+          grad.lowestSeen      = price!;
+          grad.phase1PeakPrice = price!;
+          grad.phase2LowPrice  = price!;
         }
 
-        // Track dip low once the token has pumped ≥25% from grad price
-        const hasPumped = grad.gradPrice > 0 && grad.peakPrice >= grad.gradPrice * 1.25;
-        if (hasPumped && (price < grad.dipLow || grad.dipLow === grad.gradPrice)) {
-          grad.dipLow = price;
+        const prevPhase = grad.phase;
+
+        // ────────────────────────────────────────────────────────────────────
+        // PHASE 0: Watching — track lowest seen and pump from it
+        // ────────────────────────────────────────────────────────────────────
+        if (grad.phase === 0) {
+          // If price drops below lowestSeen, reset baseline (can accumulate lower entry)
+          if (price! < grad.lowestSeen) {
+            grad.lowestSeen      = price!;
+            grad.phase1PeakPrice = price!;  // reset run high too
+          }
+
+          // Track the highest price in this run from lowestSeen
+          if (price! > grad.phase1PeakPrice) {
+            grad.phase1PeakPrice = price!;
+            grad.phase1PeakAt    = now;
+          }
+
+          grad.phase1PumpPct = grad.lowestSeen > 0
+            ? (grad.phase1PeakPrice / grad.lowestSeen - 1) * 100
+            : 0;
+
+          // Phase 1 triggers when pump ≥ 40%
+          if (grad.phase1PumpPct >= 40) {
+            grad.phase1Triggered = true;
+            grad.phase           = 1;
+            grad.status          = "phase1_pumped";
+            grad.phase2LowPrice  = price!;  // start tracking dump from current price
+            grad.phase2LowAt     = now;
+            anyPhaseChange = true;
+            logger.info({ mint, symbol: grad.symbol, pumpPct: grad.phase1PumpPct.toFixed(1), peakPrice: grad.phase1PeakPrice }, "3-phase watch: ✅ PHASE 1 triggered — pump detected");
+          }
+
+        // ────────────────────────────────────────────────────────────────────
+        // PHASE 1: Pumped — waiting for dump ≥30% from phase1 peak
+        // ────────────────────────────────────────────────────────────────────
+        } else if (grad.phase === 1) {
+          // If price makes a new peak, update phase1PeakPrice
+          if (price! > grad.phase1PeakPrice) {
+            grad.phase1PeakPrice = price!;
+            grad.phase1PeakAt    = now;
+          }
+          // Track the dump low
+          if (price! < grad.phase2LowPrice) {
+            grad.phase2LowPrice = price!;
+            grad.phase2LowAt    = now;
+          }
+
+          grad.phase2DumpPct = grad.phase1PeakPrice > 0
+            ? (1 - grad.phase2LowPrice / grad.phase1PeakPrice) * 100
+            : 0;
+
+          grad.phase1PumpPct = grad.lowestSeen > 0
+            ? (grad.phase1PeakPrice / grad.lowestSeen - 1) * 100
+            : 0;
+
+          // Phase 2 triggers when dump ≥ 30% from phase1 peak
+          if (grad.phase2DumpPct >= 30) {
+            grad.phase2Triggered = true;
+            grad.phase           = 2;
+            grad.status          = "phase2_dumped";
+            anyPhaseChange = true;
+            logger.info({ mint, symbol: grad.symbol, dumpPct: grad.phase2DumpPct.toFixed(1), phase1Peak: grad.phase1PeakPrice, phase2Low: grad.phase2LowPrice }, "3-phase watch: ✅ PHASE 2 triggered — dump detected");
+          }
+
+        // ────────────────────────────────────────────────────────────────────
+        // PHASE 2: Dumped — waiting for retrace ≥40% from phase2 low → BUY
+        // ────────────────────────────────────────────────────────────────────
+        } else if (grad.phase === 2 && !grad.phase3Triggered) {
+          // If price continues to fall, update phase2 low
+          if (price! < grad.phase2LowPrice) {
+            grad.phase2LowPrice = price!;
+            grad.phase2LowAt    = now;
+          }
+
+          grad.phase3PumpPct = grad.phase2LowPrice > 0
+            ? (price! / grad.phase2LowPrice - 1) * 100
+            : 0;
+
+          // Phase 3 triggers when retrace ≥ 40% from phase2 low → BUY
+          if (grad.phase3PumpPct >= 40) {
+            grad.phase3Triggered = true;
+            grad.phase           = 3;
+            grad.status          = "phase3_retracing";
+            anyPhaseChange = true;
+            logger.info({ mint, symbol: grad.symbol, retracePct: grad.phase3PumpPct.toFixed(1), phase2Low: grad.phase2LowPrice, currentPrice: price }, "3-phase watch: 🚀 PHASE 3 triggered — BUY SIGNAL");
+
+            // ── Trigger buy ─────────────────────────────────────────────────
+            void this.triggerPhase3Buy(mint, grad.symbol, price!, grad.phase2LowPrice);
+          }
         }
 
-        // ── Status transitions ──────────────────────────────────────────────────
-        const gainFromGradPct = grad.gradPrice > 0 ? (grad.peakPrice / grad.gradPrice - 1) * 100 : 0;
-        const dropFromPeakPct = grad.peakPrice > 0 ? (1 - price / grad.peakPrice) * 100 : 0;
-        const pumped30        = gainFromGradPct >= 30;
-        const dumped40        = pumped30 && dropFromPeakPct >= 40;
-
-        if (dumped40) {
-          const range      = grad.peakPrice - grad.dipLow;
-          const retracePct = range > 0 ? (price - grad.dipLow) / range * 100 : 0;
-          grad.status = retracePct >= 60 ? "retracing" : "dumped";
-        } else if (pumped30 || (grad.gradPrice > 0 && price >= grad.gradPrice * 1.25)) {
-          grad.status = "pumping";
-        } else {
-          grad.status = "watching";
-        }
+        if (grad.phase !== prevPhase) anyPhaseChange = true;
       }
+
+      // Broadcast to frontend on every poll so UI is always live
+      this.broadcast();
+
     } catch (err) {
       logger.debug({ err: (err as Error).message }, "Graduation sniper: watch price poll failed (non-fatal)");
     }
+  }
+
+  // Executes a buy when Phase 3 triggers. Uses same enterPosition as normal sniper.
+  private triggerPhase3Buy(mint: string, symbol: string, currentPrice: number, phase2Low: number): void {
+    const walletReady = solanaWalletService.isReady();
+    if (!walletReady) {
+      logger.info({ mint, symbol, currentPrice, phase2Low }, "3-phase watch: Phase 3 buy signal — wallet not configured, skipping live buy (paper mode)");
+      return;
+    }
+
+    // Guard: no duplicate open position
+    const alreadyOpen = Array.from(this.openPositions.values()).some(p => p.mint === mint);
+    if (alreadyOpen) {
+      logger.info({ mint, symbol }, "3-phase watch: Phase 3 buy signal — position already open, skipping");
+      return;
+    }
+
+    logger.info({ mint, symbol, currentPrice }, "3-phase watch: 🚀 Executing Phase 3 BUY NOW");
+    void this.enterPosition(
+      mint, symbol, symbol,
+      currentPrice,
+      "phase3-dip-retrace",
+      currentPrice,
+      Date.now(),
+      null,
+      undefined,
+      null,
+    );
   }
 
   getWatchedGrads(): WatchedGrad[] {

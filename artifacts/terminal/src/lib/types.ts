@@ -340,14 +340,27 @@ export interface WatchedGrad {
   mint: string;
   symbol: string;
   gradPrice: number;
-  peakPrice: number;
-  peakAt: number;
-  dipLow: number;
+
+  lowestSeen: number;
+  phase1PeakPrice: number;
+  phase1PeakAt: number;
+  phase1Triggered: boolean;
+  phase1PumpPct: number;
+
+  phase2LowPrice: number;
+  phase2LowAt: number;
+  phase2Triggered: boolean;
+  phase2DumpPct: number;
+
+  phase3PumpPct: number;
+  phase3Triggered: boolean;
+
   currentPrice: number;
   addedAt: number;
   lastUpdatedAt: number;
   qualityScore?: number;
-  status: "watching" | "pumping" | "dumped" | "retracing";
+  phase: 0 | 1 | 2 | 3;
+  status: "watching" | "phase1_pumped" | "phase2_dumped" | "phase3_retracing" | "bought";
 }
 
 export interface SniperConfig {
