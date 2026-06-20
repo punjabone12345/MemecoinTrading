@@ -160,13 +160,15 @@ const JUPITER_PRICE_URL         = "https://lite-api.jup.ag/price/v2";
 
 // ── Dip-Retrace entry strategy ────────────────────────────────────────────────
 // After graduation: watch each token for DIP_WATCH_DURATION_MS.
-// Enter only when price dumps DIP_MIN_PCT–DIP_MAX_PCT from its post-graduation
-// peak HIGH and then retraces at least RETRACE_MIN_PCT of that dump.
-// Example: pump 30k→50k, dump 50k→25k (50% dump ✓), retrace to 40k (60% retrace ✓) → BUY
-const DIP_WATCH_DURATION_MS = 30 * 60_000;  // 30-minute watch window
-const DIP_MIN_PCT            = 40;           // min dump from peak to qualify (%)
-const DIP_MAX_PCT            = 60;           // max dump from peak (above = too deep, skip)
-const RETRACE_MIN_PCT        = 60;           // min retrace of dump needed to trigger entry (%)
+// Phase 1 — PUMP GATE: wait until price is ≥30% above graduation price.
+// Phase 2 — DIP WATCH: track peak from that pump high. Enter only when price
+//            dumps DIP_MIN_PCT–DIP_MAX_PCT from peak AND retraces RETRACE_MIN_PCT.
+// Example: grad→30k, pumps→50k (+67% ✓), dumps→22k (56% dump ✓), retraces→36k (64% ✓) → BUY
+const DIP_WATCH_DURATION_MS  = 30 * 60_000;  // 30-minute total watch window
+const PUMP_MIN_PCT            = 30;           // price must pump ≥30% from grad price before tracking dip
+const DIP_MIN_PCT             = 40;           // min dump from confirmed pump peak to qualify (%)
+const DIP_MAX_PCT             = 60;           // max dump from peak (above = too deep, skip)
+const RETRACE_MIN_PCT         = 60;           // min retrace of dump needed to trigger entry (%)
 
 
 function uid(): string {
@@ -334,10 +336,12 @@ export interface DipWatchEntry {
   watchStartedAt: number;   // ms epoch when watcher was created
   expiresAt: number;         // watchStartedAt + DIP_WATCH_DURATION_MS
   graduationPrice: number;   // price at graduation detection (initial price)
-  peakHigh: number;          // highest price seen since graduation
+  peakHigh: number;          // highest price seen AFTER pump gate confirmed
   dipLow: number;            // lowest price after peak dump starts
   currentPrice: number;      // latest fetched price
-  state: "pumping" | "dumped" | "retracing" | "entered" | "expired";
+  pumpConfirmed: boolean;    // true once price hits graduation * (1 + PUMP_MIN_PCT/100)
+  pumpPctFromGrad: number;   // % gain from graduation price (for UI progress bar)
+  state: "waiting_pump" | "pumping" | "dumped" | "retracing" | "entered" | "expired";
   dumpPct: number;           // (peakHigh - dipLow) / peakHigh * 100
   retracePct: number;        // (currentPrice - dipLow) / (peakHigh - dipLow) * 100
   qualityScore: number;
@@ -1014,7 +1018,7 @@ class GraduationSniperService {
     this.liquidityIntervalId = setInterval(() => void this.checkAllLiquidity(), LIQUIDITY_CHECK_MS);
     this.externalSellCheckId = setInterval(() => void this.checkExternalSells(), 60_000);
     // Dip-retrace watcher — runs every 5 s independently of the open-position loop
-    this.dipWatchIntervalId  = setInterval(() => void this.checkDipWatchers(), 5_000);
+    this.dipWatchIntervalId  = setInterval(() => void this.checkDipWatchers(), 2_000);
 
     // ── WebSocket — only needed for detecting new graduations ────────────────
     const apiKey = process.env["HELIUS_API_KEY"];
@@ -3745,6 +3749,42 @@ class GraduationSniperService {
     });
   }
 
+  // ── Jupiter Quote API — real-time AMM spot price for dip-watch loop ─────────
+  // Quotes 0.001 SOL → token via the swap route. This is the actual price you'd
+  // pay for a swap right now — more accurate than Jupiter's TWAP price API for
+  // tracking peak/dip/retrace on newly-graduated Raydium pools.
+  // Assumes 6 token decimals (all pump.fun tokens; safe for graduation sniper).
+  private async fetchPriceViaJupiterQuote(mint: string): Promise<number | null> {
+    try {
+      const WSOL       = 'So11111111111111111111111111111111111111112';
+      const IN_LAMPORTS = 1_000_000; // 0.001 SOL — small enough to avoid price impact
+      type QuoteResp = { outAmount: string; priceImpactPct: string; error?: string };
+      const res = await axios.get<QuoteResp>(
+        'https://lite-api.jup.ag/swap/v1/quote',
+        {
+          params: {
+            inputMint:  WSOL,
+            outputMint: mint,
+            amount:     IN_LAMPORTS,
+            slippageBps: 5000,
+          },
+          timeout: 4_000,
+        },
+      );
+      if (res.data?.error) return null;
+      const outAmount = Number(res.data?.outAmount);
+      if (!outAmount || outAmount <= 0) return null;
+      // Convert: 0.001 SOL buys (outAmount / 1e6) tokens → price per token in SOL
+      const priceInSol = (IN_LAMPORTS / 1e9) / (outAmount / 1e6);
+      const solUsd = await this.fetchCachedSolUsd();
+      if (solUsd <= 0) return null;
+      const priceUsd = priceInSol * solUsd;
+      return priceUsd > 0 ? priceUsd : null;
+    } catch {
+      return null;
+    }
+  }
+
   // ── Jupiter price API — fallback for tokens not yet indexed on DexScreener ──
   // Faster than DexScreener for very new tokens (graduates appear on Jupiter in <5s).
   // Only called when DexScreener batch missed the token — keeps Jupiter call count minimal.
@@ -4313,10 +4353,12 @@ class GraduationSniperService {
       watchStartedAt:   now,
       expiresAt:        now + DIP_WATCH_DURATION_MS,
       graduationPrice:  opts.graduationPrice,
-      peakHigh:         opts.graduationPrice,
-      dipLow:           opts.graduationPrice,
+      peakHigh:         opts.graduationPrice,   // will be reset once pump confirmed
+      dipLow:           opts.graduationPrice,   // will be reset once pump confirmed
       currentPrice:     opts.graduationPrice,
-      state:            "pumping",
+      pumpConfirmed:    false,                  // must pump ≥30% from grad price first
+      pumpPctFromGrad:  0,
+      state:            "waiting_pump",
       dumpPct:          0,
       retracePct:       0,
       qualityScore:     opts.quality.totalScore,
@@ -4334,7 +4376,7 @@ class GraduationSniperService {
 
     logger.info(
       { mint: opts.mint, symbol: opts.symbol, graduationPrice: opts.graduationPrice.toExponential(4), expiresIn: '30m' },
-      `Graduation sniper: dip-retrace watcher started 👀 (${DIP_MIN_PCT}–${DIP_MAX_PCT}% dump + ${RETRACE_MIN_PCT}% retrace triggers entry)`,
+      `Graduation sniper: dip-retrace watcher started 👀 — waiting for ${PUMP_MIN_PCT}% pump, then ${DIP_MIN_PCT}–${DIP_MAX_PCT}% dump + ${RETRACE_MIN_PCT}% retrace triggers entry`,
     );
   }
 
@@ -4361,18 +4403,29 @@ class GraduationSniperService {
       }
 
       // ── Fetch current price ───────────────────────────────────────────────
-      // Use fetchPriceFast (races Jupiter + DexScreener) so the dip-watch loop
-      // gets the freshest possible price. DexScreener alone can lag 30–60 s on
-      // new tokens which causes peakHigh to be recorded lower than the actual
-      // peak, skewing dump% calculations.
+      // Race Jupiter Quote API (real-time AMM spot price) vs DexScreener
+      // in parallel. Jupiter Quote gives the exact price you'd get from a
+      // swap, not a TWAP — this is critical for accurate peak/dip tracking.
       let price = 0;
       try {
-        const priceData = await this.fetchPriceFast(mint);
-        if (priceData && priceData.price > 0) {
-          price = priceData.price;
-          // Update symbol/name if DexScreener returns better data
-          if (priceData.symbol && entry.symbol === mint.slice(0, 8)) entry.symbol = priceData.symbol;
-          if (priceData.name   && entry.name   === mint.slice(0, 8)) entry.name   = priceData.name;
+        const [quoteResult, dexResult] = await Promise.allSettled([
+          this.fetchPriceViaJupiterQuote(mint),
+          this.fetchPrice(mint),
+        ]);
+        // Prefer Jupiter Quote (real-time AMM price) for numeric accuracy
+        if (quoteResult.status === 'fulfilled' && quoteResult.value && quoteResult.value > 0) {
+          price = quoteResult.value;
+        }
+        // Use DexScreener for metadata (symbol/name) and as price fallback
+        if (dexResult.status === 'fulfilled' && dexResult.value) {
+          if (entry.symbol === mint.slice(0, 8) && dexResult.value.symbol) entry.symbol = dexResult.value.symbol;
+          if (entry.name   === mint.slice(0, 8) && dexResult.value.name)   entry.name   = dexResult.value.name;
+          if (price <= 0) price = dexResult.value.price;
+        }
+        // Last resort: Jupiter Price API fallback
+        if (price <= 0) {
+          const jupFb = await this.fetchJupiterPriceFallback(mint);
+          if (jupFb && jupFb > 0) price = jupFb;
         }
       } catch { /* non-fatal — skip this cycle */ }
 
@@ -4380,7 +4433,33 @@ class GraduationSniperService {
 
       entry.currentPrice = price;
 
-      // ── Update peak high and dip low ─────────────────────────────────────
+      // ── Update pump progress toward 30% gate ──────────────────────────────
+      entry.pumpPctFromGrad = entry.graduationPrice > 0
+        ? ((price - entry.graduationPrice) / entry.graduationPrice) * 100
+        : 0;
+
+      // ── Phase 1: Pump gate — wait until price is ≥30% above graduation ────
+      if (!entry.pumpConfirmed) {
+        const pumpThreshold = entry.graduationPrice * (1 + PUMP_MIN_PCT / 100);
+        if (price >= pumpThreshold) {
+          entry.pumpConfirmed = true;
+          entry.peakHigh      = price;
+          entry.dipLow        = price;
+          entry.state         = "pumping";
+          logger.info({
+            mint, symbol: entry.symbol,
+            pumpPct:        entry.pumpPctFromGrad.toFixed(1),
+            price:          price.toExponential(4),
+            graduationPrice: entry.graduationPrice.toExponential(4),
+          }, `Graduation sniper: ≥${PUMP_MIN_PCT}% pump confirmed — dip tracking started 🚀`);
+        } else {
+          // Still waiting — don't track peak/dip yet
+          entry.state = "waiting_pump";
+          continue;
+        }
+      }
+
+      // ── Phase 2: Peak/dip tracking (only after pump gate confirmed) ───────
       if (price > entry.peakHigh) {
         entry.peakHigh = price;
         // Reset dipLow to current price — we're at a new high, fresh dump-tracking
@@ -4462,9 +4541,14 @@ class GraduationSniperService {
 
     // Always fire paper callback at trigger time — paper position opens at
     // the dip-retrace entry price (same as the live bot), not at graduation price.
+    // Use graduationPrice as the detectionPrice fallback when _initialPrice is 0
+    // (occurs when HELIUS_API_KEY is absent and on-chain price read fails).
+    const detectionPriceForPaper = entry._initialPrice > 0
+      ? entry._initialPrice
+      : entry.graduationPrice;
     this.paperCallback?.(
       entry.mint, triggerPrice, entry.symbol, entry.name,
-      entry._detectedAt, entry._initialPrice, qualityMeta,
+      entry._detectedAt, detectionPriceForPaper, qualityMeta,
     );
 
     if (!entry._liveOnlySkip) {
@@ -4486,19 +4570,21 @@ class GraduationSniperService {
 
   getDipWatchers(): DipWatchEntry[] {
     return Array.from(this.dipWatchMap.values()).map((e) => ({
-      mint:            e.mint,
-      symbol:          e.symbol,
-      name:            e.name,
-      watchStartedAt:  e.watchStartedAt,
-      expiresAt:       e.expiresAt,
-      graduationPrice: e.graduationPrice,
-      peakHigh:        e.peakHigh,
-      dipLow:          e.dipLow,
-      currentPrice:    e.currentPrice,
-      state:           e.state,
-      dumpPct:         e.dumpPct,
-      retracePct:      e.retracePct,
-      qualityScore:    e.qualityScore,
+      mint:             e.mint,
+      symbol:           e.symbol,
+      name:             e.name,
+      watchStartedAt:   e.watchStartedAt,
+      expiresAt:        e.expiresAt,
+      graduationPrice:  e.graduationPrice,
+      peakHigh:         e.peakHigh,
+      dipLow:           e.dipLow,
+      currentPrice:     e.currentPrice,
+      pumpConfirmed:    e.pumpConfirmed,
+      pumpPctFromGrad:  e.pumpPctFromGrad,
+      state:            e.state,
+      dumpPct:          e.dumpPct,
+      retracePct:       e.retracePct,
+      qualityScore:     e.qualityScore,
     }));
   }
 

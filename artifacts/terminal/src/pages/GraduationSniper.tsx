@@ -1083,25 +1083,28 @@ function DipWatchPanel({ watchers }: { watchers: DipWatchEntry[] }) {
   if (watchers.length === 0) return null;
 
   const stateLabel: Record<DipWatchEntry["state"], string> = {
-    pumping:   "Pumping ↗",
-    dumped:    "Dumped ↘",
-    retracing: "Retracing ↗",
-    entered:   "Triggered ✓",
-    expired:   "Expired",
+    waiting_pump: "Waiting Pump ⏳",
+    pumping:      "Pumping ↗",
+    dumped:       "Dumped ↘",
+    retracing:    "Retracing ↗",
+    entered:      "Triggered ✓",
+    expired:      "Expired",
   };
   const stateColor: Record<DipWatchEntry["state"], string> = {
-    pumping:   "text-sky-400",
-    dumped:    "text-red-400",
-    retracing: "text-amber-400",
-    entered:   "text-emerald-400",
-    expired:   "text-white/30",
+    waiting_pump: "text-violet-400",
+    pumping:      "text-sky-400",
+    dumped:       "text-red-400",
+    retracing:    "text-amber-400",
+    entered:      "text-emerald-400",
+    expired:      "text-white/30",
   };
   const stateBg: Record<DipWatchEntry["state"], string> = {
-    pumping:   "bg-sky-500/15 border-sky-500/25",
-    dumped:    "bg-red-500/15 border-red-500/25",
-    retracing: "bg-amber-500/15 border-amber-500/25",
-    entered:   "bg-emerald-500/15 border-emerald-500/25",
-    expired:   "bg-white/5 border-white/10",
+    waiting_pump: "bg-violet-500/15 border-violet-500/25",
+    pumping:      "bg-sky-500/15 border-sky-500/25",
+    dumped:       "bg-red-500/15 border-red-500/25",
+    retracing:    "bg-amber-500/15 border-amber-500/25",
+    entered:      "bg-emerald-500/15 border-emerald-500/25",
+    expired:      "bg-white/5 border-white/10",
   };
 
   function fmtTimeLeft(expiresAt: number): string {
@@ -1125,7 +1128,7 @@ function DipWatchPanel({ watchers }: { watchers: DipWatchEntry[] }) {
         <div className="flex items-center gap-2">
           <Eye className="w-3.5 h-3.5 text-cyan-400" />
           <span className="text-[11px] font-bold text-white/70 uppercase tracking-wider">Dip-Retrace Watch</span>
-          <span className="text-[9px] text-cyan-400/60 font-mono">40–60% dump → 60% retrace</span>
+          <span className="text-[9px] text-cyan-400/60 font-mono">+30% pump → 40–60% dump → 60% retrace</span>
         </div>
         <Badge className="bg-cyan-500/20 text-cyan-400 border-cyan-500/30 text-[9px] px-1.5 py-0">{watchers.length}</Badge>
       </div>
@@ -1171,8 +1174,30 @@ function DipWatchPanel({ watchers }: { watchers: DipWatchEntry[] }) {
                 <span className="text-[10px] font-bold text-white/80 font-mono">${fmtPrice(w.currentPrice)}</span>
               </div>
             </div>
-            {/* Dip/Retrace progress bars */}
-            <div className="grid grid-cols-2 gap-2">
+            {/* Progress bars — phase-dependent */}
+            {w.state === "waiting_pump" ? (
+              /* Phase 1: Pump gate progress bar */
+              <div className="mb-0">
+                <div className="flex justify-between items-center mb-1">
+                  <span className="text-[8px] text-white/30">Pump from grad price</span>
+                  <span className={`text-[9px] font-bold font-mono ${w.pumpPctFromGrad >= 30 ? "text-violet-400" : w.pumpPctFromGrad > 15 ? "text-sky-400" : "text-white/50"}`}>
+                    {w.pumpPctFromGrad > 0 ? `+${w.pumpPctFromGrad.toFixed(1)}%` : "—"}
+                    {w.pumpPctFromGrad >= 30 ? " ✓" : ` / need +30%`}
+                  </span>
+                </div>
+                <div className="h-1.5 rounded-full bg-white/8 overflow-hidden">
+                  <div
+                    className="h-full rounded-full transition-all bg-violet-400"
+                    style={{ width: `${Math.min(100, Math.max(0, (w.pumpPctFromGrad / 30) * 100))}%` }}
+                  />
+                </div>
+                <div className="flex justify-between text-[7px] text-white/20 mt-0.5">
+                  <span>0%</span><span className="text-violet-400/50">+30% target</span><span></span>
+                </div>
+              </div>
+            ) : (
+              /* Phase 2: Dip + Retrace progress bars */
+              <div className="grid grid-cols-2 gap-2">
               {/* Dump % */}
               <div>
                 <div className="flex justify-between items-center mb-1">
@@ -1211,6 +1236,7 @@ function DipWatchPanel({ watchers }: { watchers: DipWatchEntry[] }) {
                 </div>
               </div>
             </div>
+            )}
             {/* Quality score + DexScreener link */}
             <div className="mt-2 flex items-center justify-between gap-2 text-[8px] text-white/25">
               <div className="flex items-center gap-2">

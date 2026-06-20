@@ -346,7 +346,9 @@ export interface DipWatchEntry {
   peakHigh: number;
   dipLow: number;
   currentPrice: number;
-  state: "pumping" | "dumped" | "retracing" | "entered" | "expired";
+  pumpConfirmed: boolean;
+  pumpPctFromGrad: number;
+  state: "waiting_pump" | "pumping" | "dumped" | "retracing" | "entered" | "expired";
   dumpPct: number;
   retracePct: number;
   qualityScore: number;
