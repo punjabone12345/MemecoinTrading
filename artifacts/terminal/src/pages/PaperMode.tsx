@@ -3,7 +3,7 @@ import {
   FileText, Settings, X, TrendingUp, TrendingDown, RotateCcw,
   AlertTriangle, Wallet, ChevronRight, ExternalLink,
   BarChart2, Clock, Target, Shield, Sliders, Check, Download,
-  ChevronDown, ChevronUp, Pencil, Trash2,
+  ChevronDown, ChevronUp, Pencil, Trash2, Eye,
 } from "lucide-react";
 import {
   usePaperSniperStatus, usePaperSniperPositions, usePaperSniperHistory,
@@ -402,6 +402,37 @@ function OpenPositionCard({ pos }: { pos: PaperPosition }) {
         </a>
       </div>
 
+      {/* Entry filter stats */}
+      {(pos.qualityScore != null || pos.liquiditySol != null || pos.uniqueBuyers != null || pos.buyPressureRatio != null || pos.dipDumpPct != null) && (
+        <div className="rounded-xl bg-white/3 border border-white/6 px-3 py-2 mb-2.5">
+          <p className="text-[8px] font-black text-white/20 uppercase tracking-widest mb-1.5">Entry Filters</p>
+          <div className="flex flex-wrap gap-x-3 gap-y-1 text-[9px] text-white/30">
+            {pos.qualityScore != null && (
+              <span>Q-score: <span className={`font-bold ${pos.qualityScore >= 70 ? "text-yellow-400/80" : "text-white/40"}`}>{pos.qualityScore}/100</span></span>
+            )}
+            {pos.liquiditySol != null && (
+              <span>Liquidity: <span className="font-bold text-white/50">{pos.liquiditySol.toFixed(1)} SOL</span></span>
+            )}
+            {pos.uniqueBuyers != null && (
+              <span>Buyers: <span className="font-bold text-white/50">{pos.uniqueBuyers}</span></span>
+            )}
+            {pos.buyPressureRatio != null && (
+              <span>Buy/Sell: <span className={`font-bold ${pos.buyPressureRatio >= 1.5 ? "text-emerald-400/70" : "text-white/40"}`}>{pos.buyPressureRatio.toFixed(1)}×</span></span>
+            )}
+            {pos.topHolderPct != null && (
+              <span>Top holder: <span className={`font-bold ${pos.topHolderPct > 20 ? "text-red-400/70" : "text-white/40"}`}>{pos.topHolderPct.toFixed(0)}%</span></span>
+            )}
+            {pos.whaleDetected && <span className="text-red-400/70 font-bold">⚠ Whale detected</span>}
+            {pos.dipDumpPct != null && pos.dipRetracePct != null && (
+              <span className="text-cyan-400/60">
+                Dip entry: <span className="font-bold">{pos.dipDumpPct.toFixed(0)}% dump</span> → <span className="font-bold">{pos.dipRetracePct.toFixed(0)}% retrace</span>
+                {pos.dipPeakHigh != null && <span className="text-white/25"> (peak ${pos.dipPeakHigh < 0.0001 ? pos.dipPeakHigh.toExponential(3) : pos.dipPeakHigh.toFixed(6)})</span>}
+              </span>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* P&L breakdown — unrealized + realized split */}
       {(pos.tp1Hit || pos.tp2Hit || pos.realizedPnlSol > 0) && (
         <div className="mt-2.5 pt-2.5 border-t border-white/5 rounded-xl bg-white/2 p-2.5 space-y-1">
@@ -742,38 +773,86 @@ function HistoryCard({ pos }: { pos: PaperPosition }) {
 // ── Event row ──────────────────────────────────────────────────────────────────
 
 function EventRow({ e }: { e: PaperSniperEvent }) {
-  const isEnter  = e.action === "entered";
-  const isClose  = e.action === "closed";
-  const isWin    = (e.pnlSol ?? 0) >= 0;
+  const isEnter    = e.action === "entered";
+  const isClose    = e.action === "closed";
+  const isWatching = e.action === "watching";
+  const isWin      = (e.pnlSol ?? 0) >= 0;
+
+  const buyerDelta = isWatching && e.baselineBuyers !== undefined && e.uniqueBuyers !== undefined
+    ? e.uniqueBuyers - e.baselineBuyers
+    : null;
+  const liqDelta = isWatching && e.baselineLiq !== undefined && e.liquiditySol !== undefined
+    ? e.liquiditySol - e.baselineLiq
+    : null;
 
   return (
-    <div className="flex items-start gap-3 px-4 py-3 border-b border-white/4 last:border-0">
+    <div className={`flex items-start gap-3 px-4 py-3 border-b border-white/4 last:border-0 ${isWatching ? "bg-amber-500/3" : ""}`}>
       <div className={`w-6 h-6 rounded-full flex items-center justify-center shrink-0 mt-0.5 ${
-        isEnter ? "bg-emerald-500/15"
+        isEnter      ? "bg-emerald-500/15"
+        : isWatching ? "bg-amber-500/12"
         : isClose && isWin ? "bg-emerald-500/15"
-        : isClose ? "bg-red-500/15"
+        : isClose    ? "bg-red-500/15"
         : "bg-white/6"
       }`}>
-        {isEnter && <ChevronRight size={12} className="text-emerald-400" />}
+        {isEnter    && <ChevronRight size={12} className="text-emerald-400" />}
+        {isWatching && <Eye size={11} className="text-amber-400 animate-pulse" />}
         {isClose && isWin  && <TrendingUp   size={12} className="text-emerald-400" />}
         {isClose && !isWin && <TrendingDown  size={12} className="text-red-400" />}
         {e.action === "skipped" && <AlertTriangle size={11} className="text-white/30" />}
       </div>
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2 flex-wrap">
-          <span className="text-[11px] font-bold text-white/80">{e.symbol}</span>
+          <span className={`text-[11px] font-bold ${isWatching ? "text-amber-300/80" : "text-white/80"}`}>
+            {e.symbol}
+          </span>
           <span className={`text-[8px] font-black px-1.5 py-0.5 rounded-full ${
-            isEnter ? "bg-emerald-500/15 text-emerald-300"
-            : isClose ? "bg-violet-500/15 text-violet-300"
+            isEnter      ? "bg-emerald-500/15 text-emerald-300"
+            : isWatching ? "bg-amber-500/15 text-amber-300"
+            : isClose    ? "bg-violet-500/15 text-violet-300"
             : "bg-white/6 text-white/35"
-          }`}>{e.action.toUpperCase()}</span>
+          }`}>
+            {isWatching ? `WATCHING ${e.watchStage ?? ""}` : e.action.toUpperCase()}
+          </span>
+          {e.qualityScore !== undefined && e.qualityScore > 0 && (
+            <span className={`text-[8px] font-bold ${e.qualityScore >= 70 ? "text-yellow-400" : "text-white/35"}`}>
+              Q:{e.qualityScore}
+            </span>
+          )}
           {e.pnlSol !== undefined && (
             <span className={`text-[10px] font-black ml-auto ${e.pnlSol >= 0 ? "text-emerald-400" : "text-red-400"}`}>
               {e.pnlSol >= 0 ? "+" : ""}{e.pnlSol.toFixed(4)} SOL
             </span>
           )}
         </div>
-        {(e.skipReason || e.closeReason) && (
+
+        {/* Watching: baseline metrics + improvement delta */}
+        {isWatching && (
+          <div className="flex items-center gap-2 mt-0.5 flex-wrap">
+            {e.baselineBuyers !== undefined && (
+              <span className="text-[9px] text-white/30">
+                👥 {e.baselineBuyers} buyers
+                {buyerDelta !== null && buyerDelta !== 0 && (
+                  <span className={buyerDelta > 0 ? " text-emerald-400" : " text-red-400"}>
+                    {" "}{buyerDelta > 0 ? "+" : ""}{buyerDelta}
+                  </span>
+                )}
+              </span>
+            )}
+            {e.baselineLiq !== undefined && (
+              <span className="text-[9px] text-white/30">
+                💧 {e.baselineLiq.toFixed(1)} SOL
+                {liqDelta !== null && Math.abs(liqDelta) > 0.5 && (
+                  <span className={liqDelta > 0 ? " text-emerald-400" : " text-red-400"}>
+                    {" "}{liqDelta > 0 ? "+" : ""}{liqDelta.toFixed(1)}
+                  </span>
+                )}
+              </span>
+            )}
+            <span className="text-[9px] text-amber-400/45">⏱ re-check at {e.watchStage ?? "T+180s"}</span>
+          </div>
+        )}
+
+        {!isWatching && (e.skipReason || e.closeReason) && (
           <p className="text-[10px] text-white/25 mt-0.5 truncate">{e.skipReason ?? e.closeReason}</p>
         )}
         <p className="text-[9px] text-white/20 mt-0.5">{new Date(e.detectedAt).toLocaleTimeString()}</p>

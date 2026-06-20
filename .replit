@@ -1,4 +1,4 @@
-modules = ["nodejs-20", "web", "bash", "postgresql-16"]
+modules = ["nodejs-20", "web", "bash"]
 
 [deployment]
 router = "application"
@@ -33,7 +33,7 @@ outputType = "webview"
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "cd artifacts/terminal && pnpm run dev"
+args = "pnpm --filter @workspace/terminal run dev"
 waitForPort = 5000
 
 [[workflows.workflow]]
@@ -60,10 +60,6 @@ timeoutMs = 20000
 [[ports]]
 localPort = 5000
 externalPort = 80
-
-[[ports]]
-localPort = 5173
-externalPort = 5173
 
 [[ports]]
 localPort = 8080

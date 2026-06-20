@@ -11,3 +11,6 @@
 - [Graduation detection architecture](graduation-detection-architecture.md) — ONLY migration wallet sub (39azUY…); subs 2 & 3 removed; adding them back causes ~49 false grads per real one
 - [Old migration re-trading bugs](old-migration-trading-bugs.md) — backfill fires on boot (not just reconnect), no blockTime pre-filter, wrong vault extraction, one-sided drift guards; all fixed
 - [Strategy overhaul: quality filter + 4-stage TP](strategy-overhaul.md) — 60s parallel data collection, 4-dim scoring, 10s candle entry, SL-12%/TP1+100%/TP2+300%/TP3+600%/runner trailing; DB columns added
+- [PumpSwap ALT vault extraction bug](pumpswap-alt-vault-bug.md) — graduation TX is v0 versioned; vault accountIndex falls in ALT range; must merge loadedAddresses into accountKeys before indexing
+- [PumpSwap on-chain liquidity fix](pumpswap-liquidity-fix.md) — PumpSwap pools are keypair-based (NOT PDAs); use DexScreener pairAddress directly, not findProgramAddressSync; WSOL vault at byte offset 171
+- [Dip-retrace entry strategy](dip-retrace-strategy.md) — replaces immediate entry; quality gate passes → addToDipWatch → 30-min watch loop; entry triggers on 40–60% dump + 60% retrace

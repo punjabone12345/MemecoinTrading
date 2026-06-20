@@ -48,6 +48,7 @@ class TokenQualityService {
     initialSolReserves: number,
     heliusApiKey:       string | null,
     wsolVaultPubkey:    string | null = null,
+    fastMode:           boolean = false,
   ): Promise<QualityMetrics> {
     const t0     = Date.now();
     const rpcUrl = heliusApiKey
@@ -55,31 +56,61 @@ class TokenQualityService {
       : null;
 
     logger.info(
-      { mint, symbol, initialSolReserves: initialSolReserves.toFixed(2), wsolVault: wsolVaultPubkey?.slice(0, 8) ?? "none" },
-      "Quality: starting 60s parallel data collection ⏱",
+      { mint, symbol, initialSolReserves: initialSolReserves.toFixed(2), wsolVault: wsolVaultPubkey?.slice(0, 8) ?? "none", fastMode },
+      fastMode ? "Quality: fast re-check (no delays — pool fully indexed) ⚡" : "Quality: starting 60s parallel data collection ⏱",
     );
 
     // Fire all four collection paths simultaneously.
-    // The on-chain vault read is fast (~200 ms) and resolves before DexScreener.
+    // fastMode=true: all delays skipped — used for T+180s/T+600s staged re-checks
+    //   when pool is fully indexed and all data sources are immediately available.
+    // fastMode=false (default): delays are applied so T0 reads don't get stale data.
     const [dexResult, holderResult, buyerResult, onChainSolRaw] = await Promise.all([
       this.pollDexScreener(mint),
-      rpcUrl ? this.fetchHolderData(mint, rpcUrl) : Promise.resolve(null),
-      (heliusApiKey && poolPda)
-        ? this.fetchBuyerData(mint, poolPda, heliusApiKey)
+      rpcUrl ? this.fetchHolderData(mint, rpcUrl, fastMode) : Promise.resolve(null),
+      // Use wsolVaultPubkey as the primary address for signature lookup.
+      // PumpSwap pools are keypair-based (not PDAs), so the derived poolPda is
+      // WRONG — getSignaturesForAddress(wrongPDA) always returns 0 signatures.
+      // The WSOL vault is touched by every buy/sell swap, making it the correct
+      // and reliable address. Fall back to poolPda only if vault is unavailable.
+      (heliusApiKey && (wsolVaultPubkey || poolPda))
+        ? this.fetchBuyerData(mint, wsolVaultPubkey ?? poolPda!, heliusApiKey, fastMode)
         : Promise.resolve(null),
       (wsolVaultPubkey && initialSolReserves === 0)
-        ? this.fetchOnChainSolBalance(wsolVaultPubkey, heliusApiKey)
+        ? (async () => {
+            if (!fastMode) {
+              // Pool accounts need ~30–40s to be populated/indexed after graduation.
+              // Reading immediately (T0) always returns 0 — delay before re-fetching.
+              await new Promise<void>((r) => setTimeout(r, 40_000));
+            }
+            return this.fetchOnChainSolBalance(wsolVaultPubkey, heliusApiKey);
+          })()
         : Promise.resolve(null),
     ]);
 
     // ── Aggregate raw metrics ────────────────────────────────────────────────
-    // Priority: initialSolReserves (passed from sniper) > on-chain vault read
-    // (fetched here in parallel) > DexScreener liquidity estimate.
+    // Priority: initialSolReserves > on-chain vault read > pairAddress pool read > DexScreener.
     // DexScreener reports liquidity=0 for 3–5 min after graduation — unreliable.
-    const liquiditySol =
-      initialSolReserves > 0                      ? initialSolReserves
+    let liquiditySol =
+      initialSolReserves > 0                         ? initialSolReserves
       : (onChainSolRaw != null && onChainSolRaw > 0) ? onChainSolRaw
-      : (dexResult ? dexResult.liquidityUsd / 150 : 0);
+      : 0;
+
+    // Fallback: read WSOL vault via DexScreener pairAddress (pool account offset 171)
+    // This is the most reliable source when wsolVaultPubkey was null or RPC failed.
+    // PumpSwap pools are keypair-based so PDA derivation fails — but pairAddress is exact.
+    if (liquiditySol === 0 && dexResult?.pairAddress) {
+      const pairSol = await this.fetchSolFromPairAddress(dexResult.pairAddress, heliusApiKey);
+      if (pairSol != null && pairSol > 0) {
+        liquiditySol = pairSol;
+        logger.info({ mint, symbol, pairSol: pairSol.toFixed(2), pairAddress: dexResult.pairAddress.slice(0, 8) },
+          "Quality: pairAddress on-chain WSOL vault balance used for liquiditySol ✅");
+      }
+    }
+
+    // Last resort: DexScreener USD estimate (often 0 for fresh tokens)
+    if (liquiditySol === 0 && dexResult?.liquidityUsd) {
+      liquiditySol = dexResult.liquidityUsd / 150;
+    }
 
     if (onChainSolRaw != null && onChainSolRaw > 0 && initialSolReserves === 0) {
       logger.info({ mint, symbol, onChainSolRaw: onChainSolRaw.toFixed(2) },
@@ -223,6 +254,67 @@ class TokenQualityService {
     return null;
   }
 
+  // ── On-chain SOL balance via DexScreener pairAddress (PumpSwap) ─────────────
+  // PumpSwap pool accounts are keypair-based (not PDAs), so we cannot derive the
+  // pool address ourselves.  But DexScreener returns pairAddress in its response.
+  // Approach: read pool account data → extract bytes [171..203] = WSOL vault pubkey
+  // → getTokenAccountBalance on that vault.  Proven correct (see test script).
+  private async fetchSolFromPairAddress(
+    pairAddress:  string,
+    heliusApiKey: string | null,
+  ): Promise<number | null> {
+    const endpoints: string[] = [
+      ...(heliusApiKey ? [`https://mainnet.helius-rpc.com/?api-key=${heliusApiKey}`] : []),
+      ...PUBLIC_RPC_ENDPOINTS,
+    ];
+
+    for (const endpoint of endpoints) {
+      try {
+        // Step 1: getAccountInfo on the pool account
+        type AccountInfoResp = {
+          result?: { value?: { data?: [string, string] | null } | null };
+          error?:  unknown;
+        };
+        const infoRes = await axios.post<AccountInfoResp>(
+          endpoint,
+          { jsonrpc: "2.0", id: 1, method: "getAccountInfo", params: [pairAddress, { encoding: "base64" }] },
+          { timeout: 5_000 },
+        );
+        if (infoRes.data?.error) continue;
+        const dataArr = infoRes.data?.result?.value?.data;
+        if (!Array.isArray(dataArr) || dataArr[1] !== "base64") continue;
+        const buf = Buffer.from(dataArr[0], "base64");
+        if (buf.length < 203) continue;
+
+        // Step 2: extract WSOL vault pubkey at bytes 171–203
+        const wsolVaultKey = new (await import("@solana/web3.js")).PublicKey(buf.slice(171, 203)).toBase58();
+
+        // Step 3: getTokenAccountBalance on the WSOL vault
+        type TokenAmountResp = {
+          result?: { value?: { uiAmount?: number | null } };
+          error?:  unknown;
+        };
+        const balRes = await axios.post<TokenAmountResp>(
+          endpoint,
+          { jsonrpc: "2.0", id: 2, method: "getTokenAccountBalance", params: [wsolVaultKey] },
+          { timeout: 5_000 },
+        );
+        if (balRes.data?.error) continue;
+        const uiAmount = balRes.data?.result?.value?.uiAmount;
+        if (uiAmount != null && uiAmount > 0) {
+          logger.debug({ pairAddress: pairAddress.slice(0, 8), wsolVault: wsolVaultKey.slice(0, 8), uiAmount: uiAmount.toFixed(2) },
+            "Quality: fetchSolFromPairAddress ✅");
+          return uiAmount;
+        }
+      } catch {
+        // try next endpoint
+      }
+    }
+
+    logger.debug({ pairAddress: pairAddress.slice(0, 8) }, "Quality: fetchSolFromPairAddress — all endpoints failed");
+    return null;
+  }
+
   // ── DexScreener polling (4 polls over ~45s) ───────────────────────────────
   // Fires at T=0, T=15s, T=30s, T=45s — captures the evolution of buy/sell
   // volume as the token gets indexed. Stops early once meaningful data arrives.
@@ -231,19 +323,21 @@ class TokenQualityService {
     fdv:             number;
     buyPressureRatio: number;
     m5Buys:          number;
+    pairAddress:     string | null;
   } | null> {
-    let best: { liquidityUsd: number; fdv: number; buyPressureRatio: number; m5Buys: number } | null = null;
+    let best: { liquidityUsd: number; fdv: number; buyPressureRatio: number; m5Buys: number; pairAddress: string | null } | null = null;
 
     for (let attempt = 0; attempt < 4; attempt++) {
       if (attempt > 0) await new Promise<void>((r) => setTimeout(r, 15_000));
 
       try {
         type DexPair = {
-          priceUsd?:  string;
-          liquidity?: { usd?: number };
-          fdv?:       number;
-          txns?:      { m5?: { buys?: number; sells?: number } };
-          dexId?:     string;
+          priceUsd?:    string;
+          pairAddress?: string;
+          liquidity?:   { usd?: number };
+          fdv?:         number;
+          txns?:        { m5?: { buys?: number; sells?: number } };
+          dexId?:       string;
         };
         const res = await axios.get<DexPair[]>(
           `${DEXSCREENER_BASE}/tokens/v1/solana/${mint}`,
@@ -263,7 +357,13 @@ class TokenQualityService {
           ? m5Buys / m5Sells
           : (m5Buys > 0 ? 5.0 : 1.0);
 
-        best = { liquidityUsd: pair.liquidity?.usd ?? 0, fdv: pair.fdv ?? 0, buyPressureRatio, m5Buys };
+        best = {
+          liquidityUsd:    pair.liquidity?.usd ?? 0,
+          fdv:             pair.fdv ?? 0,
+          buyPressureRatio,
+          m5Buys,
+          pairAddress:     pair.pairAddress ?? null,
+        };
 
         // Stop early once we have real volume data
         if (m5Buys >= 5 || m5Sells >= 5) {
@@ -295,11 +395,13 @@ class TokenQualityService {
   // ── Helius RPC: top token holder % + creator holdings % ──────────────────
   // Wait 20s before querying — new tokens take 15-30s to appear in RPC indices.
   // Also fetches creator wallet from pump.fun API and checks their holdings %.
+  // fastMode=true: skip the 20s delay (used for T+180s/T+600s re-checks).
   private async fetchHolderData(
-    mint:   string,
-    rpcUrl: string,
+    mint:     string,
+    rpcUrl:   string,
+    fastMode: boolean = false,
   ): Promise<{ topHolderPct: number; creatorHoldingsPct: number } | null> {
-    await new Promise<void>((r) => setTimeout(r, 20_000));
+    if (!fastMode) await new Promise<void>((r) => setTimeout(r, 20_000));
 
     try {
       type LargestAccount = { address?: string; uiAmount: number | null };
@@ -375,12 +477,14 @@ class TokenQualityService {
   // 30-60s of confirmation. Waiting 45s (near the end of the 60s window) gives
   // the indexer time to accumulate real buyer transactions. 25s was too early
   // and returned 0 buyers even for tokens with 100+ SOL of liquidity.
+  // fastMode=true: skip the 45s delay (used for T+180s/T+600s re-checks).
   private async fetchBuyerData(
     mint:     string,
     poolPda:  string,
     apiKey:   string,
+    fastMode: boolean = false,
   ): Promise<{ uniqueBuyers: number; whaleDetected: boolean } | null> {
-    await new Promise<void>((r) => setTimeout(r, 45_000));
+    if (!fastMode) await new Promise<void>((r) => setTimeout(r, 45_000));
 
     try {
       const rpcUrl = `https://mainnet.helius-rpc.com/?api-key=${apiKey}`;
