@@ -1019,8 +1019,8 @@ class GraduationSniperService {
     }, PRICE_LOOP_MS);
     this.liquidityIntervalId = setInterval(() => void this.checkAllLiquidity(), LIQUIDITY_CHECK_MS);
     this.externalSellCheckId = setInterval(() => void this.checkExternalSells(), 60_000);
-    // Dip-retrace watcher — runs every 5 s independently of the open-position loop
-    this.dipWatchIntervalId  = setInterval(() => void this.checkDipWatchers(), 2_000);
+    // Dip-retrace watcher — runs every 1 s for tighter peak/dip capture
+    this.dipWatchIntervalId  = setInterval(() => void this.checkDipWatchers(), 1_000);
 
     // ── WebSocket — only needed for detecting new graduations ────────────────
     const apiKey = process.env["HELIUS_API_KEY"];
@@ -1614,9 +1614,13 @@ class GraduationSniperService {
       logger.info({ mint, symbol, entryPrice: entryPrice.toExponential(4) },
         'Graduation sniper: quality gate passed — adding to dip-retrace watch ✅');
 
+      // Use initialPrice as graduationPrice — it is captured right at detection
+      // (on-chain reserves, before the 60 s quality window) so it reflects the
+      // actual pool price at graduation. entryPrice comes 60+ s later and has
+      // already moved significantly from the true graduation price.
       this.addToDipWatch({
         mint, symbol, name,
-        graduationPrice: entryPrice,
+        graduationPrice: initialPrice > 0 ? initialPrice : entryPrice,
         signature,
         initialPrice,
         detectedAt,
@@ -4409,30 +4413,44 @@ class GraduationSniperService {
       // Race Jupiter Quote API (real-time AMM spot price) vs DexScreener
       // in parallel. Jupiter Quote gives the exact price you'd get from a
       // swap, not a TWAP — this is critical for accurate peak/dip tracking.
-      let price = 0;
+      //
+      // For peak tracking we take the MAX of all sources; for dip tracking
+      // we take the MIN. This ensures that if one source momentarily catches
+      // a higher/lower price between polls, it is not lost.
+      let jupiterPrice = 0;
+      let dexPrice     = 0;
       try {
         const [quoteResult, dexResult] = await Promise.allSettled([
           this.fetchPriceViaJupiterQuote(mint),
           this.fetchPrice(mint),
         ]);
-        // Prefer Jupiter Quote (real-time AMM price) for numeric accuracy
         if (quoteResult.status === 'fulfilled' && quoteResult.value && quoteResult.value > 0) {
-          price = quoteResult.value;
+          jupiterPrice = quoteResult.value;
         }
-        // Use DexScreener for metadata (symbol/name) and as price fallback
         if (dexResult.status === 'fulfilled' && dexResult.value) {
           if (entry.symbol === mint.slice(0, 8) && dexResult.value.symbol) entry.symbol = dexResult.value.symbol;
           if (entry.name   === mint.slice(0, 8) && dexResult.value.name)   entry.name   = dexResult.value.name;
-          if (price <= 0) price = dexResult.value.price;
+          if (dexResult.value.price > 0) dexPrice = dexResult.value.price;
         }
         // Last resort: Jupiter Price API fallback
-        if (price <= 0) {
+        if (jupiterPrice <= 0 && dexPrice <= 0) {
           const jupFb = await this.fetchJupiterPriceFallback(mint);
-          if (jupFb && jupFb > 0) price = jupFb;
+          if (jupFb && jupFb > 0) jupiterPrice = jupFb;
         }
       } catch { /* non-fatal — skip this cycle */ }
 
+      // Best single price for display / pump-gate / retrace calculations:
+      // prefer Jupiter (real-time), fall back to DexScreener.
+      const price = jupiterPrice > 0 ? jupiterPrice : dexPrice;
       if (price <= 0) continue;
+
+      // Highest observed price across all sources this poll cycle — used for
+      // peakHigh so a fast spike caught by only one source is not missed.
+      const highestPrice = Math.max(jupiterPrice > 0 ? jupiterPrice : 0, dexPrice > 0 ? dexPrice : 0);
+      // Lowest observed price across all sources — used for dipLow tracking.
+      const lowestPrice  = (jupiterPrice > 0 && dexPrice > 0)
+        ? Math.min(jupiterPrice, dexPrice)
+        : price;
 
       entry.currentPrice = price;
 
@@ -4463,12 +4481,14 @@ class GraduationSniperService {
       }
 
       // ── Phase 2: Peak/dip tracking (only after pump gate confirmed) ───────
-      if (price > entry.peakHigh) {
-        entry.peakHigh = price;
+      // Use highestPrice (max across all concurrent sources) for peak — catches
+      // spikes one source saw but the other missed. Use lowestPrice for dip low.
+      if (highestPrice > entry.peakHigh) {
+        entry.peakHigh = highestPrice;
         // Reset dipLow to current price — we're at a new high, fresh dump-tracking
         entry.dipLow = price;
-      } else if (price < entry.dipLow) {
-        entry.dipLow = price;
+      } else if (lowestPrice < entry.dipLow) {
+        entry.dipLow = lowestPrice;
       }
 
       // ── Compute dip/retrace metrics ───────────────────────────────────────
