@@ -1359,13 +1359,8 @@ class GraduationSniperService {
         return;
       }
 
-      if (!c1.isActive) {
-        this.addEvent({ ...fullEventBase, action: 'skipped',
-          skipReason: `Candle 1 inactive (buys: ${c1.buysDelta})`, ...qualityEventFields });
-        logger.info({ mint, symbol, buysDelta: c1.buysDelta },
-          'Graduation sniper: candle 1 inactive — skip ❌');
-        return;
-      }
+      // "Candle 1 inactive" check removed — zero-buy candles still get entered;
+      // a candle with 0 buys can spike on candle 2 and is not a reliable reject signal.
 
       logger.info({
         mint, symbol,
