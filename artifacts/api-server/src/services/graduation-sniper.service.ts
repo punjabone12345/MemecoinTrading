@@ -4014,11 +4014,14 @@ class GraduationSniperService {
     const now = Date.now();
     const TTL = 30 * 60_000; // expire after 30 minutes — momentum window
 
-    // Expire old entries that haven't completed a trade
+    // Expire ALL entries older than 30 min — keeps the watch list clean.
+    // Phase3Triggered tokens have already fired their buy; no need to keep them.
     for (const [mint, grad] of this.watchedGrads) {
-      if (!grad.phase3Triggered && now - grad.addedAt > TTL) {
-        logger.info({ mint, symbol: grad.symbol, ageMin: ((now - grad.addedAt) / 60_000).toFixed(1) },
-          "3-phase watch: removing expired token (30-min window elapsed, no trade)");
+      if (now - grad.addedAt > TTL) {
+        logger.info(
+          { mint, symbol: grad.symbol, ageMin: ((now - grad.addedAt) / 60_000).toFixed(1), phase: grad.phase },
+          "3-phase watch: removing expired token (>30 min old)",
+        );
         this.watchedGrads.delete(mint);
       }
     }

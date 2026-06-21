@@ -969,6 +969,11 @@ class PaperSniperService {
     const ageMs = Date.now() - pos.entryAt;
     const now   = Date.now();
 
+    // ── TP1/2/3 cascade — all checked in a single tick ───────────────────
+    // No early `return` between TPs: if price moves fast (e.g. 0→400% in one
+    // poll cycle) all eligible TPs fire in the same tick, in order.
+    // Each flag (tp1Hit/tp2Hit/tp3Hit) prevents double-firing on subsequent ticks.
+
     // ── TP1 ───────────────────────────────────────────────────────────────
     if (!pos.tp1Hit && pct >= cfg.tp1Pct) {
       const closeFrac   = cfg.tp1ClosePct / 100;
@@ -999,7 +1004,7 @@ class PaperSniperService {
           `🔗 <a href="https://dexscreener.com/solana/${pos.mint}">DexScreener</a>  |  🕐 ${toIST(new Date())}`,
         );
       }
-      return;
+      // ← no return: fall through to check TP2 in the same tick
     }
 
     // ── TP2 ───────────────────────────────────────────────────────────────
@@ -1035,10 +1040,10 @@ class PaperSniperService {
           `🔗 <a href="https://dexscreener.com/solana/${pos.mint}">DexScreener</a>  |  🕐 ${toIST(new Date())}`,
         );
       }
-      return;
+      // ← no return: fall through to check TP3 in the same tick
     }
 
-    // ── TP3 — full close of remaining runner ──────────────────────────────
+    // ── TP3 + runner ───────────────────────────────────────────────────────
     if (pos.tp1Hit && pos.tp2Hit && !pos.tp3Hit && pct >= cfg.tp3Pct) {
       const closeFrac   = Math.min(cfg.tp3ClosePct / 100, 1) * pos.remainingFraction;
       const solReturned = pos.sizeSol * closeFrac * (price / pos.entryPrice);
@@ -1069,11 +1074,13 @@ class PaperSniperService {
           `\n🔗 <a href="https://dexscreener.com/solana/${pos.mint}">DexScreener</a>  |  🕐 ${toIST(new Date())}`,
         );
       }
-      // If tp3ClosePct = 100, the position is fully closed — close it now
+      // Fully closed (tp3ClosePct = 100 or rounding) — done
       if (pos.remainingFraction <= 0.01) {
         this.closePaperPosition(pos, `TP3 hit — full exit at +${pct.toFixed(0)}%`, price);
+        return;
       }
-      return;
+      // Runner (~10%) remains open — fall through so trailing SL is applied
+      // in this same tick rather than waiting for the next poll cycle
     }
 
     // ── Update trailing SL based on TP stage ─────────────────────────────
