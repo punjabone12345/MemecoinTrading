@@ -53,12 +53,12 @@ const DEFAULT_PAPER_CONFIG: PaperConfig = {
   tp2ClosePct:        57,   // 57% of remaining 70% ≈ 40% of original
   tp3Pct:             600,  // TP3 at +600% → sell 20% of original (67% of remaining 30%)
   tp3ClosePct:        67,   // 67% of remaining 30% ≈ 20% of original → 10% runner
-  trailingStopPct:    10,   // runner trailing -10% from peak after TP3
+  trailingStopPct:    15,   // runner trailing -15% from peak after TP3
   slPhase1Pct:        30,   // fixed hard SL -30% from entry (before TP1)
   slPhase2Pct:        30,   // (legacy, not used in new SL logic)
   slPhase3Pct:        30,   // (legacy, not used in new SL logic)
   slAfterTp1Pct:      0,    // (legacy, breakeven is hardcoded after TP1)
-  slAfterTp2Pct:      20,   // trailing -20% from peak after TP2
+  slAfterTp2Pct:      25,   // trailing -25% from peak after TP2
   deadCoinWindowMs:     2 * 60 * 60_000,  // 2 hours
   deadCoinMinMovePct:   5,                // must move >5% from entry
   maxFillDriftPct:      15,               // spec: skip if exec price > 15% above detection baseline

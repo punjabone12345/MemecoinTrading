@@ -117,13 +117,13 @@ const FIELDS: FieldDef[] = [
   { key: "maxOpenPositions",   label: "Max open positions",    description: "Max concurrent paper trades",                 suffix: "",    min: 1,     max: 20,   step: 1 },
   { section: "Take profit",    key: "tp1Pct",           label: "TP1 target",            description: "Close 30% of position at this gain — SL moves to breakeven",     suffix: "%",   min: 10,    max: 2000, step: 10 },
   { key: "tp1ClosePct",        label: "TP1 close %",           description: "% of position to sell at TP1 (default 30)",    suffix: "%",   min: 1,     max: 100,  step: 1 },
-  { key: "tp2Pct",             label: "TP2 target",            description: "Close ~40% of original position — SL becomes trailing -20% from peak", suffix: "%",   min: 50,    max: 5000, step: 10 },
+  { key: "tp2Pct",             label: "TP2 target",            description: "Close ~40% of original position — SL becomes trailing -25% from peak", suffix: "%",   min: 50,    max: 5000, step: 10 },
   { key: "tp2ClosePct",        label: "TP2 close %",           description: "% of remaining position to sell at TP2 (57% of remaining 70% ≈ 40% of original)", suffix: "%",   min: 1,     max: 100,  step: 1 },
-  { key: "tp3Pct",             label: "TP3 target",            description: "Close ~20% of original position — 10% runner stays with trailing -10%", suffix: "%",   min: 200,   max: 10000, step: 50 },
+  { key: "tp3Pct",             label: "TP3 target",            description: "Close ~20% of original position — 10% runner stays with trailing -15%", suffix: "%",   min: 200,   max: 10000, step: 50 },
   { key: "tp3ClosePct",        label: "TP3 close %",           description: "% of remaining to close at TP3 (67% of remaining 30% ≈ 20% of original)", suffix: "%",   min: 10,    max: 100,  step: 5 },
-  { key: "trailingStopPct",    label: "Runner trailing stop",  description: "Trailing SL % from peak for the 10% runner after TP3 (default -10%)", suffix: "%",   min: 1,     max: 90,   step: 1 },
+  { key: "trailingStopPct",    label: "Runner trailing stop",  description: "Trailing SL % from peak for the 10% runner after TP3 (default -15%)", suffix: "%",   min: 1,     max: 90,   step: 1 },
   { section: "Stop loss",      key: "slPhase1Pct",      label: "Initial SL (before TP1)", description: "Fixed hard SL — this % below entry price. Not trailing. Default -30%", suffix: "%",   min: 1,     max: 90,   step: 1 },
-  { key: "slAfterTp2Pct",      label: "SL after TP2",          description: "Trailing stop % from peak after TP2 hit — ratchets up as price rises (default -20%)", suffix: "%",   min: 1,     max: 90,   step: 1 },
+  { key: "slAfterTp2Pct",      label: "SL after TP2",          description: "Trailing stop % from peak after TP2 hit — ratchets up as price rises (default -25%)", suffix: "%",   min: 1,     max: 90,   step: 1 },
   { section: "Entry drift filter", key: "simulatedExecDelayMs", label: "Exec delay (sim)",          description: "Wait this long after graduation before entering — simulates real buy latency", suffix: "s", min: 0, max: 30, step: 1 },
   { key: "maxFillDriftPct",       label: "Max fill drift",            description: "Skip entry if price drifted more than this % during exec delay", suffix: "%", min: 1, max: 50, step: 1 },
   { section: "Dead-coin filter", key: "deadCoinWindowMs",   label: "Dead-coin window",           description: "Auto-close if coin doesn't move enough within this window", suffix: "hrs", min: 0.5, max: 24, step: 0.5 },
@@ -149,12 +149,12 @@ const DEFAULT_CFG: PaperConfig = {
   tp1Pct: 100, tp1ClosePct: 30,   // TP1 +100% → sell 30%
   tp2Pct: 300, tp2ClosePct: 57,   // TP2 +300% → sell 57% remaining (≈40% original)
   tp3Pct: 600, tp3ClosePct: 67,   // TP3 +600% → sell 67% remaining (≈20% original) → 10% runner
-  trailingStopPct: 10,             // runner trailing -10% from peak after TP3
+  trailingStopPct: 15,             // runner trailing -15% from peak after TP3
   slPhase1Pct: 30,                 // fixed -30% from entry before TP1
   slPhase2Pct: 30,                 // (legacy)
   slPhase3Pct: 30,                 // (legacy)
   slAfterTp1Pct: 0,                // (legacy)
-  slAfterTp2Pct: 20,               // trailing -20% from peak after TP2
+  slAfterTp2Pct: 25,               // trailing -25% from peak after TP2
   simulatedExecDelayMs: 5_500,
   maxFillDriftPct: 15,
   deadCoinWindowMs: 7_200_000, deadCoinMinMovePct: 5,
