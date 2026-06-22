@@ -18,15 +18,18 @@ const DEXSCREENER_BASE   = "https://api.dexscreener.com";
 const HELIUS_WS_BASE     = "wss://mainnet.helius-rpc.com";
 const PUMPPORTAL_WS_URL  = "wss://pumpportal.fun/api/data";
 
-const POLL_INTERVAL_MS     = 30_000;
-const MAX_TRACK_AGE_MS     = 30 * 60 * 1000;  // 30 min
-const MAX_TRACKED_TOKENS   = 60;
-const ENTRY_CONFIRM_MS     = 2 * 60 * 1000;   // 2 min confirmation window
-const STARTING_BALANCE     = 1.0;             // SOL
-const KV_CONFIG_KEY        = "ed_config";
-const KV_BALANCE_KEY       = "ed_balance";
-const RECONNECT_BASE_MS    = 3_000;
-const RECONNECT_MAX_MS     = 30_000;
+const POLL_INTERVAL_MS       = 30_000;
+const MAX_TRACK_AGE_MS       = 30 * 60 * 1000;  // 30 min for tracking/eligible tokens
+const MAX_REJECTED_AGE_MS    = 3 * 60 * 1000;   // 3 min — prune rejected tokens fast to free slots
+const MAX_EXITED_AGE_MS      = 10 * 60 * 1000;  // 10 min for exited positions
+const MAX_TRACKED_TOKENS     = 500;              // hard cap — pruning keeps actual set much smaller
+const MAX_TOKENS_UI          = 200;              // cap returned to frontend
+const ENTRY_CONFIRM_MS       = 2 * 60 * 1000;   // 2 min confirmation window
+const STARTING_BALANCE       = 1.0;             // SOL
+const KV_CONFIG_KEY          = "ed_config";
+const KV_BALANCE_KEY         = "ed_balance";
+const RECONNECT_BASE_MS      = 3_000;
+const RECONNECT_MAX_MS       = 30_000;
 
 const HELIUS_API_KEY = process.env["HELIUS_API_KEY"] ?? "";
 
@@ -417,24 +420,30 @@ class EarlyDiscoveryService {
   private async runRugcheck(mint: string, token: EDToken): Promise<void> {
     try {
       const result = await checkTokenSafety(mint, 0);
-      token.rugcheckStatus    = result.pass ? "passed" : "failed";
-      token.rugcheckReason    = result.reason;
-      token.rugcheckScore     = result.score;
-      token.mintAuthority     = Boolean(result.mintAuthority);
-      token.freezeAuthority   = Boolean(result.freezeAuthority);
-      token.topHolderPct      = result.topHolderPct;
+      token.rugcheckStatus  = result.pass ? "passed" : "failed";
+      token.rugcheckReason  = result.reason;
+      token.rugcheckScore   = result.score;
+      token.mintAuthority   = Boolean(result.mintAuthority);
+      token.freezeAuthority = Boolean(result.freezeAuthority);
+      token.topHolderPct    = result.topHolderPct;
 
-      if (!result.pass) {
+      // Only reject on confirmed danger — API unavailable leaves token in "tracking"
+      const isApiUnavailable = result.reason.includes("API unavailable") || result.reason.includes("API error");
+      if (!result.pass && !isApiUnavailable) {
         token.status          = "rejected";
         token.rejectionReason = result.reason;
         logger.info({ mint: mint.slice(0, 8), reason: result.reason }, "Early discovery: token REJECTED by rugcheck ❌");
+      } else if (isApiUnavailable) {
+        // API down — keep tracking, mark rugcheck as pending so it can be re-checked
+        token.rugcheckStatus = "pending";
+        token.rugcheckReason = "RugCheck unavailable — continuing to monitor";
+        logger.debug({ mint: mint.slice(0, 8) }, "Early discovery: RugCheck unavailable — keeping token in tracking");
       }
     } catch (err) {
-      logger.warn({ mint: mint.slice(0, 8), err: (err as Error).message }, "Early discovery: rugcheck failed — treating as failed");
-      token.rugcheckStatus  = "failed";
-      token.rugcheckReason  = "Rugcheck API error";
-      token.status          = "rejected";
-      token.rejectionReason = "Rugcheck API error";
+      // Network error / parse error — keep tracking, don't block
+      token.rugcheckStatus = "pending";
+      token.rugcheckReason = "RugCheck error — retrying next poll";
+      logger.debug({ mint: mint.slice(0, 8), err: (err as Error).message }, "Early discovery: rugcheck error — keeping in tracking");
     }
     token.lastUpdatedAt = Date.now();
     this.broadcast();
@@ -445,6 +454,10 @@ class EarlyDiscoveryService {
     this.pruneOldTokens();
     const active = [...this.tokens.values()].filter((t) => t.status === "tracking" || t.status === "eligible");
     for (const token of active) {
+      // Retry rugcheck for tokens where it was previously unavailable
+      if (token.rugcheckStatus === "pending" && token.pollCount > 0) {
+        void this.runRugcheck(token.mint, token);
+      }
       await this.pollToken(token);
       await new Promise<void>((r) => setTimeout(r, 200));
     }
@@ -825,9 +838,15 @@ class EarlyDiscoveryService {
 
   // ── Token pruning ─────────────────────────────────────────────────────────
   private pruneOldTokens(): void {
-    const cutoff = Date.now() - MAX_TRACK_AGE_MS;
+    const now = Date.now();
     for (const [mint, token] of this.tokens) {
-      if (token.launchAt < cutoff && token.status !== "entered") {
+      if (token.status === "entered") continue; // never prune open positions
+      const age = now - token.launchAt;
+      const ttl =
+        token.status === "rejected" ? MAX_REJECTED_AGE_MS :
+        token.status === "exited"   ? MAX_EXITED_AGE_MS :
+        MAX_TRACK_AGE_MS;
+      if (age > ttl) {
         this.tokens.delete(mint);
       }
     }
@@ -982,7 +1001,9 @@ class EarlyDiscoveryService {
   }
 
   getTokens(): EDToken[] {
-    return [...this.tokens.values()].sort((a, b) => b.scores.finalScore - a.scores.finalScore);
+    return [...this.tokens.values()]
+      .sort((a, b) => b.launchAt - a.launchAt)
+      .slice(0, MAX_TOKENS_UI);
   }
 
   getPositions(): { open: EDPosition[]; closed: EDPosition[] } {
