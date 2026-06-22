@@ -19,7 +19,10 @@ export function BottomNav() {
         borderTop: "1px solid rgba(255,255,255,0.07)",
       }}
     >
-      <div className="flex items-stretch h-[60px] max-w-2xl mx-auto">
+      <div className="text-center" style={{ fontSize: "8px", color: "rgba(255,255,255,0.15)", paddingTop: "2px", letterSpacing: "0.05em" }}>
+        v2.1 · CSV · RESET · 500ms
+      </div>
+      <div className="flex items-stretch h-[56px] max-w-2xl mx-auto">
         {tabs.map(({ path, label, icon: Icon, accent }, i) => {
           const active = path === "/" ? location === "/" : location.startsWith(path);
           return (

@@ -457,7 +457,8 @@ export default function Dashboard() {
                 </button>
                 <button
                   onClick={() => downloadEDCsv(closed)}
-                  className="flex items-center gap-1 text-[10px] text-white/40 hover:text-emerald-400 px-2 py-1 rounded bg-white/5 hover:bg-emerald-500/10 transition-colors"
+                  disabled={closed.length === 0}
+                  className="flex items-center gap-1 text-[10px] px-2 py-1 rounded bg-white/5 border border-white/10 transition-colors disabled:opacity-30 disabled:cursor-not-allowed text-emerald-400 hover:bg-emerald-500/10 hover:border-emerald-500/30"
                 >
                   <Download className="w-3 h-3" /> Export CSV
                 </button>
