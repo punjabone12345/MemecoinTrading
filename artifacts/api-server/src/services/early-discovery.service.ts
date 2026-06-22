@@ -494,6 +494,17 @@ class EarlyDiscoveryService {
         token.sellVolumeSol    = dexData.sellVolumeSol;
         if (dexData.priceUsd > 0) token.priceUsd = dexData.priceUsd;
         if (token.discoveryPrice === 0 && dexData.priceUsd > 0) token.discoveryPrice = dexData.priceUsd;
+        // Use DexScreener-derived bonding curve % as fallback when pump.fun API fails
+        if (dexData.bondingCurvePct > 0 && token.bondingCurvePct === 0) {
+          token.bondingCurvePct = dexData.bondingCurvePct;
+        }
+        // Always take the higher of the two mcap readings
+        if (dexData.marketCapUsd > 0) {
+          token.marketCapUsd = Math.max(token.marketCapUsd, dexData.marketCapUsd);
+          // Recalculate from market cap whenever we have fresh data
+          const fromMcap = Math.min((token.marketCapUsd / EarlyDiscoveryService.GRAD_MCAP_USD) * 100, 99.9);
+          if (fromMcap > token.bondingCurvePct) token.bondingCurvePct = fromMcap;
+        }
       }
 
       const metrics: DemandMetrics = {
@@ -565,18 +576,26 @@ class EarlyDiscoveryService {
     } catch { return null; }
   }
 
+  // Pump.fun graduation threshold — $69k mcap = 100% bonding curve
+  private static readonly GRAD_MCAP_USD = 69_000;
+
   private async fetchDexData(mint: string): Promise<{
     buyVolumeSol: number; sellVolumeSol: number; uniqueBuyers: number; priceUsd: number;
+    bondingCurvePct: number; marketCapUsd: number;
   } | null> {
     try {
       type DexPair = {
         priceUsd?: string; dexId?: string;
+        marketCap?: number; fdv?: number;
         txns?: { m5?: { buys?: number; sells?: number }; h1?: { buys?: number; sells?: number } };
         volume?: { m5?: number; h1?: number };
       };
       const res = await axios.get<DexPair[]>(`${DEXSCREENER_BASE}/tokens/v1/solana/${mint}`, { timeout: 5_000 });
       const pairs = Array.isArray(res.data) ? res.data : [];
-      const pair = pairs.find((p) => ["pumpswap","pump-amm","pump_amm","raydium"].includes(p.dexId ?? ""))
+
+      // Include "pumpfun" — pre-graduation pump.fun tokens show up with dexId="pumpfun"
+      // Also accept pumpswap/raydium for graduated tokens, plus any pair with a price
+      const pair = pairs.find((p) => ["pumpfun","pumpswap","pump-amm","pump_amm","raydium"].includes(p.dexId ?? ""))
         ?? pairs.find((p) => (parseFloat(p.priceUsd ?? "0") || 0) > 0);
       if (!pair) return null;
 
@@ -586,14 +605,21 @@ class EarlyDiscoveryService {
       const sells  = (m5?.sells ?? 0) + (h1?.sells ?? 0);
       const volM5  = pair.volume?.m5 ?? 0;
       const volH1  = pair.volume?.h1 ?? 0;
-      const totalVol = (volM5 + volH1) / 150;
+      const totalVol = (volM5 + volH1) / 150; // convert USD vol → approx SOL
       const buyPct = buys + sells > 0 ? buys / (buys + sells) : 0.5;
+      const mcapUsd = pair.marketCap ?? pair.fdv ?? 0;
+      // Derive bonding curve % from market cap — accurate for pump.fun tokens
+      const bondingCurvePct = mcapUsd > 0
+        ? Math.min((mcapUsd / EarlyDiscoveryService.GRAD_MCAP_USD) * 100, 99.9)
+        : 0;
 
       return {
-        buyVolumeSol:  totalVol * buyPct,
-        sellVolumeSol: totalVol * (1 - buyPct),
-        uniqueBuyers:  buys,
-        priceUsd:      parseFloat(pair.priceUsd ?? "0") || 0,
+        buyVolumeSol:    totalVol * buyPct,
+        sellVolumeSol:   totalVol * (1 - buyPct),
+        uniqueBuyers:    buys,
+        priceUsd:        parseFloat(pair.priceUsd ?? "0") || 0,
+        bondingCurvePct,
+        marketCapUsd:    mcapUsd,
       };
     } catch { return null; }
   }

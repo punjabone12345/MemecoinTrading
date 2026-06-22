@@ -15,3 +15,4 @@
 - [PumpSwap on-chain liquidity fix](pumpswap-liquidity-fix.md) — PumpSwap pools are keypair-based (NOT PDAs); use DexScreener pairAddress directly, not findProgramAddressSync; WSOL vault at byte offset 171
 - [Dip-retrace entry strategy](dip-retrace-strategy.md) — replaces immediate entry; quality gate passes → addToDipWatch → 30-min watch loop; entry triggers on 40–60% dump + 60% retrace
 - [Early Discovery Architecture](early-discovery-arch.md) — complete Early Demand Discovery system; critical route prefix gotcha; broadcast export pattern; scoring/TP/SL defaults
+- [Early Discovery rugcheck fixes](early-discovery-rugcheck-fixes.md) — 4 bugs caused zero trades: wrong dexId filter, bondingCurvePct=0 from dead API, topHolderPct check too strict, creator history hard-block

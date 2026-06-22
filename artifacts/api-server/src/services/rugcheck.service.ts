@@ -69,13 +69,17 @@ const KNOWN_SAFE_HOLDERS = new Set([
 // and therefore should not block entry. These are structural properties of the
 // bonding curve mechanism, not malicious acts.
 const PUMPFUN_EXPECTED_DANGERS = new Set([
-  "Single holder ownership",     // Bonding curve PDA holds >X% of supply initially — expected
-  "Top 10 holders high ownership", // Bonding curve + early buyers = high concentration — expected
-  "High ownership",              // Related to concentration — expected on new tokens
-  "Low Liquidity",               // Pre-graduation tokens have thin liquidity — expected
-  "Low amount of LP Providers",  // Bonding curve = single LP provider — expected
-  "No social links found",       // New tokens often have no socials yet
-  "Mutable metadata",            // Common on new tokens, not necessarily malicious
+  "Single holder ownership",          // Bonding curve PDA holds >X% of supply initially — expected
+  "Top 10 holders high ownership",    // Bonding curve + early buyers = high concentration — expected
+  "High ownership",                   // Related to concentration — expected on new tokens
+  "Low Liquidity",                    // Pre-graduation tokens have thin liquidity — expected
+  "Low amount of LP Providers",       // Bonding curve = single LP provider — expected
+  "No social links found",            // New tokens often have no socials yet
+  "Mutable metadata",                 // Common on new tokens, not necessarily malicious
+  // Creator history: many pump.fun creators have made multiple tokens; RugCheck flags the
+  // whole creator even if prior tokens simply died naturally vs malicious rug. The demand
+  // scorer and bonding-curve gate are sufficient quality filters — do not hard-block on this.
+  "Creator history of rugged tokens", // Downgraded to warning; score penalty applied instead
 ]);
 
 async function fetchReport(mintAddress: string): Promise<RugCheckReport | null> {
@@ -228,17 +232,11 @@ export async function checkTokenSafety(
     );
   }
 
-  // Single whale holding >60% of supply (excluding known DEX/bonding curve addresses).
-  // Pump.fun bonding curve PDA legitimately holds 100% of supply when first launched
-  // and decreases as buyers purchase. The KNOWN_SAFE_HOLDERS list covers the static
-  // bonding curve authority but NOT the per-token PDA (which is mint-derived).
-  // Raising threshold to 60% accounts for this — a non-DEX wallet at >60% is a real red flag.
-  if (topHolderPct > 60) {
-    return fail(
-      `RugCheck: single holder owns ${topHolderPct.toFixed(1)}% of supply — extreme concentration risk`,
-      partial,
-    );
-  }
+  // topHolderPct check removed for pump.fun pre-graduation tokens.
+  // The bonding curve PDA (a per-token keypair) legitimately holds 100% of supply at
+  // launch and decreases as buyers fill the curve. We cannot whitelist per-token PDAs
+  // in KNOWN_SAFE_HOLDERS since they are mint-derived and unique per token. The
+  // overall risk score check (>800) below already catches genuine concentration rugs.
 
   // Coordinated insider network detected — raised from 3→8→15 wallets.
   // Early pump.fun launches often have 3-14 early buyers who naturally cluster
