@@ -1,5 +1,6 @@
 import WebSocket from "ws";
 import axios from "axios";
+import { createHash } from "crypto";
 import { logger } from "../lib/logger.js";
 import { query, execute } from "../lib/db.js";
 import { broadcast } from "../websocket/server.js";
@@ -17,6 +18,7 @@ const PUMPFUN_API_BASE   = "https://client-api-2-74b1891ee9f9.herokuapp.com";
 const DEXSCREENER_BASE   = "https://api.dexscreener.com";
 const HELIUS_WS_BASE     = "wss://mainnet.helius-rpc.com";
 const PUMPPORTAL_WS_URL  = "wss://pumpportal.fun/api/data";
+const SOLANA_PUBLIC_RPC  = "https://api.mainnet-beta.solana.com";
 
 const POLL_INTERVAL_MS       = 30_000;
 const MAX_TRACK_AGE_MS       = 30 * 60 * 1000;  // 30 min for tracking/eligible tokens
@@ -202,6 +204,7 @@ class EarlyDiscoveryService {
   private lastRpcSignature: string | null = null;  // tracks newest seen pump.fun program sig
   private seenSignatures = new Set<string>();      // prevents re-processing RPC sigs
   private seenDexTokens = new Set<string>();       // prevents re-processing DexScreener profiles
+  private pdaCache = new Map<string, string>();    // mint → bonding curve PDA (cached after first compute)
 
   private tokens = new Map<string, EDToken>();
   private openPositions = new Map<string, EDPosition>();
@@ -364,14 +367,19 @@ class EarlyDiscoveryService {
       );
       const profiles = res.data ?? [];
 
-      // Only Solana pump.fun tokens (addresses end in "pump" = pump.fun vanity suffix)
-      const pumpTokens = profiles.filter(
-        (p) => p.chainId === "solana" && p.tokenAddress.endsWith("pump") && !this.seenDexTokens.has(p.tokenAddress)
+      // Only Solana pump.fun tokens:
+      // - address ends in "pump" (pump.fun vanity suffix — 100% reliable identifier)
+      // - profile updated within last 90 min (stale profiles are almost always graduated tokens)
+      const cutoff = Date.now() - 90 * 60 * 1000;
+      const pumpTokens = profiles.filter((p) =>
+        p.chainId === "solana" &&
+        p.tokenAddress.endsWith("pump") &&
+        new Date(p.updatedAt).getTime() > cutoff &&
+        !this.seenDexTokens.has(p.tokenAddress)
       );
 
       if (pumpTokens.length > 0) {
         pumpTokens.forEach((p) => this.seenDexTokens.add(p.tokenAddress));
-        // Keep set bounded
         if (this.seenDexTokens.size > 2_000) {
           const arr = [...this.seenDexTokens];
           this.seenDexTokens = new Set(arr.slice(-1_000));
@@ -379,7 +387,7 @@ class EarlyDiscoveryService {
 
         for (const p of pumpTokens) {
           if (this.tokens.has(p.tokenAddress)) continue;
-          logger.info({ mint: p.tokenAddress.slice(0, 8) }, "Early discovery: new launch via DexScreener profile 🚀");
+          logger.info({ mint: p.tokenAddress.slice(0, 8), updatedAt: p.updatedAt }, "Early discovery: new launch via DexScreener profile 🚀");
           this.launchesDetected++;
           void this.onNewLaunch(p.tokenAddress);
         }
@@ -579,9 +587,11 @@ class EarlyDiscoveryService {
     this.tokens.set(mint, token);
     this.broadcast();
 
-    // Fetch full metadata + rugcheck concurrently
-    const [pfData] = await Promise.all([
+    // Fetch metadata from DexScreener + rugcheck concurrently
+    // (pump.fun APIs are blocked from Replit — DexScreener is the reliable fallback)
+    const [pfData, dexData] = await Promise.all([
       this.fetchPumpFunData(mint),
+      this.fetchDexData(mint),
       this.runRugcheck(mint, token),
     ]);
 
@@ -595,6 +605,38 @@ class EarlyDiscoveryService {
       token.discoveryPrice  = pfData.priceUsd;
       token.priceUsd        = pfData.priceUsd;
     }
+
+    // Use DexScreener data as primary source when pump.fun API unavailable
+    if (dexData) {
+      if (!pfData || token.symbol === "???" || token.symbol === "") {
+        if (dexData.symbol) token.symbol = dexData.symbol;
+        if (dexData.name)   token.name   = dexData.name;
+      }
+      if (token.priceUsd === 0 && dexData.priceUsd > 0) {
+        token.priceUsd = dexData.priceUsd;
+        token.discoveryPrice = dexData.priceUsd;
+      }
+      if (dexData.marketCapUsd > 0) token.marketCapUsd = dexData.marketCapUsd;
+
+      // Reject tokens already graduated off pump.fun bonding curve
+      if (dexData.dexId && dexData.dexId !== "pumpfun" && token.status !== "rejected") {
+        token.status = "rejected";
+        token.rejectionReason = `Already graduated to ${dexData.dexId} — not pre-migration`;
+        logger.info({ mint: mint.slice(0, 8), dexId: dexData.dexId }, "Early discovery: rejected — already graduated ⛔");
+      }
+    }
+
+    // Fetch on-chain bonding curve if still pre-graduation
+    if (token.status !== "rejected" && token.bondingCurvePct === 0) {
+      const onChain = await this.fetchBondingCurveOnChain(mint);
+      if (onChain) token.bondingCurvePct = onChain.bondingCurvePct;
+      else if (dexData?.dexId && dexData.dexId !== "pumpfun") {
+        // No bonding curve account + not pumpfun dex = graduated
+        token.status = "rejected";
+        token.rejectionReason = "Bonding curve account not found — already graduated";
+      }
+    }
+
     token.lastUpdatedAt = Date.now();
     this.broadcast();
   }
@@ -666,6 +708,15 @@ class EarlyDiscoveryService {
       }
 
       if (dexData) {
+        // Name/symbol fallback — DexScreener is reliable when pump.fun API is unavailable
+        if (token.symbol === "???" || token.symbol === "") {
+          if (dexData.symbol) token.symbol = dexData.symbol;
+        }
+        if (token.name === "Loading…" || token.name === "") {
+          if (dexData.name) token.name = dexData.name;
+          else if (token.symbol !== "???") token.name = token.symbol;
+        }
+
         token.prevUniqueBuyers = token.uniqueBuyers;
         token.uniqueBuyers     = Math.max(token.uniqueBuyers, dexData.uniqueBuyers);
         const buyerGain        = token.uniqueBuyers - token.prevUniqueBuyers;
@@ -676,16 +727,26 @@ class EarlyDiscoveryService {
         token.sellVolumeSol    = dexData.sellVolumeSol;
         if (dexData.priceUsd > 0) token.priceUsd = dexData.priceUsd;
         if (token.discoveryPrice === 0 && dexData.priceUsd > 0) token.discoveryPrice = dexData.priceUsd;
-        // Use DexScreener-derived bonding curve % only when pump.fun API gives nothing
-        if (dexData.bondingCurvePct > 0 && token.bondingCurvePct === 0) {
-          token.bondingCurvePct = dexData.bondingCurvePct;
+        if (dexData.marketCapUsd > 0) token.marketCapUsd = Math.max(token.marketCapUsd, dexData.marketCapUsd);
+
+        // Reject already-graduated tokens discovered by REST polling
+        if (dexData.dexId && dexData.dexId !== "pumpfun" && token.status !== "rejected") {
+          token.status = "rejected";
+          token.rejectionReason = `Already graduated to ${dexData.dexId} — not pre-migration`;
+          logger.debug({ mint: token.mint.slice(0, 8), dexId: dexData.dexId }, "Early discovery: rejected — already graduated");
         }
-        // Update mcap from DexScreener (take highest reading)
-        if (dexData.marketCapUsd > 0) {
-          token.marketCapUsd = Math.max(token.marketCapUsd, dexData.marketCapUsd);
-          // NOTE: do NOT override bondingCurvePct from mcap — the mcap→bonding-curve
-          // mapping is non-linear (price accelerates as curve fills) and systematically
-          // under-reports the true progress. virtual_sol_reserves-based calc is used instead.
+      }
+
+      // Refresh on-chain bonding curve — most accurate source, no API key needed
+      if (token.status !== "rejected") {
+        const onChain = await this.fetchBondingCurveOnChain(token.mint);
+        if (onChain) {
+          token.bondingCurvePct = onChain.bondingCurvePct;
+        } else if (!pfData && token.bondingCurvePct === 0) {
+          // Bonding curve account missing — token is graduated, no longer on pump.fun
+          token.status = "rejected";
+          token.rejectionReason = "Bonding curve account not found — already graduated";
+          logger.debug({ mint: token.mint.slice(0, 8) }, "Early discovery: rejected — no on-chain bonding curve");
         }
       }
 
@@ -796,20 +857,23 @@ class EarlyDiscoveryService {
   private async fetchDexData(mint: string): Promise<{
     buyVolumeSol: number; sellVolumeSol: number; uniqueBuyers: number; priceUsd: number;
     bondingCurvePct: number; marketCapUsd: number;
+    symbol: string; name: string; dexId: string; pairCreatedAt: number;
   } | null> {
     try {
       type DexPair = {
         priceUsd?: string; dexId?: string;
+        baseToken?: { symbol?: string; name?: string };
         marketCap?: number; fdv?: number;
+        pairCreatedAt?: number;
         txns?: { m5?: { buys?: number; sells?: number }; h1?: { buys?: number; sells?: number } };
         volume?: { m5?: number; h1?: number };
       };
       const res = await axios.get<DexPair[]>(`${DEXSCREENER_BASE}/tokens/v1/solana/${mint}`, { timeout: 5_000 });
       const pairs = Array.isArray(res.data) ? res.data : [];
 
-      // Include "pumpfun" — pre-graduation pump.fun tokens show up with dexId="pumpfun"
-      // Also accept pumpswap/raydium for graduated tokens, plus any pair with a price
-      const pair = pairs.find((p) => ["pumpfun","pumpswap","pump-amm","pump_amm","raydium"].includes(p.dexId ?? ""))
+      // Prefer pumpfun (pre-graduation) — if not found fall back to graduated dexes
+      const pair = pairs.find((p) => p.dexId === "pumpfun")
+        ?? pairs.find((p) => ["pumpswap","pump-amm","pump_amm","raydium","meteora"].includes(p.dexId ?? ""))
         ?? pairs.find((p) => (parseFloat(p.priceUsd ?? "0") || 0) > 0);
       if (!pair) return null;
 
@@ -824,9 +888,9 @@ class EarlyDiscoveryService {
       const mcapUsd = pair.marketCap ?? pair.fdv ?? 0;
       // NOTE: Do NOT derive bonding curve from mcap — pump.fun's bonding curve
       // is non-linear with price (price accelerates as curve fills), so a $6.6K
-      // mcap token can be at 59.8% curve completion. Only the pump.fun API's
-      // virtual_sol_reserves or bonding_curve_progress field is accurate.
-      const bondingCurvePct = 0; // populated by fetchPumpFunData instead
+      // mcap token can be at 59.8% curve completion. Only fetchBondingCurveOnChain
+      // (virtual_sol_reserves from chain) gives the accurate value.
+      const bondingCurvePct = 0; // populated by fetchBondingCurveOnChain instead
 
       return {
         buyVolumeSol:    totalVol * buyPct,
@@ -835,8 +899,117 @@ class EarlyDiscoveryService {
         priceUsd:        parseFloat(pair.priceUsd ?? "0") || 0,
         bondingCurvePct,
         marketCapUsd:    mcapUsd,
+        symbol:          pair.baseToken?.symbol ?? "",
+        name:            pair.baseToken?.name   ?? "",
+        dexId:           pair.dexId             ?? "",
+        pairCreatedAt:   pair.pairCreatedAt      ?? 0,
       };
     } catch { return null; }
+  }
+
+  /**
+   * Reads the bonding curve account on-chain via public Solana RPC.
+   * Bonding curve account layout (after 8-byte discriminator):
+   *   [8]  virtualTokenReserves  u64
+   *   [16] virtualSolReserves    u64
+   *   [24] realTokenReserves     u64
+   *   [32] realSolReserves       u64  ← graduation progress
+   *   [40] tokenTotalSupply      u64
+   *   [48] complete              bool ← instant graduation detection
+   * Returns null if the account doesn't exist (token already graduated off pumpfun).
+   */
+  private async fetchBondingCurveOnChain(mint: string): Promise<{ bondingCurvePct: number } | null> {
+    try {
+      const pda = this.computeBondingCurvePda(mint);
+      const rpcUrl = process.env["HELIUS_API_KEY"]
+        ? `https://mainnet.helius-rpc.com/?api-key=${process.env["HELIUS_API_KEY"]}`
+        : SOLANA_PUBLIC_RPC;
+
+      type RpcResp = { result?: { value?: null | { data: [string, string] } } };
+      const res = await axios.post<RpcResp>(rpcUrl, {
+        jsonrpc: "2.0", id: 1,
+        method: "getAccountInfo",
+        params: [pda, { encoding: "base64" }],
+      }, { timeout: 6_000 });
+
+      const acct = res.data?.result?.value;
+      if (!acct) return null; // account doesn't exist → graduated or invalid
+
+      const buf = Buffer.from(acct.data[0], "base64");
+      if (buf.length < 49) return null;
+
+      const complete = buf[48] !== 0;
+      if (complete) return { bondingCurvePct: 100 };
+
+      // realSolReserves at byte offset 32 (u64 little-endian)
+      const realSolReserves = buf.readBigUInt64LE(32);
+      const GRAD_SOL_LAMPORTS = 85_000_000_000n; // 85 SOL in lamports
+      const pct = Number(realSolReserves * 10000n / GRAD_SOL_LAMPORTS) / 100;
+      return { bondingCurvePct: Math.min(Math.max(pct, 0), 99.9) };
+    } catch { return null; }
+  }
+
+  /**
+   * Derives the pump.fun bonding curve PDA from a mint address using pure Node.js crypto.
+   * Algorithm: SHA256(b"bonding-curve" || mintBytes || nonce || programIdBytes || b"ProgramDerivedAddress")
+   * where nonce decrements from 255 until the hash is NOT a valid Ed25519 curve point.
+   */
+  private computeBondingCurvePda(mint: string): string {
+    if (this.pdaCache.has(mint)) return this.pdaCache.get(mint)!;
+
+    const B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+    function b58Dec(s: string): Buffer {
+      let n = 0n;
+      for (const c of s) { const i = B58.indexOf(c); if (i < 0) throw new Error("bad b58"); n = n * 58n + BigInt(i); }
+      const out: number[] = [];
+      while (n > 0n) { out.unshift(Number(n & 0xffn)); n >>= 8n; }
+      const leading = s.match(/^1*/)?.[0]?.length ?? 0;
+      return Buffer.concat([Buffer.alloc(leading), Buffer.from(out)]);
+    }
+    function b58Enc(buf: Buffer): string {
+      if (buf.length === 0) return "";
+      let n = BigInt("0x" + buf.toString("hex"));
+      let s = "";
+      while (n > 0n) { s = B58[Number(n % 58n)] + s; n /= 58n; }
+      const leading = buf.findIndex((b) => b !== 0);
+      return "1".repeat(leading < 0 ? buf.length : leading) + s;
+    }
+
+    const P255 = (1n << 255n) - 19n;
+    const D_ED = 37095705934669439343138083508754565189542113879843219016388785533085940283555n;
+    function mpow(base: bigint, exp: bigint, mod: bigint): bigint {
+      let r = 1n; base %= mod;
+      for (; exp > 0n; exp >>= 1n) { if (exp & 1n) r = r * base % mod; base = base * base % mod; }
+      return r;
+    }
+    function isOnCurve(bytes: Buffer): boolean {
+      const y = BigInt("0x" + Buffer.from(bytes).reverse().toString("hex")) & ((1n << 255n) - 1n);
+      const y2 = y * y % P255;
+      const u  = (y2 - 1n + P255) % P255;
+      const v  = (D_ED * y2 + 1n) % P255;
+      const x2 = u * mpow(v, P255 - 2n, P255) % P255;
+      if (x2 === 0n) return u === 0n;
+      return mpow(x2, (P255 - 1n) / 2n, P255) === 1n;
+    }
+
+    const mintBytes    = b58Dec(mint);
+    const programBytes = b58Dec(PUMPFUN_PROGRAM);
+    const marker       = Buffer.from("ProgramDerivedAddress");
+    const seed         = Buffer.from("bonding-curve");
+
+    for (let nonce = 255; nonce >= 0; nonce--) {
+      const h = createHash("sha256");
+      h.update(seed); h.update(mintBytes);
+      h.update(Buffer.from([nonce]));
+      h.update(programBytes); h.update(marker);
+      const digest = h.digest();
+      if (!isOnCurve(digest)) {
+        const pda = b58Enc(digest);
+        this.pdaCache.set(mint, pda);
+        return pda;
+      }
+    }
+    throw new Error(`PDA not found for ${mint}`);
   }
 
   // ── Paper trade entry ─────────────────────────────────────────────────────
