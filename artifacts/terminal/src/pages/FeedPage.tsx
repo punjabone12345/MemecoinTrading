@@ -3,8 +3,12 @@ import {
   Telescope, Wifi, WifiOff, TrendingUp, TrendingDown,
   ChevronRight, ExternalLink, AlertTriangle, Clock,
   Activity, Users, Zap, Shield, Target, RotateCcw, FlaskConical,
+  X, Trash2, Pencil, Check, XCircle,
 } from "lucide-react";
-import { useEDStatus, useEDTokens, useEDPositions, useResetPaperBalance, useInjectTestToken } from "@/lib/api";
+import {
+  useEDStatus, useEDTokens, useEDPositions, useResetPaperBalance, useInjectTestToken,
+  useEDClosePosition, useEDDeletePosition, useEDEditPosition,
+} from "@/lib/api";
 import type { EDToken, EDPosition, EDTokenStatus } from "@/lib/types";
 
 /* ── Helpers ──────────────────────────────────────────────────────────────── */
@@ -24,10 +28,6 @@ function fmtSol(v: number): string {
 }
 function fmtPct(v: number): string {
   return `${v >= 0 ? "+" : ""}${v.toFixed(1)}%`;
-}
-function fmtNum(v: number): string {
-  if (v >= 1_000) return `${(v / 1_000).toFixed(1)}K`;
-  return v.toFixed(2);
 }
 
 /* ── Status badge ──────────────────────────────────────────────────────────── */
@@ -182,10 +182,83 @@ function MetricsPanel({ token }: { token: EDToken }) {
   );
 }
 
+/* ── Confirm overlay ──────────────────────────────────────────────────────── */
+function ConfirmBar({
+  message, onConfirm, onCancel, danger = true, loading = false,
+}: {
+  message: string; onConfirm: () => void; onCancel: () => void; danger?: boolean; loading?: boolean;
+}) {
+  return (
+    <div className="flex items-center justify-between rounded-lg px-3 py-2 mt-2" style={{ background: danger ? "rgba(248,113,113,0.08)" : "rgba(251,191,36,0.08)", border: `1px solid ${danger ? "rgba(248,113,113,0.25)" : "rgba(251,191,36,0.25)"}` }}>
+      <span className="text-[10px]" style={{ color: danger ? "#f87171" : "#fbbf24" }}>{message}</span>
+      <div className="flex gap-1.5 ml-2 shrink-0">
+        <button
+          onClick={onConfirm}
+          disabled={loading}
+          className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-[10px] font-bold transition-all"
+          style={{ background: danger ? "rgba(248,113,113,0.2)" : "rgba(251,191,36,0.2)", color: danger ? "#f87171" : "#fbbf24" }}
+        >
+          <Check size={10} />{loading ? "…" : "Yes"}
+        </button>
+        <button
+          onClick={onCancel}
+          className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-[10px] font-bold transition-all"
+          style={{ background: "rgba(255,255,255,0.05)", color: "#64748b" }}
+        >
+          <X size={10} />No
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* ── Edit notes panel ─────────────────────────────────────────────────────── */
+function EditPanel({
+  initial, onSave, onCancel, loading,
+}: {
+  initial: string; onSave: (v: string) => void; onCancel: () => void; loading: boolean;
+}) {
+  const [val, setVal] = useState(initial);
+  return (
+    <div className="mt-2 rounded-xl p-3" style={{ background: "rgba(13,13,30,0.9)", border: "1px solid rgba(129,140,248,0.25)" }}>
+      <p className="text-[9px] text-slate-500 uppercase tracking-widest mb-1.5">Notes / Close Reason</p>
+      <textarea
+        value={val}
+        onChange={(e) => setVal(e.target.value)}
+        rows={2}
+        className="w-full rounded-lg px-2.5 py-2 text-xs text-slate-200 resize-none outline-none"
+        style={{ background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)" }}
+        placeholder="Add a note…"
+      />
+      <div className="flex gap-1.5 mt-2 justify-end">
+        <button
+          onClick={() => onSave(val)}
+          disabled={loading}
+          className="flex items-center gap-1 px-3 py-1.5 rounded-lg text-[10px] font-bold transition-all"
+          style={{ background: "rgba(52,211,153,0.15)", color: "#34d399", border: "1px solid rgba(52,211,153,0.25)" }}
+        >
+          <Check size={10} />{loading ? "Saving…" : "Save"}
+        </button>
+        <button
+          onClick={onCancel}
+          className="flex items-center gap-1 px-3 py-1.5 rounded-lg text-[10px] font-bold transition-all"
+          style={{ background: "rgba(255,255,255,0.04)", color: "#64748b", border: "1px solid rgba(255,255,255,0.08)" }}
+        >
+          <X size={10} />Cancel
+        </button>
+      </div>
+    </div>
+  );
+}
+
 /* ── Active trade card ─────────────────────────────────────────────────────── */
 function TradeCard({ pos }: { pos: EDPosition }) {
   const isUp = pos.pnlPct >= 0;
   const elapsed = fmtAge(pos.entryAt);
+  const closePos = useEDClosePosition();
+  const deletePos = useEDDeletePosition();
+  const [confirm, setConfirm] = useState<"close" | "delete" | null>(null);
+
   return (
     <div
       className="rounded-xl p-4"
@@ -213,6 +286,7 @@ function TradeCard({ pos }: { pos: EDPosition }) {
           </p>
         </div>
       </div>
+
       <div className="grid grid-cols-3 gap-2 mb-3">
         {[
           { label: "Entry MC",   val: fmtMC(pos.entryMcap) },
@@ -225,7 +299,8 @@ function TradeCard({ pos }: { pos: EDPosition }) {
           </div>
         ))}
       </div>
-      <div className="flex items-center justify-between">
+
+      <div className="flex items-center justify-between mb-3">
         <div className="flex gap-2">
           <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${pos.tp1Hit ? "text-green-400 bg-green-400/10" : "text-slate-600 bg-white/5"}`}>TP1</span>
           <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${pos.tp2Hit ? "text-green-400 bg-green-400/10" : "text-slate-600 bg-white/5"}`}>TP2</span>
@@ -235,6 +310,115 @@ function TradeCard({ pos }: { pos: EDPosition }) {
           <p className="text-[9px] text-slate-500">{(pos.remainingFraction * 100).toFixed(0)}% remaining</p>
         </div>
       </div>
+
+      {/* Action buttons */}
+      {confirm === null && (
+        <div className="flex gap-2 pt-2" style={{ borderTop: "1px solid rgba(255,255,255,0.06)" }}>
+          <button
+            onClick={() => setConfirm("close")}
+            className="flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg text-[10px] font-bold transition-all"
+            style={{ background: "rgba(251,191,36,0.1)", border: "1px solid rgba(251,191,36,0.2)", color: "#fbbf24" }}
+          >
+            <XCircle size={11} /> Close Position
+          </button>
+          <button
+            onClick={() => setConfirm("delete")}
+            className="flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-[10px] font-bold transition-all"
+            style={{ background: "rgba(248,113,113,0.08)", border: "1px solid rgba(248,113,113,0.18)", color: "#f87171" }}
+          >
+            <Trash2 size={11} />
+          </button>
+        </div>
+      )}
+
+      {confirm === "close" && (
+        <ConfirmBar
+          message="Close at current price and record P&L?"
+          danger={false}
+          loading={closePos.isPending}
+          onConfirm={() => closePos.mutate(pos.id, { onSuccess: () => setConfirm(null) })}
+          onCancel={() => setConfirm(null)}
+        />
+      )}
+      {confirm === "delete" && (
+        <ConfirmBar
+          message="Delete this trade? Position size will be refunded."
+          danger={true}
+          loading={deletePos.isPending}
+          onConfirm={() => deletePos.mutate(pos.id, { onSuccess: () => setConfirm(null) })}
+          onCancel={() => setConfirm(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+/* ── Closed position row ───────────────────────────────────────────────────── */
+function ClosedRow({ pos }: { pos: EDPosition }) {
+  const deletePos = useEDDeletePosition();
+  const editPos = useEDEditPosition();
+  const [mode, setMode] = useState<"idle" | "confirmDelete" | "edit">("idle");
+
+  return (
+    <div className="rounded-xl px-4 py-3" style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.06)" }}>
+      <div className="flex items-center justify-between">
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2">
+            <span className="font-bold text-sm text-white">${pos.symbol}</span>
+            <span className="text-[9px] text-slate-500">Score {pos.entryScore}</span>
+          </div>
+          <p className="text-[9px] text-slate-500 mt-0.5 truncate">{pos.closeReason || "—"}</p>
+        </div>
+        <div className="flex items-center gap-2">
+          <div className="text-right">
+            <p className="font-black text-sm" style={{ color: pos.realizedPnlSol >= 0 ? "#34d399" : "#f87171" }}>
+              {fmtPct(pos.pnlPct)}
+            </p>
+            <p className="text-[10px]" style={{ color: pos.realizedPnlSol >= 0 ? "#34d399" : "#f87171" }}>
+              {fmtSol(pos.realizedPnlSol)}
+            </p>
+          </div>
+          {/* Edit + Delete icons */}
+          {mode === "idle" && (
+            <div className="flex gap-1 ml-2">
+              <button
+                onClick={() => setMode("edit")}
+                className="p-1.5 rounded-lg transition-all"
+                style={{ background: "rgba(129,140,248,0.08)", border: "1px solid rgba(129,140,248,0.15)", color: "#818cf8" }}
+                title="Edit notes"
+              >
+                <Pencil size={11} />
+              </button>
+              <button
+                onClick={() => setMode("confirmDelete")}
+                className="p-1.5 rounded-lg transition-all"
+                style={{ background: "rgba(248,113,113,0.08)", border: "1px solid rgba(248,113,113,0.15)", color: "#f87171" }}
+                title="Delete"
+              >
+                <Trash2 size={11} />
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {mode === "confirmDelete" && (
+        <ConfirmBar
+          message="Remove this trade from history?"
+          danger={true}
+          loading={deletePos.isPending}
+          onConfirm={() => deletePos.mutate(pos.id, { onSuccess: () => setMode("idle") })}
+          onCancel={() => setMode("idle")}
+        />
+      )}
+      {mode === "edit" && (
+        <EditPanel
+          initial={pos.closeReason ?? ""}
+          loading={editPos.isPending}
+          onSave={(v) => editPos.mutate({ id: pos.id, patch: { closeReason: v } }, { onSuccess: () => setMode("idle") })}
+          onCancel={() => setMode("idle")}
+        />
+      )}
     </div>
   );
 }
@@ -276,7 +460,6 @@ function TokenRow({ token, onClick, selected }: { token: EDToken; onClick: () =>
 function StatsStrip() {
   const { data: status } = useEDStatus();
   const { data: positions } = useEDPositions();
-  const reset = useResetPaperBalance();
   const unrealPnl = positions?.open.reduce((s, p) => s + p.unrealizedPnlSol, 0) ?? 0;
   const realPnl   = status?.totalRealizedPnlSol ?? 0;
   const totalPnl  = realPnl + unrealPnl;
@@ -324,12 +507,12 @@ export default function FeedPage() {
     return [];
   }, [tokens, tab]);
 
-  const openPositions = positions?.open ?? [];
-  const closedRecent  = (positions?.closed ?? []).slice(0, 5);
-  const selectedToken = selected ? tokens.find((t) => t.mint === selected) ?? null : null;
+  const openPositions  = positions?.open ?? [];
+  const allClosed      = positions?.closed ?? [];
+  const selectedToken  = selected ? tokens.find((t) => t.mint === selected) ?? null : null;
 
-  const connSrc = status?.connectionSource ?? "offline";
-  const wsOk = connSrc !== "offline";
+  const connSrc  = status?.connectionSource ?? "offline";
+  const wsOk     = connSrc !== "offline";
   const connLabel = connSrc === "pumpportal" ? "PUMPPORTAL" : connSrc === "helius" ? "HELIUS" : "OFFLINE";
 
   return (
@@ -358,7 +541,11 @@ export default function FeedPage() {
         {/* Sub-tabs */}
         <div className="flex px-4 pb-2 gap-1">
           {(["live", "all", "trades"] as Tab[]).map((t) => {
-            const labels: Record<Tab, string> = { live: `Live (${tokens.filter((tk) => tk.status === "tracking" || tk.status === "eligible").length})`, all: `All Tokens (${tokens.length})`, trades: `Trades (${openPositions.length})` };
+            const labels: Record<Tab, string> = {
+              live:   `Live (${tokens.filter((tk) => tk.status === "tracking" || tk.status === "eligible").length})`,
+              all:    `All Tokens (${tokens.length})`,
+              trades: `Trades (${openPositions.length + allClosed.length})`,
+            };
             return (
               <button
                 key={t}
@@ -383,7 +570,7 @@ export default function FeedPage() {
         {/* ── Split view: list + detail ── */}
         {tab !== "trades" ? (
           <div>
-            {/* Detail panel (shown when token selected) */}
+            {/* Detail panel */}
             {selectedToken && (
               <div className="mb-4">
                 <div className="flex items-center justify-between mb-3">
@@ -444,7 +631,7 @@ export default function FeedPage() {
         ) : (
           /* ── Trades tab ── */
           <div>
-            {openPositions.length === 0 && closedRecent.length === 0 ? (
+            {openPositions.length === 0 && allClosed.length === 0 ? (
               <div className="text-center py-12">
                 <Target size={32} className="text-slate-700 mx-auto mb-3" />
                 <p className="text-slate-500 text-sm">No trades yet</p>
@@ -453,39 +640,27 @@ export default function FeedPage() {
             ) : (
               <>
                 {openPositions.length > 0 && (
-                  <div className="mb-4">
+                  <div className="mb-5">
                     <p className="text-[10px] text-slate-500 uppercase tracking-widest mb-2">Open Positions</p>
                     <div className="space-y-3">
                       {openPositions.map((pos) => <TradeCard key={pos.id} pos={pos} />)}
                     </div>
                   </div>
                 )}
-                {closedRecent.length > 0 && (
+
+                {allClosed.length > 0 && (
                   <div>
-                    <p className="text-[10px] text-slate-500 uppercase tracking-widest mb-2">Recent Closed</p>
+                    <p className="text-[10px] text-slate-500 uppercase tracking-widest mb-2">
+                      Closed ({allClosed.length})
+                    </p>
                     <div className="space-y-2">
-                      {closedRecent.map((pos) => (
-                        <div key={pos.id} className="rounded-xl px-4 py-3 flex items-center justify-between" style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.06)" }}>
-                          <div>
-                            <div className="flex items-center gap-2">
-                              <span className="font-bold text-sm text-white">${pos.symbol}</span>
-                              <span className="text-[9px] text-slate-500">Score {pos.entryScore}</span>
-                            </div>
-                            <p className="text-[9px] text-slate-500 mt-0.5">{pos.closeReason}</p>
-                          </div>
-                          <div className="text-right">
-                            <p className="font-black text-sm" style={{ color: pos.realizedPnlSol >= 0 ? "#34d399" : "#f87171" }}>
-                              {fmtPct(pos.pnlPct)}
-                            </p>
-                            <p className="text-[10px]" style={{ color: pos.realizedPnlSol >= 0 ? "#34d399" : "#f87171" }}>
-                              {fmtSol(pos.realizedPnlSol)}
-                            </p>
-                          </div>
-                        </div>
+                      {allClosed.map((pos) => (
+                        <ClosedRow key={pos.id} pos={pos} />
                       ))}
                     </div>
                   </div>
                 )}
+
                 <div className="mt-4 flex justify-end">
                   <button
                     onClick={() => reset.mutate()}

@@ -34,6 +34,25 @@ router.post("/ed/reset-paper", async (_req, res) => {
   res.json({ ok: true, balance: 1.0 });
 });
 
+router.post("/ed/positions/:id/close", (req, res) => {
+  const ok = earlyDiscoveryService.forceClosePosition(req.params.id);
+  if (!ok) { res.status(404).json({ error: "Position not found or already closed" }); return; }
+  res.json({ ok: true });
+});
+
+router.delete("/ed/positions/:id", (req, res) => {
+  const ok = earlyDiscoveryService.deletePosition(req.params.id);
+  if (!ok) { res.status(404).json({ error: "Position not found" }); return; }
+  res.json({ ok: true });
+});
+
+router.patch("/ed/positions/:id", (req, res) => {
+  const patch = req.body as { closeReason?: string };
+  const pos = earlyDiscoveryService.editPosition(req.params.id, patch);
+  if (!pos) { res.status(404).json({ error: "Position not found" }); return; }
+  res.json(pos);
+});
+
 router.post("/ed/inject-test", (req, res) => {
   const { mint } = req.body as { mint?: string };
   if (!mint || mint.length < 32) {

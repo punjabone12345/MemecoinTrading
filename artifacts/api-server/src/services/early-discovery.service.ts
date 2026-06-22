@@ -1056,6 +1056,65 @@ class EarlyDiscoveryService {
   injectTestToken(mint: string): void {
     void this.onNewLaunch(mint);
   }
+
+  // ── Manual position controls ───────────────────────────────────────────────
+
+  forceClosePosition(id: string): boolean {
+    const entry = [...this.openPositions.entries()].find(([, p]) => p.id === id);
+    if (!entry) return false;
+    const [, pos] = entry;
+    const currentPx = this.tokens.get(pos.mint)?.priceUsd ?? 0;
+    const exitPx = currentPx > 0 ? currentPx : pos.entryPrice;
+    this.closePaperPosition(pos, "Manual close", exitPx);
+    return true;
+  }
+
+  deletePosition(id: string): boolean {
+    for (const [mint, pos] of this.openPositions) {
+      if (pos.id === id) {
+        this.virtualBalance += pos.sizeSol;
+        this.openPositions.delete(mint);
+        const token = this.tokens.get(mint);
+        if (token) { token.status = "tracking"; token.positionId = null; }
+        void this.persistBalance();
+        void this.deletePositionFromDb(id);
+        this.broadcast();
+        return true;
+      }
+    }
+    const idx = this.closedPositions.findIndex((p) => p.id === id);
+    if (idx !== -1) {
+      this.closedPositions.splice(idx, 1);
+      void this.deletePositionFromDb(id);
+      this.broadcast();
+      return true;
+    }
+    return false;
+  }
+
+  editPosition(id: string, patch: { closeReason?: string }): EDPosition | null {
+    const closed = this.closedPositions.find((p) => p.id === id);
+    if (closed) {
+      if (patch.closeReason !== undefined) closed.closeReason = patch.closeReason;
+      void this.persistPosition(closed);
+      return { ...closed };
+    }
+    const open = [...this.openPositions.values()].find((p) => p.id === id);
+    if (open) {
+      if (patch.closeReason !== undefined) open.closeReason = patch.closeReason;
+      void this.persistPosition(open);
+      return { ...open };
+    }
+    return null;
+  }
+
+  private async deletePositionFromDb(id: string): Promise<void> {
+    try {
+      await execute(`DELETE FROM ed_positions WHERE id = $1`, [id]);
+    } catch (err) {
+      logger.warn({ id, err: (err as Error).message }, "ED: failed to delete position from DB");
+    }
+  }
 }
 
 export const earlyDiscoveryService = new EarlyDiscoveryService();
