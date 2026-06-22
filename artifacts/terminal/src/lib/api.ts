@@ -1,6 +1,10 @@
 import { useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import type { EDStatus, EDToken, EDPosition, EDConfig, EDAnalytics } from "./types";
+import type {
+  EDStatus, EDToken, EDPosition, EDConfig, EDAnalytics,
+  SniperStatus, SniperPosition, SniperEvent, SniperConfig,
+  WatchedGrad, StuckToken, WalletBalance,
+} from "./types";
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, "") ?? "";
 
@@ -35,12 +39,37 @@ export function useWebSocket() {
 
       ws.onmessage = (event) => {
         try {
-          const data = JSON.parse(event.data as string) as { type: string };
-          if (data.type === "ed_update") {
+          const msg = JSON.parse(event.data as string) as { type: string; data: unknown; timestamp: number };
+
+          if (msg.type === "ed_update" && msg.data) {
+            const d = msg.data as {
+              status: EDStatus;
+              positions: { open: EDPosition[]; closed: EDPosition[] };
+            };
+            queryClient.setQueryData(["ed-status"], d.status);
+            queryClient.setQueryData(["ed-positions"], d.positions);
+          } else if (msg.type === "ed_update") {
             void queryClient.invalidateQueries({ queryKey: ["ed-status"] });
             void queryClient.invalidateQueries({ queryKey: ["ed-tokens"] });
             void queryClient.invalidateQueries({ queryKey: ["ed-positions"] });
             void queryClient.invalidateQueries({ queryKey: ["ed-analytics"] });
+          } else if (msg.type === "sniper_update" && msg.data) {
+            const d = msg.data as {
+              status: SniperStatus;
+              positions: SniperPosition[];
+              history: SniperPosition[];
+            };
+            queryClient.setQueryData(["sniper-status"], d.status);
+            queryClient.setQueryData(["sniper-positions"], d.positions);
+            queryClient.setQueryData(["sniper-history"], d.history);
+          } else if (msg.type === "paper_update" && msg.data) {
+            const d = msg.data as {
+              status: unknown;
+              openPositions: unknown[];
+              history: unknown[];
+            };
+            queryClient.setQueryData(["paper-status"], d.status);
+            queryClient.setQueryData(["paper-positions"], d.openPositions);
           }
         } catch { /* ignore */ }
       };
@@ -61,6 +90,8 @@ export function useWebSocket() {
     };
   }, [queryClient]);
 }
+
+// ── ED Hooks ──────────────────────────────────────────────────────────────────
 
 export function useEDStatus() {
   return useQuery<EDStatus>({
@@ -214,5 +245,233 @@ export function useInjectTestToken() {
       if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
       return res.json() as Promise<{ ok: boolean; mint: string }>;
     },
+  });
+}
+
+// ── Graduation Sniper Hooks ───────────────────────────────────────────────────
+
+export function useSniperStatus() {
+  return useQuery<SniperStatus>({
+    queryKey: ["sniper-status"],
+    queryFn: async () => {
+      const res = await apiFetch<{ success: boolean; data: SniperStatus }>("/api/sniper/status");
+      return res.data;
+    },
+    refetchInterval: 5_000,
+  });
+}
+
+export function useSniperPositions() {
+  return useQuery<SniperPosition[]>({
+    queryKey: ["sniper-positions"],
+    queryFn: async () => {
+      const res = await apiFetch<{ success: boolean; data: SniperPosition[] }>("/api/sniper/positions");
+      return res.data;
+    },
+    refetchInterval: 5_000,
+  });
+}
+
+export function useSniperHistory() {
+  return useQuery<SniperPosition[]>({
+    queryKey: ["sniper-history"],
+    queryFn: async () => {
+      const res = await apiFetch<{ success: boolean; data: SniperPosition[] }>("/api/sniper/history");
+      return res.data;
+    },
+    refetchInterval: 30_000,
+  });
+}
+
+export function useSniperEvents() {
+  return useQuery<SniperEvent[]>({
+    queryKey: ["sniper-events"],
+    queryFn: async () => {
+      const res = await apiFetch<{ success: boolean; data: SniperEvent[] }>("/api/sniper/events");
+      return res.data;
+    },
+    refetchInterval: 10_000,
+  });
+}
+
+export function useUpdateSniperConfig() {
+  const queryClient = useQueryClient();
+  return useMutation<SniperConfig, Error, Partial<SniperConfig>>({
+    mutationFn: async (patch) => {
+      const res = await fetch(apiUrl("/api/sniper/config"), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(patch),
+      });
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+      const json = await res.json() as { success: boolean; data: SniperConfig };
+      return json.data;
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["sniper-status"] });
+    },
+  });
+}
+
+export function useDeleteSniperPosition() {
+  const queryClient = useQueryClient();
+  return useMutation<void, Error, string>({
+    mutationFn: async (id) => {
+      const res = await fetch(apiUrl(`/api/sniper/positions/${id}`), { method: "DELETE" });
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["sniper-positions"] });
+      void queryClient.invalidateQueries({ queryKey: ["sniper-history"] });
+      void queryClient.invalidateQueries({ queryKey: ["sniper-status"] });
+    },
+  });
+}
+
+export function useEditSniperPosition() {
+  const queryClient = useQueryClient();
+  return useMutation<SniperPosition, Error, { id: string; patch: Partial<Pick<SniperPosition, "entryPrice" | "exitPrice" | "currentPrice" | "closeReason" | "realizedPnlSol">> }>({
+    mutationFn: async ({ id, patch }) => {
+      const res = await fetch(apiUrl(`/api/sniper/positions/${id}`), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(patch),
+      });
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+      const json = await res.json() as { success: boolean; data: SniperPosition };
+      return json.data;
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["sniper-positions"] });
+      void queryClient.invalidateQueries({ queryKey: ["sniper-history"] });
+    },
+  });
+}
+
+export function useDeleteSniperEvent() {
+  const queryClient = useQueryClient();
+  return useMutation<void, Error, string>({
+    mutationFn: async (id) => {
+      const res = await fetch(apiUrl(`/api/sniper/events/${id}`), { method: "DELETE" });
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["sniper-events"] });
+    },
+  });
+}
+
+export function useResetSniperAccount() {
+  const queryClient = useQueryClient();
+  return useMutation<void, Error, void>({
+    mutationFn: async () => {
+      const res = await fetch(apiUrl("/api/sniper/reset"), { method: "POST" });
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["sniper-status"] });
+      void queryClient.invalidateQueries({ queryKey: ["sniper-positions"] });
+      void queryClient.invalidateQueries({ queryKey: ["sniper-history"] });
+    },
+  });
+}
+
+export function useRecalculateSniperPnl() {
+  const queryClient = useQueryClient();
+  return useMutation<SniperPosition, Error, string>({
+    mutationFn: async (id) => {
+      const res = await fetch(apiUrl(`/api/sniper/positions/${id}/recalculate`), { method: "POST" });
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+      const json = await res.json() as { success: boolean; data: SniperPosition };
+      return json.data;
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["sniper-history"] });
+      void queryClient.invalidateQueries({ queryKey: ["sniper-status"] });
+    },
+  });
+}
+
+export function useCloseSniperPosition() {
+  const queryClient = useQueryClient();
+  return useMutation<SniperPosition, Error, string>({
+    mutationFn: async (id) => {
+      const res = await fetch(apiUrl(`/api/sniper/positions/${id}/close`), { method: "POST" });
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+      const json = await res.json() as { success: boolean; data: SniperPosition };
+      return json.data;
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["sniper-positions"] });
+      void queryClient.invalidateQueries({ queryKey: ["sniper-history"] });
+      void queryClient.invalidateQueries({ queryKey: ["sniper-status"] });
+    },
+  });
+}
+
+export function useWalletBalance() {
+  return useQuery<WalletBalance>({
+    queryKey: ["sniper-wallet"],
+    queryFn: async () => {
+      const res = await apiFetch<{ success: boolean; data: WalletBalance }>("/api/sniper/wallet");
+      return res.data;
+    },
+    refetchInterval: 30_000,
+  });
+}
+
+export function usePurgeUnverifiedHistory() {
+  const queryClient = useQueryClient();
+  return useMutation<{ removed: number }, Error, void>({
+    mutationFn: async () => {
+      const res = await fetch(apiUrl("/api/sniper/history/purge-unverified"), { method: "POST" });
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+      const json = await res.json() as { success: boolean; data: { removed: number } };
+      return json.data;
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["sniper-history"] });
+      void queryClient.invalidateQueries({ queryKey: ["sniper-status"] });
+    },
+  });
+}
+
+export function useStuckTokens() {
+  return useQuery<StuckToken[]>({
+    queryKey: ["sniper-stuck"],
+    queryFn: async () => {
+      const res = await apiFetch<{ success: boolean; data: StuckToken[] }>("/api/sniper/stuck-tokens");
+      return res.data;
+    },
+    refetchInterval: 60_000,
+  });
+}
+
+export function useEmergencySell() {
+  const queryClient = useQueryClient();
+  return useMutation<SniperPosition, Error, string>({
+    mutationFn: async (id) => {
+      const res = await fetch(apiUrl(`/api/sniper/positions/${id}/emergency-sell`), { method: "POST" });
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+      const json = await res.json() as { success: boolean; data: SniperPosition };
+      return json.data;
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["sniper-positions"] });
+      void queryClient.invalidateQueries({ queryKey: ["sniper-history"] });
+      void queryClient.invalidateQueries({ queryKey: ["sniper-status"] });
+      void queryClient.invalidateQueries({ queryKey: ["sniper-wallet"] });
+    },
+  });
+}
+
+export function useWatchedGrads() {
+  return useQuery<WatchedGrad[]>({
+    queryKey: ["sniper-watched"],
+    queryFn: async () => {
+      const res = await apiFetch<{ success: boolean; data: WatchedGrad[] }>("/api/sniper/watched");
+      return res.data;
+    },
+    refetchInterval: 2_000,
   });
 }

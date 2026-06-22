@@ -3,6 +3,7 @@ import { logger } from "../lib/logger.js";
 import { query, execute } from "../lib/db.js";
 import { sendTelegram, isTelegramConfigured, toIST } from "../lib/telegram.js";
 import type { GraduationQualityMeta } from "./graduation-sniper.service.js";
+import { broadcast as wsBroadcast } from "../websocket/server.js";
 
 // ── Paper-specific config ──────────────────────────────────────────────────────
 
@@ -85,7 +86,7 @@ const DEFAULT_PAPER_CONFIG: PaperConfig = {
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DEXSCREENER_BASE    = "https://api.dexscreener.com";
 const JUPITER_PRICE_BASE  = "https://lite-api.jup.ag/price/v2";
-const PRICE_LOOP_MS       = 1_500;
+const PRICE_LOOP_MS       = 500;   // 500ms for near-real-time TP/SL
 const STALE_PRICE_MS      = 4_000;
 const BATCH_MAX           = 30;
 const STARTING_BALANCE    = 0.1;
@@ -207,7 +208,18 @@ class PaperSniperService {
   }
 
   private broadcast(): void {
-    this.broadcaster?.();
+    try {
+      wsBroadcast({
+        type: "paper_update",
+        data: {
+          status: this.getStatus(),
+          openPositions: this.getOpenPositions(),
+          history: this.getHistory().slice(0, 50),
+        },
+        timestamp: Date.now(),
+      });
+      this.broadcaster?.();
+    } catch { /* ignore */ }
   }
 
   // ── Init ──────────────────────────────────────────────────────────────────

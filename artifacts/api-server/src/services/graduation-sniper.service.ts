@@ -8,6 +8,7 @@ import { sendTelegram, isTelegramConfigured, toIST } from "../lib/telegram.js";
 import { solanaWalletService } from "./solana-wallet.service.js";
 import { jupiterSwapService } from "./jupiter-swap.service.js";
 import { tokenQualityService, type QualityMetrics } from "./token-quality.service.js";
+import { broadcast as wsBroadcast } from "../websocket/server.js";
 
 // ── Quality meta passed to paper sniper at entry ──────────────────────────────
 export interface GraduationQualityMeta {
@@ -56,12 +57,12 @@ const MAX_CLOSED         = 100_000; // effectively unlimited — all trades kept
 const CONFIG_KEY         = "sniper_config";
 
 // ── Adaptive price-check intervals ───────────────────────────────────────────
-const PRICE_LOOP_MS         = 3_000;          // main loop tick — 3 s (was 10s — faster SL/TP)
-const FAST_WINDOW_MS        = 30 * 60_000;    // first 30 min  → check every 3 s
-const MED_WINDOW_MS         = 2 * 60 * 60_000;// 30 min–2 h    → check every 10 s
-const FAST_INTERVAL_MS      = 3_000;          // was 10s — tightened for faster SL/TP execution
-const MED_INTERVAL_MS       = 10_000;         // was 30s
-const SLOW_INTERVAL_MS      = 30_000;         // was 60s
+const PRICE_LOOP_MS         = 500;            // main loop tick — 500ms for near-real-time TP/SL
+const FAST_WINDOW_MS        = 30 * 60_000;    // first 30 min  → check every 500ms
+const MED_WINDOW_MS         = 2 * 60 * 60_000;// 30 min–2 h    → check every 2 s
+const FAST_INTERVAL_MS      = 500;            // 500ms — real-time TP/SL execution
+const MED_INTERVAL_MS       = 2_000;          // 2s for medium-age positions
+const SLOW_INTERVAL_MS      = 10_000;         // 10s for old positions
 
 // ── Dead-position threshold ───────────────────────────────────────────────────
 const DEAD_POSITION_MS      = 2 * 60 * 60_000;// 2 h open with no movement
@@ -376,7 +377,18 @@ class GraduationSniperService {
   }
 
   private broadcast(): void {
-    try { this.broadcaster?.(); } catch { /* ignore */ }
+    try {
+      wsBroadcast({
+        type: "sniper_update",
+        data: {
+          status: this.getStatus(),
+          positions: this.getOpenPositions(),
+          history: this.getClosedPositions().slice(0, 50),
+        },
+        timestamp: Date.now(),
+      });
+      this.broadcaster?.();
+    } catch { /* ignore */ }
   }
 
   private config: SniperConfig = { ...DEFAULT_CONFIG };

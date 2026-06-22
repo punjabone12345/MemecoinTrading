@@ -20,7 +20,7 @@ const PUMPPORTAL_WS_URL  = "wss://pumpportal.fun/api/data";
 
 const POLL_INTERVAL_MS          = 30_000;
 const HTTP_POLL_INTERVAL_MS     = 15_000;
-const POSITION_PRICE_POLL_MS    = 4_000;   // fast loop for open positions only
+const POSITION_PRICE_POLL_MS    = 500;     // fast loop for open positions — 500ms for near-real-time TP/SL
 const MAX_TRACK_AGE_MS      = 60 * 60 * 1000;
 const MAX_REJECTED_AGE_MS   = 3 * 60 * 1000;
 const MAX_EXITED_AGE_MS     = 10 * 60 * 1000;
@@ -1164,7 +1164,16 @@ class EarlyDiscoveryService {
 
   // ── WebSocket broadcast ───────────────────────────────────────────────────
   private broadcast(): void {
-    broadcast({ type: "ed_update", data: null, timestamp: Date.now() });
+    try {
+      broadcast({
+        type: "ed_update",
+        data: {
+          status: this.getStatus(),
+          positions: this.getPositions(),
+        },
+        timestamp: Date.now(),
+      });
+    } catch { /* ignore */ }
   }
 
   // ── Public REST API ───────────────────────────────────────────────────────
