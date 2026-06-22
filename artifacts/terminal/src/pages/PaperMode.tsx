@@ -3,13 +3,13 @@ import {
   FileText, Settings, X, TrendingUp, TrendingDown, RotateCcw,
   AlertTriangle, Wallet, ChevronRight, ExternalLink,
   BarChart2, Clock, Target, Shield, Sliders, Check, Download,
-  ChevronDown, ChevronUp, Pencil, Trash2, Eye,
+  ChevronDown, ChevronUp, Pencil, Trash2, Eye, FlaskConical,
 } from "lucide-react";
 import {
   usePaperSniperStatus, usePaperSniperPositions, usePaperSniperHistory,
   usePaperSniperEvents, useResetPaperAccount,
   usePaperSniperConfig, useUpdatePaperSniperConfig, useClosePaperPosition,
-  useEditHistoryPosition, useDeleteHistoryPosition,
+  useEditHistoryPosition, useDeleteHistoryPosition, useTestPaperPhase3,
 } from "@/lib/api";
 import { PaperConfig, PaperPosition, PaperSniperEvent } from "@/lib/types";
 
@@ -115,17 +115,15 @@ type FieldDef = {
 const FIELDS: FieldDef[] = [
   { section: "Position sizing", key: "positionSizeSol",  label: "Position size",         description: "SOL per virtual trade",                       suffix: "SOL", min: 0.001, max: 10,   step: 0.001 },
   { key: "maxOpenPositions",   label: "Max open positions",    description: "Max concurrent paper trades",                 suffix: "",    min: 1,     max: 20,   step: 1 },
-  { section: "Take profit",    key: "tp1Pct",           label: "TP1 target",            description: "Sell % of position at this gain",             suffix: "%",   min: 10,    max: 2000, step: 10 },
-  { key: "tp1ClosePct",        label: "TP1 close %",           description: "Portion of position to sell at TP1",          suffix: "%",   min: 1,     max: 100,  step: 1 },
-  { key: "tp2Pct",             label: "TP2 target",            description: "Sell more at this gain",                      suffix: "%",   min: 50,    max: 5000, step: 10 },
-  { key: "tp2ClosePct",        label: "TP2 close %",           description: "Portion of remaining to sell at TP2",         suffix: "%",   min: 1,     max: 100,  step: 1 },
-  { key: "tp3Pct",             label: "TP3 target",            description: "Exit remaining runner at this gain (e.g. 600 = 6×)",          suffix: "%",   min: 200,   max: 10000, step: 50 },
-  { key: "tp3ClosePct",        label: "TP3 close %",           description: "% of remaining to close at TP3 (100 = full exit)",             suffix: "%",   min: 10,    max: 100,  step: 5 },
-  { key: "trailingStopPct",    label: "Trailing stop",         description: "Stop when price drops this % from peak",      suffix: "%",   min: 1,     max: 90,   step: 1 },
-  { section: "Stop loss",      key: "slPhase1Pct",      label: "SL phase 1  (0–2 min)", description: "Max drawdown in the first 2 minutes",         suffix: "%",   min: 1,     max: 90,   step: 1 },
-  { key: "slPhase2Pct",        label: "SL phase 2  (2–10 min)",description: "Max drawdown from peak, 2–10 min",           suffix: "%",   min: 1,     max: 90,   step: 1 },
-  { key: "slPhase3Pct",        label: "SL phase 3  (10 min+)", description: "Max drawdown from peak after 10 min",        suffix: "%",   min: 1,     max: 90,   step: 1 },
-  { key: "slAfterTp1Pct",        label: "SL after TP1",              description: "Trailing SL % from peak once TP1 is hit",       suffix: "%",   min: 1,      max: 90,     step: 1    },
+  { section: "Take profit",    key: "tp1Pct",           label: "TP1 target",            description: "Close 30% of position at this gain — SL moves to breakeven",     suffix: "%",   min: 10,    max: 2000, step: 10 },
+  { key: "tp1ClosePct",        label: "TP1 close %",           description: "% of position to sell at TP1 (default 30)",    suffix: "%",   min: 1,     max: 100,  step: 1 },
+  { key: "tp2Pct",             label: "TP2 target",            description: "Close ~40% of original position — SL becomes trailing -25% from peak", suffix: "%",   min: 50,    max: 5000, step: 10 },
+  { key: "tp2ClosePct",        label: "TP2 close %",           description: "% of remaining position to sell at TP2 (57% of remaining 70% ≈ 40% of original)", suffix: "%",   min: 1,     max: 100,  step: 1 },
+  { key: "tp3Pct",             label: "TP3 target",            description: "Close ~20% of original position — 10% runner stays with trailing -15%", suffix: "%",   min: 200,   max: 10000, step: 50 },
+  { key: "tp3ClosePct",        label: "TP3 close %",           description: "% of remaining to close at TP3 (67% of remaining 30% ≈ 20% of original)", suffix: "%",   min: 10,    max: 100,  step: 5 },
+  { key: "trailingStopPct",    label: "Runner trailing stop",  description: "Trailing SL % from peak for the 10% runner after TP3 (default -15%)", suffix: "%",   min: 1,     max: 90,   step: 1 },
+  { section: "Stop loss",      key: "slPhase1Pct",      label: "Initial SL (before TP1)", description: "Fixed hard SL — this % below entry price. Not trailing. Default -30%", suffix: "%",   min: 1,     max: 90,   step: 1 },
+  { key: "slAfterTp2Pct",      label: "SL after TP2",          description: "Trailing stop % from peak after TP2 hit — ratchets up as price rises (default -25%)", suffix: "%",   min: 1,     max: 90,   step: 1 },
   { section: "Entry drift filter", key: "simulatedExecDelayMs", label: "Exec delay (sim)",          description: "Wait this long after graduation before entering — simulates real buy latency", suffix: "s", min: 0, max: 30, step: 1 },
   { key: "maxFillDriftPct",       label: "Max fill drift",            description: "Skip entry if price drifted more than this % during exec delay", suffix: "%", min: 1, max: 50, step: 1 },
   { section: "Dead-coin filter", key: "deadCoinWindowMs",   label: "Dead-coin window",           description: "Auto-close if coin doesn't move enough within this window", suffix: "hrs", min: 0.5, max: 24, step: 0.5 },
@@ -148,8 +146,15 @@ const FIELDS: FieldDef[] = [
 
 const DEFAULT_CFG: PaperConfig = {
   positionSizeSol: 0.001, maxOpenPositions: 8,
-  tp1Pct: 150, tp1ClosePct: 40, tp2Pct: 400, tp2ClosePct: 40, tp3Pct: 600, tp3ClosePct: 100,
-  trailingStopPct: 30, slPhase1Pct: 20, slPhase2Pct: 25, slPhase3Pct: 30, slAfterTp1Pct: 35,
+  tp1Pct: 100, tp1ClosePct: 30,   // TP1 +100% → sell 30%
+  tp2Pct: 300, tp2ClosePct: 57,   // TP2 +300% → sell 57% remaining (≈40% original)
+  tp3Pct: 600, tp3ClosePct: 67,   // TP3 +600% → sell 67% remaining (≈20% original) → 10% runner
+  trailingStopPct: 15,             // runner trailing -15% from peak after TP3
+  slPhase1Pct: 30,                 // fixed -30% from entry before TP1
+  slPhase2Pct: 30,                 // (legacy)
+  slPhase3Pct: 30,                 // (legacy)
+  slAfterTp1Pct: 0,                // (legacy)
+  slAfterTp2Pct: 25,               // trailing -25% from peak after TP2
   simulatedExecDelayMs: 5_500,
   maxFillDriftPct: 15,
   deadCoinWindowMs: 7_200_000, deadCoinMinMovePct: 5,
@@ -316,6 +321,7 @@ function OpenPositionCard({ pos }: { pos: PaperPosition }) {
               <span className="text-[8px] px-1.5 py-0.5 rounded-full bg-cyan-500/20 text-cyan-300 font-bold border border-cyan-500/20">DIP-RETRACE</span>
               {pos.tp1Hit && <span className="text-[8px] px-1.5 py-0.5 rounded-full bg-violet-500/20 text-violet-300 font-bold border border-violet-500/20">TP1</span>}
               {pos.tp2Hit && <span className="text-[8px] px-1.5 py-0.5 rounded-full bg-amber-500/20 text-amber-300 font-bold border border-amber-500/20">TP2</span>}
+              {pos.tp3Hit && <span className="text-[8px] px-1.5 py-0.5 rounded-full bg-rose-500/20 text-rose-300 font-bold border border-rose-500/20">TP3</span>}
               {atPeak    && <span className="text-[8px] px-1.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 font-bold border border-emerald-500/20">ATH</span>}
             </div>
             <p className="text-[10px] text-white/30 font-medium mt-0.5">
@@ -365,7 +371,10 @@ function OpenPositionCard({ pos }: { pos: PaperPosition }) {
           <Shield size={9} className="text-white/20" />
           <span className="text-white/30">SL:</span>
           <span className="text-red-400/70 font-semibold tabular-nums">{fmtPrice(pos.effectiveSlPrice)}</span>
-          {pos.tp1Hit && <span className="text-white/20 ml-1">(breakeven)</span>}
+          {!pos.tp1Hit && <span className="text-white/20 ml-1">(−30% entry)</span>}
+          {pos.tp1Hit && !pos.tp2Hit && <span className="text-white/20 ml-1">(breakeven)</span>}
+          {pos.tp2Hit && !pos.tp3Hit && <span className="text-white/20 ml-1">(trail −20%)</span>}
+          {pos.tp3Hit && <span className="text-white/20 ml-1">(runner trail −10%)</span>}
         </div>
         {peakGain !== null && (
           <span className="text-amber-300/70 font-semibold">Peak +{peakGain.toFixed(1)}%</span>
@@ -459,6 +468,12 @@ function OpenPositionCard({ pos }: { pos: PaperPosition }) {
             <div className="flex justify-between text-[10px]">
               <span className="text-white/20 pl-2">↳ TP2</span>
               <span className="text-amber-300/70 font-bold">+{fmt(pos.tp2RealizedSol, 4)}</span>
+            </div>
+          )}
+          {pos.tp3Hit && (pos.tp3RealizedSol ?? 0) > 0 && (
+            <div className="flex justify-between text-[10px]">
+              <span className="text-white/20 pl-2">↳ TP3</span>
+              <span className="text-rose-300/70 font-bold">+{fmt(pos.tp3RealizedSol ?? 0, 4)}</span>
             </div>
           )}
           <div className="flex justify-between text-[10px] border-t border-white/5 pt-1 mt-1">
@@ -934,6 +949,7 @@ export default function PaperMode() {
   const { data: events = []    } = usePaperSniperEvents();
   const { data: config }         = usePaperSniperConfig();
   const resetMutation            = useResetPaperAccount();
+  const testPhase3               = useTestPaperPhase3();
 
   const realizedPnl   = status?.totalRealizedPnlSol   ?? 0;
   const unrealizedPnl = status?.totalUnrealizedPnlSol ?? 0;
@@ -1050,30 +1066,44 @@ export default function PaperMode() {
           />
         </div>
 
-        {/* ── Tabs ── */}
-        <div className="flex gap-1 bg-white/4 rounded-xl p-1">
-          {(["open", "history", "events"] as const).map((t) => (
-            <button
-              key={t}
-              onClick={() => setTab(t)}
-              className={`flex-1 py-2 rounded-lg text-[11px] font-bold transition-all capitalize ${
-                tab === t
-                  ? "bg-amber-500/18 text-amber-300 border border-amber-500/25"
-                  : "text-white/30 hover:text-white/55"
-              }`}
-            >
-              {t === "open"    && `Open (${positions.length})`}
-              {t === "history" && `History (${history.length})`}
-              {t === "events"  && `Events (${events.length})`}
-            </button>
-          ))}
+        {/* ── Tabs + Test button ── */}
+        <div className="flex gap-2 items-center">
+          <div className="flex flex-1 gap-1 bg-white/4 rounded-xl p-1">
+            {(["open", "history", "events"] as const).map((t) => (
+              <button
+                key={t}
+                onClick={() => setTab(t)}
+                className={`flex-1 py-2 rounded-lg text-[11px] font-bold transition-all capitalize ${
+                  tab === t
+                    ? "bg-amber-500/18 text-amber-300 border border-amber-500/25"
+                    : "text-white/30 hover:text-white/55"
+                }`}
+              >
+                {t === "open"    && `Open (${positions.length})`}
+                {t === "history" && `History (${history.length})`}
+                {t === "events"  && `Events (${events.length})`}
+              </button>
+            ))}
+          </div>
+          {/* Always-visible test button */}
+          <button
+            onClick={() => testPhase3.mutate()}
+            disabled={testPhase3.isPending}
+            title="Fire a test Phase 3 paper trade"
+            className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-cyan-500/12 hover:bg-cyan-500/22 border border-cyan-500/22 hover:border-cyan-500/40 text-cyan-300 text-[10px] font-bold transition-all disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
+          >
+            {testPhase3.isPending
+              ? <span className="w-3 h-3 rounded-full border-2 border-cyan-300/30 border-t-cyan-300 animate-spin" />
+              : <FlaskConical size={12} />}
+            {testPhase3.isPending ? "…" : "Test"}
+          </button>
         </div>
 
         {/* ── Open positions ── */}
         {tab === "open" && (
           <div className="space-y-3">
             {positions.length === 0 ? (
-              <div className="flex flex-col items-center justify-center py-16 gap-4">
+              <div className="flex flex-col items-center justify-center py-12 gap-4">
                 <div className="w-14 h-14 rounded-2xl bg-amber-500/8 border border-amber-500/15 flex items-center justify-center">
                   <Target size={24} className="text-amber-400/40" />
                 </div>
@@ -1081,6 +1111,22 @@ export default function PaperMode() {
                   <p className="text-sm font-bold text-white/25">Watching for dip-retrace signals…</p>
                   <p className="text-[11px] text-white/15 mt-1 max-w-xs">
                     Paper trades fire on Phase 3 dip-retrace signals only — no wallet needed.
+                  </p>
+                </div>
+                {/* ── Test button ── */}
+                <div className="flex flex-col items-center gap-2">
+                  <button
+                    onClick={() => testPhase3.mutate()}
+                    disabled={testPhase3.isPending}
+                    className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-cyan-500/12 hover:bg-cyan-500/22 border border-cyan-500/25 hover:border-cyan-500/45 text-cyan-300 text-xs font-bold transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {testPhase3.isPending
+                      ? <span className="w-3.5 h-3.5 rounded-full border-2 border-cyan-300/30 border-t-cyan-300 animate-spin" />
+                      : <FlaskConical size={13} />}
+                    {testPhase3.isPending ? "Firing test trade…" : "Fire Test Phase 3 Trade"}
+                  </button>
+                  <p className="text-[10px] text-white/15 text-center max-w-xs">
+                    Simulates a Phase 3 buy signal → a TEST position should appear above immediately
                   </p>
                 </div>
               </div>
