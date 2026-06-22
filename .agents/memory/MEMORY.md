@@ -16,3 +16,4 @@
 - [Dip-retrace entry strategy](dip-retrace-strategy.md) — replaces immediate entry; quality gate passes → addToDipWatch → 30-min watch loop; entry triggers on 40–60% dump + 60% retrace
 - [Early Discovery Architecture](early-discovery-arch.md) — complete Early Demand Discovery system; critical route prefix gotcha; broadcast export pattern; scoring/TP/SL defaults
 - [Early Discovery rugcheck fixes](early-discovery-rugcheck-fixes.md) — 4 bugs caused zero trades: wrong dexId filter, bondingCurvePct=0 from dead API, topHolderPct check too strict, creator history hard-block
+- [Early Discovery bonding curve + trade quality fixes](early-discovery-trade-fixes.md) — mcap-formula for bonding curve is wrong (non-linear); must use virtual_sol_reserves or bonding_curve_progress API field; enteringMints dedup guard added; entryBondingCurvePct saved to DB; entryBlockers surfaced in UI

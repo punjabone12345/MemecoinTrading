@@ -69,6 +69,7 @@ export interface EDToken {
   positionId: string | null;
   pollCount: number;
   creatorSold: boolean;
+  entryBlockers: string[];
 }
 
 export interface EDPosition {
@@ -80,6 +81,7 @@ export interface EDPosition {
   entryPrice: number;
   entryMcap: number;
   entryScore: number;
+  entryBondingCurvePct: number;
   currentPrice: number;
   currentMcap: number;
   sizeSol: number;
@@ -196,6 +198,7 @@ class EarlyDiscoveryService {
   private tokens = new Map<string, EDToken>();
   private openPositions = new Map<string, EDPosition>();
   private closedPositions: EDPosition[] = [];
+  private enteringMints = new Set<string>(); // in-flight dedup guard
   private virtualBalance = STARTING_BALANCE;
   private wins = 0;
   private losses = 0;
@@ -386,6 +389,7 @@ class EarlyDiscoveryService {
       scores: { buyerGrowthScore: 0, volumeScore: 0, buyPressureScore: 0, walletQualityScore: 0, bondingCurveScore: 0, finalScore: 0, buyPressureRatio: 0 },
       status: "tracking", rejectionReason: "",
       firstEligibleAt: null, discoveryPrice: 0, positionId: null, pollCount: 0, creatorSold: false,
+      entryBlockers: [],
     };
   }
 
@@ -543,6 +547,9 @@ class EarlyDiscoveryService {
         token.discoveryPrice, token.priceUsd, this.config.minScore,
       );
 
+      // Always store the current blockers so UI can show what's pending
+      token.entryBlockers = entryCheck.blockers;
+
       if (entryCheck.eligible) {
         if (!token.firstEligibleAt) token.firstEligibleAt = Date.now();
         token.status = "eligible";
@@ -570,28 +577,28 @@ class EarlyDiscoveryService {
     symbol: string; name: string; creator: string; imageUri: string;
     marketCapUsd: number; bondingCurvePct: number; priceUsd: number;
   } | null> {
-    try {
-      type PFCoin = {
-        symbol?: string; name?: string; creator?: string; image_uri?: string;
-        usd_market_cap?: number; bonding_curve_progress?: number;
-        virtual_sol_reserves?: number; virtual_token_reserves?: number;
-      };
-      const res = await axios.get<PFCoin>(`${PUMPFUN_API_BASE}/coins/${mint}`, { timeout: 6_000 });
-      const d = res.data;
+    type PFCoin = {
+      symbol?: string; name?: string; creator?: string; image_uri?: string;
+      usd_market_cap?: number; bonding_curve_progress?: number;
+      virtual_sol_reserves?: number; virtual_token_reserves?: number;
+    };
+
+    const parsePFCoin = (d: PFCoin): {
+      symbol: string; name: string; creator: string; imageUri: string;
+      marketCapUsd: number; bondingCurvePct: number; priceUsd: number;
+    } => {
       const solReserves = (d.virtual_sol_reserves ?? 0) / 1e9;
       const tokReserves = (d.virtual_token_reserves ?? 0) / 1e6;
       const priceUsd    = solReserves > 0 && tokReserves > 0 ? (solReserves / tokReserves) * 150 : 0;
 
       // Accurate bonding curve progress from virtual reserves:
-      // Pump.fun starts with 30 SOL virtual, graduates when 85 actual SOL added (115 total)
-      // Using virtual_sol_reserves is far more accurate than the mcap-derived formula
-      // which is non-linear (price accelerates as curve fills).
+      // Pump.fun starts with 30 SOL virtual, graduates when 85 actual SOL added
       const INIT_VIRTUAL_SOL = 30;
-      const GRAD_DELTA_SOL   = 85; // SOL added at graduation
+      const GRAD_DELTA_SOL   = 85;
       const bondingFromReserves = solReserves > INIT_VIRTUAL_SOL
         ? Math.min(((solReserves - INIT_VIRTUAL_SOL) / GRAD_DELTA_SOL) * 100, 99.9)
         : 0;
-      // Also honour the API's own field (0-100 range from pump.fun backend)
+      // The API's bonding_curve_progress field is 0-100 percent — trust it directly
       const apiProgress = d.bonding_curve_progress ?? 0;
       const bondingCurvePct = Math.max(bondingFromReserves, apiProgress);
 
@@ -604,7 +611,22 @@ class EarlyDiscoveryService {
         bondingCurvePct,
         priceUsd,
       };
-    } catch { return null; }
+    };
+
+    // Try client API first, then fall back to official pump.fun frontend API
+    const urls = [
+      `${PUMPFUN_API_BASE}/coins/${mint}`,
+      `https://frontend-api.pump.fun/coins/${mint}`,
+    ];
+
+    for (const url of urls) {
+      try {
+        const res = await axios.get<PFCoin>(url, { timeout: 6_000 });
+        const result = parsePFCoin(res.data);
+        if (result.bondingCurvePct > 0 || result.priceUsd > 0) return result;
+      } catch { /* try next */ }
+    }
+    return null;
   }
 
   // Pump.fun graduation threshold — $69k mcap = 100% bonding curve
@@ -639,10 +661,11 @@ class EarlyDiscoveryService {
       const totalVol = (volM5 + volH1) / 150; // convert USD vol → approx SOL
       const buyPct = buys + sells > 0 ? buys / (buys + sells) : 0.5;
       const mcapUsd = pair.marketCap ?? pair.fdv ?? 0;
-      // Derive bonding curve % from market cap — accurate for pump.fun tokens
-      const bondingCurvePct = mcapUsd > 0
-        ? Math.min((mcapUsd / EarlyDiscoveryService.GRAD_MCAP_USD) * 100, 99.9)
-        : 0;
+      // NOTE: Do NOT derive bonding curve from mcap — pump.fun's bonding curve
+      // is non-linear with price (price accelerates as curve fills), so a $6.6K
+      // mcap token can be at 59.8% curve completion. Only the pump.fun API's
+      // virtual_sol_reserves or bonding_curve_progress field is accurate.
+      const bondingCurvePct = 0; // populated by fetchPumpFunData instead
 
       return {
         buyVolumeSol:    totalVol * buyPct,
@@ -658,22 +681,25 @@ class EarlyDiscoveryService {
   // ── Paper trade entry ─────────────────────────────────────────────────────
   private enterPaperTrade(token: EDToken): void {
     if (token.status === "entered" || token.positionId) return;
+    if (this.openPositions.has(token.mint)) return; // already has an open position for this mint
+    if (this.enteringMints.has(token.mint)) return; // currently entering — dedup in-flight calls
+    this.enteringMints.add(token.mint);
     if (this.openPositions.size >= this.config.maxOpenPositions) {
       logger.info({ mint: token.mint.slice(0, 8), open: this.openPositions.size }, "Early discovery: max open positions reached");
-      return;
+      this.enteringMints.delete(token.mint); return;
     }
     const multiplier = getPositionSizeMultiplier(token.scores.finalScore);
-    if (multiplier === 0) return;
+    if (multiplier === 0) { this.enteringMints.delete(token.mint); return; }
 
     const sizeSol = this.config.positionSizeSol * multiplier;
     if (this.virtualBalance < sizeSol) {
       logger.warn({ virtualBalance: this.virtualBalance, sizeSol }, "Early discovery: insufficient balance");
-      return;
+      this.enteringMints.delete(token.mint); return;
     }
 
     const now      = Date.now();
     const entryPx  = token.priceUsd;
-    if (!(entryPx > 0)) return;
+    if (!(entryPx > 0)) { this.enteringMints.delete(token.mint); return; }
 
     const slPrice = entryPx * (1 - this.config.slPct / 100);
 
@@ -686,6 +712,7 @@ class EarlyDiscoveryService {
       entryPrice: entryPx,
       entryMcap: token.marketCapUsd,
       entryScore: token.scores.finalScore,
+      entryBondingCurvePct: token.bondingCurvePct,
       currentPrice: entryPx,
       currentMcap: token.marketCapUsd,
       sizeSol,
@@ -713,6 +740,7 @@ class EarlyDiscoveryService {
     this.openPositions.set(token.mint, pos);
     token.status = "entered";
     token.positionId = pos.id;
+    this.enteringMints.delete(token.mint);
 
     void this.persistPosition(pos);
     void this.persistBalance();
@@ -913,12 +941,12 @@ class EarlyDiscoveryService {
   private async persistPosition(pos: EDPosition): Promise<void> {
     try {
       await execute(
-        `INSERT INTO ed_positions (id,mint,symbol,name,entry_at,entry_price,entry_mcap,entry_score,
+        `INSERT INTO ed_positions (id,mint,symbol,name,entry_at,entry_price,entry_mcap,entry_score,entry_bonding_curve_pct,
            current_price,current_mcap,size_sol,remaining_fraction,effective_sl_price,trailing_high,
            tp1_hit,tp2_hit,status,realized_pnl_sol,unrealized_pnl_sol,total_pnl_sol,pnl_pct,
            close_reason,closed_at,exit_price,tp1_realized_sol,tp2_realized_sol,runner_realized_sol,
            closing_score,position_multiplier)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30)
          ON CONFLICT (id) DO UPDATE SET
            current_price=EXCLUDED.current_price, current_mcap=EXCLUDED.current_mcap,
            remaining_fraction=EXCLUDED.remaining_fraction, effective_sl_price=EXCLUDED.effective_sl_price,
@@ -929,7 +957,7 @@ class EarlyDiscoveryService {
            exit_price=EXCLUDED.exit_price, tp1_realized_sol=EXCLUDED.tp1_realized_sol,
            tp2_realized_sol=EXCLUDED.tp2_realized_sol, runner_realized_sol=EXCLUDED.runner_realized_sol,
            closing_score=EXCLUDED.closing_score`,
-        [pos.id, pos.mint, pos.symbol, pos.name, pos.entryAt, pos.entryPrice, pos.entryMcap, pos.entryScore,
+        [pos.id, pos.mint, pos.symbol, pos.name, pos.entryAt, pos.entryPrice, pos.entryMcap, pos.entryScore, pos.entryBondingCurvePct ?? 0,
          pos.currentPrice, pos.currentMcap, pos.sizeSol, pos.remainingFraction, pos.effectiveSlPrice, pos.trailingHigh,
          pos.tp1Hit, pos.tp2Hit, pos.status, pos.realizedPnlSol, pos.unrealizedPnlSol, pos.totalPnlSol, pos.pnlPct,
          pos.closeReason, pos.closedAt, pos.exitPrice, pos.tp1RealizedSol, pos.tp2RealizedSol, pos.runnerRealizedSol,
@@ -986,6 +1014,7 @@ class EarlyDiscoveryService {
       const rows = await query<{
         id: string; mint: string; symbol: string; name: string;
         entry_at: string; entry_price: number; entry_mcap: number; entry_score: number;
+        entry_bonding_curve_pct: number;
         current_price: number; current_mcap: number; size_sol: number; remaining_fraction: number;
         effective_sl_price: number; trailing_high: number; tp1_hit: boolean; tp2_hit: boolean;
         status: string; realized_pnl_sol: number; unrealized_pnl_sol: number; total_pnl_sol: number;
@@ -998,7 +1027,8 @@ class EarlyDiscoveryService {
         const pos: EDPosition = {
           id: row.id, mint: row.mint, symbol: row.symbol, name: row.name,
           entryAt: Number(row.entry_at), entryPrice: row.entry_price, entryMcap: row.entry_mcap,
-          entryScore: row.entry_score, currentPrice: row.current_price, currentMcap: row.current_mcap,
+          entryScore: row.entry_score, entryBondingCurvePct: row.entry_bonding_curve_pct ?? 0,
+          currentPrice: row.current_price, currentMcap: row.current_mcap,
           sizeSol: row.size_sol, remainingFraction: row.remaining_fraction,
           effectiveSlPrice: row.effective_sl_price, trailingHigh: row.trailing_high,
           tp1Hit: row.tp1_hit, tp2Hit: row.tp2_hit, status: row.status as "open" | "closed",

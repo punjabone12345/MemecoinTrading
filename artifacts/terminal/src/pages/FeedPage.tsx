@@ -93,6 +93,52 @@ function BondingBar({ pct }: { pct: number }) {
   );
 }
 
+/* ── Entry conditions checklist ────────────────────────────────────────────── */
+const ENTRY_CONDITIONS = [
+  { key: "score",    label: "Score ≥ threshold",       hint: (b: string[]) => b.find((x) => x.startsWith("Score")) ?? null },
+  { key: "buyers",   label: "Unique buyers ≥ 10",      hint: (b: string[]) => b.find((x) => x.startsWith("Buyers")) ?? null },
+  { key: "pressure", label: "Buy pressure ≥ 1.5×",     hint: (b: string[]) => b.find((x) => x.startsWith("Buy pressure")) ?? null },
+  { key: "bonding",  label: "Bonding curve ≥ 60%",     hint: (b: string[]) => b.find((x) => x.startsWith("Bonding curve")) ?? null },
+  { key: "rugcheck", label: "Rugcheck passed",          hint: (b: string[]) => b.find((x) => x.startsWith("Rugcheck")) ?? null },
+  { key: "creator",  label: "Creator hold < 10%",       hint: (b: string[]) => b.find((x) => x.startsWith("Creator holds")) ?? null },
+  { key: "holder",   label: "Top holder < 25%",         hint: (b: string[]) => b.find((x) => x.startsWith("Top holder")) ?? null },
+  { key: "fomo",     label: "Price not pumped > 200%",  hint: (b: string[]) => b.find((x) => x.startsWith("Already pumped")) ?? null },
+];
+
+function EntryChecklist({ blockers }: { blockers: string[] }) {
+  return (
+    <div className="rounded-xl p-3" style={{ background: "rgba(13,13,30,0.8)", border: "1px solid rgba(255,255,255,0.07)" }}>
+      <p className="text-[9px] text-slate-500 uppercase tracking-widest mb-2.5">Entry Conditions</p>
+      <div className="grid grid-cols-2 gap-1.5">
+        {ENTRY_CONDITIONS.map(({ key, label, hint }) => {
+          const blocker = hint(blockers);
+          const passed = !blocker;
+          return (
+            <div
+              key={key}
+              className="flex items-start gap-1.5 rounded-lg px-2 py-1.5"
+              style={{ background: passed ? "rgba(52,211,153,0.06)" : "rgba(248,113,113,0.06)", border: `1px solid ${passed ? "rgba(52,211,153,0.15)" : "rgba(248,113,113,0.15)"}` }}
+            >
+              <span className="mt-0.5 shrink-0 text-[10px]" style={{ color: passed ? "#34d399" : "#f87171" }}>
+                {passed ? "✓" : "✗"}
+              </span>
+              <div className="min-w-0">
+                <p className="text-[9px] font-semibold truncate" style={{ color: passed ? "#34d399" : "#f87171" }}>{label}</p>
+                {blocker && <p className="text-[8px] text-slate-500 truncate">{blocker}</p>}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      {blockers.length === 0 && (
+        <div className="mt-2 text-center">
+          <span className="text-[9px] font-bold text-emerald-400">✓ All conditions met — confirming entry…</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ── Score breakdown panel ─────────────────────────────────────────────────── */
 function ScorePanel({ token }: { token: EDToken }) {
   const { scores } = token;
@@ -414,6 +460,7 @@ function PositionEditModal({
 function TradeCard({ pos }: { pos: EDPosition }) {
   const isUp = pos.pnlPct >= 0;
   const elapsed = fmtAge(pos.entryAt);
+  const entryTime = new Date(pos.entryAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
   const closePos = useEDClosePosition();
   const deletePos = useEDDeletePosition();
   const editPos = useEDEditPosition();
@@ -430,13 +477,24 @@ function TradeCard({ pos }: { pos: EDPosition }) {
     >
       <div className="flex items-start justify-between mb-3">
         <div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <span className="font-black text-base text-white">${pos.symbol}</span>
             <span className="text-[9px] px-1.5 py-0.5 rounded-full font-bold" style={{ background: "rgba(129,140,248,0.15)", color: "#818cf8" }}>
               Score {pos.entryScore}
             </span>
+            <a
+              href={`https://dexscreener.com/solana/${pos.mint}`}
+              target="_blank" rel="noopener noreferrer"
+              className="flex items-center gap-0.5 text-[9px] font-bold"
+              style={{ color: "#22d3ee" }}
+            >
+              DEX <ExternalLink size={8} />
+            </a>
           </div>
-          <p className="text-[10px] text-slate-500 mt-0.5">{pos.name} · {elapsed}</p>
+          <p className="text-[10px] text-slate-500 mt-0.5">{pos.name}</p>
+          <div className="flex items-center gap-2 mt-0.5">
+            <span className="text-[9px] text-slate-600 flex items-center gap-1"><Clock size={8} />{entryTime} · {elapsed} ago</span>
+          </div>
         </div>
         <div className="text-right">
           <p className="font-black text-lg" style={{ color: isUp ? "#34d399" : "#f87171" }}>
@@ -448,11 +506,26 @@ function TradeCard({ pos }: { pos: EDPosition }) {
         </div>
       </div>
 
+      {/* Entry details */}
+      <div className="grid grid-cols-4 gap-1.5 mb-3 rounded-lg p-2" style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.05)" }}>
+        {[
+          { label: "Entry Price",   val: `$${pos.entryPrice.toExponential(3)}` },
+          { label: "Entry MC",      val: fmtMC(pos.entryMcap) },
+          { label: "Curve at Entry",val: `${(pos.entryBondingCurvePct ?? 0).toFixed(1)}%` },
+          { label: "Size",          val: `${pos.sizeSol.toFixed(3)} SOL` },
+        ].map(({ label, val }) => (
+          <div key={label} className="text-center">
+            <p className="text-[8px] text-slate-600 uppercase tracking-wide">{label}</p>
+            <p className="text-[10px] font-bold text-slate-300">{val}</p>
+          </div>
+        ))}
+      </div>
+
       <div className="grid grid-cols-3 gap-2 mb-3">
         {[
-          { label: "Entry MC",   val: fmtMC(pos.entryMcap) },
           { label: "Current MC", val: fmtMC(pos.currentMcap) },
-          { label: "Size",       val: `${pos.sizeSol.toFixed(3)} SOL` },
+          { label: "Cur. Price", val: `$${pos.currentPrice.toExponential(3)}` },
+          { label: "Remaining",  val: `${(pos.remainingFraction * 100).toFixed(0)}%` },
         ].map(({ label, val }) => (
           <div key={label} className="text-center">
             <p className="text-[9px] text-slate-500 uppercase tracking-wide">{label}</p>
@@ -468,7 +541,6 @@ function TradeCard({ pos }: { pos: EDPosition }) {
         </div>
         <div className="text-right">
           <p className="text-[9px] text-slate-500">SL @ {pos.effectiveSlPrice > 0 ? `$${pos.effectiveSlPrice.toExponential(3)}` : "—"}</p>
-          <p className="text-[9px] text-slate-500">{(pos.remainingFraction * 100).toFixed(0)}% remaining</p>
         </div>
       </div>
 
@@ -535,28 +607,44 @@ function TradeCard({ pos }: { pos: EDPosition }) {
 function ClosedRow({ pos }: { pos: EDPosition }) {
   const deletePos = useEDDeletePosition();
   const editPos = useEDEditPosition();
-  const [mode, setMode] = useState<"idle" | "confirmDelete" | "edit">("idle");
+  const [mode, setMode] = useState<"idle" | "confirmDelete" | "edit" | "detail">("idle");
+  const isWin = pos.realizedPnlSol >= 0;
+  const entryTime = new Date(pos.entryAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const closedTime = pos.closedAt ? new Date(pos.closedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "—";
 
   return (
-    <div className="rounded-xl px-4 py-3" style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.06)" }}>
+    <div className="rounded-xl px-4 py-3" style={{ background: isWin ? "rgba(52,211,153,0.03)" : "rgba(248,113,113,0.03)", border: `1px solid ${isWin ? "rgba(52,211,153,0.1)" : "rgba(248,113,113,0.1)"}` }}>
       <div className="flex items-center justify-between">
         <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <span className="font-bold text-sm text-white">${pos.symbol}</span>
-            <span className="text-[9px] text-slate-500">Score {pos.entryScore}</span>
+            <span className="text-[9px] px-1 py-0.5 rounded font-bold" style={{ background: "rgba(129,140,248,0.1)", color: "#818cf8" }}>Score {pos.entryScore}</span>
+            <a
+              href={`https://dexscreener.com/solana/${pos.mint}`}
+              target="_blank" rel="noopener noreferrer"
+              className="flex items-center gap-0.5 text-[9px] font-bold"
+              style={{ color: "#22d3ee" }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              DEX <ExternalLink size={8} />
+            </a>
           </div>
-          <p className="text-[9px] text-slate-500 mt-0.5 truncate">{pos.closeReason || "—"}</p>
+          <button
+            onClick={() => setMode(mode === "detail" ? "idle" : "detail")}
+            className="text-[9px] text-slate-500 mt-0.5 truncate text-left hover:text-slate-300 transition-colors"
+          >
+            {pos.closeReason || "—"} · tap for details
+          </button>
         </div>
         <div className="flex items-center gap-2">
           <div className="text-right">
-            <p className="font-black text-sm" style={{ color: pos.realizedPnlSol >= 0 ? "#34d399" : "#f87171" }}>
+            <p className="font-black text-sm" style={{ color: isWin ? "#34d399" : "#f87171" }}>
               {fmtPct(pos.pnlPct)}
             </p>
-            <p className="text-[10px]" style={{ color: pos.realizedPnlSol >= 0 ? "#34d399" : "#f87171" }}>
+            <p className="text-[10px]" style={{ color: isWin ? "#34d399" : "#f87171" }}>
               {fmtSol(pos.realizedPnlSol)}
             </p>
           </div>
-          {/* Edit + Delete icons */}
           {mode === "idle" && (
             <div className="flex gap-1 ml-2">
               <button
@@ -579,6 +667,27 @@ function ClosedRow({ pos }: { pos: EDPosition }) {
           )}
         </div>
       </div>
+
+      {/* Expandable detail panel */}
+      {mode === "detail" && (
+        <div className="mt-2 grid grid-cols-4 gap-1.5 rounded-lg p-2" style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.05)" }}>
+          {[
+            { label: "Entry Time",    val: entryTime },
+            { label: "Close Time",    val: closedTime },
+            { label: "Entry Price",   val: `$${pos.entryPrice.toExponential(3)}` },
+            { label: "Exit Price",    val: pos.exitPrice ? `$${pos.exitPrice.toExponential(3)}` : "—" },
+            { label: "Entry MC",      val: fmtMC(pos.entryMcap) },
+            { label: "Curve at Entry",val: `${(pos.entryBondingCurvePct ?? 0).toFixed(1)}%` },
+            { label: "Size",          val: `${pos.sizeSol.toFixed(3)} SOL` },
+            { label: "TP1/TP2",       val: `${pos.tp1Hit ? "✓" : "○"} / ${pos.tp2Hit ? "✓" : "○"}` },
+          ].map(({ label, val }) => (
+            <div key={label} className="text-center">
+              <p className="text-[8px] text-slate-600 uppercase tracking-wide">{label}</p>
+              <p className="text-[10px] font-bold text-slate-300">{val}</p>
+            </div>
+          ))}
+        </div>
+      )}
 
       {mode === "confirmDelete" && (
         <ConfirmBar
@@ -773,6 +882,7 @@ export default function FeedPage() {
                 </div>
                 <div className="grid gap-3">
                   <ScorePanel token={selectedToken} />
+                  <EntryChecklist blockers={selectedToken.entryBlockers ?? []} />
                   <MetricsPanel token={selectedToken} />
                 </div>
               </div>

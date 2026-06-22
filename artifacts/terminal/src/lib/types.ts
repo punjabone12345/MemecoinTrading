@@ -42,6 +42,7 @@ export interface EDToken {
   positionId: string | null;
   pollCount: number;
   creatorSold: boolean;
+  entryBlockers: string[];
 }
 
 export interface EDPosition {
@@ -53,6 +54,7 @@ export interface EDPosition {
   entryPrice: number;
   entryMcap: number;
   entryScore: number;
+  entryBondingCurvePct: number;
   currentPrice: number;
   currentMcap: number;
   sizeSol: number;
