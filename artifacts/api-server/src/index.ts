@@ -3,9 +3,7 @@ import app from "./app.js";
 import { logger } from "./lib/logger.js";
 import { initWebSocketServer } from "./websocket/server.js";
 import { startCommandPolling, registerCommandHandler, toIST, sendTelegram, isTelegramConfigured } from "./lib/telegram.js";
-import { graduationSniperService } from "./services/graduation-sniper.service.js";
-import { paperSniperService } from "./services/paper-sniper.service.js";
-import { pumpfunTraderService } from "./services/pumpfun-trader.service.js";
+import { earlyDiscoveryService } from "./services/early-discovery.service.js";
 
 const rawPort = process.env["PORT"] ?? "8080";
 const port = Number(rawPort);
@@ -13,119 +11,61 @@ if (Number.isNaN(port) || port <= 0) {
   throw new Error(`Invalid PORT value: "${rawPort}"`);
 }
 
-function fmt(n: number, d = 4): string {
-  return (n >= 0 ? "+" : "") + n.toFixed(d);
-}
-
-// ── Telegram commands (sniper-focused) ────────────────────────────────────────
-
 registerCommandHandler(async (command: string) => {
   switch (command) {
-
-    case "/command1": {
-      const status = graduationSniperService.getStatus();
-      const open = [...graduationSniperService.getOpenPositions()];
-      if (open.length === 0) {
-        return (
-          `🎯 <b>Memecoin Sniper — No Open Positions</b>\n` +
-          `──────────────────────\n` +
-          `💰 Balance: <b>${Number(status.walletBalance).toFixed(4)} SOL</b>\n` +
-          `📊 Realized PNL: <b>${fmt(status.totalRealizedPnlSol)} SOL</b>\n` +
-          `🏆 Wins: <b>${status.wins}</b> | 💀 Losses: <b>${status.losses}</b>\n` +
-          `🕐 ${toIST(new Date())}`
-        );
-      }
-      let msg = `🎯 <b>Open Sniper Positions (${open.length})</b>\n──────────────────────\n`;
-      for (const pos of open) {
-        const pnl = pos.currentPrice && pos.entryPrice
-          ? ((pos.currentPrice - pos.entryPrice) / pos.entryPrice) * 100
-          : 0;
-        const sign = pnl >= 0 ? "📈" : "📉";
-        msg +=
-          `${sign} <b>$${pos.symbol}</b>\n` +
-          `   📍 <code>${pos.mint}</code>\n` +
-          `   💰 Entry: $${pos.entryPrice?.toFixed(10)} | Now: $${pos.currentPrice?.toFixed(10)}\n` +
-          `   📊 Change: <b>${pnl >= 0 ? "+" : ""}${pnl.toFixed(1)}%</b>\n` +
-          `──────────────────────\n`;
-      }
-      msg +=
-        `💰 Balance: <b>${Number(status.walletBalance).toFixed(4)} SOL</b>\n` +
-        `📊 Realized: <b>${fmt(status.totalRealizedPnlSol)} SOL</b>\n` +
-        `🕐 ${toIST(new Date())}`;
-      return msg;
-    }
-
-    case "/command2": {
-      const status = graduationSniperService.getStatus();
-      const winRate = (status.wins + status.losses) > 0
-        ? ((status.wins / (status.wins + status.losses)) * 100).toFixed(1)
+    case "/status": {
+      const s = earlyDiscoveryService.getStatus();
+      const pos = earlyDiscoveryService.getPositions();
+      const winRate = (s.wins + s.losses) > 0
+        ? ((s.wins / (s.wins + s.losses)) * 100).toFixed(1) + "%"
         : "—";
       return (
-        `📊 <b>Sniper Performance Report</b>\n` +
+        `🔬 <b>Early Demand Discovery — Status</b>\n` +
         `──────────────────────\n` +
-        `✅ Status: <b>${status.enabled ? "SNIPING" : "PAUSED"}</b>\n` +
-        `🔌 WebSocket: <b>${status.wsConnected ? "LIVE" : "DISCONNECTED"}</b>\n` +
-        `\n` +
-        `📈 <b>Trade Stats</b>\n` +
-        `├ Total Trades: <b>${status.tradesTotal}</b>\n` +
-        `├ Wins: <b>${status.wins}</b> | Losses: <b>${status.losses}</b>\n` +
-        `├ Win Rate: <b>${winRate}%</b>\n` +
-        `├ Open Now: <b>${status.openCount}</b>/${status.config.maxOpenPositions}\n` +
-        `└ Grads Today: <b>${status.graduationsToday}</b>\n` +
-        `\n` +
-        `💰 <b>P&L Summary</b>\n` +
-        `├ Realized: <b>${fmt(status.totalRealizedPnlSol)} SOL</b>\n` +
-        `├ Unrealized: <b>${fmt(status.totalUnrealizedPnlSol)} SOL</b>\n` +
-        `└ Balance: <b>${Number(status.walletBalance).toFixed(4)} SOL</b>\n` +
-        `\n🕐 ${toIST(new Date())}`
-      );
-    }
-
-    case "/command3": {
-      const status = graduationSniperService.getStatus();
-      const healthy = status.wsConnected && status.enabled;
-      return (
-        `${healthy ? "✅" : "⚠️"} <b>Sniper Health Check</b>\n` +
-        `──────────────────────\n` +
-        `🔌 WebSocket: <b>${status.wsConnected ? "✅ LIVE" : "❌ DISCONNECTED"}</b>\n` +
-        `🎯 Sniping: <b>${status.enabled ? "✅ ENABLED" : "⏸️ PAUSED"}</b>\n` +
-        `📍 Open Positions: <b>${status.openCount}/${status.config.maxOpenPositions}</b>\n` +
-        `🌅 Grads Today: <b>${status.graduationsToday}</b>\n` +
-        `💰 Balance: <b>${Number(status.walletBalance).toFixed(4)} SOL</b>\n` +
+        `🟢 WS: <b>${s.wsConnected ? "LIVE" : "OFFLINE"}</b> | Active: <b>${s.enabled ? "YES" : "PAUSED"}</b>\n` +
+        `📊 Tracked: <b>${s.trackedCount}</b> | Eligible: <b>${s.eligibleCount}</b> | Entered: <b>${s.enteredCount}</b>\n` +
+        `🚀 Launches Detected: <b>${s.launchesDetected}</b>\n\n` +
+        `💰 Balance: <b>${s.virtualBalance.toFixed(3)} SOL</b>\n` +
+        `📈 Realized PnL: <b>${s.totalRealizedPnlSol >= 0 ? "+" : ""}${s.totalRealizedPnlSol.toFixed(4)} SOL</b>\n` +
+        `🏆 Wins: <b>${s.wins}</b> | 💀 Losses: <b>${s.losses}</b> | Win Rate: <b>${winRate}</b>\n` +
+        `📂 Open: <b>${pos.open.length}</b> | Closed: <b>${pos.closed.length}</b>\n` +
         `🕐 ${toIST(new Date())}`
       );
     }
-
+    case "/trades": {
+      const pos = earlyDiscoveryService.getPositions();
+      if (pos.open.length === 0) return "📭 No open trades right now.";
+      let msg = `💼 <b>Open Paper Trades (${pos.open.length})</b>\n──────────────────────\n`;
+      for (const p of pos.open) {
+        const sign = p.pnlPct >= 0 ? "📈" : "📉";
+        msg +=
+          `${sign} <b>$${p.symbol}</b> (Score: ${p.entryScore})\n` +
+          `   PnL: <b>${p.pnlPct >= 0 ? "+" : ""}${p.pnlPct.toFixed(1)}%</b> | ${p.unrealizedPnlSol >= 0 ? "+" : ""}${p.unrealizedPnlSol.toFixed(4)} SOL\n` +
+          `   TP1: ${p.tp1Hit ? "✅" : "○"} | TP2: ${p.tp2Hit ? "✅" : "○"}\n` +
+          `──────────────────────\n`;
+      }
+      return msg + `🕐 ${toIST(new Date())}`;
+    }
     case "/start":
       return (
-        `🎯 <b>Memecoin Sniper — Command Menu</b>\n` +
+        `🔬 <b>Apex Meme Trader — Commands</b>\n` +
         `──────────────────────\n` +
-        `/command1 — 💼 Open positions & live P&L\n` +
-        `/command2 — 📊 Performance stats\n` +
-        `/command3 — 🔍 Health check\n`
+        `/status — Bot status & P&L\n` +
+        `/trades — Open paper trades\n`
       );
-
     default:
-      return `❓ Unknown command: <b>${command}</b>\nAvailable: /command1 /command2 /command3`;
+      return `❓ Unknown: <b>${command}</b>\nTry /status or /trades`;
   }
 });
 
 const server = http.createServer(app);
 initWebSocketServer(server);
 
-// ── DB migration (idempotent — safe to run on every startup) ──────────────────
 if (process.env["DATABASE_URL"]) {
   try {
     const { pool: dbPool } = await import("./lib/db.js");
     const migClient = await dbPool.connect();
     try {
-      await migClient.query(`
-        CREATE TABLE IF NOT EXISTS app_config (
-          key TEXT PRIMARY KEY,
-          value TEXT NOT NULL,
-          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        )
-      `);
       await migClient.query(`
         CREATE TABLE IF NOT EXISTS kv_store (
           key TEXT PRIMARY KEY,
@@ -133,106 +73,36 @@ if (process.env["DATABASE_URL"]) {
         )
       `);
       await migClient.query(`
-        CREATE TABLE IF NOT EXISTS sniper_positions (
+        CREATE TABLE IF NOT EXISTS ed_positions (
           id TEXT PRIMARY KEY,
           mint TEXT NOT NULL,
           symbol TEXT,
           name TEXT,
-          detected_at BIGINT,
           entry_at BIGINT,
           entry_price DOUBLE PRECISION,
+          entry_mcap DOUBLE PRECISION,
+          entry_score DOUBLE PRECISION,
           current_price DOUBLE PRECISION,
+          current_mcap DOUBLE PRECISION,
           size_sol DOUBLE PRECISION,
-          tp1_hit BOOLEAN DEFAULT FALSE,
-          tp2_hit BOOLEAN DEFAULT FALSE,
           remaining_fraction DOUBLE PRECISION DEFAULT 1.0,
           effective_sl_price DOUBLE PRECISION,
           trailing_high DOUBLE PRECISION,
-          status TEXT DEFAULT 'open',
-          realized_pnl_sol DOUBLE PRECISION DEFAULT 0,
-          close_reason TEXT,
-          closed_at BIGINT,
-          exit_price DOUBLE PRECISION,
-          tx_signature TEXT,
-          tp1_realized_sol DOUBLE PRECISION DEFAULT 0,
-          tp2_realized_sol DOUBLE PRECISION DEFAULT 0,
-          runner_realized_sol DOUBLE PRECISION DEFAULT 0
-        )
-      `);
-      await migClient.query(`ALTER TABLE sniper_positions ADD COLUMN IF NOT EXISTS tp1_realized_sol DOUBLE PRECISION DEFAULT 0`);
-      await migClient.query(`ALTER TABLE sniper_positions ADD COLUMN IF NOT EXISTS tp2_realized_sol DOUBLE PRECISION DEFAULT 0`);
-      await migClient.query(`ALTER TABLE sniper_positions ADD COLUMN IF NOT EXISTS runner_realized_sol DOUBLE PRECISION DEFAULT 0`);
-      await migClient.query(`ALTER TABLE sniper_positions ADD COLUMN IF NOT EXISTS token_amount DOUBLE PRECISION DEFAULT 0`);
-      // Separate entry/exit tx signatures — entry_sig = buy tx (never changes),
-      // exit_sig = confirmed sell tx (NULL means sell was never confirmed on-chain).
-      // Positions with NULL exit_sig are "unverified" and may have fake P&L.
-      await migClient.query(`ALTER TABLE sniper_positions ADD COLUMN IF NOT EXISTS entry_sig TEXT DEFAULT ''`);
-      await migClient.query(`ALTER TABLE sniper_positions ADD COLUMN IF NOT EXISTS exit_sig TEXT`);
-      await migClient.query(`ALTER TABLE sniper_positions ADD COLUMN IF NOT EXISTS detection_price DOUBLE PRECISION`);
-      await migClient.query(`ALTER TABLE sniper_positions ADD COLUMN IF NOT EXISTS entry_drift_pct DOUBLE PRECISION`);
-      await migClient.query(`ALTER TABLE sniper_positions ADD COLUMN IF NOT EXISTS ms_detection_to_fill BIGINT`);
-      // TP3 + quality columns
-      await migClient.query(`ALTER TABLE sniper_positions ADD COLUMN IF NOT EXISTS tp3_hit BOOLEAN DEFAULT FALSE`);
-      await migClient.query(`ALTER TABLE sniper_positions ADD COLUMN IF NOT EXISTS tp3_realized_sol DOUBLE PRECISION DEFAULT 0`);
-      await migClient.query(`ALTER TABLE sniper_positions ADD COLUMN IF NOT EXISTS quality_score INTEGER DEFAULT 0`);
-      await migClient.query(`ALTER TABLE sniper_positions ADD COLUMN IF NOT EXISTS liquidity_sol DOUBLE PRECISION DEFAULT 0`);
-      await migClient.query(`ALTER TABLE sniper_positions ADD COLUMN IF NOT EXISTS buy_pressure_ratio DOUBLE PRECISION DEFAULT 1`);
-      await migClient.query(`ALTER TABLE sniper_positions ADD COLUMN IF NOT EXISTS unique_buyers INTEGER DEFAULT 0`);
-      await migClient.query(`ALTER TABLE sniper_positions ADD COLUMN IF NOT EXISTS top_holder_pct DOUBLE PRECISION DEFAULT 0`);
-      await migClient.query(`ALTER TABLE sniper_positions ADD COLUMN IF NOT EXISTS whale_detected BOOLEAN DEFAULT FALSE`);
-      await migClient.query(`ALTER TABLE sniper_positions ADD COLUMN IF NOT EXISTS position_multiplier DOUBLE PRECISION DEFAULT 1`);
-      await migClient.query(`
-        CREATE TABLE IF NOT EXISTS paper_sniper_positions (
-          id TEXT PRIMARY KEY,
-          mint TEXT NOT NULL,
-          symbol TEXT,
-          name TEXT,
-          detected_at BIGINT,
-          entry_at BIGINT,
-          entry_price DOUBLE PRECISION,
-          current_price DOUBLE PRECISION,
-          size_sol DOUBLE PRECISION,
           tp1_hit BOOLEAN DEFAULT FALSE,
           tp2_hit BOOLEAN DEFAULT FALSE,
-          remaining_fraction DOUBLE PRECISION DEFAULT 1.0,
-          effective_sl_price DOUBLE PRECISION,
-          trailing_high DOUBLE PRECISION,
           status TEXT DEFAULT 'open',
           realized_pnl_sol DOUBLE PRECISION DEFAULT 0,
+          unrealized_pnl_sol DOUBLE PRECISION DEFAULT 0,
+          total_pnl_sol DOUBLE PRECISION DEFAULT 0,
+          pnl_pct DOUBLE PRECISION DEFAULT 0,
           close_reason TEXT,
           closed_at BIGINT,
           exit_price DOUBLE PRECISION,
           tp1_realized_sol DOUBLE PRECISION DEFAULT 0,
           tp2_realized_sol DOUBLE PRECISION DEFAULT 0,
           runner_realized_sol DOUBLE PRECISION DEFAULT 0,
-          detection_price DOUBLE PRECISION,
-          entry_drift_pct DOUBLE PRECISION
-        )
-      `);
-      await migClient.query(`
-        CREATE TABLE IF NOT EXISTS pumpfun_positions (
-          id TEXT PRIMARY KEY,
-          mint TEXT NOT NULL,
-          symbol TEXT,
-          name TEXT,
-          detected_at BIGINT,
-          entry_at BIGINT,
-          entry_price DOUBLE PRECISION,
-          entry_mcap DOUBLE PRECISION,
-          entry_graduation_pct DOUBLE PRECISION,
-          entry_score DOUBLE PRECISION,
-          current_price DOUBLE PRECISION,
-          size_sol DOUBLE PRECISION,
-          tp1_hit BOOLEAN DEFAULT FALSE,
-          tp2_hit BOOLEAN DEFAULT FALSE,
-          remaining_fraction DOUBLE PRECISION DEFAULT 1.0,
-          effective_sl_price DOUBLE PRECISION,
-          trailing_high DOUBLE PRECISION,
-          status TEXT DEFAULT 'open',
-          realized_pnl_sol DOUBLE PRECISION DEFAULT 0,
-          close_reason TEXT,
-          closed_at BIGINT,
-          exit_price DOUBLE PRECISION
+          closing_score INTEGER,
+          position_multiplier DOUBLE PRECISION DEFAULT 1
         )
       `);
       logger.info("DB migration: all tables ready");
@@ -244,38 +114,21 @@ if (process.env["DATABASE_URL"]) {
   }
 }
 
-// ── Start services ────────────────────────────────────────────────────────────
-await pumpfunTraderService.init();
-pumpfunTraderService.start();
-
-await graduationSniperService.init();
-graduationSniperService.start();
-await paperSniperService.init();
-graduationSniperService.setPaperSniperCallback(
-  (mint, entryPrice, symbol, name, detectedAt, detectionPrice, qualityMeta) => {
-    void paperSniperService.onGraduation(mint, entryPrice, symbol, name, detectedAt, detectionPrice, qualityMeta);
-  },
-);
-graduationSniperService.setPhase3PaperCallback(
-  (mint, symbol, price, p1Pct, p2Pct, p3Pct) => {
-    return paperSniperService.enterPhase3Trade(mint, symbol, price, p1Pct, p2Pct, p3Pct);
-  },
-);
+await earlyDiscoveryService.init();
+earlyDiscoveryService.start();
 
 server.listen(port, () => {
-  logger.info({ port }, "Memecoin Sniper — server listening");
+  logger.info({ port }, "Apex Meme Trader — Early Demand Discovery server listening");
   startCommandPolling();
   logger.info("All services started");
 
   if (isTelegramConfigured()) {
     const env = process.env["RENDER"] ? "🌐 Render (Production)" : "💻 Replit (Dev)";
-    sendTelegram(
-      `🎯 <b>Memecoin Sniper — Bot Online</b>\n` +
-      `──────────────────────\n` +
-      `🌍 Environment: <b>${env}</b>\n` +
-      `🕐 ${toIST(new Date())}\n` +
-      `\nCommands: /command1 /command2 /command3`,
-    ).catch(() => {});
+    void sendTelegram(
+      `🔬 <b>Apex Meme Trader — Online</b>\n` +
+      `Strategy: Early Demand Discovery\n` +
+      `🌍 ${env} | 🕐 ${toIST(new Date())}`
+    );
   }
 });
 

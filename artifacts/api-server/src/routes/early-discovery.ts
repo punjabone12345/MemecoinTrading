@@ -44,4 +44,74 @@ router.post("/ed/inject-test", (req, res) => {
   res.json({ ok: true, mint });
 });
 
+router.get("/ed/analytics", (_req, res) => {
+  const positions = earlyDiscoveryService.getPositions();
+  const closed = positions.closed;
+  const open = positions.open;
+
+  const total = closed.length;
+  const wins = closed.filter((p) => p.realizedPnlSol > 0);
+  const losses = closed.filter((p) => p.realizedPnlSol <= 0);
+  const winRate = total > 0 ? (wins.length / total) * 100 : 0;
+
+  const grossProfit = wins.reduce((s, p) => s + p.realizedPnlSol, 0);
+  const grossLoss   = Math.abs(losses.reduce((s, p) => s + p.realizedPnlSol, 0));
+  const profitFactor = grossLoss > 0 ? grossProfit / grossLoss : grossProfit > 0 ? 999 : 0;
+
+  const pnls = closed.map((p) => p.realizedPnlSol).sort((a, b) => a - b);
+  const avgPnl = total > 0 ? pnls.reduce((s, v) => s + v, 0) / total : 0;
+  const medianPnl = total > 0 ? pnls[Math.floor(total / 2)] ?? 0 : 0;
+
+  let peak = 0, trough = 0, maxDrawdown = 0, running = 0;
+  for (const p of closed.slice().reverse()) {
+    running += p.realizedPnlSol;
+    if (running > peak) peak = running;
+    const dd = peak - running;
+    if (dd > maxDrawdown) maxDrawdown = dd;
+  }
+
+  const byScore = [
+    { range: "95-99",   min: 95,  max: 99  },
+    { range: "100-109", min: 100, max: 109 },
+    { range: "110-120", min: 110, max: 120 },
+  ].map(({ range, min, max }) => {
+    const group = closed.filter((p) => p.entryScore >= min && p.entryScore <= max);
+    const gWins = group.filter((p) => p.realizedPnlSol > 0);
+    return {
+      range,
+      trades: group.length,
+      winRate: group.length > 0 ? (gWins.length / group.length) * 100 : 0,
+      avgPnl: group.length > 0 ? group.reduce((s, p) => s + p.realizedPnlSol, 0) / group.length : 0,
+      totalPnl: group.reduce((s, p) => s + p.realizedPnlSol, 0),
+    };
+  });
+
+  const avgHoldTimeWins = wins.length > 0
+    ? wins.reduce((s, p) => s + (p.closedAt ?? p.entryAt) - p.entryAt, 0) / wins.length / 60_000
+    : 0;
+  const avgHoldTimeLosses = losses.length > 0
+    ? losses.reduce((s, p) => s + (p.closedAt ?? p.entryAt) - p.entryAt, 0) / losses.length / 60_000
+    : 0;
+
+  res.json({
+    total,
+    wins: wins.length,
+    losses: losses.length,
+    winRate,
+    profitFactor,
+    grossProfit,
+    grossLoss,
+    avgPnl,
+    medianPnl,
+    maxDrawdown,
+    totalRealizedPnl: closed.reduce((s, p) => s + p.realizedPnlSol, 0),
+    openCount: open.length,
+    unrealizedPnl: open.reduce((s, p) => s + p.unrealizedPnlSol, 0),
+    byScore,
+    avgHoldTimeWins,
+    avgHoldTimeLosses,
+    recentTrades: closed.slice(0, 20),
+  });
+});
+
 export default router;

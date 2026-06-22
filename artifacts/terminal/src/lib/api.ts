@@ -1,12 +1,17 @@
 import { useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import type { EDStatus, EDToken, EDPosition, EDConfig } from "./types";
-import { useToast } from "@/hooks/use-toast";
+import type { EDStatus, EDToken, EDPosition, EDConfig, EDAnalytics } from "./types";
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, "") ?? "";
 
 function apiUrl(path: string): string {
   return `${API_BASE}${path}`;
+}
+
+async function apiFetch<T>(path: string): Promise<T> {
+  const res = await fetch(apiUrl(path));
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  return res.json() as Promise<T>;
 }
 
 export function useWebSocket() {
@@ -35,15 +40,9 @@ export function useWebSocket() {
             void queryClient.invalidateQueries({ queryKey: ["ed-status"] });
             void queryClient.invalidateQueries({ queryKey: ["ed-tokens"] });
             void queryClient.invalidateQueries({ queryKey: ["ed-positions"] });
+            void queryClient.invalidateQueries({ queryKey: ["ed-analytics"] });
           }
-          if (data.type === "pumpfun_update") {
-            queryClient.invalidateQueries({ queryKey: ["pumpfun-status"] });
-            queryClient.invalidateQueries({ queryKey: ["pumpfun-tokens"] });
-            queryClient.invalidateQueries({ queryKey: ["pumpfun-positions"] });
-            queryClient.invalidateQueries({ queryKey: ["pumpfun-history"] });
-            queryClient.invalidateQueries({ queryKey: ["pumpfun-events"] });
-          }
-        } catch (_) {}
+        } catch { /* ignore */ }
       };
 
       ws.onclose = () => {
@@ -63,29 +62,11 @@ export function useWebSocket() {
   }, [queryClient]);
 }
 
-// ── Sniper queries ─────────────────────────────────────────────────────────────
-
-export interface WalletInfo {
-  address: string;
-  balance: number;
-  ready: boolean;
-  solscan: string | null;
-}
-
-
-// ── Early Discovery hooks ─────────────────────────────────────────────────────
-
-async function apiFetch<T>(path: string): Promise<T> {
-  const res = await fetch(apiUrl(path));
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-  return res.json() as Promise<T>;
-}
-
 export function useEDStatus() {
   return useQuery<EDStatus>({
     queryKey: ["ed-status"],
     queryFn: () => apiFetch<EDStatus>("/api/ed/status"),
-    refetchInterval: 10_000,
+    refetchInterval: 8_000,
   });
 }
 
@@ -93,7 +74,7 @@ export function useEDTokens() {
   return useQuery<EDToken[]>({
     queryKey: ["ed-tokens"],
     queryFn: () => apiFetch<EDToken[]>("/api/ed/tokens"),
-    refetchInterval: 15_000,
+    refetchInterval: 10_000,
   });
 }
 
@@ -101,7 +82,7 @@ export function useEDPositions() {
   return useQuery<{ open: EDPosition[]; closed: EDPosition[] }>({
     queryKey: ["ed-positions"],
     queryFn: () => apiFetch<{ open: EDPosition[]; closed: EDPosition[] }>("/api/ed/positions"),
-    refetchInterval: 10_000,
+    refetchInterval: 8_000,
   });
 }
 
@@ -131,6 +112,14 @@ export function useUpdateEDConfig() {
   });
 }
 
+export function useEDAnalytics() {
+  return useQuery<EDAnalytics>({
+    queryKey: ["ed-analytics"],
+    queryFn: () => apiFetch<EDAnalytics>("/api/ed/analytics"),
+    refetchInterval: 30_000,
+  });
+}
+
 export function useResetPaperBalance() {
   const queryClient = useQueryClient();
   return useMutation<{ ok: boolean; balance: number }, Error, void>({
@@ -142,6 +131,7 @@ export function useResetPaperBalance() {
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["ed-status"] });
       void queryClient.invalidateQueries({ queryKey: ["ed-positions"] });
+      void queryClient.invalidateQueries({ queryKey: ["ed-analytics"] });
     },
   });
 }

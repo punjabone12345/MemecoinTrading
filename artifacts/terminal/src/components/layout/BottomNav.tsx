@@ -1,53 +1,61 @@
 import { useLocation } from "wouter";
-import { Zap, FileText } from "lucide-react";
+import { Telescope, BarChart3, Settings2 } from "lucide-react";
+
+const tabs = [
+  { path: "/", label: "FEED", icon: Telescope, accent: "#818cf8" },
+  { path: "/analytics", label: "ANALYTICS", icon: BarChart3, accent: "#34d399" },
+  { path: "/settings", label: "SETTINGS", icon: Settings2, accent: "#94a3b8" },
+] as const;
 
 export function BottomNav() {
   const [location, navigate] = useLocation();
-  const isLive  = location === "/" || location === "/live";
-  const isPaper = location === "/paper";
 
   return (
-    <nav className="fixed bottom-0 left-0 right-0 z-50 bg-[#0d0d15]/95 backdrop-blur-xl border-t border-white/8">
-      <div className="flex items-stretch h-16 max-w-screen-xl mx-auto">
-        {/* Pre-Migration tab */}
-        <button
-          onClick={() => navigate("/live")}
-          className={`flex-1 flex flex-col items-center justify-center gap-1 transition-colors ${
-            isLive ? "text-violet-400" : "text-white/30 hover:text-white/60"
-          }`}
-        >
-          <div className={`relative flex items-center justify-center w-10 h-6 rounded-full transition-colors ${
-            isLive ? "bg-violet-500/20" : ""
-          }`}>
-            <Zap size={18} />
-            {isLive && (
-              <span className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-violet-400 animate-pulse" />
-            )}
-          </div>
-          <span className={`text-[10px] font-bold tracking-wider ${isLive ? "text-violet-400" : "text-white/30"}`}>
-            PRE-GRAD
-          </span>
-        </button>
-
-        {/* Divider */}
-        <div className="w-px bg-white/8 my-3" />
-
-        {/* Paper Mode tab */}
-        <button
-          onClick={() => navigate("/paper")}
-          className={`flex-1 flex flex-col items-center justify-center gap-1 transition-colors ${
-            isPaper ? "text-amber-400" : "text-white/30 hover:text-white/60"
-          }`}
-        >
-          <div className={`flex items-center justify-center w-10 h-6 rounded-full transition-colors ${
-            isPaper ? "bg-amber-500/20" : ""
-          }`}>
-            <FileText size={18} />
-          </div>
-          <span className={`text-[10px] font-bold tracking-wider ${isPaper ? "text-amber-400" : "text-white/30"}`}>
-            PAPER
-          </span>
-        </button>
+    <nav
+      className="fixed bottom-0 left-0 right-0 z-50"
+      style={{
+        background: "rgba(5, 5, 15, 0.95)",
+        backdropFilter: "blur(24px)",
+        borderTop: "1px solid rgba(255,255,255,0.07)",
+      }}
+    >
+      <div className="flex items-stretch h-[60px] max-w-2xl mx-auto">
+        {tabs.map(({ path, label, icon: Icon, accent }, i) => {
+          const active = path === "/" ? location === "/" : location.startsWith(path);
+          return (
+            <button
+              key={path}
+              onClick={() => navigate(path)}
+              className="flex-1 flex flex-col items-center justify-center gap-1 transition-all duration-200 relative"
+              style={{ color: active ? accent : "rgba(255,255,255,0.3)" }}
+            >
+              {i > 0 && (
+                <div
+                  className="absolute left-0 top-3 bottom-3 w-px"
+                  style={{ background: "rgba(255,255,255,0.07)" }}
+                />
+              )}
+              {active && (
+                <div
+                  className="absolute top-0 left-1/2 -translate-x-1/2 w-8 h-[2px] rounded-full"
+                  style={{ background: accent }}
+                />
+              )}
+              <div
+                className="flex items-center justify-center w-8 h-5 rounded-lg transition-colors"
+                style={{ background: active ? `${accent}20` : "transparent" }}
+              >
+                <Icon size={16} />
+              </div>
+              <span
+                className="text-[9px] font-bold tracking-widest"
+                style={{ color: active ? accent : "rgba(255,255,255,0.3)" }}
+              >
+                {label}
+              </span>
+            </button>
+          );
+        })}
       </div>
     </nav>
   );

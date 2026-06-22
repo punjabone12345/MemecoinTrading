@@ -1,5 +1,3 @@
-// ── Early Demand Discovery ────────────────────────────────────────────────────
-
 export type EDTokenStatus = "tracking" | "rejected" | "eligible" | "entered" | "exited";
 
 export interface EDScores {
@@ -112,4 +110,30 @@ export interface EDStatus {
   totalRealizedPnlSol: number;
   totalUnrealizedPnlSol: number;
   config: EDConfig;
+}
+
+export interface EDAnalytics {
+  total: number;
+  wins: number;
+  losses: number;
+  winRate: number;
+  profitFactor: number;
+  grossProfit: number;
+  grossLoss: number;
+  avgPnl: number;
+  medianPnl: number;
+  maxDrawdown: number;
+  totalRealizedPnl: number;
+  openCount: number;
+  unrealizedPnl: number;
+  byScore: Array<{
+    range: string;
+    trades: number;
+    winRate: number;
+    avgPnl: number;
+    totalPnl: number;
+  }>;
+  avgHoldTimeWins: number;
+  avgHoldTimeLosses: number;
+  recentTrades: EDPosition[];
 }

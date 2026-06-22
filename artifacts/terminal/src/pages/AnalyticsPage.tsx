@@ -1,195 +1,218 @@
-import { useEDStatus, useEDPositions, useWebSocket } from "@/lib/api";
+import { BarChart3, TrendingUp, TrendingDown, Target, Award, Clock, AlertTriangle } from "lucide-react";
+import { useEDAnalytics } from "@/lib/api";
 import type { EDPosition } from "@/lib/types";
-import { TrendingUp, TrendingDown, BarChart2, Target, Award, AlertTriangle } from "lucide-react";
 
-function fmtSol(v: number, always = false): string {
-  if (always && v >= 0) return `+${v.toFixed(4)}`;
-  return v >= 0 ? `+${v.toFixed(4)}` : v.toFixed(4);
+function fmtSol(v: number, d = 4): string {
+  return `${v >= 0 ? "+" : ""}${v.toFixed(d)} SOL`;
 }
 function fmtPct(v: number): string {
-  return v >= 0 ? `+${v.toFixed(1)}%` : `${v.toFixed(1)}%`;
+  return `${v >= 0 ? "+" : ""}${v.toFixed(1)}%`;
 }
-function fmtAge(ts: number): string {
-  const d = new Date(ts);
-  return d.toLocaleTimeString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+function fmtMin(m: number): string {
+  if (m < 1) return "<1m";
+  if (m < 60) return `${m.toFixed(0)}m`;
+  return `${(m / 60).toFixed(1)}h`;
 }
 
-function StatCard({ label, value, sub, color, icon }: {
-  label: string; value: string; sub?: string; color: string; icon: React.ReactNode;
+function StatCard({ label, value, sub, color = "#818cf8", icon }: {
+  label: string; value: string; sub?: string; color?: string; icon: React.ReactNode;
 }) {
   return (
-    <div className="bg-white/3 rounded-xl border border-white/8 p-4">
-      <div className="flex items-center gap-2 mb-2">
-        <span className={color}>{icon}</span>
-        <span className="text-xs text-white/50 uppercase tracking-wider">{label}</span>
+    <div className="rounded-xl p-4" style={{ background: "rgba(13,13,30,0.8)", border: "1px solid rgba(255,255,255,0.07)" }}>
+      <div className="flex items-center justify-between mb-3">
+        <p className="text-[9px] text-slate-500 uppercase tracking-widest">{label}</p>
+        <div className="text-slate-600">{icon}</div>
       </div>
-      <div className={`text-2xl font-black font-mono ${color}`}>{value}</div>
-      {sub && <div className="text-xs text-white/40 mt-1">{sub}</div>}
+      <p className="text-2xl font-black" style={{ color }}>{value}</p>
+      {sub && <p className="text-[10px] text-slate-500 mt-1">{sub}</p>}
     </div>
   );
 }
 
-function PositionRow({ pos }: { pos: EDPosition }) {
-  const isProfit = pos.realizedPnlSol >= 0;
+function ScoreRow({ range, trades, winRate, avgPnl, totalPnl }: {
+  range: string; trades: number; winRate: number; avgPnl: number; totalPnl: number;
+}) {
+  const color = winRate >= 60 ? "#34d399" : winRate >= 50 ? "#fbbf24" : "#f87171";
   return (
-    <div className="grid grid-cols-7 gap-2 px-3 py-2.5 rounded-lg hover:bg-white/3 text-sm items-center border-b border-white/5">
-      <div className="col-span-2">
-        <div className="font-bold text-white">${pos.symbol}</div>
-        <div className="text-[10px] text-white/30 mt-0.5">{fmtAge(pos.entryAt)}</div>
-      </div>
-      <div className="text-xs text-white/50">{pos.entryScore}/120</div>
-      <div className="text-xs font-mono text-white/60">${pos.entryPrice.toExponential(2)}</div>
-      <div className="text-xs font-mono text-white/60">${pos.exitPrice ? pos.exitPrice.toExponential(2) : "—"}</div>
-      <div className={`text-xs font-mono font-bold ${isProfit ? "text-green-400" : "text-red-400"}`}>
-        {fmtSol(pos.realizedPnlSol, true)}
-      </div>
-      <div>
-        <div className="flex gap-1 text-[10px]">
-          <span className={`px-1 rounded ${pos.tp1Hit ? "bg-green-500/20 text-green-400" : "bg-white/5 text-white/20"}`}>T1</span>
-          <span className={`px-1 rounded ${pos.tp2Hit ? "bg-green-500/20 text-green-400" : "bg-white/5 text-white/20"}`}>T2</span>
+    <div className="rounded-xl px-4 py-3" style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.06)" }}>
+      <div className="flex items-center justify-between gap-4">
+        <div className="min-w-[80px]">
+          <span className="text-xs font-bold text-white">Score {range}</span>
+          <p className="text-[9px] text-slate-500 mt-0.5">{trades} trade{trades !== 1 ? "s" : ""}</p>
         </div>
-        <div className="text-[10px] text-white/30 mt-0.5 truncate">{pos.closeReason.slice(0, 20)}</div>
+        <div className="flex-1">
+          <div className="h-1.5 rounded-full mb-1" style={{ background: "rgba(255,255,255,0.06)" }}>
+            <div className="h-full rounded-full transition-all" style={{ width: `${Math.min(winRate, 100)}%`, background: color }} />
+          </div>
+          <p className="text-[10px] font-bold" style={{ color }}>{winRate.toFixed(0)}% win rate</p>
+        </div>
+        <div className="text-right min-w-[80px]">
+          <p className="text-xs font-bold" style={{ color: totalPnl >= 0 ? "#34d399" : "#f87171" }}>
+            {fmtSol(totalPnl, 3)}
+          </p>
+          <p className="text-[9px] text-slate-500">avg {fmtSol(avgPnl, 3)}</p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TradeRow({ pos }: { pos: EDPosition }) {
+  const holdMin = pos.closedAt ? (pos.closedAt - pos.entryAt) / 60_000 : 0;
+  const isWin = pos.realizedPnlSol > 0;
+  return (
+    <div className="flex items-center justify-between py-2.5" style={{ borderBottom: "1px solid rgba(255,255,255,0.04)" }}>
+      <div className="flex items-center gap-3">
+        <div
+          className="w-7 h-7 rounded-full flex items-center justify-center shrink-0"
+          style={{ background: isWin ? "rgba(52,211,153,0.12)" : "rgba(248,113,113,0.12)" }}
+        >
+          {isWin
+            ? <TrendingUp size={12} className="text-emerald-400" />
+            : <TrendingDown size={12} className="text-red-400" />}
+        </div>
+        <div>
+          <p className="text-xs font-bold text-white">
+            ${pos.symbol} <span className="text-slate-600 font-normal text-[10px]">score {pos.entryScore}</span>
+          </p>
+          <p className="text-[9px] text-slate-500 truncate max-w-[160px]">{pos.closeReason || "—"}</p>
+        </div>
+      </div>
+      <div className="text-right">
+        <p className="text-sm font-black" style={{ color: isWin ? "#34d399" : "#f87171" }}>
+          {fmtPct(pos.pnlPct)}
+        </p>
+        <p className="text-[9px] text-slate-500">{holdMin > 0 ? fmtMin(holdMin) : "—"}</p>
       </div>
     </div>
   );
 }
 
 export default function AnalyticsPage() {
-  useWebSocket();
-  const statusQ    = useEDStatus();
-  const positionsQ = useEDPositions();
+  const { data: analytics, isLoading } = useEDAnalytics();
 
-  const status  = statusQ.data;
-  const closed  = positionsQ.data?.closed ?? [];
-  const open    = positionsQ.data?.open ?? [];
+  if (isLoading) {
+    return (
+      <div className="flex flex-col items-center justify-center min-h-screen gap-3">
+        <BarChart3 size={32} className="text-slate-700 animate-pulse" />
+        <p className="text-slate-500 text-sm">Loading analytics…</p>
+      </div>
+    );
+  }
 
-  const allClosed = closed.filter((p) => p.status === "closed");
-  const wins   = allClosed.filter((p) => p.realizedPnlSol > 0);
-  const losses = allClosed.filter((p) => p.realizedPnlSol <= 0);
-  const totalRealized = allClosed.reduce((s, p) => s + p.realizedPnlSol, 0);
-  const totalUnrealized = open.reduce((s, p) => s + p.unrealizedPnlSol, 0);
-  const winRate = allClosed.length > 0 ? ((wins.length / allClosed.length) * 100).toFixed(1) : "—";
-  const avgWin  = wins.length > 0 ? wins.reduce((s, p) => s + p.realizedPnlSol, 0) / wins.length : 0;
-  const avgLoss = losses.length > 0 ? losses.reduce((s, p) => s + p.realizedPnlSol, 0) / losses.length : 0;
-  const profitFactor = losses.length > 0 && avgLoss !== 0
-    ? (wins.reduce((s, p) => s + p.realizedPnlSol, 0) / Math.abs(losses.reduce((s, p) => s + p.realizedPnlSol, 0))).toFixed(2)
-    : wins.length > 0 ? "∞" : "—";
+  const a = analytics;
 
-  const avgScore   = allClosed.length > 0 ? Math.round(allClosed.reduce((s, p) => s + p.entryScore, 0) / allClosed.length) : 0;
-  const maxDrawdown = allClosed.reduce((dd, p) => Math.min(dd, p.realizedPnlSol), 0);
+  if (!a || a.total === 0) {
+    return (
+      <div className="px-4 pt-6">
+        <div className="mb-6">
+          <h1 className="text-xl font-black text-white">Analytics</h1>
+          <p className="text-xs text-slate-500 mt-0.5">Early Demand Discovery · Paper Mode</p>
+        </div>
+        <div className="text-center py-16">
+          <BarChart3 size={40} className="text-slate-700 mx-auto mb-3" />
+          <p className="text-slate-400 text-sm">No completed trades yet</p>
+          <p className="text-slate-600 text-xs mt-1">Analytics populate once positions close</p>
+        </div>
+      </div>
+    );
+  }
+
+  const winColor  = a.winRate >= 55 ? "#34d399" : a.winRate >= 45 ? "#fbbf24" : "#f87171";
+  const pfColor   = a.profitFactor >= 1.5 ? "#34d399" : a.profitFactor >= 1 ? "#fbbf24" : "#f87171";
+  const pnlColor  = a.totalRealizedPnl >= 0 ? "#34d399" : "#f87171";
+  const avgColor  = a.avgPnl >= 0 ? "#34d399" : "#f87171";
 
   return (
-    <div className="flex flex-col h-screen bg-[#09090f] text-white pb-16 overflow-hidden">
-      {/* Header */}
-      <div className="flex-shrink-0 border-b border-white/8 px-4 py-3">
-        <div className="flex items-center gap-2">
-          <div className="w-6 h-6 rounded-lg bg-cyan-600 flex items-center justify-center">
-            <BarChart2 size={12} className="text-white" />
-          </div>
-          <span className="font-black text-sm tracking-wider text-white">PERFORMANCE STATS</span>
-        </div>
+    <div className="px-4 pt-6 pb-6">
+      <div className="mb-5">
+        <h1 className="text-xl font-black text-white">Analytics</h1>
+        <p className="text-xs text-slate-500 mt-0.5">Early Demand Discovery · {a.total} closed trades</p>
       </div>
 
-      <div className="flex-1 overflow-y-auto scrollbar-thin">
-        <div className="p-4 space-y-4">
-          {/* KPI grid */}
-          <div className="grid grid-cols-2 gap-3">
-            <StatCard
-              label="Win Rate"
-              value={`${winRate}%`}
-              sub={`${wins.length}W / ${losses.length}L`}
-              color="text-green-400"
-              icon={<Award size={14}/>}
-            />
-            <StatCard
-              label="Profit Factor"
-              value={String(profitFactor)}
-              sub="gross profit / gross loss"
-              color="text-violet-400"
-              icon={<Target size={14}/>}
-            />
-            <StatCard
-              label="Realized PnL"
-              value={`${fmtSol(totalRealized)} SOL`}
-              sub={`Unrealized: ${fmtSol(totalUnrealized)} SOL`}
-              color={totalRealized >= 0 ? "text-green-400" : "text-red-400"}
-              icon={<TrendingUp size={14}/>}
-            />
-            <StatCard
-              label="Balance"
-              value={`${(status?.virtualBalance ?? 0).toFixed(3)} SOL`}
-              sub="from 1.000 SOL start"
-              color="text-cyan-400"
-              icon={<BarChart2 size={14}/>}
-            />
-            <StatCard
-              label="Avg Entry Score"
-              value={avgScore > 0 ? `${avgScore}/120` : "—"}
-              sub={`${status?.launchesDetected ?? 0} launches scanned`}
-              color="text-amber-400"
-              icon={<Target size={14}/>}
-            />
-            <StatCard
-              label="Max Drawdown"
-              value={maxDrawdown < 0 ? `${maxDrawdown.toFixed(4)} SOL` : "—"}
-              sub="worst single trade"
-              color="text-red-400"
-              icon={<AlertTriangle size={14}/>}
-            />
-          </div>
-
-          {/* Avg win/loss */}
-          {allClosed.length > 0 && (
-            <div className="bg-white/3 rounded-xl border border-white/8 p-4">
-              <div className="text-xs font-bold text-white/40 uppercase tracking-widest mb-3">Trade Averages</div>
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <div className="flex items-center gap-1 mb-1">
-                    <TrendingUp size={12} className="text-green-400"/>
-                    <span className="text-xs text-white/50">Avg Win</span>
-                  </div>
-                  <div className="text-xl font-black font-mono text-green-400">{fmtSol(avgWin)} SOL</div>
-                </div>
-                <div>
-                  <div className="flex items-center gap-1 mb-1">
-                    <TrendingDown size={12} className="text-red-400"/>
-                    <span className="text-xs text-white/50">Avg Loss</span>
-                  </div>
-                  <div className="text-xl font-black font-mono text-red-400">{fmtSol(avgLoss)} SOL</div>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* Trade history table */}
-          <div className="bg-white/3 rounded-xl border border-white/8 overflow-hidden">
-            <div className="px-3 py-2.5 border-b border-white/8">
-              <div className="text-xs font-bold text-white/40 uppercase tracking-widest">
-                Trade History ({allClosed.length})
-              </div>
-            </div>
-            {allClosed.length === 0 ? (
-              <div className="text-center py-10 text-white/20 text-sm">
-                <BarChart2 size={20} className="mx-auto mb-2 opacity-30" />
-                No closed trades yet
-              </div>
-            ) : (
-              <div>
-                {/* Table header */}
-                <div className="grid grid-cols-7 gap-2 px-3 py-2 text-[10px] font-bold text-white/30 uppercase tracking-wide border-b border-white/5">
-                  <div className="col-span-2">Token</div>
-                  <div>Score</div>
-                  <div>Entry</div>
-                  <div>Exit</div>
-                  <div>PnL</div>
-                  <div>TPs</div>
-                </div>
-                {allClosed.map((pos) => <PositionRow key={pos.id} pos={pos} />)}
-              </div>
-            )}
-          </div>
-        </div>
+      {/* KPI grid */}
+      <div className="grid grid-cols-2 gap-3 mb-5">
+        <StatCard
+          label="Win Rate"
+          value={`${a.winRate.toFixed(1)}%`}
+          sub={`${a.wins} wins · ${a.losses} losses`}
+          color={winColor}
+          icon={<Award size={14} />}
+        />
+        <StatCard
+          label="Profit Factor"
+          value={a.profitFactor >= 999 ? "∞" : a.profitFactor.toFixed(2)}
+          sub={`Gross: +${a.grossProfit.toFixed(4)} / -${a.grossLoss.toFixed(4)}`}
+          color={pfColor}
+          icon={<TrendingUp size={14} />}
+        />
+        <StatCard
+          label="Total Realized P&L"
+          value={`${a.totalRealizedPnl >= 0 ? "+" : ""}${a.totalRealizedPnl.toFixed(4)}`}
+          sub={a.openCount > 0 ? `${a.unrealizedPnl >= 0 ? "+" : ""}${a.unrealizedPnl.toFixed(4)} unrealized` : `${a.total} closed`}
+          color={pnlColor}
+          icon={<Target size={14} />}
+        />
+        <StatCard
+          label="Max Drawdown"
+          value={`-${a.maxDrawdown.toFixed(4)}`}
+          sub="Peak-to-trough equity"
+          color="#f87171"
+          icon={<AlertTriangle size={14} />}
+        />
+        <StatCard
+          label="Avg P&L / Trade"
+          value={`${a.avgPnl >= 0 ? "+" : ""}${a.avgPnl.toFixed(4)}`}
+          sub={`Median: ${a.medianPnl >= 0 ? "+" : ""}${a.medianPnl.toFixed(4)}`}
+          color={avgColor}
+          icon={<BarChart3 size={14} />}
+        />
+        <StatCard
+          label="Hold Time (Wins)"
+          value={fmtMin(a.avgHoldTimeWins)}
+          sub={`Losses: ${fmtMin(a.avgHoldTimeLosses)}`}
+          color="#818cf8"
+          icon={<Clock size={14} />}
+        />
       </div>
+
+      {/* By score range */}
+      <div className="mb-5">
+        <p className="text-[10px] text-slate-500 uppercase tracking-widest mb-2">Performance by Score Range</p>
+        {a.byScore.every((r) => r.trades === 0) ? (
+          <p className="text-slate-600 text-xs py-4 text-center">No data by score range yet</p>
+        ) : (
+          <div className="space-y-2">
+            {a.byScore.map((row) => (
+              <ScoreRow key={row.range} {...row} />
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Open positions banner */}
+      {a.openCount > 0 && (
+        <div className="mb-5 rounded-xl px-4 py-3 flex items-center justify-between"
+          style={{ background: "rgba(52,211,153,0.06)", border: "1px solid rgba(52,211,153,0.18)" }}>
+          <div>
+            <p className="text-[9px] text-emerald-400 uppercase tracking-widest">Open Now</p>
+            <p className="text-sm font-bold text-white">{a.openCount} position{a.openCount > 1 ? "s" : ""}</p>
+          </div>
+          <p className="text-sm font-black" style={{ color: a.unrealizedPnl >= 0 ? "#34d399" : "#f87171" }}>
+            {fmtSol(a.unrealizedPnl, 4)} unrealized
+          </p>
+        </div>
+      )}
+
+      {/* Recent trades */}
+      {a.recentTrades.length > 0 && (
+        <div className="rounded-xl p-4" style={{ background: "rgba(13,13,30,0.8)", border: "1px solid rgba(255,255,255,0.07)" }}>
+          <p className="text-[10px] text-slate-500 uppercase tracking-widest mb-3">Recent Trades</p>
+          {a.recentTrades.map((t) => (
+            <TradeRow key={t.id} pos={t} />
+          ))}
+        </div>
+      )}
     </div>
   );
 }

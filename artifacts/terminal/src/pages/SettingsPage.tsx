@@ -1,197 +1,359 @@
 import { useState, useEffect } from "react";
-import { useEDConfig, useUpdateEDConfig, useResetPaperBalance, useWebSocket } from "@/lib/api";
+import { useEDConfig, useUpdateEDConfig, useResetPaperBalance } from "@/lib/api";
 import type { EDConfig } from "@/lib/types";
-import { Settings, RotateCcw, Save, AlertTriangle, CheckCircle } from "lucide-react";
+import {
+  Settings2, RotateCcw, Save, CheckCircle, ChevronDown, ChevronUp,
+  Shield, Target, TrendingUp, Sliders, AlertTriangle,
+} from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 
-type NumberField = Exclude<keyof EDConfig, "enabled">;
-
-const FIELDS: { key: NumberField; label: string; description: string; min: number; max: number; step: number; unit?: string }[] = [
-  { key: "positionSizeSol",   label: "Position Size",      description: "Base SOL per trade",            min: 0.01, max: 10,   step: 0.01, unit: "SOL" },
-  { key: "maxOpenPositions",  label: "Max Open Trades",    description: "Max concurrent paper positions", min: 1,    max: 20,   step: 1 },
-  { key: "minScore",          label: "Min Entry Score",    description: "Score threshold to enter (95–120)", min: 50, max: 120, step: 1 },
-  { key: "minBondingCurvePct",label: "Min Bonding Curve",  description: "Minimum bonding curve %",       min: 0,    max: 100,  step: 1, unit: "%" },
-  { key: "minUniqueBuyers",   label: "Min Unique Buyers",  description: "Minimum unique buyers required", min: 5,   max: 500,  step: 1 },
-  { key: "minBuyPressureRatio",label: "Min Buy Pressure",  description: "Min buy/sell volume ratio",     min: 1,    max: 20,   step: 0.1, unit: "x" },
-  { key: "slPct",             label: "Stop Loss",          description: "Stop loss percentage",          min: 5,    max: 50,   step: 1, unit: "%" },
-  { key: "tp1Pct",            label: "TP1 Target",         description: "Take profit 1 percentage",      min: 20,   max: 500,  step: 5, unit: "%" },
-  { key: "tp1ClosePct",       label: "TP1 Close %",        description: "Fraction to close at TP1",      min: 10,   max: 75,   step: 5, unit: "%" },
-  { key: "tp2Pct",            label: "TP2 Target",         description: "Take profit 2 percentage",      min: 50,   max: 1000, step: 10, unit: "%" },
-  { key: "tp2ClosePct",       label: "TP2 Close %",        description: "Fraction to close at TP2",      min: 10,   max: 75,   step: 5, unit: "%" },
-  { key: "runnerTrailingPct", label: "Runner Trailing Stop", description: "Trailing stop % from high",  min: 10,   max: 50,   step: 5, unit: "%" },
-];
-
-function NumberInput({ field, value, onChange }: {
-  field: typeof FIELDS[number]; value: number; onChange: (v: number) => void;
+/* ── Field input ──────────────────────────────────────────────────────────── */
+function Field({
+  label, value, onChange, min, max, step = 0.01, unit, hint,
+}: {
+  label: string;
+  value: number;
+  onChange: (v: number) => void;
+  min?: number;
+  max?: number;
+  step?: number;
+  unit?: string;
+  hint?: string;
 }) {
   return (
-    <div className="bg-white/3 rounded-xl border border-white/8 p-4">
+    <div className="py-3" style={{ borderBottom: "1px solid rgba(255,255,255,0.04)" }}>
       <div className="flex items-center justify-between mb-1">
         <div>
-          <div className="font-bold text-sm text-white">{field.label}</div>
-          <div className="text-xs text-white/40 mt-0.5">{field.description}</div>
+          <p className="text-xs font-semibold text-slate-300">{label}</p>
+          {hint && <p className="text-[9px] text-slate-600 mt-0.5">{hint}</p>}
         </div>
-        <div className="text-right ml-3 shrink-0">
-          <div className="font-mono font-black text-lg text-violet-400">
-            {field.step < 1 ? value.toFixed(2) : value}{field.unit ?? ""}
-          </div>
+        <div className="flex items-center gap-1.5">
+          <input
+            type="number"
+            value={value}
+            min={min}
+            max={max}
+            step={step}
+            onChange={(e) => {
+              const v = parseFloat(e.target.value);
+              if (!isNaN(v)) onChange(v);
+            }}
+            className="w-20 text-right text-sm font-bold rounded-lg px-2 py-1.5 outline-none focus:ring-1 transition-all"
+            style={{
+              background: "rgba(255,255,255,0.05)",
+              border: "1px solid rgba(255,255,255,0.1)",
+              color: "#f1f5f9",
+            }}
+          />
+          {unit && <span className="text-[10px] text-slate-500 w-6">{unit}</span>}
         </div>
       </div>
       <input
         type="range"
-        min={field.min}
-        max={field.max}
-        step={field.step}
+        min={min ?? 0}
+        max={max ?? 100}
+        step={step}
         value={value}
-        onChange={(e) => onChange(Number(e.target.value))}
-        className="w-full mt-2 accent-violet-500"
+        onChange={(e) => onChange(parseFloat(e.target.value))}
+        className="w-full h-1 mt-1 appearance-none rounded-full"
+        style={{
+          background: `linear-gradient(to right, #818cf8 0%, #818cf8 ${((value - (min ?? 0)) / ((max ?? 100) - (min ?? 0))) * 100}%, rgba(255,255,255,0.1) ${((value - (min ?? 0)) / ((max ?? 100) - (min ?? 0))) * 100}%, rgba(255,255,255,0.1) 100%)`,
+          accentColor: "#818cf8",
+        }}
       />
-      <div className="flex justify-between text-[10px] text-white/25 mt-0.5">
-        <span>{field.min}{field.unit ?? ""}</span>
-        <span>{field.max}{field.unit ?? ""}</span>
-      </div>
     </div>
   );
 }
 
+/* ── Toggle field ─────────────────────────────────────────────────────────── */
+function ToggleField({ label, value, onChange, hint }: {
+  label: string; value: boolean; onChange: (v: boolean) => void; hint?: string;
+}) {
+  return (
+    <div className="flex items-center justify-between py-3" style={{ borderBottom: "1px solid rgba(255,255,255,0.04)" }}>
+      <div>
+        <p className="text-xs font-semibold text-slate-300">{label}</p>
+        {hint && <p className="text-[9px] text-slate-600 mt-0.5">{hint}</p>}
+      </div>
+      <button
+        onClick={() => onChange(!value)}
+        className="relative w-11 h-6 rounded-full transition-all duration-300 shrink-0"
+        style={{ background: value ? "#818cf8" : "rgba(255,255,255,0.1)" }}
+      >
+        <div
+          className="absolute top-1 w-4 h-4 rounded-full bg-white shadow transition-all duration-300"
+          style={{ left: value ? "calc(100% - 20px)" : "4px" }}
+        />
+      </button>
+    </div>
+  );
+}
+
+/* ── Section card ─────────────────────────────────────────────────────────── */
+function Section({
+  title, icon, children, defaultOpen = false,
+}: {
+  title: string; icon: React.ReactNode; children: React.ReactNode; defaultOpen?: boolean;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div className="rounded-xl overflow-hidden mb-3" style={{ background: "rgba(13,13,30,0.8)", border: "1px solid rgba(255,255,255,0.07)" }}>
+      <button
+        className="w-full flex items-center justify-between px-4 py-3 transition-colors"
+        style={{ borderBottom: open ? "1px solid rgba(255,255,255,0.06)" : "none" }}
+        onClick={() => setOpen(!open)}
+      >
+        <div className="flex items-center gap-2">
+          <div className="text-indigo-400">{icon}</div>
+          <span className="text-sm font-bold text-white">{title}</span>
+        </div>
+        {open ? <ChevronUp size={14} className="text-slate-500" /> : <ChevronDown size={14} className="text-slate-500" />}
+      </button>
+      {open && <div className="px-4 pb-2">{children}</div>}
+    </div>
+  );
+}
+
+/* ── Main ─────────────────────────────────────────────────────────────────── */
 export default function SettingsPage() {
-  useWebSocket();
-  const configQ  = useEDConfig();
-  const updateFn = useUpdateEDConfig();
-  const resetFn  = useResetPaperBalance();
+  const { data: config, isLoading } = useEDConfig();
+  const updateConfig = useUpdateEDConfig();
+  const resetBalance = useResetPaperBalance();
   const { toast } = useToast();
 
   const [draft, setDraft] = useState<EDConfig | null>(null);
+  const [saved, setSaved] = useState(false);
   const [dirty, setDirty] = useState(false);
 
   useEffect(() => {
-    if (configQ.data && !draft) {
-      setDraft({ ...configQ.data });
-    }
-  }, [configQ.data, draft]);
+    if (config && !draft) setDraft({ ...config });
+  }, [config, draft]);
 
-  function patch<K extends keyof EDConfig>(key: K, value: EDConfig[K]) {
+  function set<K extends keyof EDConfig>(key: K, val: EDConfig[K]) {
     if (!draft) return;
-    setDraft({ ...draft, [key]: value });
+    setDraft((d) => ({ ...d!, [key]: val }));
     setDirty(true);
+    setSaved(false);
   }
 
   async function save() {
     if (!draft) return;
     try {
-      await updateFn.mutateAsync(draft);
+      await updateConfig.mutateAsync(draft);
       setDirty(false);
+      setSaved(true);
+      setTimeout(() => setSaved(false), 3000);
       toast({ title: "Settings saved", description: "Configuration updated successfully." });
     } catch {
-      toast({ title: "Save failed", variant: "destructive" });
+      toast({ title: "Save failed", description: "Could not update config.", variant: "destructive" });
     }
   }
 
-  async function resetBalance() {
-    try {
-      await resetFn.mutateAsync();
-      toast({ title: "Balance reset", description: "Paper trading balance reset to 1.000 SOL." });
-    } catch {
-      toast({ title: "Reset failed", variant: "destructive" });
-    }
+  async function doReset() {
+    await resetBalance.mutateAsync();
+    toast({ title: "Balance reset", description: "Virtual balance restored to 1.0 SOL." });
   }
 
-  const config = draft ?? configQ.data;
+  if (isLoading || !draft) {
+    return (
+      <div className="flex flex-col items-center justify-center min-h-screen gap-3">
+        <Settings2 size={28} className="text-slate-700 animate-spin" style={{ animationDuration: "3s" }} />
+        <p className="text-slate-500 text-sm">Loading settings…</p>
+      </div>
+    );
+  }
 
   return (
-    <div className="flex flex-col h-screen bg-[#09090f] text-white pb-16 overflow-hidden">
+    <div className="px-4 pt-6 pb-8">
       {/* Header */}
-      <div className="flex-shrink-0 border-b border-white/8 px-4 py-3">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <div className="w-6 h-6 rounded-lg bg-amber-600 flex items-center justify-center">
-              <Settings size={12} className="text-white" />
-            </div>
-            <span className="font-black text-sm tracking-wider text-white">SETTINGS</span>
-          </div>
-          {dirty && (
-            <div className="flex items-center gap-1 text-xs text-amber-400">
-              <AlertTriangle size={12} /> Unsaved changes
-            </div>
-          )}
+      <div className="flex items-center justify-between mb-6">
+        <div>
+          <h1 className="text-xl font-black text-white">Settings</h1>
+          <p className="text-xs text-slate-500 mt-0.5">Early Demand Discovery · Paper Mode</p>
         </div>
+        <button
+          onClick={save}
+          disabled={!dirty || updateConfig.isPending}
+          className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-bold transition-all"
+          style={{
+            background: dirty ? "rgba(129,140,248,0.2)" : "rgba(255,255,255,0.04)",
+            border: `1px solid ${dirty ? "rgba(129,140,248,0.4)" : "rgba(255,255,255,0.08)"}`,
+            color: dirty ? "#818cf8" : "#64748b",
+          }}
+        >
+          {saved
+            ? <><CheckCircle size={12} className="text-emerald-400" /> Saved</>
+            : <><Save size={12} /> {updateConfig.isPending ? "Saving…" : "Save"}</>}
+        </button>
       </div>
 
-      <div className="flex-1 overflow-y-auto scrollbar-thin">
-        <div className="p-4 space-y-4">
-          {/* Enable toggle */}
-          {config && (
-            <div className="bg-white/3 rounded-xl border border-white/8 p-4 flex items-center justify-between">
-              <div>
-                <div className="font-bold text-sm text-white">Discovery Engine</div>
-                <div className="text-xs text-white/40 mt-0.5">Enable/disable token scanning and paper trading</div>
-              </div>
-              <button
-                onClick={() => patch("enabled", !config.enabled)}
-                className={`relative w-12 h-6 rounded-full transition-colors ${config.enabled ? "bg-violet-500" : "bg-white/15"}`}
-              >
-                <div className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white transition-transform ${config.enabled ? "translate-x-6" : "translate-x-0"}`} />
-              </button>
-            </div>
-          )}
-
-          {/* Parameter sliders */}
-          {config && FIELDS.map((field) => (
-            <NumberInput
-              key={field.key}
-              field={field}
-              value={config[field.key] as number}
-              onChange={(v) => patch(field.key, v as EDConfig[typeof field.key])}
-            />
-          ))}
-
-          {/* Strategy info */}
-          {config && (
-            <div className="bg-violet-500/5 rounded-xl border border-violet-500/20 p-4">
-              <div className="text-xs font-bold text-violet-400 uppercase tracking-widest mb-2">Strategy Summary</div>
-              <div className="space-y-1 text-xs text-white/60">
-                <div>Entry: Score ≥ {config.minScore}/120, confirmed for 2 min</div>
-                <div>SL: -{config.slPct}% | TP1: +{config.tp1Pct}% → sell {config.tp1ClosePct}% → move SL to BE</div>
-                <div>TP2: +{config.tp2Pct}% → sell {config.tp2ClosePct}% | Runner: -{config.runnerTrailingPct}% trail</div>
-                <div>Position: {config.positionSizeSol} SOL base (×1.0 at 95, ×0.75 at 100, ×1.0 at 110+)</div>
-              </div>
-            </div>
-          )}
-
-          {/* Danger zone */}
-          <div className="bg-red-500/5 rounded-xl border border-red-500/20 p-4">
-            <div className="text-xs font-bold text-red-400 uppercase tracking-widest mb-3">Danger Zone</div>
-            <button
-              onClick={() => {
-                if (window.confirm("Reset paper balance to 1.000 SOL? This closes all open positions.")) {
-                  void resetBalance();
-                }
-              }}
-              className="flex items-center gap-2 px-4 py-2 bg-red-500/15 hover:bg-red-500/25 text-red-400 rounded-lg text-sm font-bold transition-colors border border-red-500/30"
-            >
-              <RotateCcw size={14} />
-              Reset Paper Balance
-            </button>
-            <div className="text-xs text-white/30 mt-2">Resets virtual balance to 1.000 SOL. Cannot be undone.</div>
-          </div>
-        </div>
-      </div>
-
-      {/* Save button */}
       {dirty && (
-        <div className="flex-shrink-0 border-t border-white/8 px-4 py-3">
-          <button
-            onClick={() => void save()}
-            disabled={updateFn.isPending}
-            className="w-full flex items-center justify-center gap-2 py-3 bg-violet-600 hover:bg-violet-500 disabled:opacity-50 text-white rounded-xl font-bold text-sm transition-colors"
-          >
-            {updateFn.isPending
-              ? <><div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" /> Saving…</>
-              : <><Save size={14} /> Save Settings</>
-            }
-          </button>
+        <div className="mb-4 rounded-xl px-4 py-2.5 flex items-center gap-2"
+          style={{ background: "rgba(251,191,36,0.08)", border: "1px solid rgba(251,191,36,0.2)" }}>
+          <AlertTriangle size={12} className="text-amber-400 shrink-0" />
+          <p className="text-[10px] text-amber-400">Unsaved changes — tap Save to apply</p>
         </div>
       )}
+
+      {/* ── General ── */}
+      <Section title="General" icon={<Settings2 size={14} />} defaultOpen>
+        <ToggleField
+          label="Bot Enabled"
+          value={draft.enabled}
+          onChange={(v) => set("enabled", v)}
+          hint="Master switch — pauses all new entries when off"
+        />
+        <Field
+          label="Max Open Positions"
+          value={draft.maxOpenPositions}
+          onChange={(v) => set("maxOpenPositions", Math.round(v))}
+          min={1} max={20} step={1}
+          hint="Maximum simultaneous paper trades"
+        />
+      </Section>
+
+      {/* ── Entry Filters ── */}
+      <Section title="Entry Filters" icon={<Shield size={14} />} defaultOpen>
+        <Field
+          label="Min Demand Score"
+          value={draft.minScore}
+          onChange={(v) => set("minScore", v)}
+          min={60} max={120} step={1}
+          hint="Minimum score/120 required to enter"
+        />
+        <Field
+          label="Min Bonding Curve %"
+          value={draft.minBondingCurvePct}
+          onChange={(v) => set("minBondingCurvePct", v)}
+          min={50} max={99} step={1} unit="%"
+          hint="Token must be this close to graduation"
+        />
+        <Field
+          label="Min Unique Buyers"
+          value={draft.minUniqueBuyers}
+          onChange={(v) => set("minUniqueBuyers", Math.round(v))}
+          min={5} max={200} step={1}
+          hint="Minimum number of distinct buyer wallets"
+        />
+        <Field
+          label="Min Buy/Sell Ratio"
+          value={draft.minBuyPressureRatio}
+          onChange={(v) => set("minBuyPressureRatio", v)}
+          min={1} max={10} step={0.1} unit="×"
+          hint="Buy volume must exceed sell by this multiple"
+        />
+      </Section>
+
+      {/* ── Position Sizing ── */}
+      <Section title="Position Sizing" icon={<Sliders size={14} />}>
+        <Field
+          label="Base Position Size"
+          value={draft.positionSizeSol}
+          onChange={(v) => set("positionSizeSol", v)}
+          min={0.01} max={10} step={0.01} unit="SOL"
+          hint="Full size for score 110-120. 75% for 100-109, 50% for 95-99"
+        />
+        <div className="mt-2 rounded-lg p-3 space-y-1" style={{ background: "rgba(129,140,248,0.06)", border: "1px solid rgba(129,140,248,0.15)" }}>
+          {[
+            { label: "Score 110-120", mult: 1.0 },
+            { label: "Score 100-109", mult: 0.75 },
+            { label: "Score 95-99",   mult: 0.50 },
+          ].map(({ label, mult }) => (
+            <div key={label} className="flex justify-between text-[10px]">
+              <span className="text-slate-500">{label}</span>
+              <span className="text-indigo-400 font-bold">{(draft.positionSizeSol * mult).toFixed(3)} SOL</span>
+            </div>
+          ))}
+        </div>
+      </Section>
+
+      {/* ── Exit Model ── */}
+      <Section title="Exit Model" icon={<Target size={14} />}>
+        <Field
+          label="Stop Loss"
+          value={draft.slPct}
+          onChange={(v) => set("slPct", v)}
+          min={5} max={50} step={0.5} unit="%"
+          hint="Exit all remaining if price drops this % from entry"
+        />
+        <Field
+          label="TP1 Target"
+          value={draft.tp1Pct}
+          onChange={(v) => set("tp1Pct", v)}
+          min={20} max={300} step={5} unit="%"
+          hint="First take-profit level"
+        />
+        <Field
+          label="TP1 Close %"
+          value={draft.tp1ClosePct}
+          onChange={(v) => set("tp1ClosePct", v)}
+          min={10} max={80} step={5} unit="%"
+          hint="Fraction of position to sell at TP1"
+        />
+        <Field
+          label="TP2 Target"
+          value={draft.tp2Pct}
+          onChange={(v) => set("tp2Pct", v)}
+          min={50} max={1000} step={10} unit="%"
+          hint="Second take-profit level — SL moves to breakeven after TP1"
+        />
+        <Field
+          label="TP2 Close %"
+          value={draft.tp2ClosePct}
+          onChange={(v) => set("tp2ClosePct", v)}
+          min={10} max={80} step={5} unit="%"
+          hint="Fraction of remaining to sell at TP2"
+        />
+        <Field
+          label="Runner Trailing Stop"
+          value={draft.runnerTrailingPct}
+          onChange={(v) => set("runnerTrailingPct", v)}
+          min={5} max={50} step={1} unit="%"
+          hint="After TP2, trail remaining position this % below peak"
+        />
+      </Section>
+
+      {/* ── Summary ── */}
+      <div className="rounded-xl p-4 mb-5" style={{ background: "rgba(13,13,30,0.8)", border: "1px solid rgba(255,255,255,0.07)" }}>
+        <p className="text-[10px] text-slate-500 uppercase tracking-widest mb-3 flex items-center gap-1.5">
+          <TrendingUp size={10} /> Exit Scenario Preview
+        </p>
+        <div className="space-y-1.5 text-[11px]">
+          {[
+            { label: "SL",     pct: -draft.slPct,  frac: 100 },
+            { label: "TP1",    pct: draft.tp1Pct,   frac: draft.tp1ClosePct },
+            { label: "TP2",    pct: draft.tp2Pct,   frac: draft.tp2ClosePct },
+            { label: "Runner", pct: "trailing",      frac: 100 - draft.tp1ClosePct - draft.tp2ClosePct },
+          ].map(({ label, pct, frac }) => (
+            <div key={label} className="flex items-center justify-between">
+              <span className="text-slate-500 w-16">{label}</span>
+              <span className="font-bold text-white">
+                {typeof pct === "number"
+                  ? `${pct >= 0 ? "+" : ""}${pct}%`
+                  : `−${draft.runnerTrailingPct}% from peak`}
+              </span>
+              <span className="text-slate-500">sell {Math.max(0, frac)}%</span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* ── Danger zone ── */}
+      <div className="rounded-xl p-4" style={{ background: "rgba(248,113,113,0.04)", border: "1px solid rgba(248,113,113,0.15)" }}>
+        <p className="text-[10px] text-red-400 uppercase tracking-widest mb-3">Danger Zone</p>
+        <button
+          onClick={doReset}
+          disabled={resetBalance.isPending}
+          className="w-full flex items-center justify-center gap-2 py-3 rounded-xl text-xs font-bold transition-all"
+          style={{ background: "rgba(248,113,113,0.1)", border: "1px solid rgba(248,113,113,0.25)", color: "#f87171" }}
+        >
+          <RotateCcw size={12} />
+          {resetBalance.isPending ? "Resetting…" : "Reset Paper Balance to 1.0 SOL"}
+        </button>
+        <p className="text-[9px] text-slate-600 text-center mt-2">
+          This clears all open positions and resets virtual balance
+        </p>
+      </div>
     </div>
   );
 }

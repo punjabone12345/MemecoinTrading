@@ -3,24 +3,29 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Shell } from "@/components/layout/Shell";
-import PumpfunTrader from "@/pages/PumpfunTrader";
-import PaperMode from "@/pages/PaperMode";
+import FeedPage from "@/pages/FeedPage";
+import AnalyticsPage from "@/pages/AnalyticsPage";
+import SettingsPage from "@/pages/SettingsPage";
 
-const queryClient = new QueryClient();
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: { retry: 2, staleTime: 5_000 },
+  },
+});
 
 function Router() {
   return (
     <Shell>
       <Switch>
-        <Route path="/" component={PumpfunTrader} />
-        <Route path="/live" component={PumpfunTrader} />
-        <Route path="/paper" component={PaperMode} />
+        <Route path="/" component={FeedPage} />
+        <Route path="/analytics" component={AnalyticsPage} />
+        <Route path="/settings" component={SettingsPage} />
       </Switch>
     </Shell>
   );
 }
 
-function App() {
+export default function App() {
   return (
     <QueryClientProvider client={queryClient}>
       <TooltipProvider>
@@ -32,5 +37,3 @@ function App() {
     </QueryClientProvider>
   );
 }
-
-export default App;
