@@ -801,7 +801,7 @@ export default function FeedPage() {
 
   const connSrc  = status?.connectionSource ?? "offline";
   const wsOk     = connSrc !== "offline";
-  const connLabel = connSrc === "pumpportal" ? "PUMPPORTAL" : connSrc === "helius" ? "HELIUS" : "OFFLINE";
+  const connLabel = connSrc === "pumpportal" ? "PUMPPORTAL" : connSrc === "helius" ? "HELIUS" : connSrc === "polling" ? "POLLING" : "OFFLINE";
 
   return (
     <div className="min-h-screen">
@@ -894,7 +894,7 @@ export default function FeedPage() {
                 <Telescope size={32} className="text-slate-700 mx-auto mb-3" />
                 <p className="text-slate-500 text-sm">Scanning for new launches…</p>
                 <p className="text-slate-600 text-xs mt-1">
-                  {wsOk ? `${connLabel} connected — scanning for new Pump.fun launches` : "Connecting to PumpPortal WebSocket…"}
+                  {wsOk ? `${connLabel} connected — scanning for new Pump.fun launches` : "Attempting WebSocket — REST polling active as fallback…"}
                 </p>
                 <button
                   onClick={() => inject.mutate(`TESTDEMO${Date.now().toString(36)}1111111111111111111111111111111111`)}

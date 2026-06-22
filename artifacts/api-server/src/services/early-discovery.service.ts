@@ -143,7 +143,7 @@ export interface EDStatus {
   wsReconnects: number;
   ppConnected: boolean;
   ppReconnects: number;
-  connectionSource: "pumpportal" | "helius" | "offline";
+  connectionSource: "pumpportal" | "helius" | "polling" | "offline";
   enabled: boolean;
   trackedCount: number;
   eligibleCount: number;
@@ -195,6 +195,14 @@ class EarlyDiscoveryService {
   private pingInterval: ReturnType<typeof setInterval> | null = null;
   private pollInterval: ReturnType<typeof setInterval> | null = null;
 
+  // REST polling fallback — always active; discovers new tokens via public APIs
+  // when PumpPortal WS is unavailable (e.g. Replit network can't reach pumpportal.fun)
+  private restPollInterval: ReturnType<typeof setInterval> | null = null;
+  private restPolling = false;
+  private lastRpcSignature: string | null = null;  // tracks newest seen pump.fun program sig
+  private seenSignatures = new Set<string>();      // prevents re-processing RPC sigs
+  private seenDexTokens = new Set<string>();       // prevents re-processing DexScreener profiles
+
   private tokens = new Map<string, EDToken>();
   private openPositions = new Map<string, EDPosition>();
   private closedPositions: EDPosition[] = [];
@@ -214,18 +222,171 @@ class EarlyDiscoveryService {
   }
 
   start(): void {
-    // PumpPortal — always on (free, no key needed) — PRIMARY discovery source
+    // REST polling — ALWAYS active; guaranteed discovery even when WebSockets fail
+    this.startRestPolling();
+
+    // PumpPortal — WebSocket for real-time new launch events (free, no key needed)
     this.connectPumpPortal();
 
     // Helius — optional secondary enhancement (speeds up detection if API key set)
     if (HELIUS_API_KEY) {
       this.connectWs();
     } else {
-      logger.info("Early discovery: HELIUS_API_KEY not set — running on PumpPortal only (fully operational)");
+      logger.info("Early discovery: HELIUS_API_KEY not set — REST polling + PumpPortal WS active");
     }
 
     this.pollInterval = setInterval(() => this.pollCycle(), POLL_INTERVAL_MS);
     logger.info("Early discovery: started");
+  }
+
+  // ── REST polling fallback — discovers new pump.fun tokens via HTTP ──────────
+  // Runs every 30s regardless of WebSocket state; guarantees discovery in
+  // environments where outbound WS connections are blocked (e.g. Replit).
+  private startRestPolling(): void {
+    if (this.restPolling) return;
+    this.restPolling = true;
+    // Run immediately, then every 30s
+    void this.pollNewTokensFromRest();
+    this.restPollInterval = setInterval(() => void this.pollNewTokensFromRest(), 30_000);
+    logger.info("Early discovery: REST polling fallback started (30s interval)");
+  }
+
+  /**
+   * Two parallel REST discovery sources (both confirmed working from Replit):
+   *
+   * SOURCE 1 — Solana public RPC getSignaturesForAddress
+   *   Polls recent pump.fun program transactions, fetches new ones to extract
+   *   mints from "Instruction: Create" log lines. Cap 5 new txs per cycle to
+   *   avoid hitting RPC rate limits.
+   *
+   * SOURCE 2 — DexScreener /token-profiles/latest/v1
+   *   Returns recently-profiled tokens; filter for Solana addresses ending in
+   *   "pump" (all pump.fun mints use this vanity suffix). Catches tokens that
+   *   gained traction in the minutes after launch.
+   */
+  private async pollNewTokensFromRest(): Promise<void> {
+    await Promise.allSettled([
+      this.pollViaRpc(),
+      this.pollViaDexScreener(),
+    ]);
+  }
+
+  private async pollViaRpc(): Promise<void> {
+    const SOLANA_RPC = "https://api.mainnet-beta.solana.com";
+    try {
+      type SigResult = { signature: string; err: unknown; blockTime: number | null };
+      const params: unknown[] = [PUMPFUN_PROGRAM, { limit: 25, commitment: "confirmed" }];
+      if (this.lastRpcSignature) {
+        (params[1] as Record<string, unknown>)["until"] = this.lastRpcSignature;
+      }
+
+      const sigRes = await axios.post<{ result: SigResult[] }>(SOLANA_RPC, {
+        jsonrpc: "2.0", id: 1, method: "getSignaturesForAddress", params,
+      }, { timeout: 8_000 });
+
+      const sigs = sigRes.data?.result ?? [];
+      if (sigs.length === 0) return;
+
+      // On first poll, just seed the cursor — don't process historical txs
+      if (!this.lastRpcSignature) {
+        this.lastRpcSignature = sigs[0].signature;
+        sigs.forEach((s) => this.seenSignatures.add(s.signature));
+        logger.info({ sig: this.lastRpcSignature.slice(0, 8) }, "Early discovery: Solana RPC seeded");
+        return;
+      }
+
+      // Update cursor to newest signature
+      this.lastRpcSignature = sigs[0].signature;
+
+      // Only process successful new txs; cap at 5 to limit RPC calls
+      const toProcess = sigs
+        .filter((s) => !s.err && !this.seenSignatures.has(s.signature))
+        .slice(0, 5);
+
+      toProcess.forEach((s) => this.seenSignatures.add(s.signature));
+
+      // Keep seenSignatures bounded
+      if (this.seenSignatures.size > 5_000) {
+        const arr = [...this.seenSignatures];
+        this.seenSignatures = new Set(arr.slice(-2_000));
+      }
+
+      for (const sig of toProcess) {
+        try {
+          const txRes = await axios.post<{ result: {
+            meta?: { logMessages?: string[] };
+            transaction?: { message?: { accountKeys?: string[] } };
+          } | null }>(SOLANA_RPC, {
+            jsonrpc: "2.0", id: 1, method: "getTransaction",
+            params: [sig.signature, { commitment: "confirmed", encoding: "json", maxSupportedTransactionVersion: 0 }],
+          }, { timeout: 6_000 });
+
+          const tx = txRes.data?.result;
+          if (!tx) continue;
+
+          const logs = tx.meta?.logMessages ?? [];
+          const isCreate = logs.some((l) =>
+            l.includes("Instruction: Create") || l.includes("Program log: Instruction: Create")
+          );
+          if (!isCreate) continue;
+
+          // Strategy 1: extract mint from logs (pump.fun logs "mint: <address>")
+          let mint: string | null = null;
+          for (const log of logs) {
+            const m = /mint:\s*([1-9A-HJ-NP-Za-km-z]{32,44})/.exec(log);
+            if (m?.[1]) { mint = m[1]; break; }
+          }
+
+          // Strategy 2: scan account keys for a pump-suffix address
+          if (!mint) {
+            const keys = tx.transaction?.message?.accountKeys ?? [];
+            mint = keys.find((k) => k.endsWith("pump") && k.length >= 40) ?? null;
+          }
+
+          if (!mint || this.tokens.has(mint)) continue;
+
+          logger.info({ mint: mint.slice(0, 8), sig: sig.signature.slice(0, 8) }, "Early discovery: new launch via Solana RPC 🚀");
+          this.launchesDetected++;
+          void this.onNewLaunch(mint);
+        } catch { /* skip this tx */ }
+      }
+    } catch (err) {
+      logger.debug({ err: (err as Error).message }, "Early discovery: Solana RPC poll error");
+    }
+  }
+
+  private async pollViaDexScreener(): Promise<void> {
+    try {
+      type DexProfile = { tokenAddress: string; chainId: string; updatedAt: string };
+      const res = await axios.get<DexProfile[]>(
+        "https://api.dexscreener.com/token-profiles/latest/v1",
+        { timeout: 8_000 }
+      );
+      const profiles = res.data ?? [];
+
+      // Only Solana pump.fun tokens (addresses end in "pump" = pump.fun vanity suffix)
+      const pumpTokens = profiles.filter(
+        (p) => p.chainId === "solana" && p.tokenAddress.endsWith("pump") && !this.seenDexTokens.has(p.tokenAddress)
+      );
+
+      if (pumpTokens.length > 0) {
+        pumpTokens.forEach((p) => this.seenDexTokens.add(p.tokenAddress));
+        // Keep set bounded
+        if (this.seenDexTokens.size > 2_000) {
+          const arr = [...this.seenDexTokens];
+          this.seenDexTokens = new Set(arr.slice(-1_000));
+        }
+
+        for (const p of pumpTokens) {
+          if (this.tokens.has(p.tokenAddress)) continue;
+          logger.info({ mint: p.tokenAddress.slice(0, 8) }, "Early discovery: new launch via DexScreener profile 🚀");
+          this.launchesDetected++;
+          void this.onNewLaunch(p.tokenAddress);
+        }
+      }
+    } catch (err) {
+      logger.debug({ err: (err as Error).message }, "Early discovery: DexScreener profile poll error");
+    }
   }
 
   // ── PumpPortal WebSocket (PRIMARY — free, no API key, always works) ────────
@@ -1062,7 +1223,8 @@ class EarlyDiscoveryService {
     const realizedPnl   = this.closedPositions.reduce((sum, p) => sum + p.realizedPnlSol, 0);
     const connectionSource: EDStatus["connectionSource"] =
       this.ppConnected ? "pumpportal" :
-      this.wsConnected ? "helius" : "offline";
+      this.wsConnected ? "helius" :
+      this.restPolling  ? "polling" : "offline";
     return {
       wsConnected: this.ppConnected || this.wsConnected,
       wsReconnects: this.wsReconnects,

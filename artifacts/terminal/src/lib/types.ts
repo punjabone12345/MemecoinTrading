@@ -99,7 +99,7 @@ export interface EDStatus {
   wsReconnects: number;
   ppConnected: boolean;
   ppReconnects: number;
-  connectionSource: "pumpportal" | "helius" | "offline";
+  connectionSource: "pumpportal" | "helius" | "polling" | "offline";
   enabled: boolean;
   trackedCount: number;
   eligibleCount: number;
