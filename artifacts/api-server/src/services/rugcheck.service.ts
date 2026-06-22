@@ -185,9 +185,21 @@ export async function checkTokenSafety(
     );
   }
 
-  if (dangerRisks.length > 0) {
+  // For brand-new tokens (< 15 min old), "Single holder ownership" is EXPECTED —
+  // the deployer always holds 100% of supply at launch before anyone buys.
+  // Filter it out so it doesn't reject every fresh launch.
+  const isVeryNew = pairAgeMinutes < 15;
+  const LAUNCH_NORMAL_RISKS = new Set([
+    "Single holder ownership",
+    "Top 10 holders high ownership",
+  ]);
+  const filteredDangerRisks = isVeryNew
+    ? dangerRisks.filter((r) => !LAUNCH_NORMAL_RISKS.has(r))
+    : dangerRisks;
+
+  if (filteredDangerRisks.length > 0) {
     return fail(
-      `RugCheck: DANGER risk(s) detected — ${dangerRisks.join(", ")}`,
+      `RugCheck: DANGER risk(s) detected — ${filteredDangerRisks.join(", ")}`,
       partial,
     );
   }
@@ -203,9 +215,9 @@ export async function checkTokenSafety(
     );
   }
 
-  // Single whale holding >40% of supply (excluding known DEX addresses)
-  // Raised from 30% → 40% since early meme launches often have concentrated supply
-  if (topHolderPct > 40) {
+  // Single whale holding >40% of supply — skip for very new tokens (<15 min)
+  // since dev always holds most supply at launch before buyers arrive.
+  if (!isVeryNew && topHolderPct > 40) {
     return fail(
       `RugCheck: single holder owns ${topHolderPct.toFixed(1)}% of supply — extreme concentration risk`,
       partial,

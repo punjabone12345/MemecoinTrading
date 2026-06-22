@@ -15,3 +15,4 @@
 - [PumpSwap on-chain liquidity fix](pumpswap-liquidity-fix.md) — PumpSwap pools are keypair-based (NOT PDAs); use DexScreener pairAddress directly, not findProgramAddressSync; WSOL vault at byte offset 171
 - [Dip-retrace entry strategy](dip-retrace-strategy.md) — replaces immediate entry; quality gate passes → addToDipWatch → 30-min watch loop; entry triggers on 40–60% dump + 60% retrace
 - [Early Discovery Architecture](early-discovery-arch.md) — complete Early Demand Discovery system; critical route prefix gotcha; broadcast export pattern; scoring/TP/SL defaults
+- [ED token discovery sources](ed-discovery-sources.md) — GeckoTerminal new_pools is the working source; pumpportal WS + pump.fun APIs all blocked/dead in Replit; rugcheck single-holder must be skipped for <15min tokens

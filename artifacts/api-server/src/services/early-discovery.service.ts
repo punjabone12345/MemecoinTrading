@@ -13,23 +13,26 @@ import {
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 const PUMPFUN_PROGRAM    = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
-const PUMPFUN_API_BASE   = "https://client-api-2-74b1891ee9f9.herokuapp.com";
+const PUMPFUN_API_BASE   = "https://frontend-api-v3.pump.fun";
 const DEXSCREENER_BASE   = "https://api.dexscreener.com";
+const GECKOTERMINAL_BASE = "https://api.geckoterminal.com/api/v2";
 const HELIUS_WS_BASE     = "wss://mainnet.helius-rpc.com";
 const PUMPPORTAL_WS_URL  = "wss://pumpportal.fun/api/data";
 
-const POLL_INTERVAL_MS       = 30_000;
-const MAX_TRACK_AGE_MS       = 30 * 60 * 1000;  // 30 min for tracking/eligible tokens
-const MAX_REJECTED_AGE_MS    = 3 * 60 * 1000;   // 3 min — prune rejected tokens fast to free slots
-const MAX_EXITED_AGE_MS      = 10 * 60 * 1000;  // 10 min for exited positions
-const MAX_TRACKED_TOKENS     = 500;              // hard cap — pruning keeps actual set much smaller
-const MAX_TOKENS_UI          = 200;              // cap returned to frontend
-const ENTRY_CONFIRM_MS       = 2 * 60 * 1000;   // 2 min confirmation window
-const STARTING_BALANCE       = 1.0;             // SOL
-const KV_CONFIG_KEY          = "ed_config";
-const KV_BALANCE_KEY         = "ed_balance";
-const RECONNECT_BASE_MS      = 3_000;
-const RECONNECT_MAX_MS       = 30_000;
+const POLL_INTERVAL_MS           = 30_000;
+const HTTP_POLL_INTERVAL_MS      = 15_000;       // GeckoTerminal free tier: ~30 req/min; 15s = 4/min safely
+const MAX_TRACK_AGE_MS           = 60 * 60 * 1000; // 60 min for tracking/eligible tokens
+const MAX_REJECTED_AGE_MS        = 3 * 60 * 1000;  // 3 min — prune rejected tokens fast to free slots
+const MAX_EXITED_AGE_MS          = 10 * 60 * 1000; // 10 min for exited positions
+const MAX_TRACKED_TOKENS         = 2000;            // hard cap — pruning keeps actual set much smaller
+const MAX_TOKENS_UI              = 200;             // cap returned to frontend
+const HTTP_SEEN_CAP              = 5000;            // how many mints to remember across HTTP polls
+const ENTRY_CONFIRM_MS           = 2 * 60 * 1000;  // 2 min confirmation window
+const STARTING_BALANCE           = 1.0;            // SOL
+const KV_CONFIG_KEY              = "ed_config";
+const KV_BALANCE_KEY             = "ed_balance";
+const RECONNECT_BASE_MS          = 3_000;
+const RECONNECT_MAX_MS           = 30_000;
 
 const HELIUS_API_KEY = process.env["HELIUS_API_KEY"] ?? "";
 
@@ -124,7 +127,7 @@ export interface EDStatus {
   wsReconnects: number;
   ppConnected: boolean;
   ppReconnects: number;
-  connectionSource: "pumpportal" | "helius" | "offline";
+  connectionSource: "pumpportal" | "helius" | "http-poll" | "offline";
   enabled: boolean;
   trackedCount: number;
   eligibleCount: number;
@@ -164,7 +167,14 @@ function uid(): string {
 
 // ── Service ───────────────────────────────────────────────────────────────────
 class EarlyDiscoveryService {
-  // PumpPortal WebSocket (primary — free, no API key required)
+  // HTTP poll (primary — GeckoTerminal new pools, 15s interval)
+  private httpPollConnected = false;
+  private httpPollTimer: ReturnType<typeof setInterval> | null = null;
+  private httpRateLimitUntil = 0;          // timestamp ms — pause polling until this time
+  private seenByHttpPoll = new Set<string>();
+  private totalHttpDiscovered = 0;
+
+  // PumpPortal WebSocket (bonus — free, fires in real-time when reachable)
   private ppWs: WebSocket | null = null;
   private ppConnected = false;
   private ppReconnects = 0;
@@ -194,18 +204,101 @@ class EarlyDiscoveryService {
   }
 
   start(): void {
-    // PumpPortal — always on (free, no key needed) — PRIMARY discovery source
+    // HTTP poll — PRIMARY, always works (regular HTTPS, no blocked ports)
+    this.startHttpPoller();
+
+    // PumpPortal WS — bonus real-time feed (blocked in some environments but harmless to try)
     this.connectPumpPortal();
 
     // Helius — optional secondary enhancement (speeds up detection if API key set)
     if (HELIUS_API_KEY) {
       this.connectWs();
     } else {
-      logger.info("Early discovery: HELIUS_API_KEY not set — running on PumpPortal only (fully operational)");
+      logger.info("Early discovery: HELIUS_API_KEY not set — HTTP poll + PumpPortal active");
     }
 
     this.pollInterval = setInterval(() => this.pollCycle(), POLL_INTERVAL_MS);
     logger.info("Early discovery: started");
+  }
+
+  // ── HTTP Poller (PRIMARY — GeckoTerminal new pools API, works in all environments) ──
+  private startHttpPoller(): void {
+    type GTPool = {
+      attributes?: { name?: string; pool_created_at?: string };
+      relationships?: {
+        base_token?: { data?: { id?: string } };
+        dex?: { data?: { id?: string } };
+      };
+    };
+    type GTResponse = { data?: GTPool[] };
+
+    const PUMP_DEXES = new Set(["pump-fun", "pumpswap", "pump_amm", "pump-amm"]);
+
+    const poll = async (): Promise<void> => {
+      try {
+        const res = await axios.get<GTResponse>(
+          `${GECKOTERMINAL_BASE}/networks/solana/new_pools?page=1`,
+          { timeout: 8_000, headers: { Accept: "application/json;version=20230302" } },
+        );
+        const pools = res.data?.data ?? [];
+        this.httpPollConnected = true;
+
+        let newThisCycle = 0;
+        for (const pool of pools) {
+          const dexId = pool.relationships?.dex?.data?.id ?? "";
+          if (!PUMP_DEXES.has(dexId)) continue;
+
+          const baseTokenId = pool.relationships?.base_token?.data?.id ?? "";
+          if (!baseTokenId.startsWith("solana_")) continue;
+          const mint = baseTokenId.slice("solana_".length);
+          if (!mint || mint.length < 32) continue;
+
+          if (this.seenByHttpPoll.has(mint)) continue;
+          this.seenByHttpPoll.add(mint);
+
+          if (!this.tokens.has(mint)) {
+            // Extract symbol from "SYMBOL / SOL" pool name format
+            const rawName  = pool.attributes?.name ?? "";
+            const symbol   = rawName.includes(" / ") ? rawName.split(" / ")[0]!.trim() : mint.slice(0, 6).toUpperCase();
+
+            logger.info({ mint: mint.slice(0, 8), symbol, dex: dexId }, "Early discovery: new launch via GeckoTerminal 🚀");
+            this.launchesDetected++;
+            this.totalHttpDiscovered++;
+            newThisCycle++;
+            void this.onNewLaunchWithMeta(mint, { symbol, name: symbol, creator: "" });
+          }
+        }
+        if (newThisCycle > 0) {
+          logger.info({ newThisCycle, totalDiscovered: this.totalHttpDiscovered, tracked: this.tokens.size }, "Early discovery: HTTP poll cycle complete");
+        }
+
+        // Cap seen set so it doesn't grow forever
+        if (this.seenByHttpPoll.size > HTTP_SEEN_CAP) {
+          const arr = [...this.seenByHttpPoll];
+          this.seenByHttpPoll = new Set(arr.slice(arr.length - Math.floor(HTTP_SEEN_CAP / 2)));
+        }
+      } catch (err) {
+        this.httpPollConnected = false;
+        const status = (err as { response?: { status?: number } }).response?.status;
+        if (status === 429) {
+          // Rate-limited — pause for 60s before retrying
+          this.httpRateLimitUntil = Date.now() + 60_000;
+          logger.warn("Early discovery: GeckoTerminal rate-limited (429) — pausing 60s");
+        } else {
+          logger.debug({ err: (err as Error).message }, "Early discovery: GeckoTerminal poll error — retrying");
+        }
+      }
+    };
+
+    const guardedPoll = (): void => {
+      if (Date.now() < this.httpRateLimitUntil) return; // still in backoff
+      void poll();
+    };
+
+    // Delay first call by 3s so server fully starts before hammering GeckoTerminal
+    setTimeout(() => { void poll(); }, 3_000);
+    this.httpPollTimer = setInterval(guardedPoll, HTTP_POLL_INTERVAL_MS);
+    logger.info({ intervalMs: HTTP_POLL_INTERVAL_MS }, "Early discovery: GeckoTerminal poll started (primary token discovery)");
   }
 
   // ── PumpPortal WebSocket (PRIMARY — free, no API key, always works) ────────
@@ -974,10 +1067,11 @@ class EarlyDiscoveryService {
     const unrealizedPnl = openPosArr.reduce((sum, p) => sum + p.unrealizedPnlSol, 0);
     const realizedPnl   = this.closedPositions.reduce((sum, p) => sum + p.realizedPnlSol, 0);
     const connectionSource: EDStatus["connectionSource"] =
-      this.ppConnected ? "pumpportal" :
-      this.wsConnected ? "helius" : "offline";
+      this.ppConnected       ? "pumpportal" :
+      this.wsConnected       ? "helius" :
+      this.httpPollConnected ? "http-poll" : "offline";
     return {
-      wsConnected: this.ppConnected || this.wsConnected,
+      wsConnected: this.ppConnected || this.wsConnected || this.httpPollConnected,
       wsReconnects: this.wsReconnects,
       ppConnected: this.ppConnected,
       ppReconnects: this.ppReconnects,

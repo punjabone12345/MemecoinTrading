@@ -330,7 +330,10 @@ export default function FeedPage() {
 
   const connSrc = status?.connectionSource ?? "offline";
   const wsOk = connSrc !== "offline";
-  const connLabel = connSrc === "pumpportal" ? "PUMPPORTAL" : connSrc === "helius" ? "HELIUS" : "OFFLINE";
+  const connLabel =
+    connSrc === "pumpportal" ? "PUMPPORTAL" :
+    connSrc === "helius"     ? "HELIUS" :
+    connSrc === "http-poll"  ? "SCANNING" : "OFFLINE";
 
   return (
     <div className="min-h-screen">
