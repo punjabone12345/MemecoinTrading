@@ -2,10 +2,76 @@ import { useState, useEffect } from "react";
 import {
   Wifi, WifiOff, TrendingUp, Users, Activity, Zap,
   Shield, ShieldOff, Clock, DollarSign, Target, BarChart2,
-  ChevronRight, Search,
+  ChevronRight, Search, Download,
 } from "lucide-react";
 import { useEDStatus, useEDTokens, useEDPositions, useWebSocket } from "@/lib/api";
 import type { EDToken, EDPosition } from "@/lib/types";
+
+// ── CSV export ────────────────────────────────────────────────────────────────
+function escCsv(v: string | number | boolean | null | undefined): string {
+  return `"${String(v ?? "").replace(/"/g, '""')}"`;
+}
+
+function toISTed(ts: number): string {
+  return new Date(ts).toLocaleString("en-IN", { timeZone: "Asia/Kolkata", hour12: false });
+}
+
+function downloadEDCsv(closed: EDPosition[]) {
+  const headers = [
+    "ID", "Symbol", "Name", "Mint",
+    "Entry At (IST)", "Closed At (IST)", "Hold Time (min)",
+    "Entry Price ($)", "Exit Price ($)", "Current Price ($)",
+    "Entry Score", "Entry Mcap ($)", "Current Mcap ($)",
+    "Size (SOL)", "Position Multiplier", "Remaining Fraction",
+    "Realized PNL (SOL)", "Unrealized PNL (SOL)", "Total PNL (SOL)", "PNL %",
+    "TP1 Realized (SOL)", "TP2 Realized (SOL)", "Runner Realized (SOL)",
+    "TP1 Hit", "TP2 Hit",
+    "Effective SL Price ($)", "Trailing High ($)",
+    "Close Reason", "Closing Score",
+  ];
+
+  const rows = closed.map((p) => {
+    const holdMin = p.closedAt && p.entryAt
+      ? ((p.closedAt - p.entryAt) / 60_000).toFixed(1) : "";
+    return [
+      p.id, p.symbol, p.name, p.mint,
+      p.entryAt  ? toISTed(p.entryAt)  : "",
+      p.closedAt ? toISTed(p.closedAt) : "",
+      holdMin,
+      p.entryPrice,
+      p.exitPrice   ?? "",
+      p.currentPrice,
+      p.entryScore,
+      p.entryMcap,
+      p.currentMcap,
+      p.sizeSol,
+      p.positionMultiplier,
+      p.remainingFraction,
+      p.realizedPnlSol.toFixed(6),
+      p.unrealizedPnlSol.toFixed(6),
+      p.totalPnlSol.toFixed(6),
+      p.pnlPct.toFixed(2),
+      p.tp1RealizedSol.toFixed(6),
+      p.tp2RealizedSol.toFixed(6),
+      p.runnerRealizedSol.toFixed(6),
+      p.tp1Hit ? "Yes" : "No",
+      p.tp2Hit ? "Yes" : "No",
+      p.effectiveSlPrice,
+      p.trailingHigh,
+      p.closeReason ?? "",
+      p.closingScore ?? "",
+    ].map(escCsv).join(",");
+  });
+
+  const csv  = [headers.map(escCsv).join(","), ...rows].join("\n");
+  const blob = new Blob([csv], { type: "text/csv" });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement("a");
+  a.href     = url;
+  a.download = `ed-trades-${new Date().toISOString().slice(0, 10)}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 function fmtAge(ts: number): string {
@@ -382,12 +448,20 @@ export default function Dashboard() {
 
           {closed.length > 0 && (
             <div className="px-3 pb-3 border-t border-white/5 pt-3">
-              <button
-                onClick={() => setShowClosed(!showClosed)}
-                className="text-[10px] font-bold text-white/40 uppercase tracking-widest hover:text-white/60 flex items-center gap-1"
-              >
-                History ({closed.length}) {showClosed ? "▲" : "▼"}
-              </button>
+              <div className="flex items-center justify-between mb-1">
+                <button
+                  onClick={() => setShowClosed(!showClosed)}
+                  className="text-[10px] font-bold text-white/40 uppercase tracking-widest hover:text-white/60 flex items-center gap-1"
+                >
+                  History ({closed.length}) {showClosed ? "▲" : "▼"}
+                </button>
+                <button
+                  onClick={() => downloadEDCsv(closed)}
+                  className="flex items-center gap-1 text-[10px] text-white/40 hover:text-emerald-400 px-2 py-1 rounded bg-white/5 hover:bg-emerald-500/10 transition-colors"
+                >
+                  <Download className="w-3 h-3" /> Export CSV
+                </button>
+              </div>
               {showClosed && (
                 <div className="mt-2 space-y-2">
                   {closed.slice(0, 20).map((pos) => <PositionCard key={pos.id} pos={pos} />)}

@@ -56,37 +56,85 @@ function toIST(ts: number): string {
 
 // ── CSV export ────────────────────────────────────────────────────────────────
 
+function escCsv(v: string | number | boolean | null | undefined): string {
+  return `"${String(v ?? "").replace(/"/g, '""')}"`;
+}
+
 function downloadSniperCsv(history: SniperPosition[]) {
   const headers = [
-    "Symbol", "Mint", "Entry Time (IST)", "Close Time (IST)", "Hold Time",
-    "Detection Price ($)", "Fill Price ($)", "Entry Drift %", "Detection→Fill (s)",
-    "Exit Price ($)", "Size (SOL)", "Realized PNL (SOL)",
-    "PNL %", "TP1 Hit", "TP2 Hit", "Close Reason", "TX Signature",
+    // Identity
+    "ID", "Symbol", "Name", "Mint",
+    // Timing
+    "Detected At (IST)", "Entry At (IST)", "Closed At (IST)", "Hold Time",
+    // Prices
+    "Detection Price ($)", "Entry (Fill) Price ($)", "Current Price ($)", "Exit Price ($)",
+    // Entry quality
+    "Entry Drift %", "Detection→Fill (s)",
+    // Size & token
+    "Size (SOL)", "Token Amount", "Position Multiplier",
+    // P&L breakdown
+    "Realized PNL (SOL)", "Unrealized PNL (SOL)", "Total PNL (SOL)", "PNL %",
+    "TP1 Realized (SOL)", "TP2 Realized (SOL)", "TP3 Realized (SOL)", "Runner Realized (SOL)",
+    // TP / SL state
+    "TP1 Hit", "TP2 Hit", "TP3 Hit",
+    "Effective SL Price ($)", "Trailing High ($)", "Remaining Fraction",
+    // Quality metrics
+    "Quality Score", "Liquidity (SOL)", "Buy Pressure Ratio", "Unique Buyers",
+    "Top Holder %", "Whale Detected",
+    // Close
+    "Close Reason",
+    // Signatures
+    "Entry TX", "Exit TX",
   ];
+
   const rows = history.map((p) => {
-    const holdMs = p.closedAt && p.entryAt ? p.closedAt - p.entryAt : 0;
-    const pnlPct = p.sizeSol > 0 ? (p.realizedPnlSol / p.sizeSol * 100).toFixed(2) : "";
+    const holdMs  = p.closedAt && p.entryAt ? p.closedAt - p.entryAt : 0;
+    const pnlPct  = p.sizeSol > 0 ? (p.realizedPnlSol / p.sizeSol * 100).toFixed(2) : "";
     return [
+      p.id,
       p.symbol,
+      p.name,
       p.mint,
-      (p.detectedAt ?? p.entryAt) ? toIST(p.detectedAt ?? p.entryAt) : "",
-      p.closedAt  ? toIST(p.closedAt)  : "",
-      holdMs ? holdTime(holdMs) : "",
-      p.detectionPrice != null ? p.detectionPrice.toString() : "",
-      p.entryPrice.toString(),
-      p.entryDriftPct != null ? p.entryDriftPct.toFixed(2) : "",
-      p.msDetectionToFill != null ? (p.msDetectionToFill / 1000).toFixed(1) : "",
-      p.exitPrice  ? p.exitPrice.toString() : "",
-      p.sizeSol.toString(),
+      p.detectedAt ? toIST(p.detectedAt) : "",
+      p.entryAt    ? toIST(p.entryAt)    : "",
+      p.closedAt   ? toIST(p.closedAt)   : "",
+      holdMs       ? holdTime(holdMs)     : "",
+      p.detectionPrice       ?? "",
+      p.entryPrice,
+      p.currentPrice,
+      p.exitPrice            ?? "",
+      p.entryDriftPct        != null ? p.entryDriftPct.toFixed(2)            : "",
+      p.msDetectionToFill    != null ? (p.msDetectionToFill / 1000).toFixed(1) : "",
+      p.sizeSol,
+      p.tokenAmount,
+      p.positionMultiplier,
       p.realizedPnlSol.toFixed(6),
+      p.unrealizedPnlSol.toFixed(6),
+      p.totalPnlSol.toFixed(6),
       pnlPct,
+      p.tp1RealizedSol.toFixed(6),
+      p.tp2RealizedSol.toFixed(6),
+      p.tp3RealizedSol.toFixed(6),
+      p.runnerRealizedSol.toFixed(6),
       p.tp1Hit ? "Yes" : "No",
       p.tp2Hit ? "Yes" : "No",
-      p.closeReason ?? "",
-      p.txSignature ?? "",
-    ].map((v) => `"${String(v).replace(/"/g, '""')}"`).join(",");
+      p.tp3Hit ? "Yes" : "No",
+      p.effectiveSlPrice,
+      p.trailingHigh,
+      p.remainingFraction,
+      p.qualityScore,
+      p.liquiditySol,
+      p.buyPressureRatio,
+      p.uniqueBuyers,
+      p.topHolderPct,
+      p.whaleDetected ? "Yes" : "No",
+      p.closeReason  ?? "",
+      p.entrySig     ?? p.txSignature ?? "",
+      p.exitSig      ?? "",
+    ].map(escCsv).join(",");
   });
-  const csv = [headers.join(","), ...rows].join("\n");
+
+  const csv  = [headers.map(escCsv).join(","), ...rows].join("\n");
   const blob = new Blob([csv], { type: "text/csv" });
   const url  = URL.createObjectURL(blob);
   const a    = document.createElement("a");
