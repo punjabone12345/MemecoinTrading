@@ -1,7 +1,8 @@
 /**
  * demand-scorer.ts
  * Pure scoring engine for Early Demand Discovery — no external calls.
- * Max score = 120 (Buyer Growth 25 + Volume 25 + Buy Pressure 25 + Wallet Quality 25 + Bonding Curve 20)
+ * Max score = 100 (Buyer Growth 25 + Volume 25 + Buy Pressure 25 + Wallet Quality 25)
+ * Bonding curve progress is intentionally excluded from scoring.
  */
 
 export interface DemandMetrics {
@@ -11,7 +12,6 @@ export interface DemandMetrics {
   buyersPerMinute: number;
   buyVolumeSol: number;
   sellVolumeSol: number;
-  bondingCurvePct: number;
   topHolderPct: number;
   creatorHoldingsPct: number;
   whaleParticipation: boolean;
@@ -22,7 +22,7 @@ export interface DemandScores {
   volumeScore: number;
   buyPressureScore: number;
   walletQualityScore: number;
-  bondingCurveScore: number;
+  bondingCurveScore: number; // always 0 — kept for DB compat, do not use
   finalScore: number;
   buyPressureRatio: number;
 }
@@ -88,7 +88,7 @@ function scoreWalletQuality(topHolderPct: number, whaleParticipation: boolean, c
     // and typically holds 50-100% of supply. This is normal and should NOT be penalised.
     let base: number;
     if (topHolderPct <= 0) {
-      base = 15; // No data — neutral
+      base = 15;
     } else if (topHolderPct >= 50) {
       base = 15; // Almost certainly the bonding curve contract — neutral
     } else if (topHolderPct < 5)  { base = 25; }
@@ -106,32 +106,17 @@ function scoreWalletQuality(topHolderPct: number, whaleParticipation: boolean, c
   } catch { return 0; }
 }
 
-function scoreBondingCurve(pct: number): number {
-  try {
-    if (pct >= 80) return 20;
-    if (pct >= 70) return 17;
-    if (pct >= 60) return 14;
-    if (pct >= 50) return 11;
-    if (pct >= 40) return 8;
-    if (pct >= 30) return 5;
-    if (pct >= 20) return 3;
-    if (pct >= 10) return 1;
-    return 0;
-  } catch { return 0; }
-}
-
 export function calculateDemandScore(metrics: DemandMetrics): DemandScores {
   const buyPressureRatio = metrics.sellVolumeSol > 0
     ? metrics.buyVolumeSol / metrics.sellVolumeSol
     : (metrics.buyVolumeSol > 0 ? 5.0 : 0);
 
-  // Each component is independently try-catch'd so one failure doesn't zero the whole score
   const buyerGrowthScore   = scoreBuyerGrowth(metrics.uniqueBuyers, metrics.buyersPerMinute);
   const volumeScore        = scoreVolume(metrics.buyVolumeSol);
   const buyPressureScore   = scoreBuyPressure(buyPressureRatio);
   const walletQualityScore = scoreWalletQuality(metrics.topHolderPct, metrics.whaleParticipation, metrics.creatorHoldingsPct);
-  const bondingCurveScore  = scoreBondingCurve(metrics.bondingCurvePct);
-  const finalScore         = buyerGrowthScore + volumeScore + buyPressureScore + walletQualityScore + bondingCurveScore;
+  const bondingCurveScore  = 0; // removed from scoring
+  const finalScore         = buyerGrowthScore + volumeScore + buyPressureScore + walletQualityScore;
 
   return { buyerGrowthScore, volumeScore, buyPressureScore, walletQualityScore, bondingCurveScore, finalScore, buyPressureRatio };
 }
@@ -149,14 +134,13 @@ export function checkEntryConditions(
   discoveryPrice: number,
   currentPrice: number,
   minScore: number,
-  config?: { minUniqueBuyers?: number; minBuyPressureRatio?: number; minBondingCurvePct?: number },
+  config?: { minUniqueBuyers?: number; minBuyPressureRatio?: number },
 ): EntryCheckResult {
   const blockers: string[] = [];
   const checklist: EntryChecklistItem[] = [];
 
-  const minBuyers = config?.minUniqueBuyers ?? 10;
+  const minBuyers  = config?.minUniqueBuyers    ?? 10;
   const minBpRatio = config?.minBuyPressureRatio ?? 1.5;
-  const minBcPct = config?.minBondingCurvePct ?? 60;
 
   // 1. Score
   const scorePass = scores.finalScore >= minScore;
@@ -165,7 +149,7 @@ export function checkEntryConditions(
   checklist.push({
     label: `Score ≥${minScore}`,
     pass: scorePass,
-    current: `${scores.finalScore}/120`,
+    current: `${scores.finalScore}/100`,
     threshold: `${minScore}`,
     borderline: scoreBorderline,
   });
@@ -195,19 +179,7 @@ export function checkEntryConditions(
     borderline: bpBorderline,
   });
 
-  // 4. Bonding curve
-  const bcPass = metrics.bondingCurvePct >= minBcPct;
-  const bcBorderline = !bcPass && metrics.bondingCurvePct >= minBcPct - 10;
-  if (!bcPass) blockers.push(`Bonding curve ${metrics.bondingCurvePct.toFixed(0)}% < ${minBcPct}%`);
-  checklist.push({
-    label: `Bonding curve ≥${minBcPct}%`,
-    pass: bcPass,
-    current: `${metrics.bondingCurvePct.toFixed(1)}%`,
-    threshold: `${minBcPct}%`,
-    borderline: bcBorderline,
-  });
-
-  // 5. Rugcheck
+  // 4. Rugcheck
   const rugPass = rugcheckStatus !== "failed";
   if (!rugPass) blockers.push("Rugcheck failed");
   checklist.push({
@@ -218,7 +190,7 @@ export function checkEntryConditions(
     borderline: rugcheckStatus === "pending",
   });
 
-  // 6. Creator holdings
+  // 5. Creator holdings
   const creatorPass = metrics.creatorHoldingsPct <= 10;
   const creatorBorderline = !creatorPass && metrics.creatorHoldingsPct <= 12;
   if (!creatorPass) blockers.push(`Creator holds ${metrics.creatorHoldingsPct.toFixed(1)}% > 10%`);
@@ -230,7 +202,7 @@ export function checkEntryConditions(
     borderline: creatorBorderline,
   });
 
-  // 7. Top holder (only block on real wallet concentration, not bonding curve contract)
+  // 6. Top holder (only block on real wallet concentration, not bonding curve contract)
   const topHolderIsRealWallet = metrics.topHolderPct > 25 && metrics.topHolderPct < 50;
   const topHolderPass = !topHolderIsRealWallet;
   const topHolderBorderline = !topHolderPass && metrics.topHolderPct < 30;
@@ -243,7 +215,7 @@ export function checkEntryConditions(
     borderline: topHolderBorderline,
   });
 
-  // 8. Anti-FOMO: not already pumped >200%
+  // 7. Anti-FOMO: not already pumped >200%
   let fomoPass = true;
   let fomoNote = "N/A";
   if (discoveryPrice > 0 && currentPrice > 0) {
@@ -264,15 +236,15 @@ export function checkEntryConditions(
 }
 
 export function getPositionSizeMultiplier(score: number): number {
-  if (score >= 100) return 1.00;
-  if (score >= 80)  return 0.75;
-  if (score >= 60)  return 0.50;
-  if (score >= 40)  return 0.35;
+  if (score >= 80)  return 1.00;
+  if (score >= 60)  return 0.75;
+  if (score >= 40)  return 0.50;
+  if (score >= 20)  return 0.35;
   return 0;
 }
 
 export function checkQualityExit(scores: DemandScores, metrics: DemandMetrics): string | null {
-  if (scores.finalScore < 60)      return `Score collapsed to ${scores.finalScore}`;
+  if (scores.finalScore < 40)      return `Score collapsed to ${scores.finalScore}`;
   if (scores.buyPressureRatio < 1) return `Buy pressure collapsed to ${scores.buyPressureRatio.toFixed(2)}x`;
   if (metrics.topHolderPct > 25 && metrics.topHolderPct < 50)
     return `Top holder concentration ${metrics.topHolderPct.toFixed(1)}% > 25%`;

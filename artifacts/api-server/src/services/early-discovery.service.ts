@@ -1,6 +1,5 @@
 import WebSocket from "ws";
 import axios from "axios";
-import { createHash } from "node:crypto";
 import { logger } from "../lib/logger.js";
 import { query, execute } from "../lib/db.js";
 import { broadcast } from "../websocket/server.js";
@@ -19,26 +18,22 @@ const GECKOTERMINAL_BASE = "https://api.geckoterminal.com/api/v2";
 const HELIUS_WS_BASE     = "wss://mainnet.helius-rpc.com";
 const PUMPPORTAL_WS_URL  = "wss://pumpportal.fun/api/data";
 
-const POLL_INTERVAL_MS           = 30_000;
-const HTTP_POLL_INTERVAL_MS      = 15_000;
-const MAX_TRACK_AGE_MS           = 60 * 60 * 1000;
-const MAX_REJECTED_AGE_MS        = 3 * 60 * 1000;
-const MAX_EXITED_AGE_MS          = 10 * 60 * 1000;
-const MAX_TRACKED_TOKENS         = 2000;
-const MAX_TOKENS_UI              = 200;
-const HTTP_SEEN_CAP              = 5000;
-const ENTRY_CONFIRM_MS           = 2 * 60 * 1000;
-const STARTING_BALANCE           = 1.0;
-const KV_CONFIG_KEY              = "ed_config";
-const KV_BALANCE_KEY             = "ed_balance";
-const RECONNECT_BASE_MS          = 3_000;
-const RECONNECT_MAX_MS           = 30_000;
+const POLL_INTERVAL_MS      = 30_000;
+const HTTP_POLL_INTERVAL_MS = 15_000;
+const MAX_TRACK_AGE_MS      = 60 * 60 * 1000;
+const MAX_REJECTED_AGE_MS   = 3 * 60 * 1000;
+const MAX_EXITED_AGE_MS     = 10 * 60 * 1000;
+const MAX_TRACKED_TOKENS    = 2000;
+const MAX_TOKENS_UI         = 200;
+const HTTP_SEEN_CAP         = 5000;
+const ENTRY_CONFIRM_MS      = 2 * 60 * 1000;
+const STARTING_BALANCE      = 1.0;
+const KV_CONFIG_KEY         = "ed_config";
+const KV_BALANCE_KEY        = "ed_balance";
+const RECONNECT_BASE_MS     = 3_000;
+const RECONNECT_MAX_MS      = 30_000;
 
-const HELIUS_API_KEY        = process.env["HELIUS_API_KEY"] ?? "";
-const SOLANA_PUBLIC_RPC     = "https://api.mainnet-beta.solana.com";
-// pump.fun graduation target = 85 SOL in lamports
-const GRADUATION_TARGET_LAMPORTS = 85_000_000_000n;
-const ON_CHAIN_INTERVAL_MS  = 20_000;
+const HELIUS_API_KEY = process.env["HELIUS_API_KEY"] ?? "";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 export type EDTokenStatus = "tracking" | "rejected" | "eligible" | "entered" | "exited";
@@ -53,9 +48,6 @@ export interface EDToken {
   lastUpdatedAt: number;
   priceUsd: number;
   marketCapUsd: number;
-  bondingCurvePct: number;
-  virtualSolReserves: number;   // raw lamports → shown as SOL for verification
-  targetSolReserves: number;    // always 85 SOL graduation target
   buyVolumeSol: number;
   sellVolumeSol: number;
   uniqueBuyers: number;
@@ -79,7 +71,6 @@ export interface EDToken {
   pollCount: number;
   creatorSold: boolean;
   entryChecklist: EntryChecklistItem[];
-  bcUpdatedAt: number;          // timestamp of last bonding curve update (ms)
 }
 
 export interface EDPosition {
@@ -136,7 +127,6 @@ export interface EDConfig {
   positionSizeSol: number;
   maxOpenPositions: number;
   minScore: number;
-  minBondingCurvePct: number;
   minUniqueBuyers: number;
   minBuyPressureRatio: number;
   slPct: number;
@@ -174,8 +164,7 @@ const DEFAULT_CONFIG: EDConfig = {
   enabled: true,
   positionSizeSol: 0.1,
   maxOpenPositions: 5,
-  minScore: 95,
-  minBondingCurvePct: 70,
+  minScore: 60,
   minUniqueBuyers: 25,
   minBuyPressureRatio: 3,
   slPct: 20,
@@ -192,7 +181,7 @@ function uid(): string {
 
 // ── Service ───────────────────────────────────────────────────────────────────
 class EarlyDiscoveryService {
-  // HTTP poll (primary — GeckoTerminal new pools, 15s interval)
+  // HTTP poll (primary — GeckoTerminal new pools)
   private httpPollConnected = false;
   private httpPollTimer: ReturnType<typeof setInterval> | null = null;
   private httpRateLimitUntil = 0;
@@ -204,21 +193,13 @@ class EarlyDiscoveryService {
   private ppConnected = false;
   private ppReconnects = 0;
 
-  // Helius WebSocket (secondary)
+  // Helius WebSocket (logs only — for new token detection)
   private ws: WebSocket | null = null;
   private wsConnected = false;
   private wsReconnects = 0;
   private pingInterval: ReturnType<typeof setInterval> | null = null;
   private pollInterval: ReturnType<typeof setInterval> | null = null;
 
-  // Helius accountSubscribe tracking: subscriptionId → mint
-  private bcSubIdToMint = new Map<number, string>();
-  // mint → subscriptionId (to avoid duplicate subscriptions)
-  private bcMintToSubId = new Map<string, number>();
-  // next request ID counter
-  private wsReqId = 10;
-
-  private pdaCache = new Map<string, string>();
   private tokens = new Map<string, EDToken>();
   private openPositions = new Map<string, EDPosition>();
   private closedPositions: EDPosition[] = [];
@@ -233,7 +214,10 @@ class EarlyDiscoveryService {
     await this.loadConfig();
     await this.loadBalance();
     await this.loadPositions();
-    logger.info({ trackedTokens: this.tokens.size, openPositions: this.openPositions.size, virtualBalance: this.virtualBalance }, "Early discovery: initialised");
+    logger.info(
+      { trackedTokens: this.tokens.size, openPositions: this.openPositions.size, virtualBalance: this.virtualBalance },
+      "Early discovery: initialised",
+    );
   }
 
   start(): void {
@@ -247,26 +231,20 @@ class EarlyDiscoveryService {
     }
 
     this.pollInterval = setInterval(() => this.pollCycle(), POLL_INTERVAL_MS);
-
-    // On-chain bonding curve batch refresh (fallback when no Helius WS)
-    setTimeout(() => void this.refreshOnChainBondingCurves(), 5_000);
-    setInterval(() => void this.refreshOnChainBondingCurves(), ON_CHAIN_INTERVAL_MS);
-
     logger.info("Early discovery: started");
   }
 
-  // ── HTTP Poller (PRIMARY) ──────────────────────────────────────────────────
+  // ── HTTP Poller (PRIMARY discovery) ───────────────────────────────────────
   private startHttpPoller(): void {
     type GTTxns = { buys?: number; sells?: number; buyers?: number; sellers?: number };
     type GTPool = {
       attributes?: {
         name?: string;
-        pool_created_at?: string;
         base_token_price_usd?: string;
         fdv_usd?: string;
         market_cap_usd?: string | null;
-        volume_usd?: { m5?: number; h1?: number; h24?: number };
-        transactions?: { m5?: GTTxns; h1?: GTTxns; h6?: GTTxns; h24?: GTTxns };
+        volume_usd?: { m5?: number; h1?: number };
+        transactions?: { m5?: GTTxns; h1?: GTTxns };
       };
       relationships?: {
         base_token?: { data?: { id?: string } };
@@ -300,8 +278,8 @@ class EarlyDiscoveryService {
           this.seenByHttpPoll.add(mint);
 
           if (!this.tokens.has(mint)) {
-            const rawName  = pool.attributes?.name ?? "";
-            const symbol   = rawName.includes(" / ") ? rawName.split(" / ")[0]!.trim() : mint.slice(0, 6).toUpperCase();
+            const rawName      = pool.attributes?.name ?? "";
+            const symbol       = rawName.includes(" / ") ? rawName.split(" / ")[0]!.trim() : mint.slice(0, 6).toUpperCase();
             const priceUsd     = parseFloat(pool.attributes?.base_token_price_usd ?? "0") || 0;
             const fdv          = parseFloat(pool.attributes?.fdv_usd ?? "0") || 0;
             const mcap         = parseFloat(pool.attributes?.market_cap_usd ?? "0") || 0;
@@ -313,7 +291,10 @@ class EarlyDiscoveryService {
             const volH1        = pool.attributes?.volume_usd?.h1 ?? 0;
             const buyVolumeSol = (volM5 + volH1) / 150;
 
-            logger.info({ mint: mint.slice(0, 8), symbol, dex: dexId, priceUsd: priceUsd.toFixed(8), marketCapUsd: marketCapUsd.toFixed(0), uniqueBuyers }, "Early discovery: new launch via GeckoTerminal 🚀");
+            logger.info(
+              { mint: mint.slice(0, 8), symbol, dex: dexId, priceUsd: priceUsd.toFixed(8), marketCapUsd: marketCapUsd.toFixed(0), uniqueBuyers },
+              "Early discovery: new launch via GeckoTerminal 🚀",
+            );
             this.launchesDetected++;
             this.totalHttpDiscovered++;
             newThisCycle++;
@@ -321,7 +302,10 @@ class EarlyDiscoveryService {
           }
         }
         if (newThisCycle > 0) {
-          logger.info({ newThisCycle, totalDiscovered: this.totalHttpDiscovered, tracked: this.tokens.size }, "Early discovery: HTTP poll cycle complete");
+          logger.info(
+            { newThisCycle, totalDiscovered: this.totalHttpDiscovered, tracked: this.tokens.size },
+            "Early discovery: HTTP poll cycle complete",
+          );
         }
 
         if (this.seenByHttpPoll.size > HTTP_SEEN_CAP) {
@@ -347,7 +331,7 @@ class EarlyDiscoveryService {
 
     setTimeout(() => { void poll(); }, 3_000);
     this.httpPollTimer = setInterval(guardedPoll, HTTP_POLL_INTERVAL_MS);
-    logger.info({ intervalMs: HTTP_POLL_INTERVAL_MS }, "Early discovery: GeckoTerminal poll started (primary token discovery)");
+    logger.info({ intervalMs: HTTP_POLL_INTERVAL_MS }, "Early discovery: GeckoTerminal poll started");
   }
 
   // ── PumpPortal WebSocket ───────────────────────────────────────────────────
@@ -357,20 +341,13 @@ class EarlyDiscoveryService {
 
       ws.on("open", () => {
         this.ppConnected = true;
-        logger.info("Early discovery: PumpPortal WebSocket connected — subscribing to new token launches");
+        logger.info("Early discovery: PumpPortal WebSocket connected");
         ws.send(JSON.stringify({ method: "subscribeNewToken" }));
       });
 
       ws.on("message", (raw) => {
         try {
-          type PPEvent = {
-            txType?: string;
-            mint?: string;
-            traderPublicKey?: string;
-            name?: string;
-            symbol?: string;
-            marketCapSol?: number;
-          };
+          type PPEvent = { txType?: string; mint?: string; traderPublicKey?: string; name?: string; symbol?: string };
           const msg = JSON.parse(raw.toString()) as PPEvent;
           if (!msg.mint || msg.txType !== "create") return;
 
@@ -384,7 +361,7 @@ class EarlyDiscoveryService {
             name:   msg.name   ?? mint.slice(0, 8),
             creator: msg.traderPublicKey ?? "",
           });
-        } catch { /* ignore parse errors */ }
+        } catch { /* ignore */ }
       });
 
       ws.on("close", () => {
@@ -406,7 +383,7 @@ class EarlyDiscoveryService {
     }
   }
 
-  // ── Helius WebSocket ───────────────────────────────────────────────────────
+  // ── Helius WebSocket (logs only) ───────────────────────────────────────────
   private connectWs(): void {
     if (!HELIUS_API_KEY) return;
     try {
@@ -415,10 +392,11 @@ class EarlyDiscoveryService {
 
       this.ws.on("open", () => {
         this.wsConnected = true;
-        this.bcSubIdToMint.clear();
-        this.bcMintToSubId.clear();
-        logger.info("Early discovery: Helius WS connected");
-        this.subscribeLogsAndBondingCurves();
+        logger.info("Early discovery: Helius WS connected — subscribing to pump.fun logs");
+        this.ws!.send(JSON.stringify({
+          jsonrpc: "2.0", id: 1, method: "logsSubscribe",
+          params: [{ mentions: [PUMPFUN_PROGRAM] }, { commitment: "processed" }],
+        }));
         this.pingInterval = setInterval(() => {
           if (this.ws?.readyState === WebSocket.OPEN) (this.ws as WebSocket).ping();
         }, 30_000);
@@ -428,7 +406,7 @@ class EarlyDiscoveryService {
         try {
           const msg = JSON.parse(raw.toString()) as Record<string, unknown>;
           this.handleWsMessage(msg);
-        } catch { /* ignore malformed */ }
+        } catch { /* ignore */ }
       });
 
       this.ws.on("close", () => {
@@ -449,87 +427,16 @@ class EarlyDiscoveryService {
     }
   }
 
-  private subscribeLogsAndBondingCurves(): void {
-    if (this.ws?.readyState !== WebSocket.OPEN) return;
-
-    // 1. logsSubscribe for new token detection
-    this.ws.send(JSON.stringify({
-      jsonrpc: "2.0",
-      id: 1,
-      method: "logsSubscribe",
-      params: [
-        { mentions: [PUMPFUN_PROGRAM] },
-        { commitment: "processed" },
-      ],
-    }));
-    logger.info("Early discovery: Helius logsSubscribe active for pump.fun program");
-
-    // 2. accountSubscribe for all currently tracked tokens (real-time BC updates)
-    const active = [...this.tokens.values()].filter(
-      (t) => t.status === "tracking" || t.status === "eligible"
-    );
-    for (const token of active) {
-      this.subscribeBondingCurveAccount(token.mint);
-    }
-    if (active.length > 0) {
-      logger.info({ count: active.length }, "Early discovery: Helius accountSubscribe for existing tracked tokens");
-    }
-  }
-
-  private subscribeBondingCurveAccount(mint: string): void {
-    if (!HELIUS_API_KEY || this.ws?.readyState !== WebSocket.OPEN) return;
-    if (this.bcMintToSubId.has(mint)) return; // already subscribed
-
-    let pda: string;
-    try { pda = this.computeBondingCurvePda(mint); } catch { return; }
-
-    const reqId = ++this.wsReqId;
-    // Store reqId → mint temporarily; will be replaced by subscriptionId once confirmed
-    this.bcSubIdToMint.set(reqId, mint);
-
-    this.ws.send(JSON.stringify({
-      jsonrpc: "2.0",
-      id: reqId,
-      method: "accountSubscribe",
-      params: [
-        pda,
-        { encoding: "base64", commitment: "confirmed" },
-      ],
-    }));
-  }
-
   private handleWsMessage(msg: Record<string, unknown>): void {
-    // ── Subscription confirmation ─────────────────────────────────────────
-    // When accountSubscribe/logsSubscribe succeeds, Helius replies:
-    // { jsonrpc: "2.0", id: <reqId>, result: <subscriptionId> }
-    if (typeof msg["result"] === "number" && typeof msg["id"] === "number") {
-      const reqId = msg["id"] as number;
-      const subId = msg["result"] as number;
-      const mint = this.bcSubIdToMint.get(reqId);
-      if (mint && reqId > 1) { // id=1 is logsSubscribe, skip
-        this.bcSubIdToMint.delete(reqId);
-        this.bcSubIdToMint.set(subId, mint);
-        this.bcMintToSubId.set(mint, subId);
-      }
-      return;
-    }
-
-    if (msg["method"] === "accountNotification") {
-      this.handleAccountNotification(msg);
-      return;
-    }
-
     if (msg["method"] !== "logsNotification") return;
     const params = msg["params"] as Record<string, unknown> | undefined;
     const result = params?.["result"] as Record<string, unknown> | undefined;
     const value  = result?.["value"] as Record<string, unknown> | undefined;
     if (!value) return;
-
     if (value["err"]) return;
 
     const sig  = value["signature"] as string | undefined;
     const logs = (value["logs"] as string[] | undefined) ?? [];
-
     const isCreate = logs.some((l) =>
       l.includes("Instruction: Create") || l.includes("Program log: Instruction: Create")
     );
@@ -548,76 +455,13 @@ class EarlyDiscoveryService {
     void this.onNewLaunch(mint);
   }
 
-  private handleAccountNotification(msg: Record<string, unknown>): void {
-    try {
-      const params = msg["params"] as Record<string, unknown> | undefined;
-      const subId  = params?.["subscription"] as number | undefined;
-      const result = params?.["result"] as Record<string, unknown> | undefined;
-      const value  = result?.["value"] as Record<string, unknown> | undefined;
-      if (subId === undefined || !value) return;
-
-      const mint = this.bcSubIdToMint.get(subId);
-      if (!mint) return;
-
-      const token = this.tokens.get(mint);
-      if (!token || (token.status !== "tracking" && token.status !== "eligible")) {
-        // Unsubscribe stale account
-        if (this.ws?.readyState === WebSocket.OPEN) {
-          this.ws.send(JSON.stringify({ jsonrpc: "2.0", id: ++this.wsReqId, method: "accountUnsubscribe", params: [subId] }));
-        }
-        this.bcSubIdToMint.delete(subId);
-        this.bcMintToSubId.delete(mint);
-        return;
-      }
-
-      // Parse account data
-      const dataArr = (value["data"] as [string, string] | undefined);
-      if (!dataArr || dataArr[1] !== "base64") return;
-      const data = Buffer.from(dataArr[0], "base64");
-      if (data.length < 49) return;
-
-      const virtualSolReservesLamports = data.readBigUInt64LE(32);
-      const complete = data[48] === 1;
-
-      const gradPct = complete
-        ? 100
-        : Math.min(Number(virtualSolReservesLamports * 100n / GRADUATION_TARGET_LAMPORTS), 99.9);
-
-      const virtualSolReservesSol = Number(virtualSolReservesLamports) / 1e9;
-      const targetSolReservesSol = Number(GRADUATION_TARGET_LAMPORTS) / 1e9;
-
-      const prev = token.bondingCurvePct;
-      token.bondingCurvePct    = gradPct;
-      token.virtualSolReserves = virtualSolReservesSol;
-      token.targetSolReserves  = targetSolReservesSol;
-      token.bcUpdatedAt        = Date.now();
-
-      logger.info(
-        {
-          mint: mint.slice(0, 8),
-          symbol: token.symbol,
-          virtualSolReservesSol: virtualSolReservesSol.toFixed(4),
-          targetSolReservesSol: targetSolReservesSol.toFixed(0),
-          gradPct: gradPct.toFixed(2),
-          prev: prev.toFixed(2),
-        },
-        "Early discovery: bonding curve updated via Helius accountSubscribe ⛓️⚡",
-      );
-
-      this.broadcast();
-    } catch (err) {
-      logger.debug({ err: (err as Error).message }, "Early discovery: accountNotification parse error");
-    }
-  }
-
   // ── New token onboarding ──────────────────────────────────────────────────
   private makeEmptyToken(mint: string): EDToken {
     const now = Date.now();
     return {
       mint, symbol: "???", name: "Loading…", creator: "", imageUri: "",
       launchAt: now, lastUpdatedAt: now,
-      priceUsd: 0, marketCapUsd: 0, bondingCurvePct: 0,
-      virtualSolReserves: 0, targetSolReserves: Number(GRADUATION_TARGET_LAMPORTS) / 1e9,
+      priceUsd: 0, marketCapUsd: 0,
       buyVolumeSol: 0, sellVolumeSol: 0,
       uniqueBuyers: 0, prevUniqueBuyers: 0, buyerAcceleration: 0, buyersPerMinute: 0,
       creatorHoldingsPct: 0, topHolderPct: 0, whaleParticipation: false,
@@ -626,7 +470,7 @@ class EarlyDiscoveryService {
       scores: { buyerGrowthScore: 0, volumeScore: 0, buyPressureScore: 0, walletQualityScore: 0, bondingCurveScore: 0, finalScore: 0, buyPressureRatio: 0 },
       status: "tracking", rejectionReason: "",
       firstEligibleAt: null, discoveryPrice: 0, positionId: null, pollCount: 0, creatorSold: false,
-      entryChecklist: [], bcUpdatedAt: 0,
+      entryChecklist: [],
     };
   }
 
@@ -656,20 +500,15 @@ class EarlyDiscoveryService {
     token.name    = meta.name;
     token.creator = meta.creator;
 
-    if (meta.priceUsd && meta.priceUsd > 0)     { token.priceUsd = meta.priceUsd; token.discoveryPrice = meta.priceUsd; }
-    if (meta.marketCapUsd && meta.marketCapUsd > 0) token.marketCapUsd = meta.marketCapUsd;
-    if (meta.uniqueBuyers && meta.uniqueBuyers > 0) token.uniqueBuyers = meta.uniqueBuyers;
-    if (meta.buyVolumeSol && meta.buyVolumeSol > 0) token.buyVolumeSol = meta.buyVolumeSol;
+    if (meta.priceUsd     && meta.priceUsd > 0)     { token.priceUsd = meta.priceUsd; token.discoveryPrice = meta.priceUsd; }
+    if (meta.marketCapUsd && meta.marketCapUsd > 0)  token.marketCapUsd = meta.marketCapUsd;
+    if (meta.uniqueBuyers && meta.uniqueBuyers > 0)  token.uniqueBuyers = meta.uniqueBuyers;
+    if (meta.buyVolumeSol && meta.buyVolumeSol > 0)  token.buyVolumeSol = meta.buyVolumeSol;
 
     this.tokens.set(mint, token);
     this.broadcast();
 
-    // Subscribe to real-time bonding curve updates via Helius accountSubscribe
-    this.subscribeBondingCurveAccount(mint);
-
-    // Run rugcheck
     await this.runRugcheck(mint, token);
-
     token.lastUpdatedAt = Date.now();
     this.broadcast();
   }
@@ -692,12 +531,12 @@ class EarlyDiscoveryService {
       } else if (isApiUnavailable) {
         token.rugcheckStatus = "pending";
         token.rugcheckReason = "RugCheck unavailable — continuing to monitor";
-        logger.debug({ mint: mint.slice(0, 8) }, "Early discovery: RugCheck unavailable — keeping token in tracking");
+        logger.debug({ mint: mint.slice(0, 8) }, "Early discovery: RugCheck unavailable — keeping in tracking");
       }
     } catch (err) {
       token.rugcheckStatus = "pending";
       token.rugcheckReason = "RugCheck error — retrying next poll";
-      logger.debug({ mint: mint.slice(0, 8), err: (err as Error).message }, "Early discovery: rugcheck error — keeping in tracking");
+      logger.debug({ mint: mint.slice(0, 8), err: (err as Error).message }, "Early discovery: rugcheck error");
     }
     token.lastUpdatedAt = Date.now();
     this.broadcast();
@@ -745,7 +584,6 @@ class EarlyDiscoveryService {
         buyersPerMinute:    token.buyersPerMinute,
         buyVolumeSol:       token.buyVolumeSol,
         sellVolumeSol:      token.sellVolumeSol,
-        bondingCurvePct:    token.bondingCurvePct,
         topHolderPct:       token.topHolderPct,
         creatorHoldingsPct: token.creatorHoldingsPct,
         whaleParticipation: token.whaleParticipation,
@@ -755,34 +593,30 @@ class EarlyDiscoveryService {
       const entryCheck = checkEntryConditions(
         token.scores,
         metrics,
-        token.rugcheckStatus,  // FIX: pass status string, not boolean
+        token.rugcheckStatus,
         token.discoveryPrice,
         token.priceUsd,
         this.config.minScore,
         {
-          minUniqueBuyers:   this.config.minUniqueBuyers,
+          minUniqueBuyers:    this.config.minUniqueBuyers,
           minBuyPressureRatio: this.config.minBuyPressureRatio,
-          minBondingCurvePct:  this.config.minBondingCurvePct,
         },
       );
 
-      // Store checklist for frontend display
       token.entryChecklist = entryCheck.checklist;
 
-      // Log entry condition check for debugging
       logger.debug(
         {
-          mint:          token.mint.slice(0, 8),
-          symbol:        token.symbol,
-          score:         token.scores.finalScore,
-          buyers:        token.uniqueBuyers,
-          bpRatio:       token.scores.buyPressureRatio.toFixed(2),
-          bcPct:         token.bondingCurvePct.toFixed(1),
-          rugcheck:      token.rugcheckStatus,
-          creatorPct:    token.creatorHoldingsPct.toFixed(1),
-          topHolder:     token.topHolderPct.toFixed(1),
-          eligible:      entryCheck.eligible,
-          blockers:      entryCheck.blockers,
+          mint:       token.mint.slice(0, 8),
+          symbol:     token.symbol,
+          score:      token.scores.finalScore,
+          buyers:     token.uniqueBuyers,
+          bpRatio:    token.scores.buyPressureRatio.toFixed(2),
+          rugcheck:   token.rugcheckStatus,
+          creatorPct: token.creatorHoldingsPct.toFixed(1),
+          topHolder:  token.topHolderPct.toFixed(1),
+          eligible:   entryCheck.eligible,
+          blockers:   entryCheck.blockers,
         },
         "Early discovery: entry condition check",
       );
@@ -793,12 +627,7 @@ class EarlyDiscoveryService {
 
         const confirmMs = Date.now() - token.firstEligibleAt;
         logger.info(
-          {
-            mint: token.mint.slice(0, 8),
-            symbol: token.symbol,
-            confirmMs,
-            requiredMs: ENTRY_CONFIRM_MS,
-          },
+          { mint: token.mint.slice(0, 8), symbol: token.symbol, confirmMs, requiredMs: ENTRY_CONFIRM_MS },
           "Early discovery: token ELIGIBLE — waiting for confirmation window ✅",
         );
 
@@ -839,151 +668,21 @@ class EarlyDiscoveryService {
         ?? pairs.find((p) => (parseFloat(p.priceUsd ?? "0") || 0) > 0);
       if (!pair) return null;
 
-      const m5     = pair.txns?.m5;
-      const h1     = pair.txns?.h1;
-      const buys   = (m5?.buys ?? 0) + (h1?.buys ?? 0);
-      const sells  = (m5?.sells ?? 0) + (h1?.sells ?? 0);
-      const volM5  = pair.volume?.m5 ?? 0;
-      const volH1  = pair.volume?.h1 ?? 0;
-      const totalVol = (volM5 + volH1) / 150;
+      const m5   = pair.txns?.m5;
+      const h1   = pair.txns?.h1;
+      const buys = (m5?.buys ?? 0) + (h1?.buys ?? 0);
+      const sells= (m5?.sells ?? 0) + (h1?.sells ?? 0);
+      const vol  = ((pair.volume?.m5 ?? 0) + (pair.volume?.h1 ?? 0)) / 150;
       const buyPct = buys + sells > 0 ? buys / (buys + sells) : 0.5;
 
       return {
-        buyVolumeSol:  totalVol * buyPct,
-        sellVolumeSol: totalVol * (1 - buyPct),
+        buyVolumeSol:  vol * buyPct,
+        sellVolumeSol: vol * (1 - buyPct),
         uniqueBuyers:  buys,
         priceUsd:      parseFloat(pair.priceUsd ?? "0") || 0,
         marketCapUsd:  pair.marketCap ?? pair.fdv ?? 0,
       };
     } catch { return null; }
-  }
-
-  // ── On-chain bonding curve PDA derivation ─────────────────────────────────
-  private computeBondingCurvePda(mint: string): string {
-    if (this.pdaCache.has(mint)) return this.pdaCache.get(mint)!;
-
-    const B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
-    function b58Dec(s: string): Buffer {
-      let n = 0n;
-      for (const c of s) { const i = B58.indexOf(c); if (i < 0) throw new Error("bad b58"); n = n * 58n + BigInt(i); }
-      const out: number[] = [];
-      while (n > 0n) { out.unshift(Number(n & 0xffn)); n >>= 8n; }
-      const leading = s.match(/^1*/)?.[0]?.length ?? 0;
-      return Buffer.concat([Buffer.alloc(leading), Buffer.from(out)]);
-    }
-    function b58Enc(buf: Buffer): string {
-      if (buf.length === 0) return "";
-      let n = BigInt("0x" + buf.toString("hex"));
-      let s = "";
-      while (n > 0n) { s = B58[Number(n % 58n)] + s; n /= 58n; }
-      const leading = buf.findIndex((b) => b !== 0);
-      return "1".repeat(leading < 0 ? buf.length : leading) + s;
-    }
-    const P255 = (1n << 255n) - 19n;
-    const D_ED = 37095705934669439343138083508754565189542113879843219016388785533085940283555n;
-    function mpow(base: bigint, exp: bigint, mod: bigint): bigint {
-      let r = 1n; base %= mod;
-      for (; exp > 0n; exp >>= 1n) { if (exp & 1n) r = r * base % mod; base = base * base % mod; }
-      return r;
-    }
-    function isOnCurve(bytes: Buffer): boolean {
-      const y = BigInt("0x" + Buffer.from(bytes).reverse().toString("hex")) & ((1n << 255n) - 1n);
-      const y2 = y * y % P255;
-      const u  = (y2 - 1n + P255) % P255;
-      const v  = (D_ED * y2 + 1n) % P255;
-      const x2 = u * mpow(v, P255 - 2n, P255) % P255;
-      if (x2 === 0n) return u === 0n;
-      return mpow(x2, (P255 - 1n) / 2n, P255) === 1n;
-    }
-    const mintBytes    = b58Dec(mint);
-    const programBytes = b58Dec(PUMPFUN_PROGRAM);
-    const marker       = Buffer.from("ProgramDerivedAddress");
-    const seed         = Buffer.from("bonding-curve");
-    for (let nonce = 255; nonce >= 0; nonce--) {
-      const h = createHash("sha256");
-      h.update(seed); h.update(mintBytes); h.update(Buffer.from([nonce]));
-      h.update(programBytes); h.update(marker);
-      const digest = h.digest();
-      if (!isOnCurve(digest)) { const pda = b58Enc(digest); this.pdaCache.set(mint, pda); return pda; }
-    }
-    throw new Error(`PDA not found for mint ${mint}`);
-  }
-
-  // ── Batch on-chain bonding curve refresh (fallback when no accountSubscribe) ─
-  private async refreshOnChainBondingCurves(): Promise<void> {
-    const mints = [...this.tokens.values()]
-      .filter((t) => t.status === "tracking" || t.status === "eligible")
-      .map((t) => t.mint);
-    if (mints.length === 0) return;
-
-    const rpcUrl = HELIUS_API_KEY
-      ? `https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`
-      : SOLANA_PUBLIC_RPC;
-
-    const pdaToMint = new Map<string, string>();
-    for (const mint of mints) {
-      try { pdaToMint.set(this.computeBondingCurvePda(mint), mint); } catch { /* skip */ }
-    }
-    const pdas = [...pdaToMint.keys()];
-    let updated = 0;
-
-    for (let i = 0; i < pdas.length; i += 100) {
-      const batch = pdas.slice(i, i + 100);
-      try {
-        type RpcResp = { result?: { value?: (null | { data: [string, string] })[] } };
-        const res = await axios.post<RpcResp>(
-          rpcUrl,
-          { jsonrpc: "2.0", id: 1, method: "getMultipleAccounts", params: [batch, { encoding: "base64" }] },
-          { timeout: 10_000 },
-        );
-        const values = res.data?.result?.value ?? [];
-        for (let j = 0; j < batch.length; j++) {
-          const mint  = pdaToMint.get(batch[j]!);
-          const acct  = values[j];
-          const token = mint ? this.tokens.get(mint) : undefined;
-          if (!mint || !acct || !token) continue;
-
-          const data = Buffer.from(acct.data[0], "base64");
-          if (data.length < 49) continue;
-
-          const virtualSolReservesLamports = data.readBigUInt64LE(32);
-          const complete = data[48] === 1;
-
-          const gradPct = complete
-            ? 100
-            : Math.min(Number(virtualSolReservesLamports * 100n / GRADUATION_TARGET_LAMPORTS), 99.9);
-
-          const virtualSolReservesSol = Number(virtualSolReservesLamports) / 1e9;
-          const targetSolReservesSol  = Number(GRADUATION_TARGET_LAMPORTS) / 1e9;
-
-          logger.debug(
-            {
-              mint: mint.slice(0, 8),
-              virtualSolReservesSol: virtualSolReservesSol.toFixed(4),
-              targetSolReservesSol: targetSolReservesSol.toFixed(0),
-              bondingCurvePct: gradPct.toFixed(2),
-            },
-            "Early discovery: on-chain BC read",
-          );
-
-          if (gradPct > token.bondingCurvePct || complete) {
-            token.bondingCurvePct    = gradPct;
-            token.virtualSolReserves = virtualSolReservesSol;
-            token.targetSolReserves  = targetSolReservesSol;
-            token.bcUpdatedAt        = Date.now();
-            updated++;
-          }
-        }
-      } catch (err) {
-        logger.debug({ err: (err as Error).message }, "Early discovery: on-chain bonding curve refresh error");
-      }
-    }
-
-    if (updated > 0) {
-      logger.info({ updated, total: mints.length, rpc: HELIUS_API_KEY ? "helius" : "public" },
-        "Early discovery: on-chain bonding curves refreshed ⛓️");
-      this.broadcast();
-    }
   }
 
   // ── Paper trade entry ─────────────────────────────────────────────────────
@@ -1002,8 +701,8 @@ class EarlyDiscoveryService {
       return;
     }
 
-    const now      = Date.now();
-    const entryPx  = token.priceUsd;
+    const now     = Date.now();
+    const entryPx = token.priceUsd;
     if (!(entryPx > 0)) return;
 
     const slPrice = entryPx * (1 - this.config.slPct / 100);
@@ -1048,7 +747,10 @@ class EarlyDiscoveryService {
     void this.persistPosition(pos);
     void this.persistBalance();
 
-    logger.info({ mint: token.mint.slice(0, 8), symbol: token.symbol, score: token.scores.finalScore, sizeSol, entryPx }, "Early discovery: PAPER TRADE ENTERED 📄🎯");
+    logger.info(
+      { mint: token.mint.slice(0, 8), symbol: token.symbol, score: token.scores.finalScore, sizeSol, entryPx },
+      "Early discovery: PAPER TRADE ENTERED 📄🎯",
+    );
 
     if (isTelegramConfigured()) {
       const tp1Px = entryPx * (1 + this.config.tp1Pct / 100);
@@ -1057,12 +759,11 @@ class EarlyDiscoveryService {
         `📄 <b>EARLY DISCOVERY — PAPER ENTRY</b>\n` +
         `━━━━━━━━━━━━━━━━━━━━━━━\n` +
         `🪙 <b>${token.symbol}</b>  <code>${token.mint.slice(0, 8)}…</code>\n\n` +
-        `📊 <b>Demand Score: ${token.scores.finalScore}/120</b>\n` +
+        `📊 <b>Demand Score: ${token.scores.finalScore}/100</b>\n` +
         `  Buyer Growth: ${token.scores.buyerGrowthScore}/25\n` +
         `  Volume:       ${token.scores.volumeScore}/25\n` +
         `  Buy Pressure: ${token.scores.buyPressureScore}/25\n` +
-        `  Wallet Quality: ${token.scores.walletQualityScore}/25\n` +
-        `  Bonding Curve:  ${token.scores.bondingCurveScore}/20\n\n` +
+        `  Wallet Quality: ${token.scores.walletQualityScore}/25\n\n` +
         `💵 Entry: $${entryPx.toExponential(3)} | MC: $${(token.marketCapUsd / 1000).toFixed(1)}K\n` +
         `🛑 SL: $${slPrice.toExponential(3)} (-${this.config.slPct}%)\n` +
         `🎯 TP1: $${tp1Px.toExponential(3)} (+${this.config.tp1Pct}%)\n` +
@@ -1076,7 +777,7 @@ class EarlyDiscoveryService {
   // ── Position management ───────────────────────────────────────────────────
   private checkPositions(): void {
     for (const [mint, pos] of this.openPositions) {
-      const token = this.tokens.get(mint);
+      const token     = this.tokens.get(mint);
       const currentPx = token?.priceUsd ?? 0;
       if (!(currentPx > 0)) continue;
 
@@ -1093,25 +794,14 @@ class EarlyDiscoveryService {
 
       if (token) {
         const qExit = checkQualityExit(token.scores, {
-          uniqueBuyers: token.uniqueBuyers,
-          prevUniqueBuyers: token.prevUniqueBuyers,
-          buyerAcceleration: 0,
-          buyersPerMinute: token.buyersPerMinute,
-          buyVolumeSol: token.buyVolumeSol,
-          sellVolumeSol: token.sellVolumeSol,
-          bondingCurvePct: token.bondingCurvePct,
-          topHolderPct: token.topHolderPct,
-          creatorHoldingsPct: token.creatorHoldingsPct,
+          uniqueBuyers: token.uniqueBuyers, prevUniqueBuyers: token.prevUniqueBuyers,
+          buyerAcceleration: 0, buyersPerMinute: token.buyersPerMinute,
+          buyVolumeSol: token.buyVolumeSol, sellVolumeSol: token.sellVolumeSol,
+          topHolderPct: token.topHolderPct, creatorHoldingsPct: token.creatorHoldingsPct,
           whaleParticipation: token.whaleParticipation,
         });
-        if (qExit) {
-          this.closePaperPosition(pos, `Quality exit: ${qExit}`, currentPx);
-          continue;
-        }
-        if (token.creatorSold) {
-          this.closePaperPosition(pos, "Creator sold tokens", currentPx);
-          continue;
-        }
+        if (qExit) { this.closePaperPosition(pos, `Quality exit: ${qExit}`, currentPx); continue; }
+        if (token.creatorSold) { this.closePaperPosition(pos, "Creator sold tokens", currentPx); continue; }
       }
 
       if (currentPx <= pos.effectiveSlPrice) {
@@ -1128,13 +818,12 @@ class EarlyDiscoveryService {
         pos.remainingFraction *= (1 - sellFrac);
         pos.effectiveSlPrice  = pos.entryPrice;
         pos.tp1Hit = true;
-
         logger.info({ mint: mint.slice(0, 8), symbol: pos.symbol, gainPct: gainPct.toFixed(1), pnl: pnl.toFixed(4) }, "Early discovery: TP1 hit 🎯");
         if (isTelegramConfigured()) {
           void sendTelegram(
             `🎯 <b>PAPER TP1 HIT — ${pos.symbol}</b>\n` +
             `+${gainPct.toFixed(1)}% | Sold ${this.config.tp1ClosePct}% | PnL: +${pnl.toFixed(4)} SOL\n` +
-            `SL moved to breakeven | Runner: ${(pos.remainingFraction * 100).toFixed(0)}% remaining\n` +
+            `SL moved to breakeven\n` +
             `🔗 <a href="https://dexscreener.com/solana/${mint}">Chart</a>`
           );
         }
@@ -1148,13 +837,11 @@ class EarlyDiscoveryService {
         pos.realizedPnlSol += pnl;
         pos.remainingFraction *= (1 - sellFrac);
         pos.tp2Hit = true;
-
         logger.info({ mint: mint.slice(0, 8), symbol: pos.symbol, gainPct: gainPct.toFixed(1), pnl: pnl.toFixed(4) }, "Early discovery: TP2 hit 🎯🎯");
         if (isTelegramConfigured()) {
           void sendTelegram(
             `🎯🎯 <b>PAPER TP2 HIT — ${pos.symbol}</b>\n` +
             `+${gainPct.toFixed(1)}% | Sold ${this.config.tp2ClosePct}% | PnL: +${pnl.toFixed(4)} SOL\n` +
-            `Runner trailing -${this.config.runnerTrailingPct}% from high\n` +
             `🔗 <a href="https://dexscreener.com/solana/${mint}">Chart</a>`
           );
         }
@@ -1163,11 +850,11 @@ class EarlyDiscoveryService {
       if (pos.tp2Hit) {
         const runnerSl = pos.trailingHigh * (1 - this.config.runnerTrailingPct / 100);
         if (currentPx <= runnerSl) {
-          const remaining2 = pos.sizeSol * pos.remainingFraction;
-          const pnl        = remaining2 * (gainPct / 100);
+          const rem2 = pos.sizeSol * pos.remainingFraction;
+          const pnl  = rem2 * (gainPct / 100);
           pos.runnerRealizedSol = pnl;
-          pos.realizedPnlSol    += pnl;
-          pos.remainingFraction  = 0;
+          pos.realizedPnlSol   += pnl;
+          pos.remainingFraction = 0;
           this.closePaperPosition(pos, `Runner trailing stop (-${this.config.runnerTrailingPct}% from ${pos.trailingHigh.toExponential(3)})`, currentPx);
         }
       }
@@ -1190,7 +877,7 @@ class EarlyDiscoveryService {
     pos.closedAt         = Date.now();
     pos.exitPrice        = exitPx;
     pos.totalPnlSol      = pos.realizedPnlSol;
-    pos.pnlPct           = ((pos.totalPnlSol) / pos.sizeSol) * 100;
+    pos.pnlPct           = (pos.totalPnlSol / pos.sizeSol) * 100;
     pos.closingScore     = token?.scores.finalScore ?? null;
 
     this.virtualBalance += pos.sizeSol + pos.realizedPnlSol;
@@ -1204,7 +891,10 @@ class EarlyDiscoveryService {
     void this.persistPosition(pos);
     void this.persistBalance();
 
-    logger.info({ mint: pos.mint.slice(0, 8), symbol: pos.symbol, reason, pnl: pos.realizedPnlSol.toFixed(4), pnlPct: pos.pnlPct.toFixed(1) }, "Early discovery: paper position CLOSED");
+    logger.info(
+      { mint: pos.mint.slice(0, 8), symbol: pos.symbol, reason, pnl: pos.realizedPnlSol.toFixed(4), pnlPct: pos.pnlPct.toFixed(1) },
+      "Early discovery: paper position CLOSED",
+    );
 
     if (isTelegramConfigured()) {
       const emoji = pos.realizedPnlSol > 0 ? "💚" : "💔";
@@ -1222,12 +912,7 @@ class EarlyDiscoveryService {
   // ── Public position management ────────────────────────────────────────────
   forceClosePosition(id: string): boolean {
     const pos = [...this.openPositions.values()].find((p) => p.id === id);
-    if (!pos) {
-      // Check closed positions
-      const closed = this.closedPositions.find((p) => p.id === id);
-      if (!closed) return false;
-      return false; // already closed
-    }
+    if (!pos) return false;
     const currentPx = pos.currentPrice > 0 ? pos.currentPrice : pos.entryPrice;
     this.closePaperPosition(pos, "Manually closed", currentPx);
     this.broadcast();
@@ -1235,11 +920,9 @@ class EarlyDiscoveryService {
   }
 
   deletePosition(id: string): boolean {
-    // Try open positions first
     const openEntry = [...this.openPositions.entries()].find(([, p]) => p.id === id);
     if (openEntry) {
       const [mint, pos] = openEntry;
-      // Refund the unrealized position back to balance
       this.virtualBalance += pos.sizeSol * pos.remainingFraction;
       this.openPositions.delete(mint);
       const token = this.tokens.get(mint);
@@ -1250,7 +933,6 @@ class EarlyDiscoveryService {
       return true;
     }
 
-    // Try closed positions
     const closedIdx = this.closedPositions.findIndex((p) => p.id === id);
     if (closedIdx >= 0) {
       this.closedPositions.splice(closedIdx, 1);
@@ -1263,28 +945,25 @@ class EarlyDiscoveryService {
   }
 
   editPosition(id: string, patch: EDPositionPatch): EDPosition | null {
-    // Try open positions
     const pos = [...this.openPositions.values()].find((p) => p.id === id)
       ?? this.closedPositions.find((p) => p.id === id);
     if (!pos) return null;
 
-    // Apply allowed patches
-    if (patch.entryPrice    !== undefined) pos.entryPrice = patch.entryPrice;
-    if (patch.entryScore    !== undefined) pos.entryScore = patch.entryScore;
-    if (patch.sizeSol       !== undefined) pos.sizeSol = patch.sizeSol;
+    if (patch.entryPrice       !== undefined) pos.entryPrice       = patch.entryPrice;
+    if (patch.entryScore       !== undefined) pos.entryScore       = patch.entryScore;
+    if (patch.sizeSol          !== undefined) pos.sizeSol          = patch.sizeSol;
     if (patch.effectiveSlPrice !== undefined) pos.effectiveSlPrice = patch.effectiveSlPrice;
-    if (patch.trailingHigh  !== undefined) pos.trailingHigh = patch.trailingHigh;
-    if (patch.tp1Hit        !== undefined) pos.tp1Hit = patch.tp1Hit;
-    if (patch.tp2Hit        !== undefined) pos.tp2Hit = patch.tp2Hit;
-    if (patch.closeReason   !== undefined) pos.closeReason = patch.closeReason;
-    if (patch.closingScore  !== undefined) pos.closingScore = patch.closingScore;
-    if (patch.exitPrice     !== undefined) pos.exitPrice = patch.exitPrice;
-    if (patch.realizedPnlSol !== undefined) pos.realizedPnlSol = patch.realizedPnlSol;
-    if (patch.tp1RealizedSol !== undefined) pos.tp1RealizedSol = patch.tp1RealizedSol;
-    if (patch.tp2RealizedSol !== undefined) pos.tp2RealizedSol = patch.tp2RealizedSol;
-    if (patch.runnerRealizedSol !== undefined) pos.runnerRealizedSol = patch.runnerRealizedSol;
+    if (patch.trailingHigh     !== undefined) pos.trailingHigh     = patch.trailingHigh;
+    if (patch.tp1Hit           !== undefined) pos.tp1Hit           = patch.tp1Hit;
+    if (patch.tp2Hit           !== undefined) pos.tp2Hit           = patch.tp2Hit;
+    if (patch.closeReason      !== undefined) pos.closeReason      = patch.closeReason;
+    if (patch.closingScore     !== undefined) pos.closingScore     = patch.closingScore;
+    if (patch.exitPrice        !== undefined) pos.exitPrice        = patch.exitPrice;
+    if (patch.realizedPnlSol   !== undefined) pos.realizedPnlSol   = patch.realizedPnlSol;
+    if (patch.tp1RealizedSol   !== undefined) pos.tp1RealizedSol   = patch.tp1RealizedSol;
+    if (patch.tp2RealizedSol   !== undefined) pos.tp2RealizedSol   = patch.tp2RealizedSol;
+    if (patch.runnerRealizedSol!== undefined) pos.runnerRealizedSol= patch.runnerRealizedSol;
 
-    // Recalculate derived fields for open positions
     if (pos.status === "open" && pos.currentPrice > 0) {
       const gainPct = ((pos.currentPrice - pos.entryPrice) / pos.entryPrice) * 100;
       pos.pnlPct = gainPct;
@@ -1310,18 +989,7 @@ class EarlyDiscoveryService {
         token.status === "rejected" ? MAX_REJECTED_AGE_MS :
         token.status === "exited"   ? MAX_EXITED_AGE_MS :
         MAX_TRACK_AGE_MS;
-      if (age > ttl) {
-        this.tokens.delete(mint);
-        // Clean up any WS subscription
-        const subId = this.bcMintToSubId.get(mint);
-        if (subId !== undefined) {
-          if (this.ws?.readyState === WebSocket.OPEN) {
-            this.ws.send(JSON.stringify({ jsonrpc: "2.0", id: ++this.wsReqId, method: "accountUnsubscribe", params: [subId] }));
-          }
-          this.bcSubIdToMint.delete(subId);
-          this.bcMintToSubId.delete(mint);
-        }
-      }
+      if (age > ttl) this.tokens.delete(mint);
     }
   }
 
@@ -1429,7 +1097,7 @@ class EarlyDiscoveryService {
         if (pos.status === "open") this.openPositions.set(pos.mint, pos);
         else this.closedPositions.push(pos);
       }
-      this.wins = this.closedPositions.filter((p) => p.realizedPnlSol > 0).length;
+      this.wins   = this.closedPositions.filter((p) => p.realizedPnlSol > 0).length;
       this.losses = this.closedPositions.filter((p) => p.realizedPnlSol <= 0).length;
     } catch { /* table may not exist yet */ }
   }
@@ -1441,7 +1109,7 @@ class EarlyDiscoveryService {
 
   // ── Public REST API ───────────────────────────────────────────────────────
   getStatus(): EDStatus {
-    const tokenArr = [...this.tokens.values()];
+    const tokenArr   = [...this.tokens.values()];
     const openPosArr = [...this.openPositions.values()];
     const unrealizedPnl = openPosArr.reduce((sum, p) => sum + p.unrealizedPnlSol, 0);
     const realizedPnl   = this.closedPositions.reduce((sum, p) => sum + p.realizedPnlSol, 0);

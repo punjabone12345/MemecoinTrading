@@ -1,7 +1,7 @@
 import { useState, useMemo } from "react";
 import {
   Telescope, Wifi, WifiOff, TrendingUp, TrendingDown,
-  ChevronRight, ExternalLink, AlertTriangle, Clock,
+  ExternalLink, AlertTriangle, Clock,
   Activity, Users, Zap, Shield, Target, RotateCcw, FlaskConical,
   CheckCircle2, XCircle, Circle, Pencil, X, Trash2, ChevronDown, ChevronUp,
 } from "lucide-react";
@@ -53,11 +53,11 @@ function StatusBadge({ status }: { status: EDTokenStatus }) {
 
 /* ── Score ring ───────────────────────────────────────────────────────────── */
 function ScoreRing({ score, size = 48 }: { score: number; size?: number }) {
-  const pct = score / 120;
+  const pct = Math.min(score / 100, 1);
   const r = (size - 6) / 2;
   const circ = 2 * Math.PI * r;
   const dash = circ * pct;
-  const color = score >= 110 ? "#34d399" : score >= 100 ? "#fbbf24" : score >= 95 ? "#818cf8" : "#64748b";
+  const color = score >= 80 ? "#34d399" : score >= 60 ? "#fbbf24" : score >= 40 ? "#818cf8" : "#64748b";
   return (
     <div className="relative flex items-center justify-center" style={{ width: size, height: size }}>
       <svg width={size} height={size} className="absolute inset-0 -rotate-90">
@@ -74,33 +74,6 @@ function ScoreRing({ score, size = 48 }: { score: number; size?: number }) {
   );
 }
 
-/* ── Bonding curve bar ─────────────────────────────────────────────────────── */
-function BondingBar({ pct, showRaw, virtualSol, targetSol }: {
-  pct: number; showRaw?: boolean; virtualSol?: number; targetSol?: number;
-}) {
-  const color = pct >= 80 ? "#34d399" : pct >= 70 ? "#fbbf24" : "#818cf8";
-  return (
-    <div>
-      <div className="flex items-center gap-1.5">
-        <div className="flex-1 h-1.5 rounded-full" style={{ background: "rgba(255,255,255,0.08)" }}>
-          <div
-            className="h-full rounded-full transition-all duration-300"
-            style={{ width: `${Math.min(pct, 100)}%`, background: color }}
-          />
-        </div>
-        <span className="text-[10px] font-bold tabular-nums" style={{ color, minWidth: 32 }}>
-          {pct.toFixed(1)}%
-        </span>
-      </div>
-      {showRaw && virtualSol !== undefined && targetSol !== undefined && (
-        <p className="text-[9px] text-slate-600 mt-0.5">
-          {virtualSol.toFixed(2)} SOL / {targetSol.toFixed(0)} SOL target
-        </p>
-      )}
-    </div>
-  );
-}
-
 /* ── Entry Checklist Panel ─────────────────────────────────────────────────── */
 function EntryChecklistPanel({ checklist }: { checklist: EntryChecklistItem[] }) {
   if (!checklist || checklist.length === 0) {
@@ -112,7 +85,7 @@ function EntryChecklistPanel({ checklist }: { checklist: EntryChecklistItem[] })
     );
   }
 
-  const allPass = checklist.every((c) => c.pass);
+  const allPass  = checklist.every((c) => c.pass);
   const passCount = checklist.filter((c) => c.pass).length;
 
   return (
@@ -132,8 +105,8 @@ function EntryChecklistPanel({ checklist }: { checklist: EntryChecklistItem[] })
       </div>
       <div className="space-y-1.5">
         {checklist.map((item) => {
-          const iconColor = item.pass ? "#34d399" : item.borderline ? "#fbbf24" : "#f87171";
-          const bgColor   = item.pass ? "rgba(52,211,153,0.05)" : item.borderline ? "rgba(251,191,36,0.05)" : "rgba(248,113,113,0.05)";
+          const iconColor   = item.pass ? "#34d399" : item.borderline ? "#fbbf24" : "#f87171";
+          const bgColor     = item.pass ? "rgba(52,211,153,0.05)" : item.borderline ? "rgba(251,191,36,0.05)" : "rgba(248,113,113,0.05)";
           const borderColor = item.pass ? "rgba(52,211,153,0.12)" : item.borderline ? "rgba(251,191,36,0.15)" : "rgba(248,113,113,0.12)";
           return (
             <div
@@ -142,13 +115,12 @@ function EntryChecklistPanel({ checklist }: { checklist: EntryChecklistItem[] })
               style={{ background: bgColor, border: `1px solid ${borderColor}` }}
             >
               <div className="flex items-center gap-2">
-                {item.pass ? (
-                  <CheckCircle2 size={12} style={{ color: iconColor, flexShrink: 0 }} />
-                ) : item.borderline ? (
-                  <Circle size={12} style={{ color: iconColor, flexShrink: 0 }} />
-                ) : (
-                  <XCircle size={12} style={{ color: iconColor, flexShrink: 0 }} />
-                )}
+                {item.pass
+                  ? <CheckCircle2 size={12} style={{ color: iconColor, flexShrink: 0 }} />
+                  : item.borderline
+                    ? <Circle size={12} style={{ color: iconColor, flexShrink: 0 }} />
+                    : <XCircle size={12} style={{ color: iconColor, flexShrink: 0 }} />
+                }
                 <span className="text-[10px] font-medium" style={{ color: item.pass ? "#94a3b8" : "#cbd5e1" }}>
                   {item.label}
                 </span>
@@ -158,9 +130,7 @@ function EntryChecklistPanel({ checklist }: { checklist: EntryChecklistItem[] })
                   {item.current}
                 </span>
                 {!item.pass && (
-                  <span className="text-[9px] text-slate-600 ml-1">
-                    (need {item.threshold})
-                  </span>
+                  <span className="text-[9px] text-slate-600 ml-1">(need {item.threshold})</span>
                 )}
               </div>
             </div>
@@ -175,11 +145,10 @@ function EntryChecklistPanel({ checklist }: { checklist: EntryChecklistItem[] })
 function ScorePanel({ token }: { token: EDToken }) {
   const { scores } = token;
   const bars = [
-    { label: "Buyer Growth",  val: scores.buyerGrowthScore,   max: 25, color: "#818cf8" },
-    { label: "Volume",        val: scores.volumeScore,         max: 25, color: "#34d399" },
-    { label: "Buy Pressure",  val: scores.buyPressureScore,    max: 25, color: "#fbbf24" },
-    { label: "Wallet Quality",val: scores.walletQualityScore,  max: 25, color: "#f472b6" },
-    { label: "Bonding Curve", val: scores.bondingCurveScore,   max: 20, color: "#22d3ee" },
+    { label: "Buyer Growth",   val: scores.buyerGrowthScore,   max: 25, color: "#818cf8" },
+    { label: "Volume",         val: scores.volumeScore,         max: 25, color: "#34d399" },
+    { label: "Buy Pressure",   val: scores.buyPressureScore,    max: 25, color: "#fbbf24" },
+    { label: "Wallet Quality", val: scores.walletQualityScore,  max: 25, color: "#f472b6" },
   ];
   return (
     <div className="rounded-xl p-4" style={{ background: "rgba(13,13,30,0.8)", border: "1px solid rgba(255,255,255,0.07)" }}>
@@ -187,7 +156,9 @@ function ScorePanel({ token }: { token: EDToken }) {
         <ScoreRing score={scores.finalScore} size={52} />
         <div>
           <p className="text-[10px] text-slate-500 uppercase tracking-widest">Demand Score</p>
-          <p className="text-xl font-black text-white">{scores.finalScore}<span className="text-slate-500 text-sm font-medium">/120</span></p>
+          <p className="text-xl font-black text-white">
+            {scores.finalScore}<span className="text-slate-500 text-sm font-medium">/100</span>
+          </p>
           <p className="text-[10px]" style={{ color: "#fbbf24" }}>
             BP Ratio: {scores.buyPressureRatio.toFixed(2)}×
           </p>
@@ -215,29 +186,35 @@ function ScorePanel({ token }: { token: EDToken }) {
 
 /* ── Live metrics panel ────────────────────────────────────────────────────── */
 function MetricsPanel({ token }: { token: EDToken }) {
-  const ratio = token.sellVolumeSol > 0 ? token.buyVolumeSol / token.sellVolumeSol : token.buyVolumeSol > 0 ? 99 : 0;
+  const ratio = token.sellVolumeSol > 0
+    ? token.buyVolumeSol / token.sellVolumeSol
+    : token.buyVolumeSol > 0 ? 99 : 0;
   const rugColor = token.rugcheckStatus === "passed" ? "#34d399" : token.rugcheckStatus === "failed" ? "#f87171" : "#fbbf24";
-  const bcAge = token.bcUpdatedAt > 0 ? fmtAge(token.bcUpdatedAt) : "never";
+
   return (
     <div className="rounded-xl p-4" style={{ background: "rgba(13,13,30,0.8)", border: "1px solid rgba(255,255,255,0.07)" }}>
       <p className="text-[10px] text-slate-500 uppercase tracking-widest mb-3">Live Metrics</p>
       <div className="grid grid-cols-2 gap-2">
         {[
-          { label: "Unique Buyers", val: token.uniqueBuyers.toLocaleString(), icon: <Users size={11} /> },
-          { label: "Buyers/min",    val: token.buyersPerMinute.toFixed(1),     icon: <Activity size={11} /> },
-          { label: "Buy Volume",    val: `${token.buyVolumeSol.toFixed(2)} SOL`,icon: <TrendingUp size={11} /> },
-          { label: "Sell Volume",   val: `${token.sellVolumeSol.toFixed(2)} SOL`,icon: <TrendingDown size={11} /> },
-          { label: "Buy/Sell Ratio",val: `${ratio.toFixed(2)}×`,               icon: <Zap size={11} /> },
-          { label: "Whale Activity",val: token.whaleParticipation ? "YES ⚡" : "None", icon: <Target size={11} /> },
-          { label: "Creator Hold", val: `${token.creatorHoldingsPct.toFixed(1)}%`, icon: <Shield size={11} /> },
-          { label: "Top Holder",   val: `${token.topHolderPct.toFixed(1)}%`,   icon: <Shield size={11} /> },
+          { label: "Unique Buyers",  val: token.uniqueBuyers.toLocaleString(), icon: <Users size={11} /> },
+          { label: "Buyers/min",     val: token.buyersPerMinute.toFixed(1),    icon: <Activity size={11} /> },
+          { label: "Buy Volume",     val: `${token.buyVolumeSol.toFixed(2)} SOL`,  icon: <TrendingUp size={11} /> },
+          { label: "Sell Volume",    val: `${token.sellVolumeSol.toFixed(2)} SOL`, icon: <TrendingDown size={11} /> },
+          { label: "Buy/Sell Ratio", val: `${ratio.toFixed(2)}×`,              icon: <Zap size={11} /> },
+          { label: "Whale Activity", val: token.whaleParticipation ? "YES ⚡" : "None", icon: <Target size={11} /> },
+          { label: "Creator Hold",   val: `${token.creatorHoldingsPct.toFixed(1)}%`, icon: <Shield size={11} /> },
+          { label: "Top Holder",     val: `${token.topHolderPct.toFixed(1)}%`,       icon: <Shield size={11} /> },
         ].map(({ label, val, icon }) => (
           <div key={label} className="rounded-lg p-2.5" style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.05)" }}>
-            <div className="flex items-center gap-1 text-slate-500 mb-1">{icon}<span className="text-[9px] uppercase tracking-wide">{label}</span></div>
+            <div className="flex items-center gap-1 text-slate-500 mb-1">
+              {icon}
+              <span className="text-[9px] uppercase tracking-wide">{label}</span>
+            </div>
             <p className="text-xs font-bold text-slate-200">{val}</p>
           </div>
         ))}
       </div>
+
       <div className="mt-3 flex items-center justify-between rounded-lg px-3 py-2" style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.05)" }}>
         <span className="text-[9px] text-slate-500 uppercase tracking-wide">Rugcheck</span>
         <div className="flex items-center gap-1.5">
@@ -248,18 +225,7 @@ function MetricsPanel({ token }: { token: EDToken }) {
           )}
         </div>
       </div>
-      <div className="mt-2">
-        <div className="flex items-center justify-between mb-1">
-          <p className="text-[9px] text-slate-500">Bonding Curve Progress</p>
-          <p className="text-[9px] text-slate-600">updated {bcAge}</p>
-        </div>
-        <BondingBar
-          pct={token.bondingCurvePct}
-          showRaw
-          virtualSol={token.virtualSolReserves}
-          targetSol={token.targetSolReserves}
-        />
-      </div>
+
       {token.status === "rejected" && token.rejectionReason && (
         <div className="mt-2 rounded-lg px-3 py-2 flex items-center gap-2" style={{ background: "rgba(248,113,113,0.08)", border: "1px solid rgba(248,113,113,0.2)" }}>
           <AlertTriangle size={12} className="text-red-400 shrink-0" />
@@ -272,7 +238,7 @@ function MetricsPanel({ token }: { token: EDToken }) {
 
 /* ── Edit Position Modal ───────────────────────────────────────────────────── */
 function EditPositionModal({ pos, onClose }: { pos: EDPosition; onClose: () => void }) {
-  const edit = useEDEditPosition();
+  const edit   = useEDEditPosition();
   const isOpen = pos.status === "open";
 
   const [form, setForm] = useState<EDPositionPatch>({
@@ -283,9 +249,9 @@ function EditPositionModal({ pos, onClose }: { pos: EDPosition; onClose: () => v
     tp1Hit:        pos.tp1Hit,
     tp2Hit:        pos.tp2Hit,
     ...(isOpen ? {} : {
-      exitPrice:     pos.exitPrice ?? 0,
+      exitPrice:      pos.exitPrice ?? 0,
       realizedPnlSol: pos.realizedPnlSol,
-      closeReason:   pos.closeReason,
+      closeReason:    pos.closeReason,
     }),
   });
 
@@ -339,7 +305,7 @@ function EditPositionModal({ pos, onClose }: { pos: EDPosition; onClose: () => v
         <div className="flex items-center justify-between mb-4">
           <div>
             <h3 className="font-black text-white text-sm">${pos.symbol} — Edit Position</h3>
-            <p className="text-[10px] text-slate-500">{isOpen ? "Open" : "Closed"} position • {pos.id.slice(0, 10)}</p>
+            <p className="text-[10px] text-slate-500">{isOpen ? "Open" : "Closed"} position</p>
           </div>
           <button onClick={onClose} className="p-1 rounded-lg text-slate-500 hover:text-white transition-colors" style={{ border: "1px solid rgba(255,255,255,0.08)" }}>
             <X size={14} />
@@ -415,13 +381,12 @@ function ConfirmDialog({
 
 /* ── Active trade card ─────────────────────────────────────────────────────── */
 function TradeCard({ pos }: { pos: EDPosition }) {
-  const isUp = pos.pnlPct >= 0;
-  const elapsed = fmtAge(pos.entryAt);
-  const close  = useEDClosePosition();
-  const del    = useEDDeletePosition();
-  const [showEdit,    setShowEdit]    = useState(false);
-  const [showClose,   setShowClose]   = useState(false);
-  const [showDelete,  setShowDelete]  = useState(false);
+  const isUp  = pos.pnlPct >= 0;
+  const close = useEDClosePosition();
+  const del   = useEDDeletePosition();
+  const [showEdit,   setShowEdit]   = useState(false);
+  const [showClose,  setShowClose]  = useState(false);
+  const [showDelete, setShowDelete] = useState(false);
 
   return (
     <>
@@ -440,15 +405,11 @@ function TradeCard({ pos }: { pos: EDPosition }) {
                 Score {pos.entryScore}
               </span>
             </div>
-            <p className="text-[10px] text-slate-500 mt-0.5">{pos.name} · {elapsed}</p>
+            <p className="text-[10px] text-slate-500 mt-0.5">{pos.name} · {fmtAge(pos.entryAt)}</p>
           </div>
           <div className="text-right">
-            <p className="font-black text-lg" style={{ color: isUp ? "#34d399" : "#f87171" }}>
-              {fmtPct(pos.pnlPct)}
-            </p>
-            <p className="text-[10px]" style={{ color: isUp ? "#34d399" : "#f87171" }}>
-              {fmtSol(pos.unrealizedPnlSol)}
-            </p>
+            <p className="font-black text-lg" style={{ color: isUp ? "#34d399" : "#f87171" }}>{fmtPct(pos.pnlPct)}</p>
+            <p className="text-[10px]" style={{ color: isUp ? "#34d399" : "#f87171" }}>{fmtSol(pos.unrealizedPnlSol)}</p>
           </div>
         </div>
         <div className="grid grid-cols-3 gap-2 mb-3">
@@ -473,7 +434,6 @@ function TradeCard({ pos }: { pos: EDPosition }) {
             <p className="text-[9px] text-slate-500">{(pos.remainingFraction * 100).toFixed(0)}% remaining</p>
           </div>
         </div>
-        {/* Action buttons */}
         <div className="flex gap-1.5 pt-2 border-t" style={{ borderColor: "rgba(255,255,255,0.06)" }}>
           <button
             onClick={() => setShowEdit(true)}
@@ -500,11 +460,10 @@ function TradeCard({ pos }: { pos: EDPosition }) {
       </div>
 
       {showEdit && <EditPositionModal pos={pos} onClose={() => setShowEdit(false)} />}
-
       {showClose && (
         <ConfirmDialog
           title={`Close $${pos.symbol}?`}
-          message={`This will close the position at the current price ($${pos.currentPrice.toExponential(3)}). No real sell transaction will be executed — this is paper mode only.`}
+          message={`Closes the position at the current price ($${pos.currentPrice.toExponential(3)}). Paper mode only — no real trade.`}
           confirmLabel="Close Position"
           confirmColor="#fbbf24"
           loading={close.isPending}
@@ -512,11 +471,10 @@ function TradeCard({ pos }: { pos: EDPosition }) {
           onCancel={() => setShowClose(false)}
         />
       )}
-
       {showDelete && (
         <ConfirmDialog
           title={`Delete $${pos.symbol}?`}
-          message="This will remove the position from tracking entirely. No sell transaction will be executed. The position size will be refunded to your paper balance."
+          message="Removes this position entirely. The position size will be refunded to your paper balance."
           confirmLabel="Delete Position"
           loading={del.isPending}
           onConfirm={() => del.mutate(pos.id, { onSuccess: () => setShowDelete(false) })}
@@ -529,7 +487,7 @@ function TradeCard({ pos }: { pos: EDPosition }) {
 
 /* ── Closed position row ───────────────────────────────────────────────────── */
 function ClosedPositionRow({ pos }: { pos: EDPosition }) {
-  const del  = useEDDeletePosition();
+  const del = useEDDeletePosition();
   const [showEdit,   setShowEdit]   = useState(false);
   const [showDelete, setShowDelete] = useState(false);
 
@@ -572,11 +530,10 @@ function ClosedPositionRow({ pos }: { pos: EDPosition }) {
       </div>
 
       {showEdit && <EditPositionModal pos={pos} onClose={() => setShowEdit(false)} />}
-
       {showDelete && (
         <ConfirmDialog
           title={`Delete $${pos.symbol} from history?`}
-          message="This will permanently remove this trade from your history. This cannot be undone."
+          message="Permanently removes this trade from history. Cannot be undone."
           confirmLabel="Delete Permanently"
           loading={del.isPending}
           onConfirm={() => del.mutate(pos.id, { onSuccess: () => setShowDelete(false) })}
@@ -591,7 +548,7 @@ function ClosedPositionRow({ pos }: { pos: EDPosition }) {
 function TokenRow({ token, onClick, selected }: { token: EDToken; onClick: () => void; selected: boolean }) {
   const failCount = token.entryChecklist?.filter((c) => !c.pass).length ?? 0;
   const passCount = token.entryChecklist?.filter((c) => c.pass).length ?? 0;
-  const total = token.entryChecklist?.length ?? 0;
+  const total     = token.entryChecklist?.length ?? 0;
 
   return (
     <button
@@ -605,10 +562,9 @@ function TokenRow({ token, onClick, selected }: { token: EDToken; onClick: () =>
       <div className="flex items-center gap-3">
         <ScoreRing score={token.scores.finalScore} size={38} />
         <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2 mb-0.5">
+          <div className="flex items-center gap-2 mb-1">
             <span className="font-bold text-sm text-white truncate">${token.symbol}</span>
             <StatusBadge status={token.status} />
-            {/* Mini checklist summary */}
             {total > 0 && (
               <span className="text-[8px] font-bold px-1.5 py-0.5 rounded-full" style={{
                 background: failCount === 0 ? "rgba(52,211,153,0.15)" : "rgba(248,113,113,0.1)",
@@ -618,8 +574,7 @@ function TokenRow({ token, onClick, selected }: { token: EDToken; onClick: () =>
               </span>
             )}
           </div>
-          <BondingBar pct={token.bondingCurvePct} />
-          <div className="flex items-center gap-3 mt-1">
+          <div className="flex items-center gap-3">
             <span className="text-[9px] text-slate-500 flex items-center gap-1">
               <Clock size={9} />{fmtAge(token.launchAt)}
             </span>
@@ -630,7 +585,10 @@ function TokenRow({ token, onClick, selected }: { token: EDToken; onClick: () =>
             )}
           </div>
         </div>
-        {selected ? <ChevronUp size={14} className="text-slate-600 shrink-0" /> : <ChevronDown size={14} className="text-slate-600 shrink-0" />}
+        {selected
+          ? <ChevronUp size={14} className="text-slate-600 shrink-0" />
+          : <ChevronDown size={14} className="text-slate-600 shrink-0" />
+        }
       </div>
     </button>
   );
@@ -674,25 +632,25 @@ type Tab = "live" | "all" | "trades";
 export default function FeedPage() {
   const { data: status } = useEDStatus();
   const { data: tokens = [] } = useEDTokens();
-  const { data: positions } = useEDPositions();
-  const reset = useResetPaperBalance();
+  const { data: positions }   = useEDPositions();
+  const reset  = useResetPaperBalance();
   const inject = useInjectTestToken();
 
-  const [tab, setTab] = useState<Tab>("live");
+  const [tab,      setTab]      = useState<Tab>("live");
   const [selected, setSelected] = useState<string | null>(null);
 
   const displayTokens = useMemo(() => {
     if (tab === "live") return tokens.filter((t) => t.status === "tracking" || t.status === "eligible");
-    if (tab === "all") return tokens;
+    if (tab === "all")  return tokens;
     return [];
   }, [tokens, tab]);
 
-  const openPositions = positions?.open ?? [];
+  const openPositions = positions?.open   ?? [];
   const closedAll     = positions?.closed ?? [];
   const selectedToken = selected ? tokens.find((t) => t.mint === selected) ?? null : null;
 
   const connSrc = status?.connectionSource ?? "offline";
-  const wsOk = connSrc !== "offline";
+  const wsOk    = connSrc !== "offline";
   const connLabel =
     connSrc === "pumpportal" ? "PUMPPORTAL" :
     connSrc === "helius"     ? "HELIUS" :
@@ -710,7 +668,7 @@ export default function FeedPage() {
           <div className="flex items-center gap-2">
             <div className="flex items-center gap-1.5 px-2 py-1 rounded-full" style={{
               background: wsOk ? "rgba(52,211,153,0.1)" : "rgba(248,113,113,0.1)",
-              border: `1px solid ${wsOk ? "rgba(52,211,153,0.25)" : "rgba(248,113,113,0.25)"}`
+              border: `1px solid ${wsOk ? "rgba(52,211,153,0.25)" : "rgba(248,113,113,0.25)"}`,
             }}>
               {wsOk ? <Wifi size={10} className="text-emerald-400" /> : <WifiOff size={10} className="text-red-400" />}
               <span className="text-[9px] font-bold" style={{ color: wsOk ? "#34d399" : "#f87171" }}>{connLabel}</span>
@@ -721,12 +679,11 @@ export default function FeedPage() {
           </div>
         </div>
 
-        {/* Sub-tabs */}
         <div className="flex px-4 pb-2 gap-1">
           {(["live", "all", "trades"] as Tab[]).map((t) => {
             const labels: Record<Tab, string> = {
-              live: `Live (${tokens.filter((tk) => tk.status === "tracking" || tk.status === "eligible").length})`,
-              all: `All Tokens (${tokens.length})`,
+              live:   `Live (${tokens.filter((tk) => tk.status === "tracking" || tk.status === "eligible").length})`,
+              all:    `All Tokens (${tokens.length})`,
               trades: `Trades (${openPositions.length})`,
             };
             return (
@@ -750,10 +707,8 @@ export default function FeedPage() {
       <div className="px-4 pt-4">
         <StatsStrip />
 
-        {/* ── Split view: list + detail ── */}
         {tab !== "trades" ? (
           <div>
-            {/* Detail panel (shown when token selected) */}
             {selectedToken && (
               <div className="mb-4">
                 <div className="flex items-center justify-between mb-3">
@@ -783,13 +738,12 @@ export default function FeedPage() {
               </div>
             )}
 
-            {/* Token list */}
             {displayTokens.length === 0 ? (
               <div className="text-center py-12">
                 <Telescope size={32} className="text-slate-700 mx-auto mb-3" />
                 <p className="text-slate-500 text-sm">Scanning for new launches…</p>
                 <p className="text-slate-600 text-xs mt-1">
-                  {wsOk ? `${connLabel} connected — scanning for new Pump.fun launches` : "Connecting to PumpPortal WebSocket…"}
+                  {wsOk ? `${connLabel} connected — watching Pump.fun` : "Connecting…"}
                 </p>
                 <button
                   onClick={() => inject.mutate(`TESTDEMO${Date.now().toString(36)}1111111111111111111111111111111111`)}
@@ -813,7 +767,6 @@ export default function FeedPage() {
             )}
           </div>
         ) : (
-          /* ── Trades tab ── */
           <div>
             {openPositions.length === 0 && closedAll.length === 0 ? (
               <div className="text-center py-12">
@@ -837,9 +790,7 @@ export default function FeedPage() {
                       Trade History ({closedAll.length})
                     </p>
                     <div className="space-y-2">
-                      {closedAll.map((pos) => (
-                        <ClosedPositionRow key={pos.id} pos={pos} />
-                      ))}
+                      {closedAll.map((pos) => <ClosedPositionRow key={pos.id} pos={pos} />)}
                     </div>
                   </div>
                 )}
