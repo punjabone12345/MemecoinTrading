@@ -4225,6 +4225,23 @@ class GraduationSniperService {
       .sort((a, b) => b.addedAt - a.addedAt)
       .slice(0, 30);
   }
+
+  // Force a manual WebSocket reconnect — called from the API when the UI
+  // detects OFFLINE status despite HELIUS_API_KEY being configured.
+  forceWsReconnect(): void {
+    const apiKey = process.env["HELIUS_API_KEY"];
+    if (!apiKey) {
+      logger.warn("forceWsReconnect: HELIUS_API_KEY not set — cannot reconnect");
+      return;
+    }
+    logger.info("forceWsReconnect: forcing Helius WebSocket reconnect");
+    // Close current socket if open — the close handler will schedule reconnect
+    if (this.ws) {
+      try { this.ws.terminate(); } catch { /* ignore */ }
+    }
+    // Also schedule a direct reconnect in case close handler doesn't fire
+    setTimeout(() => { if (!this.wsConnected) this.connect(apiKey); }, 1_000);
+  }
 }
 
 export const graduationSniperService = new GraduationSniperService();

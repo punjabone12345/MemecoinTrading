@@ -204,4 +204,21 @@ router.get("/sniper/watched", (_req, res) => {
   res.json({ success: true, data: graduationSniperService.getWatchedGrads() });
 });
 
+// ── Force Helius WebSocket reconnect ─────────────────────────────────────────
+// Useful when the deployment shows OFFLINE despite HELIUS_API_KEY being set.
+router.post("/sniper/reconnect", (_req, res) => {
+  try {
+    const status = graduationSniperService.getStatus();
+    if (!status.wsConnected) {
+      // Trigger reconnect by restarting the service internals
+      graduationSniperService.forceWsReconnect();
+      res.json({ success: true, message: "WebSocket reconnect triggered" });
+    } else {
+      res.json({ success: true, message: "Already connected", wsConnected: true });
+    }
+  } catch (err) {
+    res.status(500).json({ success: false, error: (err as Error).message });
+  }
+});
+
 export default router;

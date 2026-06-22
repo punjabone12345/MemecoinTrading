@@ -841,54 +841,84 @@ export default function GraduationSniper() {
       <div className="sticky top-0 z-10 bg-[#0d0d15]/95 backdrop-blur-md border-b border-white/8 px-4 py-3">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2.5">
-            <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-amber-500 to-orange-600 flex items-center justify-center">
-              <Target className="w-4 h-4 text-white" />
+            <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-amber-500 to-orange-600 flex items-center justify-center shadow-lg shadow-amber-500/20">
+              <Target className="w-4.5 h-4.5 text-white" />
             </div>
             <div>
-              <h1 className="text-sm font-black text-white leading-none">Graduation Sniper</h1>
-              <p className="text-[9px] text-white/35 leading-none mt-0.5">Pump.fun → Raydium · {wallet?.ready ? <span className="text-emerald-400/80 font-bold">🔴 LIVE</span> : "Wallet not configured"}</p>
+              <h1 className="text-[15px] font-black text-white leading-none tracking-tight">Graduation Sniper</h1>
+              <p className="text-[10px] text-white/40 leading-none mt-0.5">
+                Pump.fun → Raydium
+                <span className="mx-1 text-white/20">·</span>
+                {wallet?.ready
+                  ? <span className="text-emerald-400 font-bold">● LIVE</span>
+                  : <span className="text-white/35">Paper only</span>}
+              </p>
             </div>
           </div>
-          <div className="flex items-center gap-2">
-            <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold ${
-              status?.wsConnected ? "bg-emerald-500/15 text-emerald-400" : "bg-red-500/15 text-red-400"
-            }`}>
-              {status?.wsConnected ? <Wifi className="w-3 h-3" /> : <WifiOff className="w-3 h-3" />}
-              {status?.wsConnected ? "LIVE" : "DISCONNECTED"}
-            </div>
+          <div className="flex items-center gap-1.5">
+            {/* Connection badge — tap when OFFLINE to force reconnect */}
+            <button
+              onClick={async () => {
+                if (!status?.wsConnected) {
+                  await fetch("/api/sniper/reconnect", { method: "POST" }).catch(() => null);
+                  void queryClient.invalidateQueries({ queryKey: ["sniper-status"] });
+                }
+              }}
+              title={status?.wsConnected ? "Connected to Helius" : "Tap to reconnect"}
+              className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-full text-[10px] font-black border transition-all cursor-pointer ${
+                statusLoading
+                  ? "bg-white/6 text-white/40 border-white/10"
+                  : status?.wsConnected
+                  ? "bg-emerald-500/12 text-emerald-400 border-emerald-500/25"
+                  : "bg-red-500/12 text-red-400 border-red-500/25 hover:bg-red-500/20"
+              }`}>
+              {statusLoading
+                ? <RefreshCw className="w-3 h-3 animate-spin" />
+                : status?.wsConnected
+                ? <Wifi className="w-3 h-3" />
+                : <WifiOff className="w-3 h-3" />}
+              <span>{statusLoading ? "CONNECTING" : status?.wsConnected ? "LIVE" : "OFFLINE"}</span>
+            </button>
             <button onClick={() => setShowReset(true)} title="Reset account"
-              className="p-1.5 rounded-lg bg-white/5 hover:bg-red-500/15 text-white/30 hover:text-red-400 transition-colors">
-              <RotateCcw className="w-4 h-4" />
+              className="p-1.5 rounded-lg bg-white/5 hover:bg-red-500/12 text-white/30 hover:text-red-400 transition-colors border border-white/6">
+              <RotateCcw className="w-3.5 h-3.5" />
             </button>
             {config && (
-              <button onClick={() => setShowSettings(true)}
-                className="p-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-white/50 hover:text-white transition-colors">
-                <Settings className="w-4 h-4" />
+              <button onClick={() => setShowSettings(true)} title="Settings"
+                className="p-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-white/40 hover:text-white transition-colors border border-white/6">
+                <Settings className="w-3.5 h-3.5" />
               </button>
             )}
           </div>
         </div>
-        <div className="flex items-center gap-3 mt-2 text-[10px] text-white/30 flex-wrap">
-          <span>{(status?.wsReconnects ?? 0) > 0 ? `${status!.wsReconnects} reconnect${status!.wsReconnects > 1 ? "s" : ""}` : "Stable connection"}</span>
-          <span>·</span>
-          {/* Detection listener health — shows "last event Xs ago" or warns if silent */}
+        <div className="flex items-center gap-2 mt-2 text-[10px] flex-wrap">
+          <span className={`${(status?.wsReconnects ?? 0) > 0 ? "text-amber-400/70" : "text-white/30"}`}>
+            {(status?.wsReconnects ?? 0) > 0
+              ? `⚡ ${status!.wsReconnects} reconnect${status!.wsReconnects > 1 ? "s" : ""}`
+              : "Stable connection"}
+          </span>
+          <span className="text-white/15">·</span>
           {status?.wsConnected && (() => {
             const t = status.lastWsMessageAt;
-            if (!t) return <span className="text-amber-400/70">⚠ No messages yet</span>;
+            if (!t) return <span className="text-amber-400/60">⚠ No events yet</span>;
             const secAgo = Math.round((Date.now() - t) / 1000);
             const isStale = secAgo > 120;
             return (
-              <span className={isStale ? "text-red-400 font-bold" : "text-white/30"}>
+              <span className={isStale ? "text-red-400/80 font-bold" : "text-white/30"}>
                 {isStale ? "⚠ " : ""}last event {secAgo < 60 ? `${secAgo}s` : `${Math.round(secAgo / 60)}m`} ago
               </span>
             );
           })()}
-          {status?.wsConnected && <span>·</span>}
-          <span>{status?.enabled ? "Sniping enabled" : "Sniping paused"}</span>
-          <span>·</span>
-          <span className="text-amber-400/60">TP1 +{config?.tp1Pct ?? 150}% ({config?.tp1ClosePct ?? 40}%) · TP2 +{config?.tp2Pct ?? 400}% ({config?.tp2ClosePct ?? 40}%) · Runner 20%</span>
+          {status?.wsConnected && <span className="text-white/15">·</span>}
+          <span className={status?.enabled ? "text-emerald-400/60" : "text-amber-400/70"}>
+            {status?.enabled ? "Sniping enabled" : "⏸ Sniping paused"}
+          </span>
+          <span className="text-white/15">·</span>
+          <span className="text-amber-400/55">
+            TP1 +{config?.tp1Pct ?? 150}% ({config?.tp1ClosePct ?? 40}%) · TP2 +{config?.tp2Pct ?? 400}% ({config?.tp2ClosePct ?? 40}%) · Runner 20%
+          </span>
           {!status?.wsConnected && !statusLoading && (
-            <><span>·</span><span className="text-amber-400/70">Check HELIUS_API_KEY</span></>
+            <><span className="text-white/15">·</span><span className="text-amber-400/70">Tap OFFLINE to reconnect · check HELIUS_API_KEY</span></>
           )}
         </div>
       </div>
