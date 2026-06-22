@@ -1,12 +1,10 @@
 import { Router, type IRouter } from "express";
 import healthRouter from "./health.js";
-import graduationSniperRouter from "./graduation-sniper.js";
-import paperSniperRouter from "./paper-sniper.js";
+import earlyDiscoveryRouter from "./early-discovery.js";
 
 const router: IRouter = Router();
 
 router.use(healthRouter);
-router.use(graduationSniperRouter);
-router.use(paperSniperRouter);
+router.use(earlyDiscoveryRouter);
 
 export default router;

@@ -3,18 +3,21 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Shell } from "@/components/layout/Shell";
-import GraduationSniper from "@/pages/GraduationSniper";
-import PaperMode from "@/pages/PaperMode";
+import Dashboard from "@/pages/Dashboard";
+import AnalyticsPage from "@/pages/AnalyticsPage";
+import SettingsPage from "@/pages/SettingsPage";
 
-const queryClient = new QueryClient();
+const queryClient = new QueryClient({
+  defaultOptions: { queries: { refetchInterval: 10_000, staleTime: 5_000 } },
+});
 
 function Router() {
   return (
     <Shell>
       <Switch>
-        <Route path="/" component={GraduationSniper} />
-        <Route path="/sniper" component={GraduationSniper} />
-        <Route path="/paper" component={PaperMode} />
+        <Route path="/" component={Dashboard} />
+        <Route path="/analytics" component={AnalyticsPage} />
+        <Route path="/settings" component={SettingsPage} />
       </Switch>
     </Shell>
   );
