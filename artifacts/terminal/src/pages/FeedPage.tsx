@@ -3,9 +3,13 @@ import {
   Telescope, Wifi, WifiOff, TrendingUp, TrendingDown,
   ChevronRight, ExternalLink, AlertTriangle, Clock,
   Activity, Users, Zap, Shield, Target, RotateCcw, FlaskConical,
+  CheckCircle2, XCircle, Circle, Pencil, X, Trash2, ChevronDown, ChevronUp,
 } from "lucide-react";
-import { useEDStatus, useEDTokens, useEDPositions, useResetPaperBalance, useInjectTestToken } from "@/lib/api";
-import type { EDToken, EDPosition, EDTokenStatus } from "@/lib/types";
+import {
+  useEDStatus, useEDTokens, useEDPositions, useResetPaperBalance,
+  useInjectTestToken, useEDClosePosition, useEDDeletePosition, useEDEditPosition,
+} from "@/lib/api";
+import type { EDToken, EDPosition, EDTokenStatus, EntryChecklistItem, EDPositionPatch } from "@/lib/types";
 
 /* ── Helpers ──────────────────────────────────────────────────────────────── */
 function fmtAge(ms: number): string {
@@ -24,10 +28,6 @@ function fmtSol(v: number): string {
 }
 function fmtPct(v: number): string {
   return `${v >= 0 ? "+" : ""}${v.toFixed(1)}%`;
-}
-function fmtNum(v: number): string {
-  if (v >= 1_000) return `${(v / 1_000).toFixed(1)}K`;
-  return v.toFixed(2);
 }
 
 /* ── Status badge ──────────────────────────────────────────────────────────── */
@@ -75,19 +75,98 @@ function ScoreRing({ score, size = 48 }: { score: number; size?: number }) {
 }
 
 /* ── Bonding curve bar ─────────────────────────────────────────────────────── */
-function BondingBar({ pct }: { pct: number }) {
+function BondingBar({ pct, showRaw, virtualSol, targetSol }: {
+  pct: number; showRaw?: boolean; virtualSol?: number; targetSol?: number;
+}) {
   const color = pct >= 80 ? "#34d399" : pct >= 70 ? "#fbbf24" : "#818cf8";
   return (
-    <div className="flex items-center gap-1.5">
-      <div className="flex-1 h-1.5 rounded-full" style={{ background: "rgba(255,255,255,0.08)" }}>
-        <div
-          className="h-full rounded-full transition-all duration-700"
-          style={{ width: `${Math.min(pct, 100)}%`, background: color }}
-        />
+    <div>
+      <div className="flex items-center gap-1.5">
+        <div className="flex-1 h-1.5 rounded-full" style={{ background: "rgba(255,255,255,0.08)" }}>
+          <div
+            className="h-full rounded-full transition-all duration-300"
+            style={{ width: `${Math.min(pct, 100)}%`, background: color }}
+          />
+        </div>
+        <span className="text-[10px] font-bold tabular-nums" style={{ color, minWidth: 32 }}>
+          {pct.toFixed(1)}%
+        </span>
       </div>
-      <span className="text-[10px] font-bold tabular-nums" style={{ color, minWidth: 32 }}>
-        {pct.toFixed(0)}%
-      </span>
+      {showRaw && virtualSol !== undefined && targetSol !== undefined && (
+        <p className="text-[9px] text-slate-600 mt-0.5">
+          {virtualSol.toFixed(2)} SOL / {targetSol.toFixed(0)} SOL target
+        </p>
+      )}
+    </div>
+  );
+}
+
+/* ── Entry Checklist Panel ─────────────────────────────────────────────────── */
+function EntryChecklistPanel({ checklist }: { checklist: EntryChecklistItem[] }) {
+  if (!checklist || checklist.length === 0) {
+    return (
+      <div className="rounded-xl p-4" style={{ background: "rgba(13,13,30,0.8)", border: "1px solid rgba(255,255,255,0.07)" }}>
+        <p className="text-[10px] text-slate-500 uppercase tracking-widest mb-2">Entry Checklist</p>
+        <p className="text-[10px] text-slate-600">Waiting for first poll cycle…</p>
+      </div>
+    );
+  }
+
+  const allPass = checklist.every((c) => c.pass);
+  const passCount = checklist.filter((c) => c.pass).length;
+
+  return (
+    <div className="rounded-xl p-4" style={{ background: "rgba(13,13,30,0.8)", border: "1px solid rgba(255,255,255,0.07)" }}>
+      <div className="flex items-center justify-between mb-3">
+        <p className="text-[10px] text-slate-500 uppercase tracking-widest">Entry Checklist</p>
+        <div className="flex items-center gap-1.5">
+          <span className="text-[10px] font-bold" style={{ color: allPass ? "#34d399" : "#fbbf24" }}>
+            {passCount}/{checklist.length} passing
+          </span>
+          {allPass && (
+            <span className="text-[9px] font-black px-2 py-0.5 rounded-full" style={{ background: "rgba(52,211,153,0.15)", color: "#34d399" }}>
+              ENTRY READY
+            </span>
+          )}
+        </div>
+      </div>
+      <div className="space-y-1.5">
+        {checklist.map((item) => {
+          const iconColor = item.pass ? "#34d399" : item.borderline ? "#fbbf24" : "#f87171";
+          const bgColor   = item.pass ? "rgba(52,211,153,0.05)" : item.borderline ? "rgba(251,191,36,0.05)" : "rgba(248,113,113,0.05)";
+          const borderColor = item.pass ? "rgba(52,211,153,0.12)" : item.borderline ? "rgba(251,191,36,0.15)" : "rgba(248,113,113,0.12)";
+          return (
+            <div
+              key={item.label}
+              className="flex items-center justify-between rounded-lg px-2.5 py-1.5"
+              style={{ background: bgColor, border: `1px solid ${borderColor}` }}
+            >
+              <div className="flex items-center gap-2">
+                {item.pass ? (
+                  <CheckCircle2 size={12} style={{ color: iconColor, flexShrink: 0 }} />
+                ) : item.borderline ? (
+                  <Circle size={12} style={{ color: iconColor, flexShrink: 0 }} />
+                ) : (
+                  <XCircle size={12} style={{ color: iconColor, flexShrink: 0 }} />
+                )}
+                <span className="text-[10px] font-medium" style={{ color: item.pass ? "#94a3b8" : "#cbd5e1" }}>
+                  {item.label}
+                </span>
+              </div>
+              <div className="text-right">
+                <span className="text-[10px] font-bold tabular-nums" style={{ color: iconColor }}>
+                  {item.current}
+                </span>
+                {!item.pass && (
+                  <span className="text-[9px] text-slate-600 ml-1">
+                    (need {item.threshold})
+                  </span>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -138,6 +217,7 @@ function ScorePanel({ token }: { token: EDToken }) {
 function MetricsPanel({ token }: { token: EDToken }) {
   const ratio = token.sellVolumeSol > 0 ? token.buyVolumeSol / token.sellVolumeSol : token.buyVolumeSol > 0 ? 99 : 0;
   const rugColor = token.rugcheckStatus === "passed" ? "#34d399" : token.rugcheckStatus === "failed" ? "#f87171" : "#fbbf24";
+  const bcAge = token.bcUpdatedAt > 0 ? fmtAge(token.bcUpdatedAt) : "never";
   return (
     <div className="rounded-xl p-4" style={{ background: "rgba(13,13,30,0.8)", border: "1px solid rgba(255,255,255,0.07)" }}>
       <p className="text-[10px] text-slate-500 uppercase tracking-widest mb-3">Live Metrics</p>
@@ -169,8 +249,16 @@ function MetricsPanel({ token }: { token: EDToken }) {
         </div>
       </div>
       <div className="mt-2">
-        <p className="text-[9px] text-slate-500 mb-1">Bonding Curve Progress</p>
-        <BondingBar pct={token.bondingCurvePct} />
+        <div className="flex items-center justify-between mb-1">
+          <p className="text-[9px] text-slate-500">Bonding Curve Progress</p>
+          <p className="text-[9px] text-slate-600">updated {bcAge}</p>
+        </div>
+        <BondingBar
+          pct={token.bondingCurvePct}
+          showRaw
+          virtualSol={token.virtualSolReserves}
+          targetSol={token.targetSolReserves}
+        />
       </div>
       {token.status === "rejected" && token.rejectionReason && (
         <div className="mt-2 rounded-lg px-3 py-2 flex items-center gap-2" style={{ background: "rgba(248,113,113,0.08)", border: "1px solid rgba(248,113,113,0.2)" }}>
@@ -182,65 +270,329 @@ function MetricsPanel({ token }: { token: EDToken }) {
   );
 }
 
-/* ── Active trade card ─────────────────────────────────────────────────────── */
-function TradeCard({ pos }: { pos: EDPosition }) {
-  const isUp = pos.pnlPct >= 0;
-  const elapsed = fmtAge(pos.entryAt);
-  return (
-    <div
-      className="rounded-xl p-4"
-      style={{
-        background: isUp ? "rgba(52,211,153,0.05)" : "rgba(248,113,113,0.05)",
-        border: `1px solid ${isUp ? "rgba(52,211,153,0.15)" : "rgba(248,113,113,0.15)"}`,
-      }}
-    >
-      <div className="flex items-start justify-between mb-3">
-        <div>
-          <div className="flex items-center gap-2">
-            <span className="font-black text-base text-white">${pos.symbol}</span>
-            <span className="text-[9px] px-1.5 py-0.5 rounded-full font-bold" style={{ background: "rgba(129,140,248,0.15)", color: "#818cf8" }}>
-              Score {pos.entryScore}
-            </span>
-          </div>
-          <p className="text-[10px] text-slate-500 mt-0.5">{pos.name} · {elapsed}</p>
-        </div>
-        <div className="text-right">
-          <p className="font-black text-lg" style={{ color: isUp ? "#34d399" : "#f87171" }}>
-            {fmtPct(pos.pnlPct)}
-          </p>
-          <p className="text-[10px]" style={{ color: isUp ? "#34d399" : "#f87171" }}>
-            {fmtSol(pos.unrealizedPnlSol)}
-          </p>
-        </div>
-      </div>
-      <div className="grid grid-cols-3 gap-2 mb-3">
-        {[
-          { label: "Entry MC",   val: fmtMC(pos.entryMcap) },
-          { label: "Current MC", val: fmtMC(pos.currentMcap) },
-          { label: "Size",       val: `${pos.sizeSol.toFixed(3)} SOL` },
-        ].map(({ label, val }) => (
-          <div key={label} className="text-center">
-            <p className="text-[9px] text-slate-500 uppercase tracking-wide">{label}</p>
-            <p className="text-xs font-bold text-slate-200">{val}</p>
-          </div>
-        ))}
-      </div>
-      <div className="flex items-center justify-between">
+/* ── Edit Position Modal ───────────────────────────────────────────────────── */
+function EditPositionModal({ pos, onClose }: { pos: EDPosition; onClose: () => void }) {
+  const edit = useEDEditPosition();
+  const isOpen = pos.status === "open";
+
+  const [form, setForm] = useState<EDPositionPatch>({
+    entryPrice:    pos.entryPrice,
+    entryScore:    pos.entryScore,
+    sizeSol:       pos.sizeSol,
+    effectiveSlPrice: pos.effectiveSlPrice,
+    tp1Hit:        pos.tp1Hit,
+    tp2Hit:        pos.tp2Hit,
+    ...(isOpen ? {} : {
+      exitPrice:     pos.exitPrice ?? 0,
+      realizedPnlSol: pos.realizedPnlSol,
+      closeReason:   pos.closeReason,
+    }),
+  });
+
+  const handleSubmit = () => {
+    edit.mutate({ id: pos.id, patch: form }, { onSuccess: onClose });
+  };
+
+  const field = (label: string, fkey: keyof EDPositionPatch, type = "number") => (
+    <div key={String(fkey)}>
+      <label className="text-[9px] text-slate-500 uppercase tracking-wide block mb-1">{label}</label>
+      {type === "boolean" ? (
         <div className="flex gap-2">
-          <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${pos.tp1Hit ? "text-green-400 bg-green-400/10" : "text-slate-600 bg-white/5"}`}>TP1</span>
-          <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${pos.tp2Hit ? "text-green-400 bg-green-400/10" : "text-slate-600 bg-white/5"}`}>TP2</span>
+          {[true, false].map((v) => (
+            <button
+              key={String(v)}
+              onClick={() => setForm((f: EDPositionPatch) => ({ ...f, [fkey]: v }))}
+              className="px-3 py-1 rounded-lg text-[10px] font-bold transition-all"
+              style={{
+                background: form[fkey] === v ? (v ? "rgba(52,211,153,0.2)" : "rgba(248,113,113,0.2)") : "rgba(255,255,255,0.05)",
+                border: `1px solid ${form[fkey] === v ? (v ? "rgba(52,211,153,0.4)" : "rgba(248,113,113,0.4)") : "rgba(255,255,255,0.1)"}`,
+                color: form[fkey] === v ? (v ? "#34d399" : "#f87171") : "#64748b",
+              }}
+            >
+              {v ? "YES" : "NO"}
+            </button>
+          ))}
         </div>
-        <div className="text-right">
-          <p className="text-[9px] text-slate-500">SL @ {pos.effectiveSlPrice > 0 ? `$${pos.effectiveSlPrice.toExponential(3)}` : "—"}</p>
-          <p className="text-[9px] text-slate-500">{(pos.remainingFraction * 100).toFixed(0)}% remaining</p>
+      ) : type === "text" ? (
+        <input
+          className="w-full rounded-lg px-3 py-1.5 text-xs text-white bg-transparent focus:outline-none"
+          style={{ border: "1px solid rgba(255,255,255,0.12)" }}
+          value={String(form[fkey] ?? "")}
+          onChange={(e) => setForm((f: EDPositionPatch) => ({ ...f, [fkey]: e.target.value }))}
+        />
+      ) : (
+        <input
+          type="number"
+          step="any"
+          className="w-full rounded-lg px-3 py-1.5 text-xs text-white bg-transparent focus:outline-none"
+          style={{ border: "1px solid rgba(255,255,255,0.12)" }}
+          value={Number(form[fkey] ?? 0)}
+          onChange={(e) => setForm((f: EDPositionPatch) => ({ ...f, [fkey]: parseFloat(e.target.value) || 0 }))}
+        />
+      )}
+    </div>
+  );
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-end justify-center p-4" style={{ background: "rgba(0,0,0,0.7)", backdropFilter: "blur(8px)" }}>
+      <div className="w-full max-w-sm rounded-2xl p-5" style={{ background: "rgba(10,10,25,0.98)", border: "1px solid rgba(255,255,255,0.1)" }}>
+        <div className="flex items-center justify-between mb-4">
+          <div>
+            <h3 className="font-black text-white text-sm">${pos.symbol} — Edit Position</h3>
+            <p className="text-[10px] text-slate-500">{isOpen ? "Open" : "Closed"} position • {pos.id.slice(0, 10)}</p>
+          </div>
+          <button onClick={onClose} className="p-1 rounded-lg text-slate-500 hover:text-white transition-colors" style={{ border: "1px solid rgba(255,255,255,0.08)" }}>
+            <X size={14} />
+          </button>
+        </div>
+        <div className="space-y-3 mb-4">
+          {field("Entry Price (USD)", "entryPrice")}
+          {field("Entry Score", "entryScore")}
+          {field("Size (SOL)", "sizeSol")}
+          {isOpen && field("SL Price (USD)", "effectiveSlPrice")}
+          {isOpen && field("TP1 Hit", "tp1Hit", "boolean")}
+          {isOpen && field("TP2 Hit", "tp2Hit", "boolean")}
+          {!isOpen && field("Exit Price (USD)", "exitPrice")}
+          {!isOpen && field("Realized PnL (SOL)", "realizedPnlSol")}
+          {!isOpen && field("Close Reason", "closeReason", "text")}
+        </div>
+        <div className="flex gap-2">
+          <button
+            onClick={onClose}
+            className="flex-1 py-2 rounded-xl text-[11px] font-bold transition-all"
+            style={{ background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.1)", color: "#64748b" }}
+          >
+            Cancel
+          </button>
+          <button
+            onClick={handleSubmit}
+            disabled={edit.isPending}
+            className="flex-1 py-2 rounded-xl text-[11px] font-bold transition-all"
+            style={{ background: "rgba(129,140,248,0.2)", border: "1px solid rgba(129,140,248,0.4)", color: "#818cf8" }}
+          >
+            {edit.isPending ? "Saving…" : "Save Changes"}
+          </button>
         </div>
       </div>
     </div>
   );
 }
 
+/* ── Confirm Dialog ────────────────────────────────────────────────────────── */
+function ConfirmDialog({
+  title, message, confirmLabel, confirmColor = "#f87171",
+  onConfirm, onCancel, loading,
+}: {
+  title: string; message: string; confirmLabel: string;
+  confirmColor?: string; onConfirm: () => void; onCancel: () => void; loading?: boolean;
+}) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-end justify-center p-4" style={{ background: "rgba(0,0,0,0.7)", backdropFilter: "blur(8px)" }}>
+      <div className="w-full max-w-sm rounded-2xl p-5" style={{ background: "rgba(10,10,25,0.98)", border: "1px solid rgba(255,255,255,0.1)" }}>
+        <h3 className="font-black text-white text-sm mb-2">{title}</h3>
+        <p className="text-[11px] text-slate-400 mb-4">{message}</p>
+        <div className="flex gap-2">
+          <button
+            onClick={onCancel}
+            className="flex-1 py-2 rounded-xl text-[11px] font-bold transition-all"
+            style={{ background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.1)", color: "#64748b" }}
+          >
+            Cancel
+          </button>
+          <button
+            onClick={onConfirm}
+            disabled={loading}
+            className="flex-1 py-2 rounded-xl text-[11px] font-bold transition-all"
+            style={{ background: `${confirmColor}22`, border: `1px solid ${confirmColor}55`, color: confirmColor }}
+          >
+            {loading ? "Working…" : confirmLabel}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ── Active trade card ─────────────────────────────────────────────────────── */
+function TradeCard({ pos }: { pos: EDPosition }) {
+  const isUp = pos.pnlPct >= 0;
+  const elapsed = fmtAge(pos.entryAt);
+  const close  = useEDClosePosition();
+  const del    = useEDDeletePosition();
+  const [showEdit,    setShowEdit]    = useState(false);
+  const [showClose,   setShowClose]   = useState(false);
+  const [showDelete,  setShowDelete]  = useState(false);
+
+  return (
+    <>
+      <div
+        className="rounded-xl p-4"
+        style={{
+          background: isUp ? "rgba(52,211,153,0.05)" : "rgba(248,113,113,0.05)",
+          border: `1px solid ${isUp ? "rgba(52,211,153,0.15)" : "rgba(248,113,113,0.15)"}`,
+        }}
+      >
+        <div className="flex items-start justify-between mb-3">
+          <div>
+            <div className="flex items-center gap-2">
+              <span className="font-black text-base text-white">${pos.symbol}</span>
+              <span className="text-[9px] px-1.5 py-0.5 rounded-full font-bold" style={{ background: "rgba(129,140,248,0.15)", color: "#818cf8" }}>
+                Score {pos.entryScore}
+              </span>
+            </div>
+            <p className="text-[10px] text-slate-500 mt-0.5">{pos.name} · {elapsed}</p>
+          </div>
+          <div className="text-right">
+            <p className="font-black text-lg" style={{ color: isUp ? "#34d399" : "#f87171" }}>
+              {fmtPct(pos.pnlPct)}
+            </p>
+            <p className="text-[10px]" style={{ color: isUp ? "#34d399" : "#f87171" }}>
+              {fmtSol(pos.unrealizedPnlSol)}
+            </p>
+          </div>
+        </div>
+        <div className="grid grid-cols-3 gap-2 mb-3">
+          {[
+            { label: "Entry MC",   val: fmtMC(pos.entryMcap) },
+            { label: "Current MC", val: fmtMC(pos.currentMcap) },
+            { label: "Size",       val: `${pos.sizeSol.toFixed(3)} SOL` },
+          ].map(({ label, val }) => (
+            <div key={label} className="text-center">
+              <p className="text-[9px] text-slate-500 uppercase tracking-wide">{label}</p>
+              <p className="text-xs font-bold text-slate-200">{val}</p>
+            </div>
+          ))}
+        </div>
+        <div className="flex items-center justify-between mb-3">
+          <div className="flex gap-2">
+            <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${pos.tp1Hit ? "text-green-400 bg-green-400/10" : "text-slate-600 bg-white/5"}`}>TP1</span>
+            <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${pos.tp2Hit ? "text-green-400 bg-green-400/10" : "text-slate-600 bg-white/5"}`}>TP2</span>
+          </div>
+          <div className="text-right">
+            <p className="text-[9px] text-slate-500">SL @ {pos.effectiveSlPrice > 0 ? `$${pos.effectiveSlPrice.toExponential(3)}` : "—"}</p>
+            <p className="text-[9px] text-slate-500">{(pos.remainingFraction * 100).toFixed(0)}% remaining</p>
+          </div>
+        </div>
+        {/* Action buttons */}
+        <div className="flex gap-1.5 pt-2 border-t" style={{ borderColor: "rgba(255,255,255,0.06)" }}>
+          <button
+            onClick={() => setShowEdit(true)}
+            className="flex-1 flex items-center justify-center gap-1 py-1.5 rounded-lg text-[10px] font-bold transition-all"
+            style={{ background: "rgba(129,140,248,0.1)", border: "1px solid rgba(129,140,248,0.2)", color: "#818cf8" }}
+          >
+            <Pencil size={10} /> Edit
+          </button>
+          <button
+            onClick={() => setShowClose(true)}
+            className="flex-1 flex items-center justify-center gap-1 py-1.5 rounded-lg text-[10px] font-bold transition-all"
+            style={{ background: "rgba(251,191,36,0.1)", border: "1px solid rgba(251,191,36,0.2)", color: "#fbbf24" }}
+          >
+            <X size={10} /> Close
+          </button>
+          <button
+            onClick={() => setShowDelete(true)}
+            className="flex items-center justify-center gap-1 px-2.5 py-1.5 rounded-lg text-[10px] font-bold transition-all"
+            style={{ background: "rgba(248,113,113,0.1)", border: "1px solid rgba(248,113,113,0.2)", color: "#f87171" }}
+          >
+            <Trash2 size={10} />
+          </button>
+        </div>
+      </div>
+
+      {showEdit && <EditPositionModal pos={pos} onClose={() => setShowEdit(false)} />}
+
+      {showClose && (
+        <ConfirmDialog
+          title={`Close $${pos.symbol}?`}
+          message={`This will close the position at the current price ($${pos.currentPrice.toExponential(3)}). No real sell transaction will be executed — this is paper mode only.`}
+          confirmLabel="Close Position"
+          confirmColor="#fbbf24"
+          loading={close.isPending}
+          onConfirm={() => close.mutate(pos.id, { onSuccess: () => setShowClose(false) })}
+          onCancel={() => setShowClose(false)}
+        />
+      )}
+
+      {showDelete && (
+        <ConfirmDialog
+          title={`Delete $${pos.symbol}?`}
+          message="This will remove the position from tracking entirely. No sell transaction will be executed. The position size will be refunded to your paper balance."
+          confirmLabel="Delete Position"
+          loading={del.isPending}
+          onConfirm={() => del.mutate(pos.id, { onSuccess: () => setShowDelete(false) })}
+          onCancel={() => setShowDelete(false)}
+        />
+      )}
+    </>
+  );
+}
+
+/* ── Closed position row ───────────────────────────────────────────────────── */
+function ClosedPositionRow({ pos }: { pos: EDPosition }) {
+  const del  = useEDDeletePosition();
+  const [showEdit,   setShowEdit]   = useState(false);
+  const [showDelete, setShowDelete] = useState(false);
+
+  return (
+    <>
+      <div className="rounded-xl px-3 py-3 flex items-center justify-between" style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.06)" }}>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2">
+            <span className="font-bold text-sm text-white">${pos.symbol}</span>
+            <span className="text-[9px] text-slate-500">Score {pos.entryScore}</span>
+          </div>
+          <p className="text-[9px] text-slate-500 mt-0.5 truncate">{pos.closeReason}</p>
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          <div className="text-right">
+            <p className="font-black text-sm" style={{ color: pos.realizedPnlSol >= 0 ? "#34d399" : "#f87171" }}>
+              {fmtPct(pos.pnlPct)}
+            </p>
+            <p className="text-[10px]" style={{ color: pos.realizedPnlSol >= 0 ? "#34d399" : "#f87171" }}>
+              {fmtSol(pos.realizedPnlSol)}
+            </p>
+          </div>
+          <div className="flex gap-1">
+            <button
+              onClick={() => setShowEdit(true)}
+              className="p-1.5 rounded-lg transition-all"
+              style={{ background: "rgba(129,140,248,0.1)", border: "1px solid rgba(129,140,248,0.2)", color: "#818cf8" }}
+            >
+              <Pencil size={10} />
+            </button>
+            <button
+              onClick={() => setShowDelete(true)}
+              className="p-1.5 rounded-lg transition-all"
+              style={{ background: "rgba(248,113,113,0.1)", border: "1px solid rgba(248,113,113,0.2)", color: "#f87171" }}
+            >
+              <Trash2 size={10} />
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {showEdit && <EditPositionModal pos={pos} onClose={() => setShowEdit(false)} />}
+
+      {showDelete && (
+        <ConfirmDialog
+          title={`Delete $${pos.symbol} from history?`}
+          message="This will permanently remove this trade from your history. This cannot be undone."
+          confirmLabel="Delete Permanently"
+          loading={del.isPending}
+          onConfirm={() => del.mutate(pos.id, { onSuccess: () => setShowDelete(false) })}
+          onCancel={() => setShowDelete(false)}
+        />
+      )}
+    </>
+  );
+}
+
 /* ── Token row (in list) ───────────────────────────────────────────────────── */
 function TokenRow({ token, onClick, selected }: { token: EDToken; onClick: () => void; selected: boolean }) {
+  const failCount = token.entryChecklist?.filter((c) => !c.pass).length ?? 0;
+  const passCount = token.entryChecklist?.filter((c) => c.pass).length ?? 0;
+  const total = token.entryChecklist?.length ?? 0;
+
   return (
     <button
       onClick={onClick}
@@ -256,6 +608,15 @@ function TokenRow({ token, onClick, selected }: { token: EDToken; onClick: () =>
           <div className="flex items-center gap-2 mb-0.5">
             <span className="font-bold text-sm text-white truncate">${token.symbol}</span>
             <StatusBadge status={token.status} />
+            {/* Mini checklist summary */}
+            {total > 0 && (
+              <span className="text-[8px] font-bold px-1.5 py-0.5 rounded-full" style={{
+                background: failCount === 0 ? "rgba(52,211,153,0.15)" : "rgba(248,113,113,0.1)",
+                color: failCount === 0 ? "#34d399" : "#f87171",
+              }}>
+                {failCount === 0 ? "✓ ALL PASS" : `✗ ${failCount} fail`}
+              </span>
+            )}
           </div>
           <BondingBar pct={token.bondingCurvePct} />
           <div className="flex items-center gap-3 mt-1">
@@ -264,9 +625,12 @@ function TokenRow({ token, onClick, selected }: { token: EDToken; onClick: () =>
             </span>
             <span className="text-[9px] text-slate-500">{fmtMC(token.marketCapUsd)}</span>
             <span className="text-[9px] text-slate-500">{token.uniqueBuyers} buyers</span>
+            {total > 0 && (
+              <span className="text-[9px] text-slate-600">{passCount}/{total} checks</span>
+            )}
           </div>
         </div>
-        <ChevronRight size={14} className="text-slate-600 shrink-0" />
+        {selected ? <ChevronUp size={14} className="text-slate-600 shrink-0" /> : <ChevronDown size={14} className="text-slate-600 shrink-0" />}
       </div>
     </button>
   );
@@ -276,7 +640,6 @@ function TokenRow({ token, onClick, selected }: { token: EDToken; onClick: () =>
 function StatsStrip() {
   const { data: status } = useEDStatus();
   const { data: positions } = useEDPositions();
-  const reset = useResetPaperBalance();
   const unrealPnl = positions?.open.reduce((s, p) => s + p.unrealizedPnlSol, 0) ?? 0;
   const realPnl   = status?.totalRealizedPnlSol ?? 0;
   const totalPnl  = realPnl + unrealPnl;
@@ -325,7 +688,7 @@ export default function FeedPage() {
   }, [tokens, tab]);
 
   const openPositions = positions?.open ?? [];
-  const closedRecent  = (positions?.closed ?? []).slice(0, 5);
+  const closedAll     = positions?.closed ?? [];
   const selectedToken = selected ? tokens.find((t) => t.mint === selected) ?? null : null;
 
   const connSrc = status?.connectionSource ?? "offline";
@@ -361,7 +724,11 @@ export default function FeedPage() {
         {/* Sub-tabs */}
         <div className="flex px-4 pb-2 gap-1">
           {(["live", "all", "trades"] as Tab[]).map((t) => {
-            const labels: Record<Tab, string> = { live: `Live (${tokens.filter((tk) => tk.status === "tracking" || tk.status === "eligible").length})`, all: `All Tokens (${tokens.length})`, trades: `Trades (${openPositions.length})` };
+            const labels: Record<Tab, string> = {
+              live: `Live (${tokens.filter((tk) => tk.status === "tracking" || tk.status === "eligible").length})`,
+              all: `All Tokens (${tokens.length})`,
+              trades: `Trades (${openPositions.length})`,
+            };
             return (
               <button
                 key={t}
@@ -409,6 +776,7 @@ export default function FeedPage() {
                   </a>
                 </div>
                 <div className="grid gap-3">
+                  <EntryChecklistPanel checklist={selectedToken.entryChecklist ?? []} />
                   <ScorePanel token={selectedToken} />
                   <MetricsPanel token={selectedToken} />
                 </div>
@@ -447,7 +815,7 @@ export default function FeedPage() {
         ) : (
           /* ── Trades tab ── */
           <div>
-            {openPositions.length === 0 && closedRecent.length === 0 ? (
+            {openPositions.length === 0 && closedAll.length === 0 ? (
               <div className="text-center py-12">
                 <Target size={32} className="text-slate-700 mx-auto mb-3" />
                 <p className="text-slate-500 text-sm">No trades yet</p>
@@ -463,28 +831,14 @@ export default function FeedPage() {
                     </div>
                   </div>
                 )}
-                {closedRecent.length > 0 && (
+                {closedAll.length > 0 && (
                   <div>
-                    <p className="text-[10px] text-slate-500 uppercase tracking-widest mb-2">Recent Closed</p>
+                    <p className="text-[10px] text-slate-500 uppercase tracking-widest mb-2">
+                      Trade History ({closedAll.length})
+                    </p>
                     <div className="space-y-2">
-                      {closedRecent.map((pos) => (
-                        <div key={pos.id} className="rounded-xl px-4 py-3 flex items-center justify-between" style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.06)" }}>
-                          <div>
-                            <div className="flex items-center gap-2">
-                              <span className="font-bold text-sm text-white">${pos.symbol}</span>
-                              <span className="text-[9px] text-slate-500">Score {pos.entryScore}</span>
-                            </div>
-                            <p className="text-[9px] text-slate-500 mt-0.5">{pos.closeReason}</p>
-                          </div>
-                          <div className="text-right">
-                            <p className="font-black text-sm" style={{ color: pos.realizedPnlSol >= 0 ? "#34d399" : "#f87171" }}>
-                              {fmtPct(pos.pnlPct)}
-                            </p>
-                            <p className="text-[10px]" style={{ color: pos.realizedPnlSol >= 0 ? "#34d399" : "#f87171" }}>
-                              {fmtSol(pos.realizedPnlSol)}
-                            </p>
-                          </div>
-                        </div>
+                      {closedAll.map((pos) => (
+                        <ClosedPositionRow key={pos.id} pos={pos} />
                       ))}
                     </div>
                   </div>

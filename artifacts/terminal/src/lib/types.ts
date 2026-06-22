@@ -10,6 +10,14 @@ export interface EDScores {
   buyPressureRatio: number;
 }
 
+export interface EntryChecklistItem {
+  label: string;
+  pass: boolean;
+  current: string;
+  threshold: string;
+  borderline: boolean;
+}
+
 export interface EDToken {
   mint: string;
   symbol: string;
@@ -21,6 +29,8 @@ export interface EDToken {
   priceUsd: number;
   marketCapUsd: number;
   bondingCurvePct: number;
+  virtualSolReserves: number;
+  targetSolReserves: number;
   buyVolumeSol: number;
   sellVolumeSol: number;
   uniqueBuyers: number;
@@ -42,6 +52,8 @@ export interface EDToken {
   positionId: string | null;
   pollCount: number;
   creatorSold: boolean;
+  entryChecklist: EntryChecklistItem[];
+  bcUpdatedAt: number;
 }
 
 export interface EDPosition {
@@ -113,6 +125,23 @@ export interface EDStatus {
   totalRealizedPnlSol: number;
   totalUnrealizedPnlSol: number;
   config: EDConfig;
+}
+
+export interface EDPositionPatch {
+  entryPrice?: number;
+  entryScore?: number;
+  sizeSol?: number;
+  effectiveSlPrice?: number;
+  trailingHigh?: number;
+  tp1Hit?: boolean;
+  tp2Hit?: boolean;
+  closeReason?: string;
+  closingScore?: number;
+  exitPrice?: number;
+  realizedPnlSol?: number;
+  tp1RealizedSol?: number;
+  tp2RealizedSol?: number;
+  runnerRealizedSol?: number;
 }
 
 export interface EDAnalytics {

@@ -16,3 +16,5 @@
 - [Dip-retrace entry strategy](dip-retrace-strategy.md) — replaces immediate entry; quality gate passes → addToDipWatch → 30-min watch loop; entry triggers on 40–60% dump + 60% retrace
 - [Early Discovery Architecture](early-discovery-arch.md) — complete Early Demand Discovery system; critical route prefix gotcha; broadcast export pattern; scoring/TP/SL defaults
 - [ED token discovery sources](ed-discovery-sources.md) — GeckoTerminal new_pools is the working source; pumpportal WS + pump.fun APIs all blocked/dead in Replit; rugcheck single-holder must be skipped for <15min tokens
+- [ED rugcheck boolean bug](ed-rugcheck-boolean-bug.md) — passing rugcheckStatus===passed (boolean) to checkEntryConditions broke the guard; always pass the raw status string
+- [ED accountSubscribe pattern](ed-accountsubscribe.md) — Helius WS handles both logsNotification (id=1) and accountNotification; track reqId→mint then swap to subscriptionId on confirmation; clean up on token prune
