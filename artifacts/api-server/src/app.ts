@@ -59,10 +59,24 @@ if (shouldServeFrontend) {
   // In the compiled bundle (dist/index.mjs) __dirname = artifacts/api-server/dist
   // The frontend build lands at artifacts/terminal/dist/public
   const frontendDir = path.resolve(__dirname, "../../terminal/dist/public");
-  app.use(express.static(frontendDir, { maxAge: "1h", etag: true }));
+
+  // Hashed assets (JS/CSS bundles) get long-term cache; index.html must never be cached
+  // so browsers always fetch the latest entry point on every deploy.
+  app.use(express.static(frontendDir, {
+    maxAge: "1y",
+    etag: true,
+    setHeaders(res, filePath) {
+      if (filePath.endsWith("index.html")) {
+        res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+        res.setHeader("Pragma", "no-cache");
+        res.setHeader("Expires", "0");
+      }
+    },
+  }));
 
   // SPA fallback — anything that isn't an /api call gets index.html
   app.get(/^(?!\/api).*/, (_req, res) => {
+    res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
     res.sendFile(path.join(frontendDir, "index.html"));
   });
 
