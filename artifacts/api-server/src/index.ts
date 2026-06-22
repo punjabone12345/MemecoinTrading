@@ -102,9 +102,12 @@ if (process.env["DATABASE_URL"]) {
           tp2_realized_sol DOUBLE PRECISION DEFAULT 0,
           runner_realized_sol DOUBLE PRECISION DEFAULT 0,
           closing_score INTEGER,
-          position_multiplier DOUBLE PRECISION DEFAULT 1
+          position_multiplier DOUBLE PRECISION DEFAULT 1,
+          entry_bonding_curve_pct DOUBLE PRECISION DEFAULT 0
         )
       `);
+      // Add entry_bonding_curve_pct to existing tables that may not have it
+      await migClient.query(`ALTER TABLE ed_positions ADD COLUMN IF NOT EXISTS entry_bonding_curve_pct DOUBLE PRECISION DEFAULT 0`);
       logger.info("DB migration: all tables ready");
     } finally {
       migClient.release();

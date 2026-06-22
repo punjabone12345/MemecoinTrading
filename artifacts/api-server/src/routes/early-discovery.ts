@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { earlyDiscoveryService } from "../services/early-discovery.service.js";
-import type { EDConfig } from "../services/early-discovery.service.js";
+import type { EDConfig, EDPositionPatch } from "../services/early-discovery.service.js";
 
 const router = Router();
 
@@ -32,6 +32,25 @@ router.patch("/ed/config", async (req, res) => {
 router.post("/ed/reset-paper", async (_req, res) => {
   await earlyDiscoveryService.resetPaperBalance();
   res.json({ ok: true, balance: 1.0 });
+});
+
+router.post("/ed/positions/:id/close", (req, res) => {
+  const ok = earlyDiscoveryService.forceClosePosition(req.params.id);
+  if (!ok) { res.status(404).json({ error: "Position not found or already closed" }); return; }
+  res.json({ ok: true });
+});
+
+router.delete("/ed/positions/:id", (req, res) => {
+  const ok = earlyDiscoveryService.deletePosition(req.params.id);
+  if (!ok) { res.status(404).json({ error: "Position not found" }); return; }
+  res.json({ ok: true });
+});
+
+router.patch("/ed/positions/:id", (req, res) => {
+  const patch = req.body as EDPositionPatch;
+  const pos = earlyDiscoveryService.editPosition(req.params.id, patch);
+  if (!pos) { res.status(404).json({ error: "Position not found" }); return; }
+  res.json(pos);
 });
 
 router.post("/ed/inject-test", (req, res) => {

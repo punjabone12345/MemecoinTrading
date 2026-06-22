@@ -112,6 +112,73 @@ export function useUpdateEDConfig() {
   });
 }
 
+export function useEDClosePosition() {
+  const queryClient = useQueryClient();
+  return useMutation<{ ok: boolean }, Error, string>({
+    mutationFn: async (id) => {
+      const res = await fetch(apiUrl(`/api/ed/positions/${id}/close`), { method: "POST" });
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+      return res.json() as Promise<{ ok: boolean }>;
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["ed-positions"] });
+      void queryClient.invalidateQueries({ queryKey: ["ed-status"] });
+      void queryClient.invalidateQueries({ queryKey: ["ed-analytics"] });
+    },
+  });
+}
+
+export function useEDDeletePosition() {
+  const queryClient = useQueryClient();
+  return useMutation<{ ok: boolean }, Error, string>({
+    mutationFn: async (id) => {
+      const res = await fetch(apiUrl(`/api/ed/positions/${id}`), { method: "DELETE" });
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+      return res.json() as Promise<{ ok: boolean }>;
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["ed-positions"] });
+      void queryClient.invalidateQueries({ queryKey: ["ed-status"] });
+      void queryClient.invalidateQueries({ queryKey: ["ed-analytics"] });
+    },
+  });
+}
+
+export interface EDPositionPatch {
+  entryPrice?: number;
+  entryScore?: number;
+  sizeSol?: number;
+  effectiveSlPrice?: number;
+  trailingHigh?: number;
+  tp1Hit?: boolean;
+  tp2Hit?: boolean;
+  closeReason?: string;
+  closingScore?: number;
+  exitPrice?: number;
+  realizedPnlSol?: number;
+  tp1RealizedSol?: number;
+  tp2RealizedSol?: number;
+  runnerRealizedSol?: number;
+}
+
+export function useEDEditPosition() {
+  const queryClient = useQueryClient();
+  return useMutation<EDPosition, Error, { id: string; patch: EDPositionPatch }>({
+    mutationFn: async ({ id, patch }) => {
+      const res = await fetch(apiUrl(`/api/ed/positions/${id}`), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(patch),
+      });
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+      return res.json() as Promise<EDPosition>;
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["ed-positions"] });
+    },
+  });
+}
+
 export function useEDAnalytics() {
   return useQuery<EDAnalytics>({
     queryKey: ["ed-analytics"],
