@@ -5,6 +5,7 @@ import { initWebSocketServer } from "./websocket/server.js";
 import { startCommandPolling, registerCommandHandler, toIST, sendTelegram, isTelegramConfigured } from "./lib/telegram.js";
 import { graduationSniperService } from "./services/graduation-sniper.service.js";
 import { paperSniperService } from "./services/paper-sniper.service.js";
+import { pumpfunTraderService } from "./services/pumpfun-trader.service.js";
 
 const rawPort = process.env["PORT"] ?? "8080";
 const port = Number(rawPort);
@@ -208,6 +209,32 @@ if (process.env["DATABASE_URL"]) {
           entry_drift_pct DOUBLE PRECISION
         )
       `);
+      await migClient.query(`
+        CREATE TABLE IF NOT EXISTS pumpfun_positions (
+          id TEXT PRIMARY KEY,
+          mint TEXT NOT NULL,
+          symbol TEXT,
+          name TEXT,
+          detected_at BIGINT,
+          entry_at BIGINT,
+          entry_price DOUBLE PRECISION,
+          entry_mcap DOUBLE PRECISION,
+          entry_graduation_pct DOUBLE PRECISION,
+          entry_score DOUBLE PRECISION,
+          current_price DOUBLE PRECISION,
+          size_sol DOUBLE PRECISION,
+          tp1_hit BOOLEAN DEFAULT FALSE,
+          tp2_hit BOOLEAN DEFAULT FALSE,
+          remaining_fraction DOUBLE PRECISION DEFAULT 1.0,
+          effective_sl_price DOUBLE PRECISION,
+          trailing_high DOUBLE PRECISION,
+          status TEXT DEFAULT 'open',
+          realized_pnl_sol DOUBLE PRECISION DEFAULT 0,
+          close_reason TEXT,
+          closed_at BIGINT,
+          exit_price DOUBLE PRECISION
+        )
+      `);
       logger.info("DB migration: all tables ready");
     } finally {
       migClient.release();
@@ -218,6 +245,9 @@ if (process.env["DATABASE_URL"]) {
 }
 
 // ── Start services ────────────────────────────────────────────────────────────
+await pumpfunTraderService.init();
+pumpfunTraderService.start();
+
 await graduationSniperService.init();
 graduationSniperService.start();
 await paperSniperService.init();

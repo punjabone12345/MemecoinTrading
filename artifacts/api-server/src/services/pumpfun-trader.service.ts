@@ -279,6 +279,11 @@ class PumpfunTraderService {
   private ppReconnects = 0;
   private ppSubscribedMints = new Set<string>();
 
+  // WebSocket broadcaster — set by the WS server so the UI gets live pushes
+  private broadcaster: (() => void) | null = null;
+  setBroadcaster(fn: () => void): void { this.broadcaster = fn; }
+  private notify(): void { try { this.broadcaster?.(); } catch { /* ignore */ } }
+
   // SOL/USD price (refreshed every 5 min, used to convert PumpPortal SOL mcap → USD)
   private solPriceUsd = 150;
 
@@ -1545,6 +1550,7 @@ class PumpfunTraderService {
     this.virtualBalance -= sizeSol;
     token.status     = "bought";
     token.positionId = id;
+    this.notify();
 
     this.addEvent({ id: uid(), ts: Date.now(), mint: token.mint, symbol: token.symbol, action: "entered", score: token.score, graduationPct: token.graduationPct });
     void this.savePosition(pos);
@@ -1807,6 +1813,7 @@ class PumpfunTraderService {
   private addEvent(event: PumpfunEvent): void {
     this.events.unshift(event);
     if (this.events.length > MAX_EVENTS) this.events.pop();
+    this.notify();
   }
 
   // ── DB persistence ──────────────────────────────────────────────────────────

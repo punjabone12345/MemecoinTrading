@@ -3,7 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Shell } from "@/components/layout/Shell";
-import GraduationSniper from "@/pages/GraduationSniper";
+import PumpfunTrader from "@/pages/PumpfunTrader";
 import PaperMode from "@/pages/PaperMode";
 
 const queryClient = new QueryClient();
@@ -12,8 +12,8 @@ function Router() {
   return (
     <Shell>
       <Switch>
-        <Route path="/" component={GraduationSniper} />
-        <Route path="/sniper" component={GraduationSniper} />
+        <Route path="/" component={PumpfunTrader} />
+        <Route path="/live" component={PumpfunTrader} />
         <Route path="/paper" component={PaperMode} />
       </Switch>
     </Shell>

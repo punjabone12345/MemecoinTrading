@@ -45,6 +45,13 @@ export function useWebSocket() {
             queryClient.invalidateQueries({ queryKey: ["paper-sniper-history"] });
             queryClient.invalidateQueries({ queryKey: ["paper-sniper-events"] });
           }
+          if (data.type === "pumpfun_update") {
+            queryClient.invalidateQueries({ queryKey: ["pumpfun-status"] });
+            queryClient.invalidateQueries({ queryKey: ["pumpfun-tokens"] });
+            queryClient.invalidateQueries({ queryKey: ["pumpfun-positions"] });
+            queryClient.invalidateQueries({ queryKey: ["pumpfun-history"] });
+            queryClient.invalidateQueries({ queryKey: ["pumpfun-events"] });
+          }
         } catch (_) {}
       };
 
