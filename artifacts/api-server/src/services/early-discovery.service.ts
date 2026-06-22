@@ -545,7 +545,9 @@ class EarlyDiscoveryService {
   // ── Polling cycle ─────────────────────────────────────────────────────────
   private async pollCycle(): Promise<void> {
     this.pruneOldTokens();
-    const active = [...this.tokens.values()].filter((t) => t.status === "tracking" || t.status === "eligible");
+    const active = [...this.tokens.values()].filter((t) =>
+      t.status === "tracking" || t.status === "eligible" || t.status === "entered"
+    );
     for (const token of active) {
       if (token.rugcheckStatus === "pending" && token.pollCount > 0) {
         void this.runRugcheck(token.mint, token);

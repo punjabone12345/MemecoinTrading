@@ -435,6 +435,15 @@ function TradeCard({ pos }: { pos: EDPosition }) {
           </div>
         </div>
         <div className="flex gap-1.5 pt-2 border-t" style={{ borderColor: "rgba(255,255,255,0.06)" }}>
+          <a
+            href={`https://dexscreener.com/solana/${pos.mint}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="flex items-center justify-center gap-1 px-2.5 py-1.5 rounded-lg text-[10px] font-bold transition-all"
+            style={{ background: "rgba(52,211,153,0.1)", border: "1px solid rgba(52,211,153,0.2)", color: "#34d399" }}
+          >
+            <ExternalLink size={10} />
+          </a>
           <button
             onClick={() => setShowEdit(true)}
             className="flex-1 flex items-center justify-center gap-1 py-1.5 rounded-lg text-[10px] font-bold transition-all"
