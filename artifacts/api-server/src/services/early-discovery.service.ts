@@ -24,7 +24,7 @@ const MAX_REJECTED_AGE_MS    = 3 * 60 * 1000;   // 3 min — prune rejected toke
 const MAX_EXITED_AGE_MS      = 10 * 60 * 1000;  // 10 min for exited positions
 const MAX_TRACKED_TOKENS     = 500;              // hard cap — pruning keeps actual set much smaller
 const MAX_TOKENS_UI          = 200;              // cap returned to frontend
-const ENTRY_CONFIRM_MS       = 2 * 60 * 1000;   // 2 min confirmation window
+const ENTRY_CONFIRM_MS       = 30_000;           // 30s confirmation window (was 2min — too slow)
 const STARTING_BALANCE       = 1.0;             // SOL
 const KV_CONFIG_KEY          = "ed_config";
 const KV_BALANCE_KEY         = "ed_balance";
@@ -146,10 +146,10 @@ const DEFAULT_CONFIG: EDConfig = {
   enabled: true,
   positionSizeSol: 0.1,
   maxOpenPositions: 5,
-  minScore: 95,
-  minBondingCurvePct: 70,
-  minUniqueBuyers: 25,
-  minBuyPressureRatio: 3,
+  minScore: 55,              // lowered from 95 — DexScreener lags, tokens score 0 initially
+  minBondingCurvePct: 60,   // lowered from 70 — catch tokens earlier
+  minUniqueBuyers: 10,      // lowered from 25 — DexScreener lags on unique buyer counts
+  minBuyPressureRatio: 1.5, // lowered from 3 — pure buy pressure (0 sells) is already good
   slPct: 20,
   tp1Pct: 80,
   tp1ClosePct: 25,
@@ -511,7 +511,7 @@ class EarlyDiscoveryService {
       token.scores = calculateDemandScore(metrics);
 
       const entryCheck = checkEntryConditions(
-        token.scores, metrics, token.rugcheckStatus === "passed",
+        token.scores, metrics, token.rugcheckStatus,
         token.discoveryPrice, token.priceUsd, this.config.minScore,
       );
 

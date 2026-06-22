@@ -60,6 +60,22 @@ const KNOWN_SAFE_HOLDERS = new Set([
   "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", // Token program
   "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8", // Raydium AMM
   "5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1", // Raydium Authority
+  "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",  // Pump.fun program (bonding curve)
+  "Ce6TQqeHC9p8KetsN6JsjHK7UTZk7nasjjnr7XxXp9F1", // Pump.fun bonding curve authority
+  "TSLvdd1pWpHVjahSpsvCXUbgwsL3JAcvokwaKt1eokM",  // Pump.fun fee recipient
+]);
+
+// Danger risk names that are EXPECTED on brand-new pump.fun pre-graduation tokens
+// and therefore should not block entry. These are structural properties of the
+// bonding curve mechanism, not malicious acts.
+const PUMPFUN_EXPECTED_DANGERS = new Set([
+  "Single holder ownership",     // Bonding curve PDA holds >X% of supply initially — expected
+  "Top 10 holders high ownership", // Bonding curve + early buyers = high concentration — expected
+  "High ownership",              // Related to concentration — expected on new tokens
+  "Low Liquidity",               // Pre-graduation tokens have thin liquidity — expected
+  "Low amount of LP Providers",  // Bonding curve = single LP provider — expected
+  "No social links found",       // New tokens often have no socials yet
+  "Mutable metadata",            // Common on new tokens, not necessarily malicious
 ]);
 
 async function fetchReport(mintAddress: string): Promise<RugCheckReport | null> {
@@ -185,17 +201,26 @@ export async function checkTokenSafety(
     );
   }
 
-  if (dangerRisks.length > 0) {
+  // For pump.fun pre-graduation tokens, some DANGER risks are expected due to
+  // the bonding curve mechanism (e.g. single holder = bonding curve PDA, low
+  // liquidity = pre-graduation). Filter those out and only block on real dangers.
+  const realDangerRisks = dangerRisks.filter((r) => !PUMPFUN_EXPECTED_DANGERS.has(r));
+  if (realDangerRisks.length > 0) {
     return fail(
-      `RugCheck: DANGER risk(s) detected — ${dangerRisks.join(", ")}`,
-      partial,
+      `RugCheck: DANGER risk(s) detected — ${realDangerRisks.join(", ")}`,
+      { ...partial, dangerRisks: realDangerRisks },
     );
   }
+  // Re-tag expected dangers as warnings so callers can see them
+  const expectedDangerAsWarn = dangerRisks.filter((r) => PUMPFUN_EXPECTED_DANGERS.has(r));
+  if (expectedDangerAsWarn.length > 0) {
+    (partial as Partial<RugCheckResult>).warnRisks = [...(partial.warnRisks ?? []), ...expectedDangerAsWarn];
+  }
 
-  // LP lock check — only applies to traditional AMM tokens, NOT pump.fun.
-  // Pump.fun tokens use a bonding curve mechanism and never lock LP — that is
-  // expected and safe. For non-pump tokens, 0% lock on a very new pair is risky.
-  const isPumpFun = mintAddress.toLowerCase().endsWith("pump");
+  // LP lock check — pump.fun tokens use a bonding curve, not traditional LP.
+  // All tokens arriving here are from the pump.fun bonding curve system.
+  // Skip LP lock check entirely for pump.fun tokens.
+  const isPumpFun = true; // All tokens tracked by this bot are pump.fun tokens
   if (!isPumpFun && lpLockedPct === 0 && pairAgeMinutes < 20) {
     return fail(
       `RugCheck: 0% LP locked on a ${Math.round(pairAgeMinutes)}m old non-pump pair — easy LP pull rug`,
@@ -203,9 +228,12 @@ export async function checkTokenSafety(
     );
   }
 
-  // Single whale holding >40% of supply (excluding known DEX addresses)
-  // Raised from 30% → 40% since early meme launches often have concentrated supply
-  if (topHolderPct > 40) {
+  // Single whale holding >60% of supply (excluding known DEX/bonding curve addresses).
+  // Pump.fun bonding curve PDA legitimately holds 100% of supply when first launched
+  // and decreases as buyers purchase. The KNOWN_SAFE_HOLDERS list covers the static
+  // bonding curve authority but NOT the per-token PDA (which is mint-derived).
+  // Raising threshold to 60% accounts for this — a non-DEX wallet at >60% is a real red flag.
+  if (topHolderPct > 60) {
     return fail(
       `RugCheck: single holder owns ${topHolderPct.toFixed(1)}% of supply — extreme concentration risk`,
       partial,

@@ -107,7 +107,7 @@ export interface EntryCheckResult {
 export function checkEntryConditions(
   scores: DemandScores,
   metrics: DemandMetrics,
-  rugcheckPassed: boolean,
+  rugcheckStatus: "pending" | "passed" | "failed",
   discoveryPrice: number,
   currentPrice: number,
   minScore: number,
@@ -116,22 +116,35 @@ export function checkEntryConditions(
 
   if (scores.finalScore < minScore)
     blockers.push(`Score ${scores.finalScore} < ${minScore}`);
-  if (metrics.uniqueBuyers < 25)
-    blockers.push(`Buyers ${metrics.uniqueBuyers} < 25`);
-  if (scores.buyPressureRatio < 3)
-    blockers.push(`Buy pressure ${scores.buyPressureRatio.toFixed(1)}x < 3x`);
-  if (metrics.bondingCurvePct < 70)
-    blockers.push(`Bonding curve ${metrics.bondingCurvePct.toFixed(0)}% < 70%`);
-  if (!rugcheckPassed)
+
+  // Require at least 10 unique buyers (lowered from 25 — DexScreener lags on new tokens)
+  if (metrics.uniqueBuyers < 10)
+    blockers.push(`Buyers ${metrics.uniqueBuyers} < 10`);
+
+  // Buy pressure: only block if there is actual sell volume AND ratio is bad.
+  // If there are zero sells (pure buy pressure), that's a strong signal — don't block.
+  if (metrics.sellVolumeSol > 0.01 && scores.buyPressureRatio < 1.5)
+    blockers.push(`Buy pressure ${scores.buyPressureRatio.toFixed(1)}x < 1.5x`);
+
+  // Bonding curve: lowered to 60% (was 70%) — catch tokens earlier with genuine demand
+  if (metrics.bondingCurvePct < 60)
+    blockers.push(`Bonding curve ${metrics.bondingCurvePct.toFixed(0)}% < 60%`);
+
+  // Only hard-block on confirmed rug — "pending" (API unavailable) is not a block
+  if (rugcheckStatus === "failed")
     blockers.push("Rugcheck failed");
-  if (metrics.creatorHoldingsPct > 5)
-    blockers.push(`Creator holds ${metrics.creatorHoldingsPct.toFixed(1)}% > 5%`);
-  if (metrics.topHolderPct > 15)
-    blockers.push(`Top holder ${metrics.topHolderPct.toFixed(1)}% > 15%`);
+
+  // Creator risk: only block if creator holds a significant amount
+  if (metrics.creatorHoldingsPct > 10)
+    blockers.push(`Creator holds ${metrics.creatorHoldingsPct.toFixed(1)}% > 10%`);
+
+  // Top holder: raised threshold — rugcheck already blocks >40%
+  if (metrics.topHolderPct > 25)
+    blockers.push(`Top holder ${metrics.topHolderPct.toFixed(1)}% > 25%`);
 
   if (discoveryPrice > 0 && currentPrice > 0) {
     const pumpPct = ((currentPrice - discoveryPrice) / discoveryPrice) * 100;
-    if (pumpPct > 150)
+    if (pumpPct > 200)
       blockers.push(`Already pumped ${pumpPct.toFixed(0)}% from discovery (anti-FOMO)`);
   }
 
@@ -139,9 +152,10 @@ export function checkEntryConditions(
 }
 
 export function getPositionSizeMultiplier(score: number): number {
-  if (score >= 110) return 1.00;
-  if (score >= 100) return 0.75;
-  if (score >= 95)  return 0.50;
+  if (score >= 100) return 1.00;
+  if (score >= 80)  return 0.75;
+  if (score >= 60)  return 0.50;
+  if (score >= 40)  return 0.35;
   return 0;
 }
 
