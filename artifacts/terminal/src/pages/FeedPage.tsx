@@ -502,8 +502,9 @@ export default function FeedPage() {
   const [selected, setSelected] = useState<string | null>(null);
 
   const displayTokens = useMemo(() => {
-    if (tab === "live") return tokens.filter((t) => t.status === "tracking" || t.status === "eligible");
-    if (tab === "all") return tokens;
+    const sorted = [...tokens].sort((a, b) => b.scores.finalScore - a.scores.finalScore);
+    if (tab === "live") return sorted.filter((t) => t.status === "tracking" || t.status === "eligible");
+    if (tab === "all") return sorted;
     return [];
   }, [tokens, tab]);
 

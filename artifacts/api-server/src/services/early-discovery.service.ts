@@ -494,16 +494,16 @@ class EarlyDiscoveryService {
         token.sellVolumeSol    = dexData.sellVolumeSol;
         if (dexData.priceUsd > 0) token.priceUsd = dexData.priceUsd;
         if (token.discoveryPrice === 0 && dexData.priceUsd > 0) token.discoveryPrice = dexData.priceUsd;
-        // Use DexScreener-derived bonding curve % as fallback when pump.fun API fails
+        // Use DexScreener-derived bonding curve % only when pump.fun API gives nothing
         if (dexData.bondingCurvePct > 0 && token.bondingCurvePct === 0) {
           token.bondingCurvePct = dexData.bondingCurvePct;
         }
-        // Always take the higher of the two mcap readings
+        // Update mcap from DexScreener (take highest reading)
         if (dexData.marketCapUsd > 0) {
           token.marketCapUsd = Math.max(token.marketCapUsd, dexData.marketCapUsd);
-          // Recalculate from market cap whenever we have fresh data
-          const fromMcap = Math.min((token.marketCapUsd / EarlyDiscoveryService.GRAD_MCAP_USD) * 100, 99.9);
-          if (fromMcap > token.bondingCurvePct) token.bondingCurvePct = fromMcap;
+          // NOTE: do NOT override bondingCurvePct from mcap — the mcap→bonding-curve
+          // mapping is non-linear (price accelerates as curve fills) and systematically
+          // under-reports the true progress. virtual_sol_reserves-based calc is used instead.
         }
       }
 
@@ -564,13 +564,27 @@ class EarlyDiscoveryService {
       const solReserves = (d.virtual_sol_reserves ?? 0) / 1e9;
       const tokReserves = (d.virtual_token_reserves ?? 0) / 1e6;
       const priceUsd    = solReserves > 0 && tokReserves > 0 ? (solReserves / tokReserves) * 150 : 0;
+
+      // Accurate bonding curve progress from virtual reserves:
+      // Pump.fun starts with 30 SOL virtual, graduates when 85 actual SOL added (115 total)
+      // Using virtual_sol_reserves is far more accurate than the mcap-derived formula
+      // which is non-linear (price accelerates as curve fills).
+      const INIT_VIRTUAL_SOL = 30;
+      const GRAD_DELTA_SOL   = 85; // SOL added at graduation
+      const bondingFromReserves = solReserves > INIT_VIRTUAL_SOL
+        ? Math.min(((solReserves - INIT_VIRTUAL_SOL) / GRAD_DELTA_SOL) * 100, 99.9)
+        : 0;
+      // Also honour the API's own field (0-100 range from pump.fun backend)
+      const apiProgress = d.bonding_curve_progress ?? 0;
+      const bondingCurvePct = Math.max(bondingFromReserves, apiProgress);
+
       return {
         symbol: d.symbol ?? "???",
         name:   d.name   ?? "",
         creator: d.creator ?? "",
         imageUri: d.image_uri ?? "",
         marketCapUsd: d.usd_market_cap ?? 0,
-        bondingCurvePct: d.bonding_curve_progress ?? 0,
+        bondingCurvePct,
         priceUsd,
       };
     } catch { return null; }
