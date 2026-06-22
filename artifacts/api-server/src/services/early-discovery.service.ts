@@ -18,8 +18,9 @@ const GECKOTERMINAL_BASE = "https://api.geckoterminal.com/api/v2";
 const HELIUS_WS_BASE     = "wss://mainnet.helius-rpc.com";
 const PUMPPORTAL_WS_URL  = "wss://pumpportal.fun/api/data";
 
-const POLL_INTERVAL_MS      = 30_000;
-const HTTP_POLL_INTERVAL_MS = 15_000;
+const POLL_INTERVAL_MS          = 30_000;
+const HTTP_POLL_INTERVAL_MS     = 15_000;
+const POSITION_PRICE_POLL_MS    = 4_000;   // fast loop for open positions only
 const MAX_TRACK_AGE_MS      = 60 * 60 * 1000;
 const MAX_REJECTED_AGE_MS   = 3 * 60 * 1000;
 const MAX_EXITED_AGE_MS     = 10 * 60 * 1000;
@@ -199,6 +200,7 @@ class EarlyDiscoveryService {
   private wsReconnects = 0;
   private pingInterval: ReturnType<typeof setInterval> | null = null;
   private pollInterval: ReturnType<typeof setInterval> | null = null;
+  private positionPriceInterval: ReturnType<typeof setInterval> | null = null;
 
   private tokens = new Map<string, EDToken>();
   private openPositions = new Map<string, EDPosition>();
@@ -231,7 +233,63 @@ class EarlyDiscoveryService {
     }
 
     this.pollInterval = setInterval(() => this.pollCycle(), POLL_INTERVAL_MS);
+
+    // Fast price loop — runs every 4 s for open positions only
+    this.positionPriceInterval = setInterval(() => { void this.pollOpenPositionPrices(); }, POSITION_PRICE_POLL_MS);
+
     logger.info("Early discovery: started");
+  }
+
+  // ── Fast position price poller ────────────────────────────────────────────
+  private async pollOpenPositionPrices(): Promise<void> {
+    if (this.openPositions.size === 0) return;
+
+    const mints = [...this.openPositions.keys()];
+
+    // Jupiter Price API v2 — accepts comma-separated mint addresses, no auth needed
+    const JUPITER_PRICE_URL = "https://api.jup.ag/price/v2";
+
+    try {
+      type JupPriceEntry = { id: string; price: string };
+      type JupPriceResponse = { data: Record<string, JupPriceEntry> };
+
+      const res = await axios.get<JupPriceResponse>(JUPITER_PRICE_URL, {
+        params: { ids: mints.join(",") },
+        timeout: 5_000,
+      });
+
+      const priceMap = res.data?.data ?? {};
+      let anyUpdated = false;
+
+      for (const mint of mints) {
+        const pos = this.openPositions.get(mint);
+        if (!pos) continue;
+
+        const entry = priceMap[mint];
+        const newPrice = entry ? parseFloat(entry.price) : 0;
+
+        if (newPrice > 0 && Math.abs(newPrice - pos.currentPrice) / (pos.currentPrice || newPrice) > 0.0001) {
+          pos.currentPrice = newPrice;
+
+          // Also update the token so the feed card reflects the same price
+          const token = this.tokens.get(mint);
+          if (token) {
+            token.priceUsd = newPrice;
+            token.lastUpdatedAt = Date.now();
+          }
+          anyUpdated = true;
+        }
+      }
+
+      if (anyUpdated) {
+        // Run TP/SL checks with fresh prices
+        this.checkPositions();
+        this.broadcast();
+      }
+    } catch (err) {
+      // Jupiter unreachable — fall back silently; regular DexScreener poll will catch up
+      logger.debug({ err: (err as Error).message }, "Early discovery: Jupiter fast-price poll failed");
+    }
   }
 
   // ── HTTP Poller (PRIMARY discovery) ───────────────────────────────────────

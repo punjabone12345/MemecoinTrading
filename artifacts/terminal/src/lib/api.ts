@@ -82,7 +82,7 @@ export function useEDPositions() {
   return useQuery<{ open: EDPosition[]; closed: EDPosition[] }>({
     queryKey: ["ed-positions"],
     queryFn: () => apiFetch<{ open: EDPosition[]; closed: EDPosition[] }>("/api/ed/positions"),
-    refetchInterval: 8_000,
+    refetchInterval: 3_000,
   });
 }
 
