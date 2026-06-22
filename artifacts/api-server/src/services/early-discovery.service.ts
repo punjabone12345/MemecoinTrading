@@ -12,10 +12,11 @@ import {
 } from "./demand-scorer.js";
 
 // ── Constants ──────────────────────────────────────────────────────────────────
-const PUMPFUN_PROGRAM  = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
-const PUMPFUN_API_BASE = "https://client-api-2-74b1891ee9f9.herokuapp.com";
-const DEXSCREENER_BASE = "https://api.dexscreener.com";
-const HELIUS_WS_BASE   = "wss://atlas-mainnet.helius-rpc.com";
+const PUMPFUN_PROGRAM    = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
+const PUMPFUN_API_BASE   = "https://client-api-2-74b1891ee9f9.herokuapp.com";
+const DEXSCREENER_BASE   = "https://api.dexscreener.com";
+const HELIUS_WS_BASE     = "wss://mainnet.helius-rpc.com";
+const PUMPPORTAL_WS_URL  = "wss://pumpportal.fun/api/data";
 
 const POLL_INTERVAL_MS     = 30_000;
 const MAX_TRACK_AGE_MS     = 30 * 60 * 1000;  // 30 min
@@ -24,6 +25,8 @@ const ENTRY_CONFIRM_MS     = 2 * 60 * 1000;   // 2 min confirmation window
 const STARTING_BALANCE     = 1.0;             // SOL
 const KV_CONFIG_KEY        = "ed_config";
 const KV_BALANCE_KEY       = "ed_balance";
+const RECONNECT_BASE_MS    = 3_000;
+const RECONNECT_MAX_MS     = 30_000;
 
 const HELIUS_API_KEY = process.env["HELIUS_API_KEY"] ?? "";
 
@@ -116,6 +119,9 @@ export interface EDConfig {
 export interface EDStatus {
   wsConnected: boolean;
   wsReconnects: number;
+  ppConnected: boolean;
+  ppReconnects: number;
+  connectionSource: "pumpportal" | "helius" | "offline";
   enabled: boolean;
   trackedCount: number;
   eligibleCount: number;
@@ -155,6 +161,12 @@ function uid(): string {
 
 // ── Service ───────────────────────────────────────────────────────────────────
 class EarlyDiscoveryService {
+  // PumpPortal WebSocket (primary — free, no API key required)
+  private ppWs: WebSocket | null = null;
+  private ppConnected = false;
+  private ppReconnects = 0;
+
+  // Helius WebSocket (secondary — enhances detection speed if API key is set)
   private ws: WebSocket | null = null;
   private wsConnected = false;
   private wsReconnects = 0;
@@ -179,174 +191,221 @@ class EarlyDiscoveryService {
   }
 
   start(): void {
-    if (!HELIUS_API_KEY) {
-      logger.warn("Early discovery: HELIUS_API_KEY not set — WebSocket disabled. Paper trading active in offline mode.");
-    } else {
+    // PumpPortal — always on (free, no key needed) — PRIMARY discovery source
+    this.connectPumpPortal();
+
+    // Helius — optional secondary enhancement (speeds up detection if API key set)
+    if (HELIUS_API_KEY) {
       this.connectWs();
+    } else {
+      logger.info("Early discovery: HELIUS_API_KEY not set — running on PumpPortal only (fully operational)");
     }
+
     this.pollInterval = setInterval(() => this.pollCycle(), POLL_INTERVAL_MS);
     logger.info("Early discovery: started");
   }
 
-  // ── Helius WebSocket ──────────────────────────────────────────────────────
+  // ── PumpPortal WebSocket (PRIMARY — free, no API key, always works) ────────
+  private connectPumpPortal(): void {
+    try {
+      const ws = new WebSocket(PUMPPORTAL_WS_URL);
+
+      ws.on("open", () => {
+        this.ppConnected = true;
+        logger.info("Early discovery: PumpPortal WebSocket connected — subscribing to new token launches");
+        ws.send(JSON.stringify({ method: "subscribeNewToken" }));
+      });
+
+      ws.on("message", (raw) => {
+        try {
+          type PPEvent = {
+            txType?: string;
+            mint?: string;
+            traderPublicKey?: string;
+            name?: string;
+            symbol?: string;
+            marketCapSol?: number;
+          };
+          const msg = JSON.parse(raw.toString()) as PPEvent;
+          if (!msg.mint || msg.txType !== "create") return;
+
+          const mint = msg.mint;
+          if (this.tokens.has(mint)) return;
+
+          logger.info({ mint: mint.slice(0, 8), symbol: msg.symbol }, "Early discovery: new launch via PumpPortal 🚀");
+          this.launchesDetected++;
+          void this.onNewLaunchWithMeta(mint, {
+            symbol: msg.symbol ?? mint.slice(0, 6).toUpperCase(),
+            name:   msg.name   ?? mint.slice(0, 8),
+            creator: msg.traderPublicKey ?? "",
+          });
+        } catch { /* ignore parse errors */ }
+      });
+
+      ws.on("close", () => {
+        this.ppConnected = false;
+        this.ppReconnects++;
+        const delay = Math.min(RECONNECT_MAX_MS, RECONNECT_BASE_MS * Math.min(this.ppReconnects, 10));
+        logger.warn({ reconnects: this.ppReconnects, delayMs: delay }, "Early discovery: PumpPortal WS closed — reconnecting");
+        setTimeout(() => this.connectPumpPortal(), delay);
+      });
+
+      ws.on("error", (err) => {
+        logger.warn({ err: (err as Error).message }, "Early discovery: PumpPortal WS error");
+      });
+
+      this.ppWs = ws;
+    } catch (err) {
+      logger.warn({ err: (err as Error).message }, "Early discovery: PumpPortal WS connect failed — retrying in 10s");
+      setTimeout(() => this.connectPumpPortal(), 10_000);
+    }
+  }
+
+  // ── Helius WebSocket (SECONDARY — logsSubscribe works on all plan tiers) ──
   private connectWs(): void {
     if (!HELIUS_API_KEY) return;
     try {
-      const wsUrl = `${HELIUS_WS_BASE}?api-key=${HELIUS_API_KEY}`;
+      const wsUrl = `${HELIUS_WS_BASE}/?api-key=${HELIUS_API_KEY}`;
       this.ws = new WebSocket(wsUrl);
 
-      this.ws.onopen = () => {
+      this.ws.on("open", () => {
         this.wsConnected = true;
-        logger.info("Early discovery: Helius WS connected");
+        logger.info("Early discovery: Helius WS connected (secondary enhancement)");
         this.subscribe();
         this.pingInterval = setInterval(() => {
-          if (this.ws?.readyState === WebSocket.OPEN) this.ws.ping();
+          if (this.ws?.readyState === WebSocket.OPEN) (this.ws as WebSocket).ping();
         }, 30_000);
-      };
+      });
 
-      this.ws.onmessage = (event) => {
+      this.ws.on("message", (raw) => {
         try {
-          const msg = JSON.parse(event.data as string);
+          const msg = JSON.parse(raw.toString()) as Record<string, unknown>;
           this.handleWsMessage(msg);
         } catch { /* ignore malformed */ }
-      };
+      });
 
-      this.ws.onclose = () => {
+      this.ws.on("close", () => {
         this.wsConnected = false;
         if (this.pingInterval) { clearInterval(this.pingInterval); this.pingInterval = null; }
         this.wsReconnects++;
-        const delay = Math.min(30_000, 3_000 * this.wsReconnects);
-        logger.warn({ reconnects: this.wsReconnects, delayMs: delay }, "Early discovery: WS closed — reconnecting");
+        const delay = Math.min(RECONNECT_MAX_MS, RECONNECT_BASE_MS * Math.min(this.wsReconnects, 10));
+        logger.warn({ reconnects: this.wsReconnects, delayMs: delay }, "Early discovery: Helius WS closed — reconnecting");
         setTimeout(() => this.connectWs(), delay);
-      };
+      });
 
-      this.ws.onerror = (err) => {
-        logger.error({ err: (err as Error).message }, "Early discovery: WS error");
-      };
+      this.ws.on("error", (err) => {
+        logger.warn({ err: (err as Error).message }, "Early discovery: Helius WS error");
+      });
     } catch (err) {
-      logger.error({ err: (err as Error).message }, "Early discovery: WS connect failed");
+      logger.warn({ err: (err as Error).message }, "Early discovery: Helius WS connect failed");
       setTimeout(() => this.connectWs(), 10_000);
     }
   }
 
   private subscribe(): void {
     if (this.ws?.readyState !== WebSocket.OPEN) return;
+    // logsSubscribe works on ALL Helius plan tiers (free and paid)
     this.ws.send(JSON.stringify({
       jsonrpc: "2.0",
       id: 1,
-      method: "transactionSubscribe",
+      method: "logsSubscribe",
       params: [
-        {
-          accountInclude: [PUMPFUN_PROGRAM],
-          commitment: "confirmed",
-          failed: false,
-        },
-        {
-          encoding: "base64",
-          transactionDetails: "full",
-          showRewards: false,
-          maxSupportedTransactionVersion: 0,
-        },
+        { mentions: [PUMPFUN_PROGRAM] },
+        { commitment: "processed" },
       ],
     }));
-    logger.info("Early discovery: subscribed to pump.fun program transactions");
+    logger.info("Early discovery: Helius logsSubscribe active for pump.fun program");
   }
 
   private handleWsMessage(msg: Record<string, unknown>): void {
-    if (msg["method"] !== "transactionNotification") return;
+    if (msg["method"] !== "logsNotification") return;
     const params = msg["params"] as Record<string, unknown> | undefined;
     const result = params?.["result"] as Record<string, unknown> | undefined;
-    if (!result) return;
+    const value  = result?.["value"] as Record<string, unknown> | undefined;
+    if (!value) return;
 
-    const sig = result["signature"] as string | undefined;
-    const txWrapper = result["transaction"] as Record<string, unknown> | undefined;
-    if (!txWrapper) return;
+    // Skip failed txs
+    if (value["err"]) return;
 
-    const meta = txWrapper["meta"] as Record<string, unknown> | undefined;
-    const logMessages = (meta?.["logMessages"] as string[] | undefined) ?? [];
+    const sig  = value["signature"] as string | undefined;
+    const logs = (value["logs"] as string[] | undefined) ?? [];
 
-    const isCreate = logMessages.some((l) =>
+    // Only interested in Create instructions
+    const isCreate = logs.some((l) =>
       l.includes("Instruction: Create") || l.includes("Program log: Instruction: Create")
     );
-    if (!isCreate) return;
+    if (!isCreate || !sig) return;
 
-    const postTokenBalances = (meta?.["postTokenBalances"] as Array<{ mint?: string; owner?: string }> | undefined) ?? [];
+    // Try to extract mint from log messages (format: "Program log: mint: <address>")
     let mint: string | null = null;
-    for (const bal of postTokenBalances) {
-      if (bal.mint && bal.mint.length > 32 && !this.tokens.has(bal.mint)) {
-        mint = bal.mint;
-        break;
-      }
+    for (const log of logs) {
+      const m = /mint:\s*([1-9A-HJ-NP-Za-km-z]{32,44})/.exec(log);
+      if (m?.[1] && !this.tokens.has(m[1])) { mint = m[1]; break; }
     }
+    // PumpPortal will also pick this up, so only process if we got a valid mint
     if (!mint) return;
     if (this.tokens.has(mint)) return;
 
-    logger.info({ mint: mint.slice(0, 8), sig: sig?.slice(0, 8) }, "Early discovery: new pump.fun launch detected 🚀");
+    logger.info({ mint: mint.slice(0, 8), sig: sig.slice(0, 8) }, "Early discovery: new pump.fun launch via Helius 🚀");
     this.launchesDetected++;
     void this.onNewLaunch(mint);
   }
 
   // ── New token onboarding ──────────────────────────────────────────────────
+  private makeEmptyToken(mint: string): EDToken {
+    const now = Date.now();
+    return {
+      mint, symbol: "???", name: "Loading…", creator: "", imageUri: "",
+      launchAt: now, lastUpdatedAt: now,
+      priceUsd: 0, marketCapUsd: 0, bondingCurvePct: 0,
+      buyVolumeSol: 0, sellVolumeSol: 0,
+      uniqueBuyers: 0, prevUniqueBuyers: 0, buyerAcceleration: 0, buyersPerMinute: 0,
+      creatorHoldingsPct: 0, topHolderPct: 0, whaleParticipation: false,
+      rugcheckStatus: "pending", rugcheckReason: "", rugcheckScore: 0,
+      mintAuthority: false, freezeAuthority: false,
+      scores: { buyerGrowthScore: 0, volumeScore: 0, buyPressureScore: 0, walletQualityScore: 0, bondingCurveScore: 0, finalScore: 0, buyPressureRatio: 0 },
+      status: "tracking", rejectionReason: "",
+      firstEligibleAt: null, discoveryPrice: 0, positionId: null, pollCount: 0, creatorSold: false,
+    };
+  }
+
   private async onNewLaunch(mint: string): Promise<void> {
+    return this.onNewLaunchWithMeta(mint, { symbol: "???", name: "Loading…", creator: "" });
+  }
+
+  private async onNewLaunchWithMeta(
+    mint: string,
+    meta: { symbol: string; name: string; creator: string },
+  ): Promise<void> {
+    if (this.tokens.has(mint)) return;
     if (this.tokens.size >= MAX_TRACKED_TOKENS) {
       this.pruneOldTokens();
       if (this.tokens.size >= MAX_TRACKED_TOKENS) {
-        logger.debug({ mint: mint.slice(0, 8) }, "Early discovery: too many tracked tokens, skipping new launch");
+        logger.debug({ mint: mint.slice(0, 8) }, "Early discovery: too many tracked tokens, skipping");
         return;
       }
     }
 
-    const now = Date.now();
-    const token: EDToken = {
-      mint,
-      symbol: "???",
-      name: "Loading…",
-      creator: "",
-      imageUri: "",
-      launchAt: now,
-      lastUpdatedAt: now,
-      priceUsd: 0,
-      marketCapUsd: 0,
-      bondingCurvePct: 0,
-      buyVolumeSol: 0,
-      sellVolumeSol: 0,
-      uniqueBuyers: 0,
-      prevUniqueBuyers: 0,
-      buyerAcceleration: 0,
-      buyersPerMinute: 0,
-      creatorHoldingsPct: 0,
-      topHolderPct: 0,
-      whaleParticipation: false,
-      rugcheckStatus: "pending",
-      rugcheckReason: "",
-      rugcheckScore: 0,
-      mintAuthority: false,
-      freezeAuthority: false,
-      scores: { buyerGrowthScore: 0, volumeScore: 0, buyPressureScore: 0, walletQualityScore: 0, bondingCurveScore: 0, finalScore: 0, buyPressureRatio: 0 },
-      status: "tracking",
-      rejectionReason: "",
-      firstEligibleAt: null,
-      discoveryPrice: 0,
-      positionId: null,
-      pollCount: 0,
-      creatorSold: false,
-    };
+    const token = this.makeEmptyToken(mint);
+    token.symbol  = meta.symbol;
+    token.name    = meta.name;
+    token.creator = meta.creator;
 
     this.tokens.set(mint, token);
     this.broadcast();
 
-    // Fetch initial metadata + run rugcheck concurrently
+    // Fetch full metadata + rugcheck concurrently
     const [pfData] = await Promise.all([
       this.fetchPumpFunData(mint),
       this.runRugcheck(mint, token),
     ]);
 
     if (pfData) {
-      token.symbol       = pfData.symbol || "???";
-      token.name         = pfData.name   || mint.slice(0, 8);
-      token.creator      = pfData.creator || "";
-      token.imageUri     = pfData.imageUri || "";
-      token.marketCapUsd = pfData.marketCapUsd;
+      token.symbol          = pfData.symbol   || meta.symbol;
+      token.name            = pfData.name     || meta.name;
+      token.creator         = pfData.creator  || meta.creator;
+      token.imageUri        = pfData.imageUri || "";
+      token.marketCapUsd    = pfData.marketCapUsd;
       token.bondingCurvePct = pfData.bondingCurvePct;
       token.discoveryPrice  = pfData.priceUsd;
       token.priceUsd        = pfData.priceUsd;
@@ -895,9 +954,15 @@ class EarlyDiscoveryService {
     const openPosArr = [...this.openPositions.values()];
     const unrealizedPnl = openPosArr.reduce((sum, p) => sum + p.unrealizedPnlSol, 0);
     const realizedPnl   = this.closedPositions.reduce((sum, p) => sum + p.realizedPnlSol, 0);
+    const connectionSource: EDStatus["connectionSource"] =
+      this.ppConnected ? "pumpportal" :
+      this.wsConnected ? "helius" : "offline";
     return {
-      wsConnected: this.wsConnected,
+      wsConnected: this.ppConnected || this.wsConnected,
       wsReconnects: this.wsReconnects,
+      ppConnected: this.ppConnected,
+      ppReconnects: this.ppReconnects,
+      connectionSource,
       enabled: this.config.enabled,
       trackedCount: tokenArr.filter((t) => t.status === "tracking").length,
       eligibleCount: tokenArr.filter((t) => t.status === "eligible").length,

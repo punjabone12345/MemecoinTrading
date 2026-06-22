@@ -95,6 +95,9 @@ export interface EDConfig {
 export interface EDStatus {
   wsConnected: boolean;
   wsReconnects: number;
+  ppConnected: boolean;
+  ppReconnects: number;
+  connectionSource: "pumpportal" | "helius" | "offline";
   enabled: boolean;
   trackedCount: number;
   eligibleCount: number;

@@ -328,7 +328,9 @@ export default function FeedPage() {
   const closedRecent  = (positions?.closed ?? []).slice(0, 5);
   const selectedToken = selected ? tokens.find((t) => t.mint === selected) ?? null : null;
 
-  const wsOk = status?.wsConnected ?? false;
+  const connSrc = status?.connectionSource ?? "offline";
+  const wsOk = connSrc !== "offline";
+  const connLabel = connSrc === "pumpportal" ? "PUMPPORTAL" : connSrc === "helius" ? "HELIUS" : "OFFLINE";
 
   return (
     <div className="min-h-screen">
@@ -340,9 +342,12 @@ export default function FeedPage() {
             <span className="font-black text-sm text-white tracking-tight">APEX MEME TRADER</span>
           </div>
           <div className="flex items-center gap-2">
-            <div className="flex items-center gap-1.5 px-2 py-1 rounded-full" style={{ background: wsOk ? "rgba(52,211,153,0.1)" : "rgba(248,113,113,0.1)", border: `1px solid ${wsOk ? "rgba(52,211,153,0.25)" : "rgba(248,113,113,0.25)"}` }}>
+            <div className="flex items-center gap-1.5 px-2 py-1 rounded-full" style={{
+              background: wsOk ? "rgba(52,211,153,0.1)" : "rgba(248,113,113,0.1)",
+              border: `1px solid ${wsOk ? "rgba(52,211,153,0.25)" : "rgba(248,113,113,0.25)"}`
+            }}>
               {wsOk ? <Wifi size={10} className="text-emerald-400" /> : <WifiOff size={10} className="text-red-400" />}
-              <span className="text-[9px] font-bold" style={{ color: wsOk ? "#34d399" : "#f87171" }}>{wsOk ? "LIVE" : "OFFLINE"}</span>
+              <span className="text-[9px] font-bold" style={{ color: wsOk ? "#34d399" : "#f87171" }}>{connLabel}</span>
             </div>
             <div className="px-2 py-1 rounded-full" style={{ background: "rgba(129,140,248,0.1)", border: "1px solid rgba(129,140,248,0.2)" }}>
               <span className="text-[9px] font-bold text-indigo-400">PAPER MODE</span>
@@ -413,7 +418,7 @@ export default function FeedPage() {
                 <Telescope size={32} className="text-slate-700 mx-auto mb-3" />
                 <p className="text-slate-500 text-sm">Scanning for new launches…</p>
                 <p className="text-slate-600 text-xs mt-1">
-                  {wsOk ? "WebSocket connected — waiting for new Pump.fun tokens" : "Waiting for Helius WebSocket connection"}
+                  {wsOk ? `${connLabel} connected — scanning for new Pump.fun launches` : "Connecting to PumpPortal WebSocket…"}
                 </p>
                 <button
                   onClick={() => inject.mutate(`TESTDEMO${Date.now().toString(36)}1111111111111111111111111111111111`)}
