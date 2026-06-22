@@ -312,7 +312,10 @@ export interface SniperStatus {
 export interface WatchedGrad {
   mint: string;
   symbol: string;
-  gradPrice: number;         // USD price at graduation detection (from on-chain or first DexScreener price)
+  // USD price at graduation (on-chain estimate initially; overwritten by first real DexScreener price)
+  gradPrice: number;
+  // true once gradPrice has been confirmed by a DexScreener reading (locks it against further overwrite)
+  gradPriceLocked: boolean;
 
   // Phase 0 → Phase 1: track lowest seen and pump from it
   lowestSeen: number;        // lowest price seen at any point (reset if price goes lower pre-phase1)
@@ -1145,7 +1148,7 @@ class GraduationSniperService {
         return;
       }
 
-      const { mint, wsolVaultPubkey, tokenVaultPubkey } = extracted;
+      const { mint, wsolVaultPubkey, tokenVaultPubkey, txSolInVault, txTokenInVault } = extracted;
       const skipReason = this.checkSkipReason(mint);
       const eventBase  = { id: uid(), detectedAt, mint, symbol: mint.slice(0, 8), txSignature: signature };
       catchEventBase   = eventBase; // expose to catch block
@@ -1193,10 +1196,17 @@ class GraduationSniperService {
         }
       }
 
-      // ── T0: on-chain price + SOL/USD (parallel) ────────────────────────────────
-      // Pool accounts are created in the graduation TX but may not be readable
-      // immediately — retry up to 3× with 1.5s delay to let RPC state settle.
+      // ── T0: graduation price from migration TX (zero latency) ─────────────────
+      // txSolInVault / txTokenInVault come directly from the migration TX's
+      // postTokenBalances — the exact amounts deposited into the new pool at
+      // graduation block. No external API, no indexing delay, millisecond-accurate.
+      //
+      // Falls back to on-chain RPC reads only if the TX data was missing
+      // (shouldn't happen with Helius jsonParsed encoding, but kept as safety net).
+      const hasTxPrice = txSolInVault > 0 && txTokenInVault > 0;
+
       const fetchReservesWithRetry = async () => {
+        if (hasTxPrice) return null; // TX data is sufficient — skip extra RPC round-trip
         if (!wsolVaultPubkey || !tokenVaultPubkey) return null;
         for (let attempt = 0; attempt < 3; attempt++) {
           if (attempt > 0) await new Promise<void>((r) => setTimeout(r, 1_500));
@@ -1206,7 +1216,7 @@ class GraduationSniperService {
             return r;
           }
         }
-        logger.warn({ mint, wsolVaultPubkey: wsolVaultPubkey.slice(0, 8) }, "Graduation sniper: on-chain reserves still 0 after 3 attempts — falling back to DexScreener");
+        logger.warn({ mint, wsolVaultPubkey: wsolVaultPubkey?.slice(0, 8) }, "Graduation sniper: on-chain reserves still 0 after 3 attempts — no price available");
         return null;
       };
 
@@ -1215,11 +1225,27 @@ class GraduationSniperService {
         this.fetchSolUsdPrice(),
       ]);
 
-      const initialPoolSol    = reserves?.solBalance ?? 0;
-      const effectiveSolUsd   = solUsd ?? 150;
-      const initialPrice      = (reserves && reserves.solBalance > 0 && reserves.tokenBalanceUi > 0 && effectiveSolUsd > 0)
-        ? (reserves.solBalance / reserves.tokenBalanceUi) * effectiveSolUsd
+      // Primary: TX-exact amounts (on-chain truth, zero latency)
+      // Fallback: RPC vault reads (used only when TX amounts were 0)
+      const primarySol      = hasTxPrice ? txSolInVault   : (reserves?.solBalance   ?? 0);
+      const primaryToken    = hasTxPrice ? txTokenInVault : (reserves?.tokenBalanceUi ?? 0);
+      const effectiveSolUsd = solUsd ?? 150;
+
+      const initialPoolSol = primarySol;
+      const initialPrice   = (primarySol > 0 && primaryToken > 0 && effectiveSolUsd > 0)
+        ? (primarySol / primaryToken) * effectiveSolUsd
         : 0;
+
+      logger.info({
+        mint,
+        method:         hasTxPrice ? "tx-exact ⚡" : "rpc-fallback 🔄",
+        txSolInVault:   txSolInVault.toFixed(4),
+        txTokenInVault: txTokenInVault.toFixed(0),
+        primarySol:     primarySol.toFixed(4),
+        primaryToken:   primaryToken.toFixed(0),
+        solUsd:         effectiveSolUsd.toFixed(2),
+        initialPrice:   initialPrice > 0 ? `$${initialPrice.toExponential(4)}` : "unavailable",
+      }, "Graduation sniper: graduation price calculated");
 
       // Pre-quality pool SOL check — fast rejection before 60s quality window
       if (initialPoolSol > 0) {
@@ -1280,9 +1306,11 @@ class GraduationSniperService {
 
       // ── Dip-Retrace Watch: add this token to the watch list ─────────────────
       // Run regardless of whether we enter — we want to track ALL graduates.
-      // initialPrice is the on-chain reserve-ratio price at graduation.
+      // priceLocked=true when price comes from migration TX (millisecond-accurate) —
+      // prevents DexScreener from overwriting it with a delayed/wrong value.
       this.addToWatchList(mint, symbol, initialPrice, quality.totalScore,
-        wsolVaultPubkey ?? undefined, tokenVaultPubkey ?? undefined);
+        wsolVaultPubkey ?? undefined, tokenVaultPubkey ?? undefined,
+        hasTxPrice && initialPrice > 0);
 
       if (quality.autoSkipReason) {
         this.addEvent({ ...fullEventBase, action: 'skipped',
@@ -1356,13 +1384,8 @@ class GraduationSniperService {
         return;
       }
 
-      if (!c1.isActive) {
-        this.addEvent({ ...fullEventBase, action: 'skipped',
-          skipReason: `Candle 1 inactive (buys: ${c1.buysDelta})`, ...qualityEventFields });
-        logger.info({ mint, symbol, buysDelta: c1.buysDelta },
-          'Graduation sniper: candle 1 inactive — skip ❌');
-        return;
-      }
+      // "Candle 1 inactive" check removed — zero-buy candles still get entered;
+      // a candle with 0 buys can spike on candle 2 and is not a reliable reject signal.
 
       logger.info({
         mint, symbol,
@@ -1455,7 +1478,7 @@ class GraduationSniperService {
     return null;
   }
 
-  private async extractMintFromTx(signature: string): Promise<{ mint: string; wsolVaultPubkey: string | null; tokenVaultPubkey: string | null } | null> {
+  private async extractMintFromTx(signature: string): Promise<{ mint: string; wsolVaultPubkey: string | null; tokenVaultPubkey: string | null; txSolInVault: number; txTokenInVault: number } | null> {
     const apiKey = process.env["HELIUS_API_KEY"];
     if (!apiKey) return null;
 
@@ -1669,13 +1692,24 @@ class GraduationSniperService {
             newTokenCount: newTokenEntries.length,
           }, "Graduation sniper: vault extraction strategy");
 
+          // ── Extract graduation price directly from migration TX ──────────────
+          // postTokenBalances.uiAmount is already decimal-adjusted (UI units).
+          // txSolInVault  = SOL deposited into the new pool's wSOL vault
+          // txTokenInVault = tokens deposited into the new pool's token vault
+          // price = (txSolInVault / txTokenInVault) * solUsd — zero latency, on-chain exact
+          const txSolInVault   = (wsolEntry?.uiTokenAmount?.uiAmount   ?? 0) as number;
+          const txTokenInVault = (tokenEntry?.uiTokenAmount?.uiAmount  ?? 0) as number;
+
           logger.info({
             signature, mint,
             wsolVaultPubkey:  wsolVaultPubkey?.slice(0, 8) ?? null,
             tokenVaultPubkey: tokenVaultPubkey?.slice(0, 8) ?? null,
+            txSolInVault:     txSolInVault.toFixed(4),
+            txTokenInVault:   txTokenInVault.toFixed(0),
+            hasTxPrice:       txSolInVault > 0 && txTokenInVault > 0,
             attempt: attempt + 1,
-          }, "Graduation sniper: mint + both vaults extracted ✅");
-          return { mint, wsolVaultPubkey, tokenVaultPubkey };
+          }, "Graduation sniper: mint + vaults + TX-exact graduation price ✅");
+          return { mint, wsolVaultPubkey, tokenVaultPubkey, txSolInVault, txTokenInVault };
         }
 
         logger.info(
@@ -3966,16 +4000,19 @@ class GraduationSniperService {
     qualityScore?: number,
     _wsolVaultPubkey?: string,
     _tokenVaultPubkey?: string,
+    priceLocked?: boolean,
   ): void {
     if (this.watchedGrads.has(mint)) return; // already watching this token
     const now = Date.now();
-    // gradPrice may be 0 if on-chain reserves weren't readable yet —
-    // first DexScreener price will initialise it during pollWatchedGradPrices.
+    // gradPrice sourced directly from migration TX postTokenBalances → already accurate.
+    // priceLocked=true prevents DexScreener from overwriting it during pollWatchedGradPrices.
+    // priceLocked=false (fallback path) keeps the old correction behaviour.
     const safeGrad = gradPrice > 0 ? gradPrice : 0;
     this.watchedGrads.set(mint, {
       mint,
       symbol,
       gradPrice:          safeGrad,
+      gradPriceLocked:    priceLocked ?? false,
       lowestSeen:         safeGrad,   // updated to lower if price dips pre-phase1
       phase1PeakPrice:    safeGrad,
       phase1PeakAt:       now,
@@ -4008,11 +4045,14 @@ class GraduationSniperService {
     const now = Date.now();
     const TTL = 30 * 60_000; // expire after 30 minutes — momentum window
 
-    // Expire old entries that haven't completed a trade
+    // Expire ALL entries older than 30 min — keeps the watch list clean.
+    // Phase3Triggered tokens have already fired their buy; no need to keep them.
     for (const [mint, grad] of this.watchedGrads) {
-      if (!grad.phase3Triggered && now - grad.addedAt > TTL) {
-        logger.info({ mint, symbol: grad.symbol, ageMin: ((now - grad.addedAt) / 60_000).toFixed(1) },
-          "3-phase watch: removing expired token (30-min window elapsed, no trade)");
+      if (now - grad.addedAt > TTL) {
+        logger.info(
+          { mint, symbol: grad.symbol, ageMin: ((now - grad.addedAt) / 60_000).toFixed(1), phase: grad.phase },
+          "3-phase watch: removing expired token (>30 min old)",
+        );
         this.watchedGrads.delete(mint);
       }
     }
@@ -4054,12 +4094,26 @@ class GraduationSniperService {
         grad.currentPrice  = price!;
         grad.lastUpdatedAt = now;
 
-        // ── Bootstrap: first real price sets gradPrice / lowestSeen ─────────
-        if (grad.gradPrice === 0) {
+        // ── Bootstrap / correct gradPrice from first real DexScreener reading ─
+        // On-chain reserve math runs before the AMM is fully settled and can be
+        // off by 2–3× versus the actual AMM price. The first DexScreener tick
+        // (real market price) overwrites gradPrice and resets all phase baselines
+        // so Phase 1/2/3 thresholds are computed against the true graduation price.
+        if (!grad.gradPriceLocked) {
+          const oldGrad = grad.gradPrice;
           grad.gradPrice       = price!;
+          grad.gradPriceLocked = true;
+          // Always reset baselines to the real DexScreener price so Phase 1
+          // pump % is measured from the actual market price at graduation.
           grad.lowestSeen      = price!;
           grad.phase1PeakPrice = price!;
           grad.phase2LowPrice  = price!;
+          if (oldGrad > 0 && Math.abs(price! / oldGrad - 1) > 0.1) {
+            logger.info(
+              { mint, symbol: grad.symbol, onChainPrice: oldGrad, dexPrice: price!, diffPct: ((price! / oldGrad - 1) * 100).toFixed(1) + "%" },
+              "3-phase watch: gradPrice corrected from on-chain → DexScreener real price 🔄",
+            );
+          }
         }
 
         const prevPhase = grad.phase;
@@ -4149,6 +4203,27 @@ class GraduationSniperService {
             anyPhaseChange = true;
             logger.info({ mint, symbol: grad.symbol, retracePct: grad.phase3PumpPct.toFixed(1), phase2Low: grad.phase2LowPrice, currentPrice: price }, "3-phase watch: 🚀 PHASE 3 triggered — BUY SIGNAL");
 
+            // ── PAPER TRADE: fire directly here, unconditionally ─────────────
+            // This is the authoritative paper-trade trigger. It runs BEFORE any
+            // live-wallet logic so a live wallet, RPC failure, or old code path
+            // can NEVER prevent the paper position from being entered.
+            if (this.phase3PaperCallback) {
+              logger.info({ mint, symbol: grad.symbol, price }, "3-phase watch: 📄 DIRECT paper trade call (Phase 3)");
+              const pr = this.phase3PaperCallback(
+                mint, grad.symbol, price!,
+                grad.phase1PumpPct, grad.phase2DumpPct, grad.phase3PumpPct,
+              );
+              if (pr && typeof (pr as Promise<void>).catch === "function") {
+                (pr as Promise<void>).catch((err: unknown) => {
+                  logger.error({ mint, symbol: grad.symbol, err: (err as Error).message },
+                    "3-phase watch: DIRECT paper callback threw — trade LOST 🔥");
+                });
+              }
+            } else {
+              logger.error({ mint, symbol: grad.symbol },
+                "3-phase watch: phase3PaperCallback is NULL at Phase 3 trigger — check index.ts startup order!");
+            }
+
             // ── Telegram: Phase 3 signal detected ───────────────────────────
             if (isTelegramConfigured()) {
               void sendTelegram(
@@ -4162,7 +4237,7 @@ class GraduationSniperService {
               );
             }
 
-            // ── Trigger buy ─────────────────────────────────────────────────
+            // ── Live wallet buy (runs in addition to paper, never instead of) ─
             void this.triggerPhase3Buy(mint, grad.symbol, price!, grad);
           }
         }
@@ -4197,7 +4272,10 @@ class GraduationSniperService {
         });
       }
     } else {
-      logger.warn({ mint, symbol }, "3-phase watch: ⚠️ phase3PaperCallback is NULL — paper trade skipped (wiring missing!)");
+      // This must NEVER happen in a correctly deployed server — the callback is
+      // set in index.ts BEFORE start() is called.  If you see this in logs,
+      // the server is running old code or the startup order was changed.
+      logger.error({ mint, symbol }, "3-phase watch: 🔥 phase3PaperCallback is NULL — paper trade LOST (check index.ts startup order!)");
     }
 
     if (!walletReady) {

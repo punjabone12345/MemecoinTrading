@@ -53,12 +53,12 @@ const DEFAULT_PAPER_CONFIG: PaperConfig = {
   tp2ClosePct:        57,   // 57% of remaining 70% ≈ 40% of original
   tp3Pct:             600,  // TP3 at +600% → sell 20% of original (67% of remaining 30%)
   tp3ClosePct:        67,   // 67% of remaining 30% ≈ 20% of original → 10% runner
-  trailingStopPct:    10,   // runner trailing -10% from peak after TP3
+  trailingStopPct:    15,   // runner trailing -15% from peak after TP3
   slPhase1Pct:        30,   // fixed hard SL -30% from entry (before TP1)
   slPhase2Pct:        30,   // (legacy, not used in new SL logic)
   slPhase3Pct:        30,   // (legacy, not used in new SL logic)
   slAfterTp1Pct:      0,    // (legacy, breakeven is hardcoded after TP1)
-  slAfterTp2Pct:      20,   // trailing -20% from peak after TP2
+  slAfterTp2Pct:      25,   // trailing -25% from peak after TP2
   deadCoinWindowMs:     2 * 60 * 60_000,  // 2 hours
   deadCoinMinMovePct:   5,                // must move >5% from entry
   maxFillDriftPct:      15,               // spec: skip if exec price > 15% above detection baseline
@@ -84,8 +84,9 @@ const DEFAULT_PAPER_CONFIG: PaperConfig = {
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const DEXSCREENER_BASE    = "https://api.dexscreener.com";
-const PRICE_LOOP_MS       = 3_000;
-const STALE_PRICE_MS      = 5_000;
+const JUPITER_PRICE_BASE  = "https://lite-api.jup.ag/price/v2";
+const PRICE_LOOP_MS       = 1_500;
+const STALE_PRICE_MS      = 4_000;
 const BATCH_MAX           = 30;
 const STARTING_BALANCE    = 0.1;
 const MAX_EVENTS          = 100;
@@ -397,14 +398,13 @@ class PaperSniperService {
     if (qualityMeta?.onChainPriceConfirmed && entryPrice > 0) {
       logger.info({ mint, symbol, entryPrice, detectionPrice },
         "Paper sniper: ⚡ FAST PATH — on-chain price confirmed, skipping gate + price poll");
-      // Re-check capacity after quality-filter pipeline
       const cfgFast = this.paperConfig;
+      // ── Balance: ALWAYS auto-top-up — virtual balance must never block entry ─
       if (this.virtualBalance < cfgFast.positionSizeSol) {
-        this.addEvent({ id: uid(), detectedAt, mint, symbol, action: "skipped",
-          skipReason: `Insufficient balance (${this.virtualBalance.toFixed(4)} SOL < ${cfgFast.positionSizeSol} SOL)` });
-        this.seenMints.delete(mint);
-        this.broadcast();
-        return;
+        logger.warn({ mint, symbol, virtualBalance: this.virtualBalance },
+          "Paper sniper [fast]: balance depleted — auto-resetting to starting balance");
+        this.virtualBalance = STARTING_BALANCE;
+        void this.persistBalance();
       }
       if (this.openPositions.size >= cfgFast.maxOpenPositions) {
         this.addEvent({ id: uid(), detectedAt, mint, symbol, action: "skipped",
@@ -505,13 +505,12 @@ class PaperSniperService {
     const cfgNow = this.paperConfig;
     const sizeSol = cfgNow.positionSizeSol;
 
-    // Re-check capacity after delay
+    // ── Balance: ALWAYS auto-top-up — virtual balance must never block entry ────
     if (this.virtualBalance < sizeSol) {
-      this.addEvent({ id: uid(), detectedAt, mint, symbol, action: "skipped",
-        skipReason: `Insufficient balance after ${(delayMs / 1000).toFixed(0)}s exec delay (${this.virtualBalance.toFixed(4)} SOL < ${sizeSol} SOL)` });
-      this.seenMints.delete(mint);
-      this.broadcast();
-      return;
+      logger.warn({ mint, symbol, virtualBalance: this.virtualBalance, sizeSol },
+        "Paper sniper [slow]: balance depleted — auto-resetting to starting balance");
+      this.virtualBalance = STARTING_BALANCE;
+      void this.persistBalance();
     }
     if (this.openPositions.size >= cfgNow.maxOpenPositions) {
       this.addEvent({ id: uid(), detectedAt, mint, symbol, action: "skipped",
@@ -879,65 +878,82 @@ class PaperSniperService {
     for (let i = 0; i < positions.length; i += BATCH_MAX) {
       const batch = positions.slice(i, i + BATCH_MAX);
       const mints = batch.map((p) => p.mint).join(",");
-      try {
-        type DexPair = {
-          baseToken: { address: string };
-          priceUsd: string;
-          liquidity?: { usd?: number };
-          txns?: { m5?: { buys?: number; sells?: number } };
-        };
-        const res = await axios.get<DexPair[]>(
-          `${DEXSCREENER_BASE}/tokens/v1/solana/${mints}`,
-          { timeout: 6_000 },
-        );
-        const pairs = res.data ?? [];
-        const priceMap = new Map<string, number>();
-        const liqMap   = new Map<string, number>();
-        const buysMap  = new Map<string, number>();
-        const sellsMap = new Map<string, number>();
+
+      const priceMap = new Map<string, number>();
+      const liqMap   = new Map<string, number>();
+      const buysMap  = new Map<string, number>();
+      const sellsMap = new Map<string, number>();
+
+      // ── Fire Jupiter (real-time AMM) and DexScreener in parallel ─────────
+      type DexPair = {
+        baseToken: { address: string };
+        priceUsd: string;
+        liquidity?: { usd?: number };
+        txns?: { m5?: { buys?: number; sells?: number } };
+      };
+      type JupResp = { data: Record<string, { price: number }> };
+
+      const [jupResult, dexResult] = await Promise.allSettled([
+        axios.get<JupResp>(`${JUPITER_PRICE_BASE}?ids=${mints}`, { timeout: 3_000 }),
+        axios.get<DexPair[]>(`${DEXSCREENER_BASE}/tokens/v1/solana/${mints}`, { timeout: 5_000 }),
+      ]);
+
+      // Jupiter gives most real-time AMM prices — use as primary
+      if (jupResult.status === "fulfilled") {
+        const jupData = jupResult.value.data?.data ?? {};
+        for (const mint of batch.map(p => p.mint)) {
+          const p = jupData[mint]?.price;
+          if (p && p > 0) priceMap.set(mint, p);
+        }
+      }
+
+      // DexScreener fills in liq/txn data and prices for any mint Jupiter missed
+      if (dexResult.status === "fulfilled") {
+        const pairs = dexResult.value.data ?? [];
         for (const pair of pairs) {
           const addr = pair.baseToken.address;
           const p = parseFloat(pair.priceUsd);
-          if (p > 0) priceMap.set(addr, p);
+          // Only use DexScreener price if Jupiter didn't return one for this mint
+          if (p > 0 && !priceMap.has(addr)) priceMap.set(addr, p);
           if (pair.liquidity?.usd != null) liqMap.set(addr, pair.liquidity.usd);
           if (pair.txns?.m5) {
             buysMap.set(addr,  pair.txns.m5.buys  ?? 0);
             sellsMap.set(addr, pair.txns.m5.sells ?? 0);
           }
         }
+      }
 
-        for (const pos of batch) {
-          const price = priceMap.get(pos.mint);
-          if (!price || price <= 0) continue;
-          pos.currentPrice = price;
-          pos.lastPriceAt  = now;
-          if (price > pos.trailingHigh) pos.trailingHigh = price;
+      for (const pos of batch) {
+        const price = priceMap.get(pos.mint);
+        if (!price || price <= 0) continue;
+        pos.currentPrice = price;
+        pos.lastPriceAt  = now;
+        if (price > pos.trailingHigh) pos.trailingHigh = price;
 
-          // ── Whale dump detection (pre-TP1, enabled toggle) ──────────────────
-          if (cfg.enableWhaleDumpExit && !pos.tp1Hit) {
-            const liqUsd = liqMap.get(pos.mint);
-            if (liqUsd != null && liqUsd > 0) {
-              const prev = this.lastPositionLiquidityUsd.get(pos.mint);
-              this.lastPositionLiquidityUsd.set(pos.mint, liqUsd);
-              if (prev != null && prev > 0) {
-                const dropPct = (1 - liqUsd / prev) * 100;
-                const prevSolEst = prev / (price > 0 ? price * 150 : 1);
-                const solDropEst = prevSolEst * (dropPct / 100);
-                if (dropPct >= 20 && dropPct < 40 && solDropEst >= 5) {
-                  logger.warn({ mint: pos.mint, symbol: pos.symbol, dropPct: dropPct.toFixed(1), solDropEst: solDropEst.toFixed(1) },
-                    "Paper sniper: WHALE DUMP detected — emergency exit 🐋");
-                  this.closePaperPosition(pos, `Whale dump: -${dropPct.toFixed(0)}% liquidity (~${solDropEst.toFixed(1)} SOL)`, price);
-                  continue;
-                }
+        // ── Whale dump detection (pre-TP1, enabled toggle) ──────────────────
+        if (cfg.enableWhaleDumpExit && !pos.tp1Hit) {
+          const liqUsd = liqMap.get(pos.mint);
+          if (liqUsd != null && liqUsd > 0) {
+            const prev = this.lastPositionLiquidityUsd.get(pos.mint);
+            this.lastPositionLiquidityUsd.set(pos.mint, liqUsd);
+            if (prev != null && prev > 0) {
+              const dropPct = (1 - liqUsd / prev) * 100;
+              const prevSolEst = prev / (price > 0 ? price * 150 : 1);
+              const solDropEst = prevSolEst * (dropPct / 100);
+              if (dropPct >= 20 && dropPct < 40 && solDropEst >= 5) {
+                logger.warn({ mint: pos.mint, symbol: pos.symbol, dropPct: dropPct.toFixed(1), solDropEst: solDropEst.toFixed(1) },
+                  "Paper sniper: WHALE DUMP detected — emergency exit 🐋");
+                this.closePaperPosition(pos, `Whale dump: -${dropPct.toFixed(0)}% liquidity (~${solDropEst.toFixed(1)} SOL)`, price);
+                continue;
               }
             }
           }
-
-          const buysM5  = buysMap.get(pos.mint)  ?? 0;
-          const sellsM5 = sellsMap.get(pos.mint) ?? 0;
-          this.checkTpSl(pos, cfg, buysM5, sellsM5);
         }
-      } catch { /* non-fatal */ }
+
+        const buysM5  = buysMap.get(pos.mint)  ?? 0;
+        const sellsM5 = sellsMap.get(pos.mint) ?? 0;
+        this.checkTpSl(pos, cfg, buysM5, sellsM5);
+      }
     }
 
     this.updateUnrealizedPnl();
@@ -952,6 +968,11 @@ class PaperSniperService {
     const pct   = ((price / pos.entryPrice) - 1) * 100;
     const ageMs = Date.now() - pos.entryAt;
     const now   = Date.now();
+
+    // ── TP1/2/3 cascade — all checked in a single tick ───────────────────
+    // No early `return` between TPs: if price moves fast (e.g. 0→400% in one
+    // poll cycle) all eligible TPs fire in the same tick, in order.
+    // Each flag (tp1Hit/tp2Hit/tp3Hit) prevents double-firing on subsequent ticks.
 
     // ── TP1 ───────────────────────────────────────────────────────────────
     if (!pos.tp1Hit && pct >= cfg.tp1Pct) {
@@ -983,7 +1004,7 @@ class PaperSniperService {
           `🔗 <a href="https://dexscreener.com/solana/${pos.mint}">DexScreener</a>  |  🕐 ${toIST(new Date())}`,
         );
       }
-      return;
+      // ← no return: fall through to check TP2 in the same tick
     }
 
     // ── TP2 ───────────────────────────────────────────────────────────────
@@ -1019,10 +1040,10 @@ class PaperSniperService {
           `🔗 <a href="https://dexscreener.com/solana/${pos.mint}">DexScreener</a>  |  🕐 ${toIST(new Date())}`,
         );
       }
-      return;
+      // ← no return: fall through to check TP3 in the same tick
     }
 
-    // ── TP3 — full close of remaining runner ──────────────────────────────
+    // ── TP3 + runner ───────────────────────────────────────────────────────
     if (pos.tp1Hit && pos.tp2Hit && !pos.tp3Hit && pct >= cfg.tp3Pct) {
       const closeFrac   = Math.min(cfg.tp3ClosePct / 100, 1) * pos.remainingFraction;
       const solReturned = pos.sizeSol * closeFrac * (price / pos.entryPrice);
@@ -1053,11 +1074,13 @@ class PaperSniperService {
           `\n🔗 <a href="https://dexscreener.com/solana/${pos.mint}">DexScreener</a>  |  🕐 ${toIST(new Date())}`,
         );
       }
-      // If tp3ClosePct = 100, the position is fully closed — close it now
+      // Fully closed (tp3ClosePct = 100 or rounding) — done
       if (pos.remainingFraction <= 0.01) {
         this.closePaperPosition(pos, `TP3 hit — full exit at +${pct.toFixed(0)}%`, price);
+        return;
       }
-      return;
+      // Runner (~10%) remains open — fall through so trailing SL is applied
+      // in this same tick rather than waiting for the next poll cycle
     }
 
     // ── Update trailing SL based on TP stage ─────────────────────────────
@@ -1293,11 +1316,26 @@ class PaperSniperService {
   // AMM pair) with Jupiter as fallback. Used by enterPhase3Trade to guarantee
   // a realistic entry price at the moment Phase 3 fires.
   private async fetchLivePriceForPhase3(mint: string, fallbackPrice: number): Promise<number> {
+    // Try Jupiter first — it returns real-time AMM prices in ~200ms
+    try {
+      type JupResp = { data: Record<string, { price: number }> };
+      const res = await axios.get<JupResp>(
+        `${JUPITER_PRICE_BASE}?ids=${mint}`,
+        { timeout: 2_000 },
+      );
+      const p = res.data?.data?.[mint]?.price;
+      if (p && p > 0) {
+        logger.info({ mint, price: p, source: "jupiter" }, "Paper sniper [phase3]: live price fetched (Jupiter)");
+        return p;
+      }
+    } catch { /* fall through to DexScreener */ }
+
+    // DexScreener fallback — slower but has liquidity data
     try {
       type DexPair = { baseToken?: { address: string }; priceUsd: string; liquidity?: { usd?: number }; dexId?: string };
       const res = await axios.get<DexPair[]>(
         `${DEXSCREENER_BASE}/tokens/v1/solana/${mint}`,
-        { timeout: 5_000 },
+        { timeout: 4_000 },
       );
       const pairs = Array.isArray(res.data) ? res.data : [];
       let bestPrice = 0;
@@ -1308,21 +1346,8 @@ class PaperSniperService {
         if (p > 0 && liq > bestLiq) { bestPrice = p; bestLiq = liq; }
       }
       if (bestPrice > 0) {
-        logger.info({ mint, price: bestPrice, source: "dexscreener" }, "Paper sniper [phase3]: live price fetched");
+        logger.info({ mint, price: bestPrice, source: "dexscreener" }, "Paper sniper [phase3]: live price fetched (DexScreener)");
         return bestPrice;
-      }
-    } catch { /* fall through to Jupiter */ }
-
-    try {
-      type JupResp = { data: Record<string, { price: number }> };
-      const res = await axios.get<JupResp>(
-        `https://lite-api.jup.ag/price/v2?ids=${mint}`,
-        { timeout: 4_000 },
-      );
-      const p = res.data?.data?.[mint]?.price;
-      if (p && p > 0) {
-        logger.info({ mint, price: p, source: "jupiter" }, "Paper sniper [phase3]: live price fetched (Jupiter fallback)");
-        return p;
       }
     } catch { /* fall through to fallback */ }
 
@@ -1351,39 +1376,54 @@ class PaperSniperService {
       "Paper sniper [phase3]: enterPhase3Trade called 🔔",
     );
 
+    // ── Duplicate guard: skip if already tracking this mint ───────────────────
     if (this.openPositions.has(mint)) {
-      logger.info({ mint, symbol }, "Paper sniper [phase3]: position already open, skipping");
+      logger.info({ mint, symbol }, "Paper sniper [phase3]: position already open for this mint — skipping duplicate signal");
+      return; // silent skip — not a user-facing event, just a duplicate Phase 3 callback
+    }
+
+    // ── Position cap: paper mode allows up to 2× the configured max ──────────
+    // We never hard-block Phase 3 paper trades — they are the ONLY source of
+    // paper entries. The soft cap is doubled so a fully-loaded live side doesn't
+    // prevent paper trading (paper has its own separate position count).
+    const PAPER_PHASE3_MAX = Math.max(cfg.maxOpenPositions * 2, 20);
+    if (this.openPositions.size >= PAPER_PHASE3_MAX) {
+      logger.warn({ mint, symbol, openCount: this.openPositions.size, cap: PAPER_PHASE3_MAX },
+        "Paper sniper [phase3]: soft position cap reached — skipping");
       this.addEvent({ id: uid(), detectedAt: now2, mint, symbol, action: "skipped",
-        skipReason: "Phase 3 signal — position already open for this mint" });
+        skipReason: `Phase 3 signal — position cap (${this.openPositions.size}/${PAPER_PHASE3_MAX})` });
       this.broadcast();
       return;
     }
 
-    if (this.openPositions.size >= cfg.maxOpenPositions) {
-      logger.info({ mint, symbol, openCount: this.openPositions.size, maxOpenPositions: cfg.maxOpenPositions },
-        "Paper sniper [phase3]: max open positions reached, skipping");
-      this.addEvent({ id: uid(), detectedAt: now2, mint, symbol, action: "skipped",
-        skipReason: `Phase 3 signal — max open positions (${this.openPositions.size}/${cfg.maxOpenPositions})` });
-      this.broadcast();
-      return;
-    }
-
+    // ── Balance: ALWAYS auto-top-up so balance NEVER blocks a paper trade ─────
+    // Virtual balance is not real money — entering a trade must always succeed.
     const sizeSol = cfg.positionSizeSol;
-    // Auto-heal balance: if depleted below position size, reset to STARTING_BALANCE
     if (this.virtualBalance < sizeSol) {
       logger.warn({ mint, symbol, virtualBalance: this.virtualBalance, sizeSol },
-        "Paper sniper [phase3]: balance below position size — auto-resetting to starting balance");
+        "Paper sniper [phase3]: virtual balance depleted — auto-resetting to starting balance (paper mode always trades)");
       this.virtualBalance = STARTING_BALANCE;
       void this.persistBalance();
     }
 
-    // Fetch a fresh live price at the moment of entry for realistic execution
-    const entryPrice = await this.fetchLivePriceForPhase3(mint, price);
+    // Use the signal price directly — it comes from the graduation sniper's
+    // 1-second real-time poller and is already the live AMM price.
+    // We fire a Jupiter refresh in parallel just to log, but never block on it.
+    let entryPrice = price;
+    axios.get<{ data: Record<string, { price: number }> }>(
+      `${JUPITER_PRICE_BASE}?ids=${mint}`, { timeout: 2_000 }
+    ).then(res => {
+      const jp = res.data?.data?.[mint]?.price;
+      if (jp && jp > 0) {
+        logger.info({ mint, symbol, signalPrice: price, jupiterPrice: jp },
+          "Paper sniper [phase3]: Jupiter confirms live price ✅");
+      }
+    }).catch(() => { /* non-fatal — we already have the signal price */ });
 
     if (!(entryPrice > 0)) {
-      logger.warn({ mint, symbol, price }, "Paper sniper [phase3]: could not determine entry price, skipping");
+      logger.warn({ mint, symbol, price }, "Paper sniper [phase3]: signal price is zero, skipping");
       this.addEvent({ id: uid(), detectedAt: now2, mint, symbol, action: "skipped",
-        skipReason: "Phase 3 signal — price unavailable (DexScreener + Jupiter both failed)" });
+        skipReason: "Phase 3 signal — price unavailable" });
       this.broadcast();
       return;
     }
