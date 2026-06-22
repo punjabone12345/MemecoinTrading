@@ -3788,25 +3788,47 @@ class GraduationSniperService {
   }
 
   async resetAccount(): Promise<void> {
-    // Close/remove all open positions (refund virtual balance)
-    for (const [mint] of this.openPositions) {
-      this.openPositions.delete(mint);
-    }
+    // ── Clear all in-memory state ──────────────────────────────────────────────
+    this.openPositions.clear();
     this.closedPositions = [];
     this.events = [];
+
+    // Clear processing locks so future trades for these mints aren't blocked
+    this.processingMints.clear();
+    this.closingMints.clear();
+    this.processingGraduations.clear();
+
+    // Clear per-position tracking maps
+    this.lastPositionCheckAt.clear();
+    this.sellFailCount.clear();
+    this.lastPositionLiquidityUsd.clear();
+    this.closedTradeFingerprints = new Set();
+    this.sellPressureStartAt.clear();
+    this.lastPriceUpdatedAt.clear();
+    this.positionLastError.clear();
+
+    // Clear graduation watch state
+    this.watchedGrads.clear();
     this.seenMints.clear();
+
+    // Reset counters
     this.graduationsToday = 0;
-    void this.refreshWalletBalance();
     this.allTimeRealizedSol = 0;
     this.allTimeWins = 0;
     this.allTimeLosses = 0;
 
+    // ── Wipe DB ────────────────────────────────────────────────────────────────
     try {
       await execute(`DELETE FROM sniper_positions`, []);
     } catch (err) {
       logger.warn({ err: (err as Error).message }, "Graduation sniper: resetAccount DB error");
     }
-    logger.info({ walletBalance: this.walletBalanceSol }, "Graduation sniper: account reset");
+
+    // Refresh wallet balance then push updated (empty) state to all clients
+    void this.refreshWalletBalance();
+    this.broadcast();
+
+    logger.info("Graduation sniper: account fully reset — all positions, history, locks, and events cleared");
   }
 
   deleteEvent(id: string): boolean {

@@ -369,9 +369,15 @@ export function useResetSniperAccount() {
       if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
     },
     onSuccess: () => {
+      // Immediately zero out cached data so UI clears before the next WS push
+      queryClient.setQueryData(["sniper-positions"], { open: [], closed: [] });
+      queryClient.setQueryData(["sniper-history"], []);
+      queryClient.setQueryData(["sniper-events"], []);
+      // Then refetch fresh state from server
       void queryClient.invalidateQueries({ queryKey: ["sniper-status"] });
       void queryClient.invalidateQueries({ queryKey: ["sniper-positions"] });
       void queryClient.invalidateQueries({ queryKey: ["sniper-history"] });
+      void queryClient.invalidateQueries({ queryKey: ["sniper-events"] });
     },
   });
 }
