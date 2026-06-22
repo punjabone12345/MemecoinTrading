@@ -1,5 +1,6 @@
 import WebSocket from "ws";
 import axios from "axios";
+import { createHash } from "node:crypto";
 import { logger } from "../lib/logger.js";
 import { query, execute } from "../lib/db.js";
 import { broadcast } from "../websocket/server.js";
@@ -34,7 +35,10 @@ const KV_BALANCE_KEY             = "ed_balance";
 const RECONNECT_BASE_MS          = 3_000;
 const RECONNECT_MAX_MS           = 30_000;
 
-const HELIUS_API_KEY = process.env["HELIUS_API_KEY"] ?? "";
+const HELIUS_API_KEY        = process.env["HELIUS_API_KEY"] ?? "";
+const SOLANA_PUBLIC_RPC     = "https://api.mainnet-beta.solana.com";
+const GRADUATION_REAL_SOL   = 85_000_000_000n; // 85 SOL in lamports = pump.fun graduation target
+const ON_CHAIN_INTERVAL_MS  = 20_000;           // refresh bonding curve % every 20s
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 export type EDTokenStatus = "tracking" | "rejected" | "eligible" | "entered" | "exited";
@@ -186,6 +190,7 @@ class EarlyDiscoveryService {
   private pingInterval: ReturnType<typeof setInterval> | null = null;
   private pollInterval: ReturnType<typeof setInterval> | null = null;
 
+  private pdaCache = new Map<string, string>();  // mint → bonding curve PDA (cached after first compute)
   private tokens = new Map<string, EDToken>();
   private openPositions = new Map<string, EDPosition>();
   private closedPositions: EDPosition[] = [];
@@ -218,13 +223,27 @@ class EarlyDiscoveryService {
     }
 
     this.pollInterval = setInterval(() => this.pollCycle(), POLL_INTERVAL_MS);
+
+    // On-chain bonding curve refresh — reads Solana RPC directly; no API key needed
+    setTimeout(() => void this.refreshOnChainBondingCurves(), 5_000);
+    setInterval(() => void this.refreshOnChainBondingCurves(), ON_CHAIN_INTERVAL_MS);
+
     logger.info("Early discovery: started");
   }
 
   // ── HTTP Poller (PRIMARY — GeckoTerminal new pools API, works in all environments) ──
   private startHttpPoller(): void {
+    type GTTxns = { buys?: number; sells?: number; buyers?: number; sellers?: number };
     type GTPool = {
-      attributes?: { name?: string; pool_created_at?: string };
+      attributes?: {
+        name?: string;
+        pool_created_at?: string;
+        base_token_price_usd?: string;
+        fdv_usd?: string;
+        market_cap_usd?: string | null;
+        volume_usd?: { m5?: number; h1?: number; h24?: number };
+        transactions?: { m5?: GTTxns; h1?: GTTxns; h6?: GTTxns; h24?: GTTxns };
+      };
       relationships?: {
         base_token?: { data?: { id?: string } };
         dex?: { data?: { id?: string } };
@@ -261,11 +280,23 @@ class EarlyDiscoveryService {
             const rawName  = pool.attributes?.name ?? "";
             const symbol   = rawName.includes(" / ") ? rawName.split(" / ")[0]!.trim() : mint.slice(0, 6).toUpperCase();
 
-            logger.info({ mint: mint.slice(0, 8), symbol, dex: dexId }, "Early discovery: new launch via GeckoTerminal 🚀");
+            // Extract real-time price/mcap/volume/buyer data from GeckoTerminal pool response
+            const priceUsd     = parseFloat(pool.attributes?.base_token_price_usd ?? "0") || 0;
+            const fdv          = parseFloat(pool.attributes?.fdv_usd ?? "0") || 0;
+            const mcap         = parseFloat(pool.attributes?.market_cap_usd ?? "0") || 0;
+            const marketCapUsd = fdv || mcap;
+            const m5t          = pool.attributes?.transactions?.m5;
+            const h1t          = pool.attributes?.transactions?.h1;
+            const uniqueBuyers = (m5t?.buyers ?? 0) + (h1t?.buyers ?? 0);
+            const volM5        = pool.attributes?.volume_usd?.m5 ?? 0;
+            const volH1        = pool.attributes?.volume_usd?.h1 ?? 0;
+            const buyVolumeSol = (volM5 + volH1) / 150;  // USD → SOL approx
+
+            logger.info({ mint: mint.slice(0, 8), symbol, dex: dexId, priceUsd: priceUsd.toFixed(8), marketCapUsd: marketCapUsd.toFixed(0), uniqueBuyers }, "Early discovery: new launch via GeckoTerminal 🚀");
             this.launchesDetected++;
             this.totalHttpDiscovered++;
             newThisCycle++;
-            void this.onNewLaunchWithMeta(mint, { symbol, name: symbol, creator: "" });
+            void this.onNewLaunchWithMeta(mint, { symbol, name: symbol, creator: "", priceUsd, marketCapUsd, uniqueBuyers, buyVolumeSol });
           }
         }
         if (newThisCycle > 0) {
@@ -471,7 +502,11 @@ class EarlyDiscoveryService {
 
   private async onNewLaunchWithMeta(
     mint: string,
-    meta: { symbol: string; name: string; creator: string },
+    meta: {
+      symbol: string; name: string; creator: string;
+      priceUsd?: number; marketCapUsd?: number;
+      uniqueBuyers?: number; buyVolumeSol?: number;
+    },
   ): Promise<void> {
     if (this.tokens.has(mint)) return;
     if (this.tokens.size >= MAX_TRACKED_TOKENS) {
@@ -487,25 +522,18 @@ class EarlyDiscoveryService {
     token.name    = meta.name;
     token.creator = meta.creator;
 
+    // Apply real-time data from GeckoTerminal immediately (no need to wait for pump.fun API)
+    if (meta.priceUsd && meta.priceUsd > 0)     { token.priceUsd = meta.priceUsd; token.discoveryPrice = meta.priceUsd; }
+    if (meta.marketCapUsd && meta.marketCapUsd > 0) token.marketCapUsd = meta.marketCapUsd;
+    if (meta.uniqueBuyers && meta.uniqueBuyers > 0) token.uniqueBuyers = meta.uniqueBuyers;
+    if (meta.buyVolumeSol && meta.buyVolumeSol > 0) token.buyVolumeSol = meta.buyVolumeSol;
+
     this.tokens.set(mint, token);
     this.broadcast();
 
-    // Fetch full metadata + rugcheck concurrently
-    const [pfData] = await Promise.all([
-      this.fetchPumpFunData(mint),
-      this.runRugcheck(mint, token),
-    ]);
+    // Run rugcheck (pump.fun API is blocked in Replit — skip fetchPumpFunData)
+    await this.runRugcheck(mint, token);
 
-    if (pfData) {
-      token.symbol          = pfData.symbol   || meta.symbol;
-      token.name            = pfData.name     || meta.name;
-      token.creator         = pfData.creator  || meta.creator;
-      token.imageUri        = pfData.imageUri || "";
-      token.marketCapUsd    = pfData.marketCapUsd;
-      token.bondingCurvePct = pfData.bondingCurvePct;
-      token.discoveryPrice  = pfData.priceUsd;
-      token.priceUsd        = pfData.priceUsd;
-    }
     token.lastUpdatedAt = Date.now();
     this.broadcast();
   }
@@ -560,21 +588,9 @@ class EarlyDiscoveryService {
 
   private async pollToken(token: EDToken): Promise<void> {
     try {
-      const [pfData, dexData] = await Promise.all([
-        this.fetchPumpFunData(token.mint),
-        this.fetchDexData(token.mint),
-      ]);
-
-      if (pfData) {
-        if (token.symbol === "???" || token.symbol === "") token.symbol = pfData.symbol || "???";
-        if (token.name === "Loading…" || token.name === "") token.name = pfData.name || token.mint.slice(0, 8);
-        token.creator         = pfData.creator || token.creator;
-        token.imageUri        = pfData.imageUri || token.imageUri;
-        token.marketCapUsd    = pfData.marketCapUsd;
-        token.bondingCurvePct = pfData.bondingCurvePct;
-        token.priceUsd        = pfData.priceUsd;
-        if (token.discoveryPrice === 0 && pfData.priceUsd > 0) token.discoveryPrice = pfData.priceUsd;
-      }
+      // pump.fun API is blocked in Replit — only use DexScreener for poll updates
+      // Bonding curve % is updated separately by refreshOnChainBondingCurves() every 20s
+      const dexData = await this.fetchDexData(token.mint);
 
       if (dexData) {
         token.prevUniqueBuyers = token.uniqueBuyers;
@@ -585,8 +601,11 @@ class EarlyDiscoveryService {
         token.buyerAcceleration = buyerGain;
         token.buyVolumeSol     = dexData.buyVolumeSol;
         token.sellVolumeSol    = dexData.sellVolumeSol;
-        if (dexData.priceUsd > 0) token.priceUsd = dexData.priceUsd;
-        if (token.discoveryPrice === 0 && dexData.priceUsd > 0) token.discoveryPrice = dexData.priceUsd;
+        if (dexData.priceUsd > 0) {
+          token.priceUsd = dexData.priceUsd;
+          if (token.discoveryPrice === 0) token.discoveryPrice = dexData.priceUsd;
+        }
+        if (dexData.marketCapUsd > 0) token.marketCapUsd = dexData.marketCapUsd;
       }
 
       const metrics: DemandMetrics = {
@@ -659,11 +678,11 @@ class EarlyDiscoveryService {
   }
 
   private async fetchDexData(mint: string): Promise<{
-    buyVolumeSol: number; sellVolumeSol: number; uniqueBuyers: number; priceUsd: number;
+    buyVolumeSol: number; sellVolumeSol: number; uniqueBuyers: number; priceUsd: number; marketCapUsd: number;
   } | null> {
     try {
       type DexPair = {
-        priceUsd?: string; dexId?: string;
+        priceUsd?: string; dexId?: string; marketCap?: number; fdv?: number;
         txns?: { m5?: { buys?: number; sells?: number }; h1?: { buys?: number; sells?: number } };
         volume?: { m5?: number; h1?: number };
       };
@@ -687,8 +706,124 @@ class EarlyDiscoveryService {
         sellVolumeSol: totalVol * (1 - buyPct),
         uniqueBuyers:  buys,
         priceUsd:      parseFloat(pair.priceUsd ?? "0") || 0,
+        marketCapUsd:  pair.marketCap ?? pair.fdv ?? 0,
       };
     } catch { return null; }
+  }
+
+  // ── On-chain bonding curve reader ─────────────────────────────────────────
+  // Derives the pump.fun bonding curve PDA and reads graduation% directly from Solana.
+  // No Solana SDK needed — pure Node.js crypto + axios RPC call.
+  private computeBondingCurvePda(mint: string): string {
+    if (this.pdaCache.has(mint)) return this.pdaCache.get(mint)!;
+
+    const B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+    function b58Dec(s: string): Buffer {
+      let n = 0n;
+      for (const c of s) { const i = B58.indexOf(c); if (i < 0) throw new Error("bad b58"); n = n * 58n + BigInt(i); }
+      const out: number[] = [];
+      while (n > 0n) { out.unshift(Number(n & 0xffn)); n >>= 8n; }
+      const leading = s.match(/^1*/)?.[0]?.length ?? 0;
+      return Buffer.concat([Buffer.alloc(leading), Buffer.from(out)]);
+    }
+    function b58Enc(buf: Buffer): string {
+      if (buf.length === 0) return "";
+      let n = BigInt("0x" + buf.toString("hex"));
+      let s = "";
+      while (n > 0n) { s = B58[Number(n % 58n)] + s; n /= 58n; }
+      const leading = buf.findIndex((b) => b !== 0);
+      return "1".repeat(leading < 0 ? buf.length : leading) + s;
+    }
+    const P255 = (1n << 255n) - 19n;
+    const D_ED = 37095705934669439343138083508754565189542113879843219016388785533085940283555n;
+    function mpow(base: bigint, exp: bigint, mod: bigint): bigint {
+      let r = 1n; base %= mod;
+      for (; exp > 0n; exp >>= 1n) { if (exp & 1n) r = r * base % mod; base = base * base % mod; }
+      return r;
+    }
+    function isOnCurve(bytes: Buffer): boolean {
+      const y = BigInt("0x" + Buffer.from(bytes).reverse().toString("hex")) & ((1n << 255n) - 1n);
+      const y2 = y * y % P255;
+      const u  = (y2 - 1n + P255) % P255;
+      const v  = (D_ED * y2 + 1n) % P255;
+      const x2 = u * mpow(v, P255 - 2n, P255) % P255;
+      if (x2 === 0n) return u === 0n;
+      return mpow(x2, (P255 - 1n) / 2n, P255) === 1n;
+    }
+    const mintBytes    = b58Dec(mint);
+    const programBytes = b58Dec(PUMPFUN_PROGRAM);
+    const marker       = Buffer.from("ProgramDerivedAddress");
+    const seed         = Buffer.from("bonding-curve");
+    for (let nonce = 255; nonce >= 0; nonce--) {
+      const h = createHash("sha256");
+      h.update(seed); h.update(mintBytes); h.update(Buffer.from([nonce]));
+      h.update(programBytes); h.update(marker);
+      const digest = h.digest();
+      if (!isOnCurve(digest)) { const pda = b58Enc(digest); this.pdaCache.set(mint, pda); return pda; }
+    }
+    throw new Error(`PDA not found for mint ${mint}`);
+  }
+
+  private async refreshOnChainBondingCurves(): Promise<void> {
+    // Only refresh tokens still on the bonding curve (not yet graduated/exited)
+    const mints = [...this.tokens.values()]
+      .filter((t) => t.status === "tracking" || t.status === "eligible")
+      .map((t) => t.mint);
+    if (mints.length === 0) return;
+
+    const rpcUrl = HELIUS_API_KEY
+      ? `https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`
+      : SOLANA_PUBLIC_RPC;
+
+    // Build PDA → mint mapping
+    const pdaToMint = new Map<string, string>();
+    for (const mint of mints) {
+      try { pdaToMint.set(this.computeBondingCurvePda(mint), mint); } catch { /* skip */ }
+    }
+    const pdas = [...pdaToMint.keys()];
+    let updated = 0;
+
+    // Batch getMultipleAccounts (100 per call)
+    for (let i = 0; i < pdas.length; i += 100) {
+      const batch = pdas.slice(i, i + 100);
+      try {
+        type RpcResp = { result?: { value?: (null | { data: [string, string] })[] } };
+        const res = await axios.post<RpcResp>(
+          rpcUrl,
+          { jsonrpc: "2.0", id: 1, method: "getMultipleAccounts", params: [batch, { encoding: "base64" }] },
+          { timeout: 10_000 },
+        );
+        const values = res.data?.result?.value ?? [];
+        for (let j = 0; j < batch.length; j++) {
+          const mint  = pdaToMint.get(batch[j]!);
+          const acct  = values[j];
+          const token = mint ? this.tokens.get(mint) : undefined;
+          if (!mint || !acct || !token) continue;
+
+          const data = Buffer.from(acct.data[0], "base64");
+          if (data.length < 49) continue;
+
+          const realSolReserves = data.readBigUInt64LE(32);
+          const complete        = data[48] === 1;
+          const gradPct = complete
+            ? 100
+            : Math.min(Number(realSolReserves * 100n / GRADUATION_REAL_SOL), 99.9);
+
+          if (gradPct > token.bondingCurvePct || complete) {
+            token.bondingCurvePct = gradPct;
+            updated++;
+          }
+        }
+      } catch (err) {
+        logger.debug({ err: (err as Error).message }, "Early discovery: on-chain bonding curve refresh error");
+      }
+    }
+
+    if (updated > 0) {
+      logger.info({ updated, total: mints.length, rpc: HELIUS_API_KEY ? "helius" : "public" },
+        "Early discovery: on-chain bonding curves refreshed ⛓️");
+      this.broadcast();
+    }
   }
 
   // ── Paper trade entry ─────────────────────────────────────────────────────
