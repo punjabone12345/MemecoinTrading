@@ -9,6 +9,7 @@ import {
   useEDStatus, useEDTokens, useEDPositions, useResetPaperBalance, useInjectTestToken,
   useEDClosePosition, useEDDeletePosition, useEDEditPosition,
 } from "@/lib/api";
+import type { EDPositionPatch } from "@/lib/api";
 import type { EDToken, EDPosition, EDTokenStatus } from "@/lib/types";
 
 /* ── Helpers ──────────────────────────────────────────────────────────────── */
@@ -212,40 +213,198 @@ function ConfirmBar({
   );
 }
 
-/* ── Edit notes panel ─────────────────────────────────────────────────────── */
-function EditPanel({
-  initial, onSave, onCancel, loading,
+/* ── Full position edit modal ─────────────────────────────────────────────── */
+function PositionEditModal({
+  pos, onSave, onCancel, loading,
 }: {
-  initial: string; onSave: (v: string) => void; onCancel: () => void; loading: boolean;
+  pos: EDPosition;
+  onSave: (patch: EDPositionPatch) => void;
+  onCancel: () => void;
+  loading: boolean;
 }) {
-  const [val, setVal] = useState(initial);
+  const isClosed = pos.status === "closed";
+
+  const [entryPrice,       setEntryPrice]       = useState(String(pos.entryPrice));
+  const [sizeSol,          setSizeSol]          = useState(String(pos.sizeSol));
+  const [entryScore,       setEntryScore]       = useState(String(pos.entryScore));
+  const [effectiveSlPrice, setEffectiveSlPrice] = useState(String(pos.effectiveSlPrice));
+  const [trailingHigh,     setTrailingHigh]     = useState(String(pos.trailingHigh));
+  const [tp1Hit,           setTp1Hit]           = useState(pos.tp1Hit);
+  const [tp2Hit,           setTp2Hit]           = useState(pos.tp2Hit);
+  const [exitPrice,        setExitPrice]        = useState(String(pos.exitPrice ?? ""));
+  const [realizedPnlSol,   setRealizedPnlSol]   = useState(String(pos.realizedPnlSol));
+  const [tp1RealizedSol,   setTp1RealizedSol]   = useState(String(pos.tp1RealizedSol));
+  const [tp2RealizedSol,   setTp2RealizedSol]   = useState(String(pos.tp2RealizedSol));
+  const [runnerRealized,   setRunnerRealized]   = useState(String(pos.runnerRealizedSol));
+  const [closeReason,      setCloseReason]      = useState(pos.closeReason ?? "");
+  const [closingScore,     setClosingScore]     = useState(String(pos.closingScore ?? ""));
+
+  const numOr = (s: string, fallback: number) => { const n = parseFloat(s); return isNaN(n) ? fallback : n; };
+
+  function handleSave() {
+    const patch: EDPositionPatch = {
+      entryPrice:       numOr(entryPrice, pos.entryPrice),
+      sizeSol:          numOr(sizeSol, pos.sizeSol),
+      entryScore:       numOr(entryScore, pos.entryScore),
+      tp1Hit,
+      tp2Hit,
+      closeReason,
+    };
+    if (!isClosed) {
+      patch.effectiveSlPrice = numOr(effectiveSlPrice, pos.effectiveSlPrice);
+      patch.trailingHigh     = numOr(trailingHigh, pos.trailingHigh);
+    } else {
+      patch.exitPrice         = exitPrice ? numOr(exitPrice, pos.exitPrice ?? 0) : undefined;
+      patch.realizedPnlSol    = numOr(realizedPnlSol, pos.realizedPnlSol);
+      patch.tp1RealizedSol    = numOr(tp1RealizedSol, pos.tp1RealizedSol);
+      patch.tp2RealizedSol    = numOr(tp2RealizedSol, pos.tp2RealizedSol);
+      patch.runnerRealizedSol = numOr(runnerRealized, pos.runnerRealizedSol);
+      patch.closingScore      = closingScore ? numOr(closingScore, pos.closingScore ?? 0) : undefined;
+    }
+    onSave(patch);
+  }
+
+  const inputCls = "w-full rounded-lg px-2.5 py-1.5 text-xs text-slate-200 outline-none";
+  const inputStyle = { background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)" };
+  const labelCls = "text-[9px] text-slate-500 uppercase tracking-widest mb-1";
+
+  function Field({ label, value, onChange, placeholder }: { label: string; value: string; onChange: (v: string) => void; placeholder?: string }) {
+    return (
+      <div>
+        <p className={labelCls}>{label}</p>
+        <input
+          type="number"
+          step="any"
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder={placeholder ?? "0"}
+          className={inputCls}
+          style={inputStyle}
+        />
+      </div>
+    );
+  }
+
+  function Toggle({ label, value, onChange }: { label: string; value: boolean; onChange: (v: boolean) => void }) {
+    return (
+      <button
+        type="button"
+        onClick={() => onChange(!value)}
+        className="flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-bold transition-all w-full"
+        style={{
+          background: value ? "rgba(52,211,153,0.12)" : "rgba(255,255,255,0.03)",
+          border: `1px solid ${value ? "rgba(52,211,153,0.3)" : "rgba(255,255,255,0.08)"}`,
+          color: value ? "#34d399" : "#64748b",
+        }}
+      >
+        <div className="w-3 h-3 rounded-sm border flex items-center justify-center" style={{ borderColor: value ? "#34d399" : "#475569" }}>
+          {value && <Check size={9} />}
+        </div>
+        {label}
+      </button>
+    );
+  }
+
+  const sectionTitle = (t: string) => (
+    <p className="text-[9px] text-slate-500 uppercase tracking-widest pt-3 pb-1" style={{ borderTop: "1px solid rgba(255,255,255,0.06)" }}>{t}</p>
+  );
+
   return (
-    <div className="mt-2 rounded-xl p-3" style={{ background: "rgba(13,13,30,0.9)", border: "1px solid rgba(129,140,248,0.25)" }}>
-      <p className="text-[9px] text-slate-500 uppercase tracking-widest mb-1.5">Notes / Close Reason</p>
-      <textarea
-        value={val}
-        onChange={(e) => setVal(e.target.value)}
-        rows={2}
-        className="w-full rounded-lg px-2.5 py-2 text-xs text-slate-200 resize-none outline-none"
-        style={{ background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)" }}
-        placeholder="Add a note…"
-      />
-      <div className="flex gap-1.5 mt-2 justify-end">
-        <button
-          onClick={() => onSave(val)}
-          disabled={loading}
-          className="flex items-center gap-1 px-3 py-1.5 rounded-lg text-[10px] font-bold transition-all"
-          style={{ background: "rgba(52,211,153,0.15)", color: "#34d399", border: "1px solid rgba(52,211,153,0.25)" }}
-        >
-          <Check size={10} />{loading ? "Saving…" : "Save"}
-        </button>
-        <button
-          onClick={onCancel}
-          className="flex items-center gap-1 px-3 py-1.5 rounded-lg text-[10px] font-bold transition-all"
-          style={{ background: "rgba(255,255,255,0.04)", color: "#64748b", border: "1px solid rgba(255,255,255,0.08)" }}
-        >
-          <X size={10} />Cancel
-        </button>
+    <div className="fixed inset-0 z-50 flex items-end justify-center" style={{ background: "rgba(0,0,0,0.7)" }} onClick={onCancel}>
+      <div
+        className="w-full max-w-lg rounded-t-2xl p-4 pb-6 overflow-y-auto"
+        style={{ background: "#0d0d1e", border: "1px solid rgba(129,140,248,0.2)", maxHeight: "88vh" }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Header */}
+        <div className="flex items-center justify-between mb-4">
+          <div>
+            <p className="font-black text-white text-base">${pos.symbol}</p>
+            <p className="text-[10px] text-slate-500">{pos.name} · {isClosed ? "Closed" : "Open"} position</p>
+          </div>
+          <button onClick={onCancel} className="p-2 rounded-lg" style={{ background: "rgba(255,255,255,0.04)" }}>
+            <X size={14} className="text-slate-400" />
+          </button>
+        </div>
+
+        {/* Entry & Size */}
+        {sectionTitle("Entry & Size")}
+        <div className="grid grid-cols-3 gap-2">
+          <Field label="Entry Price" value={entryPrice} onChange={setEntryPrice} />
+          <Field label="Size (SOL)" value={sizeSol} onChange={setSizeSol} />
+          <Field label="Entry Score" value={entryScore} onChange={setEntryScore} />
+        </div>
+
+        {/* Risk (open only) */}
+        {!isClosed && (
+          <>
+            {sectionTitle("Risk Management")}
+            <div className="grid grid-cols-2 gap-2 mb-2">
+              <Field label="Stop Loss Price" value={effectiveSlPrice} onChange={setEffectiveSlPrice} />
+              <Field label="Trailing High" value={trailingHigh} onChange={setTrailingHigh} />
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <Toggle label="TP1 Hit" value={tp1Hit} onChange={setTp1Hit} />
+              <Toggle label="TP2 Hit" value={tp2Hit} onChange={setTp2Hit} />
+            </div>
+          </>
+        )}
+
+        {/* Exit & P&L (closed only) */}
+        {isClosed && (
+          <>
+            {sectionTitle("Exit & P&L")}
+            <div className="grid grid-cols-2 gap-2 mb-2">
+              <Field label="Exit Price" value={exitPrice} onChange={setExitPrice} placeholder="—" />
+              <Field label="Realized P&L (SOL)" value={realizedPnlSol} onChange={setRealizedPnlSol} />
+            </div>
+            <div className="grid grid-cols-3 gap-2 mb-2">
+              <Field label="TP1 Realized (SOL)" value={tp1RealizedSol} onChange={setTp1RealizedSol} />
+              <Field label="TP2 Realized (SOL)" value={tp2RealizedSol} onChange={setTp2RealizedSol} />
+              <Field label="Runner (SOL)" value={runnerRealized} onChange={setRunnerRealized} />
+            </div>
+            <div className="grid grid-cols-2 gap-2 mb-2">
+              <Toggle label="TP1 Hit" value={tp1Hit} onChange={setTp1Hit} />
+              <Toggle label="TP2 Hit" value={tp2Hit} onChange={setTp2Hit} />
+            </div>
+            <Field label="Closing Score" value={closingScore} onChange={setClosingScore} placeholder="—" />
+          </>
+        )}
+
+        {/* Notes */}
+        {sectionTitle("Notes / Close Reason")}
+        <textarea
+          value={closeReason}
+          onChange={(e) => setCloseReason(e.target.value)}
+          rows={2}
+          className="w-full rounded-lg px-2.5 py-2 text-xs text-slate-200 resize-none outline-none"
+          style={{ background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)" }}
+          placeholder="Add a note or close reason…"
+        />
+
+        {/* Recalculation hint for closed */}
+        {isClosed && (
+          <p className="text-[9px] text-slate-600 mt-1">P&L % will be recalculated from Realized P&L ÷ Size</p>
+        )}
+
+        {/* Buttons */}
+        <div className="flex gap-2 mt-4">
+          <button
+            onClick={handleSave}
+            disabled={loading}
+            className="flex-1 flex items-center justify-center gap-1.5 py-2.5 rounded-xl text-xs font-bold transition-all"
+            style={{ background: "rgba(52,211,153,0.15)", color: "#34d399", border: "1px solid rgba(52,211,153,0.3)" }}
+          >
+            <Check size={12} />{loading ? "Saving…" : "Save Changes"}
+          </button>
+          <button
+            onClick={onCancel}
+            className="px-4 py-2.5 rounded-xl text-xs font-bold transition-all"
+            style={{ background: "rgba(255,255,255,0.04)", color: "#64748b", border: "1px solid rgba(255,255,255,0.08)" }}
+          >
+            Cancel
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -257,7 +416,9 @@ function TradeCard({ pos }: { pos: EDPosition }) {
   const elapsed = fmtAge(pos.entryAt);
   const closePos = useEDClosePosition();
   const deletePos = useEDDeletePosition();
+  const editPos = useEDEditPosition();
   const [confirm, setConfirm] = useState<"close" | "delete" | null>(null);
+  const [editing, setEditing] = useState(false);
 
   return (
     <div
@@ -312,7 +473,7 @@ function TradeCard({ pos }: { pos: EDPosition }) {
       </div>
 
       {/* Action buttons */}
-      {confirm === null && (
+      {confirm === null && !editing && (
         <div className="flex gap-2 pt-2" style={{ borderTop: "1px solid rgba(255,255,255,0.06)" }}>
           <button
             onClick={() => setConfirm("close")}
@@ -320,6 +481,14 @@ function TradeCard({ pos }: { pos: EDPosition }) {
             style={{ background: "rgba(251,191,36,0.1)", border: "1px solid rgba(251,191,36,0.2)", color: "#fbbf24" }}
           >
             <XCircle size={11} /> Close Position
+          </button>
+          <button
+            onClick={() => setEditing(true)}
+            className="flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-[10px] font-bold transition-all"
+            style={{ background: "rgba(129,140,248,0.08)", border: "1px solid rgba(129,140,248,0.18)", color: "#818cf8" }}
+            title="Edit position"
+          >
+            <Pencil size={11} />
           </button>
           <button
             onClick={() => setConfirm("delete")}
@@ -347,6 +516,15 @@ function TradeCard({ pos }: { pos: EDPosition }) {
           loading={deletePos.isPending}
           onConfirm={() => deletePos.mutate(pos.id, { onSuccess: () => setConfirm(null) })}
           onCancel={() => setConfirm(null)}
+        />
+      )}
+
+      {editing && (
+        <PositionEditModal
+          pos={pos}
+          loading={editPos.isPending}
+          onSave={(patch) => editPos.mutate({ id: pos.id, patch }, { onSuccess: () => setEditing(false) })}
+          onCancel={() => setEditing(false)}
         />
       )}
     </div>
@@ -412,10 +590,10 @@ function ClosedRow({ pos }: { pos: EDPosition }) {
         />
       )}
       {mode === "edit" && (
-        <EditPanel
-          initial={pos.closeReason ?? ""}
+        <PositionEditModal
+          pos={pos}
           loading={editPos.isPending}
-          onSave={(v) => editPos.mutate({ id: pos.id, patch: { closeReason: v } }, { onSuccess: () => setMode("idle") })}
+          onSave={(patch) => editPos.mutate({ id: pos.id, patch }, { onSuccess: () => setMode("idle") })}
           onCancel={() => setMode("idle")}
         />
       )}

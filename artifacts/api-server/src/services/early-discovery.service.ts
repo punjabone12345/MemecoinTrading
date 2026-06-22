@@ -103,6 +103,23 @@ export interface EDPosition {
   positionMultiplier: number;
 }
 
+export interface EDPositionPatch {
+  entryPrice?: number;
+  entryScore?: number;
+  sizeSol?: number;
+  effectiveSlPrice?: number;
+  trailingHigh?: number;
+  tp1Hit?: boolean;
+  tp2Hit?: boolean;
+  closeReason?: string;
+  closingScore?: number;
+  exitPrice?: number;
+  realizedPnlSol?: number;
+  tp1RealizedSol?: number;
+  tp2RealizedSol?: number;
+  runnerRealizedSol?: number;
+}
+
 export interface EDConfig {
   enabled: boolean;
   positionSizeSol: number;
@@ -1106,20 +1123,36 @@ class EarlyDiscoveryService {
     return false;
   }
 
-  editPosition(id: string, patch: { closeReason?: string }): EDPosition | null {
-    const closed = this.closedPositions.find((p) => p.id === id);
-    if (closed) {
-      if (patch.closeReason !== undefined) closed.closeReason = patch.closeReason;
-      void this.persistPosition(closed);
-      return { ...closed };
+  editPosition(id: string, patch: EDPositionPatch): EDPosition | null {
+    const pos = this.closedPositions.find((p) => p.id === id)
+      ?? [...this.openPositions.values()].find((p) => p.id === id);
+    if (!pos) return null;
+
+    if (patch.entryPrice      !== undefined) pos.entryPrice      = patch.entryPrice;
+    if (patch.entryScore      !== undefined) pos.entryScore      = patch.entryScore;
+    if (patch.sizeSol         !== undefined) pos.sizeSol         = patch.sizeSol;
+    if (patch.effectiveSlPrice !== undefined) pos.effectiveSlPrice = patch.effectiveSlPrice;
+    if (patch.trailingHigh    !== undefined) pos.trailingHigh    = patch.trailingHigh;
+    if (patch.tp1Hit          !== undefined) pos.tp1Hit          = patch.tp1Hit;
+    if (patch.tp2Hit          !== undefined) pos.tp2Hit          = patch.tp2Hit;
+    if (patch.closeReason     !== undefined) pos.closeReason     = patch.closeReason;
+    if (patch.closingScore    !== undefined) pos.closingScore    = patch.closingScore;
+
+    // Closed-only fields
+    if (pos.status === "closed") {
+      if (patch.exitPrice       !== undefined) pos.exitPrice       = patch.exitPrice;
+      if (patch.realizedPnlSol  !== undefined) pos.realizedPnlSol  = patch.realizedPnlSol;
+      if (patch.tp1RealizedSol  !== undefined) pos.tp1RealizedSol  = patch.tp1RealizedSol;
+      if (patch.tp2RealizedSol  !== undefined) pos.tp2RealizedSol  = patch.tp2RealizedSol;
+      if (patch.runnerRealizedSol !== undefined) pos.runnerRealizedSol = patch.runnerRealizedSol;
+      // Recalculate derived fields from new values
+      pos.totalPnlSol = pos.realizedPnlSol;
+      pos.pnlPct      = pos.sizeSol > 0 ? (pos.totalPnlSol / pos.sizeSol) * 100 : 0;
     }
-    const open = [...this.openPositions.values()].find((p) => p.id === id);
-    if (open) {
-      if (patch.closeReason !== undefined) open.closeReason = patch.closeReason;
-      void this.persistPosition(open);
-      return { ...open };
-    }
-    return null;
+
+    void this.persistPosition(pos);
+    this.broadcast();
+    return { ...pos };
   }
 
   private async deletePositionFromDb(id: string): Promise<void> {

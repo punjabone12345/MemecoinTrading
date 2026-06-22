@@ -144,9 +144,26 @@ export function useEDDeletePosition() {
   });
 }
 
+export interface EDPositionPatch {
+  entryPrice?: number;
+  entryScore?: number;
+  sizeSol?: number;
+  effectiveSlPrice?: number;
+  trailingHigh?: number;
+  tp1Hit?: boolean;
+  tp2Hit?: boolean;
+  closeReason?: string;
+  closingScore?: number;
+  exitPrice?: number;
+  realizedPnlSol?: number;
+  tp1RealizedSol?: number;
+  tp2RealizedSol?: number;
+  runnerRealizedSol?: number;
+}
+
 export function useEDEditPosition() {
   const queryClient = useQueryClient();
-  return useMutation<EDPosition, Error, { id: string; patch: { closeReason?: string } }>({
+  return useMutation<EDPosition, Error, { id: string; patch: EDPositionPatch }>({
     mutationFn: async ({ id, patch }) => {
       const res = await fetch(apiUrl(`/api/ed/positions/${id}`), {
         method: "PATCH",

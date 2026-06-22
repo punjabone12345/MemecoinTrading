@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { earlyDiscoveryService } from "../services/early-discovery.service.js";
-import type { EDConfig } from "../services/early-discovery.service.js";
+import type { EDConfig, EDPositionPatch } from "../services/early-discovery.service.js";
 
 const router = Router();
 
@@ -47,7 +47,7 @@ router.delete("/ed/positions/:id", (req, res) => {
 });
 
 router.patch("/ed/positions/:id", (req, res) => {
-  const patch = req.body as { closeReason?: string };
+  const patch = req.body as EDPositionPatch;
   const pos = earlyDiscoveryService.editPosition(req.params.id, patch);
   if (!pos) { res.status(404).json({ error: "Position not found" }); return; }
   res.json(pos);
