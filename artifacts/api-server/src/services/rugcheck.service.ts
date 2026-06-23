@@ -2,7 +2,7 @@ import axios from 'axios';
 import { logger } from '../lib/logger.js';
 
 const cache = new Map<string, { ok: boolean; ts: number }>();
-const CACHE_TTL = 10 * 60_000; // 10 min
+const CACHE_TTL = 10 * 60_000;
 
 export async function checkRugcheck(mint: string): Promise<boolean> {
   const cached = cache.get(mint);
@@ -19,20 +19,20 @@ export async function checkRugcheck(mint: string): Promise<boolean> {
     }>(`https://api.rugcheck.xyz/v1/tokens/${mint}/report/summary`, { timeout: 8000 });
 
     const data = res.data;
-    const score = data?.score ?? 100;
+    // rugcheck.xyz: LOWER score = SAFER (score of 1 is perfectly safe like USDC)
+    // Higher score = more risky. We want score <= 500 to pass.
+    const score = data?.score ?? 9999;
 
-    // Check critical risks
     const hasCritical = (data?.risks ?? []).some((r) => r.level === 'danger' || r.level === 'critical');
     const hasFreezeAuth = !!data?.freezeAuthority;
     const hasMintAuth = !!data?.mintAuthority;
 
-    // Top holder check
     const topHolders = data?.topHolders ?? [];
     const topHolderPct = topHolders[0]?.pct ?? 0;
     const creatorPct = topHolders.filter((h) => h.insider).reduce((s, h) => s + h.pct, 0);
 
     const ok =
-      score >= 500 &&
+      score <= 500 &&
       !hasCritical &&
       !hasFreezeAuth &&
       !hasMintAuth &&

@@ -79,6 +79,8 @@ export function calcScore(token: Partial<Token>): ScoreBreakdown {
   };
 }
 
+const ALLOWED_DEXES = ['raydium', 'pump-fun', 'pumpfun', 'pumpswap', 'orca', 'meteora'];
+
 function buildFilterResults(pair: DexPair, settings: Awaited<ReturnType<typeof getSettings>>, rugOk: boolean): FilterResult[] {
   const mc = pair.marketCap ?? pair.fdv ?? 0;
   const vol24 = pair.volume?.h24 ?? 0;
@@ -87,6 +89,7 @@ function buildFilterResults(pair: DexPair, settings: Awaited<ReturnType<typeof g
   const h1Txns = pair.txns?.h1 ?? { buys: 0, sells: 0 };
   const bsr = h1Txns.sells > 0 ? h1Txns.buys / h1Txns.sells : h1Txns.buys > 0 ? 99 : 1;
   const change24 = Math.abs(pair.priceChange?.h24 ?? 0);
+  const dexOk = ALLOWED_DEXES.includes(pair.dexId?.toLowerCase() ?? '');
 
   return [
     { name: 'Market Cap ≥$500K', passed: mc >= settings.minMc, value: `$${(mc/1000).toFixed(0)}K`, required: `≥$${(settings.minMc/1000).toFixed(0)}K` },
@@ -96,49 +99,83 @@ function buildFilterResults(pair: DexPair, settings: Awaited<ReturnType<typeof g
     { name: 'Buy/Sell ≥1.2x', passed: bsr >= settings.minBuySellRatio, value: `${bsr.toFixed(2)}x`, required: `≥${settings.minBuySellRatio}x` },
     { name: 'Not pumped >500%', passed: change24 <= 500, value: `${change24.toFixed(0)}%`, required: '≤500%' },
     { name: 'Rugcheck pass', passed: rugOk || !settings.rugcheckEnabled, value: rugOk ? 'PASS' : 'FAIL', required: 'PASS' },
-    { name: 'DEX: Raydium/Pump', passed: ['raydium', 'pump-fun', 'pumpfun', 'orca'].includes(pair.dexId?.toLowerCase() ?? ''), value: pair.dexId ?? 'unknown', required: 'Raydium/Pump.fun' },
+    { name: 'DEX supported', passed: dexOk, value: pair.dexId ?? 'unknown', required: 'Raydium/Pump/Orca' },
   ];
 }
 
 async function fetchDexPairs(): Promise<DexPair[]> {
   try {
-    const [res1] = await Promise.all([
-      axios.get<{ pairs: DexPair[] }>(`${DEXSCREENER_BASE}/token-profiles/latest/v1`, { timeout: 10000 }),
-    ]);
-
-    // Also search top boosted tokens
-    const boostRes = await axios.get<{ pairs?: DexPair[] }>(`${DEXSCREENER_BASE}/token-boosts/top/v1`, { timeout: 10000 }).catch(() => ({ data: { pairs: [] } }));
-
-    // Search for SOL pairs with high momentum
-    const searchRes = await axios.get<{ pairs: DexPair[] }>(`${DEXSCREENER_BASE}/dex/search?q=SOL`, { timeout: 10000 }).catch(() => ({ data: { pairs: [] } }));
-
     const allPairs: DexPair[] = [];
 
-    // Process token profiles
-    if (Array.isArray(res1.data)) {
-      const mints = (res1.data as Array<{ tokenAddress: string; chainId: string }>)
+    // Fetch token profiles (latest boosted/trending tokens on Solana)
+    const profileRes = await axios.get<Array<{ tokenAddress: string; chainId: string }>>(
+      `${DEXSCREENER_BASE}/token-profiles/latest/v1`,
+      { timeout: 10000 }
+    ).catch(() => ({ data: [] }));
+
+    if (Array.isArray(profileRes.data)) {
+      const mints = profileRes.data
         .filter((t) => t.chainId === 'solana')
         .slice(0, 30)
         .map((t) => t.tokenAddress);
 
       if (mints.length > 0) {
-        const chunks = [];
-        for (let i = 0; i < mints.length; i += 30) chunks.push(mints.slice(i, i + 30));
-        for (const chunk of chunks) {
-          const r = await axios.get<{ pairs: DexPair[] }>(`${DEXSCREENER_BASE}/dex/tokens/${chunk.join(',')}`, { timeout: 10000 }).catch(() => ({ data: { pairs: [] } }));
+        for (let i = 0; i < mints.length; i += 30) {
+          const chunk = mints.slice(i, i + 30);
+          const r = await axios.get<{ pairs: DexPair[] }>(
+            `${DEXSCREENER_BASE}/latest/dex/tokens/${chunk.join(',')}`,
+            { timeout: 10000 }
+          ).catch(() => ({ data: { pairs: [] } }));
           if (r.data?.pairs) allPairs.push(...r.data.pairs.filter((p) => p.chainId === 'solana'));
         }
       }
     }
 
-    if (searchRes.data?.pairs) {
-      allPairs.push(...searchRes.data.pairs.filter((p) => p.chainId === 'solana'));
+    // Search for trending Solana pairs
+    const searches = [
+      `${DEXSCREENER_BASE}/latest/dex/search?q=solana`,
+      `${DEXSCREENER_BASE}/latest/dex/search?q=pump`,
+      `${DEXSCREENER_BASE}/latest/dex/search?q=meme+sol`,
+    ];
+
+    const searchResults = await Promise.all(
+      searches.map((url) =>
+        axios.get<{ pairs: DexPair[] }>(url, { timeout: 10000 }).catch(() => ({ data: { pairs: [] } }))
+      )
+    );
+
+    for (const res of searchResults) {
+      if (res.data?.pairs) allPairs.push(...res.data.pairs.filter((p) => p.chainId === 'solana'));
+    }
+
+    // Top boosted tokens
+    const boostRes = await axios.get<Array<{ tokenAddress: string; chainId: string }>>(
+      `${DEXSCREENER_BASE}/token-boosts/top/v1`,
+      { timeout: 10000 }
+    ).catch(() => ({ data: [] }));
+
+    if (Array.isArray(boostRes.data)) {
+      const boostedMints = boostRes.data
+        .filter((t) => t.chainId === 'solana')
+        .slice(0, 20)
+        .map((t) => t.tokenAddress);
+
+      if (boostedMints.length > 0) {
+        for (let i = 0; i < boostedMints.length; i += 30) {
+          const chunk = boostedMints.slice(i, i + 30);
+          const r = await axios.get<{ pairs: DexPair[] }>(
+            `${DEXSCREENER_BASE}/latest/dex/tokens/${chunk.join(',')}`,
+            { timeout: 10000 }
+          ).catch(() => ({ data: { pairs: [] } }));
+          if (r.data?.pairs) allPairs.push(...r.data.pairs.filter((p) => p.chainId === 'solana'));
+        }
+      }
     }
 
     // Deduplicate by pairAddress
     const seen = new Set<string>();
     return allPairs.filter((p) => {
-      if (seen.has(p.pairAddress)) return false;
+      if (!p.pairAddress || seen.has(p.pairAddress)) return false;
       seen.add(p.pairAddress);
       return true;
     });
@@ -164,15 +201,14 @@ export async function scanTokens(): Promise<void> {
     const liq = pair.liquidity?.usd ?? 0;
     const ageH = pair.pairCreatedAt ? (Date.now() - pair.pairCreatedAt) / 3_600_000 : 0;
     const h1Txns = pair.txns?.h1 ?? { buys: 0, sells: 0 };
-    const h24Txns = pair.txns?.h24 ?? { buys: 0, sells: 0 };
     const bsr = h1Txns.sells > 0 ? h1Txns.buys / h1Txns.sells : h1Txns.buys > 0 ? 99 : 1;
     const change24 = pair.priceChange?.h24 ?? 0;
     const change1h = pair.priceChange?.h1 ?? 0;
     const change5m = pair.priceChange?.m5 ?? 0;
     const price = parseFloat(pair.priceUsd ?? '0');
 
-    // Quick pre-filter
-    if (mc < settings.minMc || vol24 < settings.minVolume24h || ageH < settings.minAgeHours) continue;
+    // Quick pre-filter (MC and volume only — age is lenient)
+    if (mc < settings.minMc || vol24 < settings.minVolume24h) continue;
     if (ageH > settings.maxAgeHours) continue;
 
     // Rugcheck (with cache)

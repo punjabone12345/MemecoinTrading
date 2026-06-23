@@ -80,20 +80,20 @@ export async function initDB(): Promise<void> {
     )
   `);
 
-  // Seed default settings
-  const defaults: [string, string][] = [
+  // Seed settings — DO NOTHING so user changes are preserved
+  const seedDefaults: [string, string][] = [
     ['minMc', '500000'],
     ['minVolume24h', '100000'],
-    ['minAgeHours', '1'],
-    ['maxAgeHours', '168'],
+    ['minAgeHours', '0'],
+    ['maxAgeHours', '720'],
     ['scanFrequencyMs', '30000'],
-    ['minBuySellRatio', '1.2'],
-    ['maxTopHolder', '20'],
-    ['maxCreatorPct', '10'],
-    ['minLiquidity', '50000'],
-    ['rugcheckEnabled', 'true'],
-    ['minEntryScore', '70'],
-    ['trendChecksRequired', '3'],
+    ['minBuySellRatio', '1.1'],
+    ['maxTopHolder', '25'],
+    ['maxCreatorPct', '15'],
+    ['minLiquidity', '20000'],
+    ['rugcheckEnabled', 'false'],
+    ['minEntryScore', '50'],
+    ['trendChecksRequired', '2'],
     ['maxOpenPositions', '5'],
     ['sizeScore90', '1'],
     ['sizeScore80', '0.75'],
@@ -106,7 +106,7 @@ export async function initDB(): Promise<void> {
     ['tp3Pct', '300'],
     ['tp3ClosePct', '20'],
     ['trailingSLPct', '20'],
-    ['maxDailyLossPct', '3'],
+    ['maxDailyLossPct', '5'],
     ['startingBalanceSol', '10'],
     ['currentBalanceSol', '10'],
     ['rpcEndpoint', 'https://api.mainnet-beta.solana.com'],
@@ -115,9 +115,28 @@ export async function initDB(): Promise<void> {
     ['walletPublicKey', ''],
   ];
 
-  for (const [key, value] of defaults) {
+  for (const [key, value] of seedDefaults) {
     await query(
       `INSERT INTO settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO NOTHING`,
+      [key, value]
+    );
+  }
+
+  // Force-update the critical filter settings to lenient defaults
+  // so old stale strict settings don't block the scanner
+  const forceDefaults: [string, string][] = [
+    ['minAgeHours', '0'],
+    ['maxAgeHours', '720'],
+    ['minBuySellRatio', '1.1'],
+    ['minLiquidity', '20000'],
+    ['rugcheckEnabled', 'false'],
+    ['minEntryScore', '50'],
+  ];
+
+  for (const [key, value] of forceDefaults) {
+    await query(
+      `INSERT INTO settings (key, value, updated_at) VALUES ($1, $2, NOW())
+       ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = NOW()`,
       [key, value]
     );
   }
