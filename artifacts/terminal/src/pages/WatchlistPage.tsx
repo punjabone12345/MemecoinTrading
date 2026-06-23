@@ -24,7 +24,6 @@ function TokenRow({ token }: { token: Token }) {
       style={{ borderColor: isEligible ? 'rgba(0,255,136,0.2)' : undefined, overflow: 'hidden' }}>
       <button onClick={() => setOpen(!open)} style={{ width: '100%', display: 'block', background: 'transparent', border: 'none', cursor: 'pointer', padding: '14px 16px', textAlign: 'left' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-          {/* Score bubble */}
           <div style={{
             width: 44, height: 44, borderRadius: 14, flexShrink: 0,
             background: `${color}18`, border: `2px solid ${color}55`,
@@ -105,17 +104,25 @@ function TokenRow({ token }: { token: Token }) {
 }
 
 export default function WatchlistPage({ tokens }: Props) {
-  const eligible = useMemo(() => tokens.filter((t) => t.status === 'ELIGIBLE' || t.status === 'SCANNING').sort((a, b) => b.score - a.score), [tokens]);
-  const top = useMemo(() => tokens.filter((t) => t.score >= 40).sort((a, b) => b.score - a.score).slice(0, 30), [tokens]);
-  const display = eligible.length > 0 ? eligible : top;
+  const eligibleTokens = useMemo(() =>
+    tokens.filter((t) => t.status === 'ELIGIBLE').sort((a, b) => b.score - a.score),
+    [tokens]
+  );
+  const topScoring = useMemo(() =>
+    tokens.filter((t) => t.score >= 40).sort((a, b) => b.score - a.score).slice(0, 30),
+    [tokens]
+  );
+
+  const showingEligible = eligibleTokens.length > 0;
+  const display = showingEligible ? eligibleTokens : topScoring;
   const avgScore = display.length > 0 ? Math.round(display.reduce((s, t) => s + t.score, 0) / display.length) : 0;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8 }}>
         {[
-          { label: 'Watchlist', value: display.length, color: '#00d4ff', glow: 'card-glow-cyan' },
-          { label: 'Eligible', value: tokens.filter((t) => t.status === 'ELIGIBLE').length, color: '#00ff88', glow: 'card-glow-green' },
+          { label: 'Eligible', value: eligibleTokens.length, color: '#00ff88', glow: 'card-glow-green' },
+          { label: 'Top Scoring', value: topScoring.length, color: '#00d4ff', glow: 'card-glow-cyan' },
           { label: 'Avg Score', value: avgScore, color: '#ffd700', glow: 'card-glow-gold' },
         ].map((s) => (
           <div key={s.label} className={`card ${s.glow}`} style={{ padding: '12px 8px', textAlign: 'center' }}>
@@ -133,7 +140,11 @@ export default function WatchlistPage({ tokens }: Props) {
         </div>
       ) : (
         <>
-          <div className="section-label">{eligible.length > 0 ? `${eligible.length} Eligible Tokens` : 'Top Scoring Tokens'}</div>
+          <div className="section-label">
+            {showingEligible
+              ? `${eligibleTokens.length} Eligible — Ready to Trade`
+              : `Top Scoring Tokens (${topScoring.length})`}
+          </div>
           {display.map((t) => <TokenRow key={t.mint} token={t} />)}
         </>
       )}

@@ -1,8 +1,8 @@
 import { useState, useMemo } from 'react';
-import { Token, ScanStats } from '../lib/types.js';
+import { Token, ScanStats, Settings } from '../lib/types.js';
 import { formatMC, formatAge, formatPrice } from '../lib/utils.js';
 
-interface Props { tokens: Token[]; scanStats: ScanStats }
+interface Props { tokens: Token[]; scanStats: ScanStats; settings: Settings | null }
 type Sort = 'score' | 'marketCap' | 'age' | 'priceChange24h';
 type Filter = 'ALL' | 'ELIGIBLE' | 'SCANNING' | 'ENTERED' | 'REJECTED';
 
@@ -30,7 +30,37 @@ function StatusBadge({ status }: { status: Token['status'] }) {
   return <span className={`badge ${cls}`}>{status}</span>;
 }
 
-function TokenCard({ token }: { token: Token }) {
+function TradeBlockBanner({ token, settings }: { token: Token; settings: Settings }) {
+  const reasons: string[] = [];
+
+  if (token.score < settings.minEntryScore)
+    reasons.push(`Score ${token.score} below min ${settings.minEntryScore}`);
+  if (token.consecutiveTrending < settings.trendChecksRequired)
+    reasons.push(`Trend ${token.consecutiveTrending}/${settings.trendChecksRequired} scans confirmed`);
+  if (token.buySellRatio < settings.minBuySellRatio)
+    reasons.push(`Buy/Sell ratio ${token.buySellRatio.toFixed(2)}x below ${settings.minBuySellRatio}x`);
+  if (token.priceChange5m > 50)
+    reasons.push(`5m pump +${token.priceChange5m.toFixed(1)}% — FOMO guard active`);
+
+  if (reasons.length === 0) {
+    return (
+      <div style={{ marginTop: 8, padding: '7px 12px', borderRadius: 8, background: 'rgba(0,255,136,0.06)', border: '1px solid rgba(0,255,136,0.2)', fontSize: 11, color: '#00ff88' }}>
+        ✅ Waiting for next scan cycle to enter
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ marginTop: 8, padding: '8px 12px', borderRadius: 8, background: 'rgba(255,180,0,0.06)', border: '1px solid rgba(255,180,0,0.2)', fontSize: 11 }}>
+      <div style={{ color: '#ffd700', fontWeight: 700, marginBottom: 5 }}>⏳ Waiting to trade — conditions not met:</div>
+      {reasons.map((r, i) => (
+        <div key={i} style={{ color: '#b08830', marginBottom: 2 }}>• {r}</div>
+      ))}
+    </div>
+  );
+}
+
+function TokenCard({ token, settings }: { token: Token; settings: Settings | null }) {
   const [open, setOpen] = useState(false);
   const isEligible = token.status === 'ELIGIBLE';
   const isEntered = token.status === 'ENTERED';
@@ -66,12 +96,15 @@ function TokenCard({ token }: { token: Token }) {
             </button>
           </div>
         </div>
+
+        {isEligible && settings && (
+          <TradeBlockBanner token={token} settings={settings} />
+        )}
       </div>
 
       {open && (
         <div style={{ borderTop: '1px solid rgba(255,255,255,0.06)', padding: '14px 16px' }}>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
-            {/* Score bars */}
             <div>
               <div className="section-label" style={{ marginBottom: 10 }}>Score Breakdown</div>
               {[
@@ -91,7 +124,6 @@ function TokenCard({ token }: { token: Token }) {
                 </div>
               ))}
             </div>
-            {/* Filter checklist */}
             <div>
               <div className="section-label" style={{ marginBottom: 10 }}>Filter Checks</div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
@@ -109,7 +141,7 @@ function TokenCard({ token }: { token: Token }) {
                 <span style={{ color: '#3a5070' }}>Price <b style={{ color: '#7090b0' }}>${formatPrice(token.price)}</b></span>
                 <span style={{ color: '#3a5070' }}>B/S <b style={{ color: token.buySellRatio >= 1.5 ? '#00ff88' : '#7090b0' }}>{token.buySellRatio.toFixed(2)}x</b></span>
                 <span style={{ color: '#3a5070' }}>5m <b style={{ color: token.priceChange5m >= 0 ? '#00ff88' : '#ff4466' }}>{token.priceChange5m >= 0 ? '+' : ''}{token.priceChange5m.toFixed(2)}%</b></span>
-                <span style={{ color: '#3a5070' }}>Trend <b style={{ color: token.consecutiveTrending >= 3 ? '#00ff88' : '#7090b0' }}>{token.consecutiveTrending}/3 ↑</b></span>
+                <span style={{ color: '#3a5070' }}>Trend <b style={{ color: token.consecutiveTrending >= (settings?.trendChecksRequired ?? 2) ? '#00ff88' : '#7090b0' }}>{token.consecutiveTrending}/{settings?.trendChecksRequired ?? 2} ↑</b></span>
               </div>
             </div>
           </div>
@@ -127,7 +159,7 @@ function TokenCard({ token }: { token: Token }) {
 const FILTERS: Filter[] = ['ALL', 'ELIGIBLE', 'SCANNING', 'ENTERED', 'REJECTED'];
 const FILTER_COLOR: Record<Filter, string> = { ALL: '#00d4ff', ELIGIBLE: '#00ff88', SCANNING: '#00d4ff', ENTERED: '#ffd700', REJECTED: '#ff4466' };
 
-export default function DiscoverPage({ tokens, scanStats }: Props) {
+export default function DiscoverPage({ tokens, scanStats, settings }: Props) {
   const [sort, setSort] = useState<Sort>('score');
   const [filter, setFilter] = useState<Filter>('ALL');
   const [search, setSearch] = useState('');
@@ -142,7 +174,6 @@ export default function DiscoverPage({ tokens, scanStats }: Props) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-      {/* Stats row */}
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8 }}>
         {[
           { label: 'Scanning', value: scanStats.scanning, color: '#00d4ff', glow: 'card-glow-cyan' },
@@ -156,7 +187,6 @@ export default function DiscoverPage({ tokens, scanStats }: Props) {
         ))}
       </div>
 
-      {/* Search + Sort */}
       <div style={{ display: 'flex', gap: 8 }}>
         <input type="text" placeholder="Search token..." value={search} onChange={(e) => setSearch(e.target.value)}
           className="input-premium" style={{ flex: 1, padding: '9px 12px', fontSize: 13 }} />
@@ -169,11 +199,11 @@ export default function DiscoverPage({ tokens, scanStats }: Props) {
         </select>
       </div>
 
-      {/* Filter chips */}
       <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
         {FILTERS.map((f) => {
           const active = filter === f;
           const c = FILTER_COLOR[f];
+          const count = f === 'ALL' ? tokens.length : tokens.filter((t) => t.status === f).length;
           return (
             <button key={f} onClick={() => setFilter(f)}
               style={{
@@ -182,21 +212,22 @@ export default function DiscoverPage({ tokens, scanStats }: Props) {
                 border: `1px solid ${active ? `${c}55` : 'rgba(255,255,255,0.07)'}`,
                 color: active ? c : '#3a5070',
                 boxShadow: active ? `0 0 12px ${c}22` : 'none',
-              }}>{f}</button>
+              }}>{f} {count > 0 && <span style={{ opacity: 0.7 }}>({count})</span>}</button>
           );
         })}
       </div>
 
-      {/* Token list */}
       {filtered.length === 0 ? (
         <div style={{ textAlign: 'center', padding: '48px 20px', color: '#3a5070' }}>
           <div style={{ fontSize: 48, marginBottom: 12 }}>🔍</div>
-          <div style={{ fontWeight: 700, color: '#7090b0', marginBottom: 6 }}>Scanning Solana...</div>
+          <div style={{ fontWeight: 700, color: '#7090b0', marginBottom: 6 }}>
+            {filter !== 'ALL' ? `No ${filter} tokens right now` : 'Scanning Solana...'}
+          </div>
           <div style={{ fontSize: 12 }}>Updates every 30 seconds</div>
         </div>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-          {filtered.map((t) => <TokenCard key={t.mint} token={t} />)}
+          {filtered.map((t) => <TokenCard key={t.mint} token={t} settings={settings} />)}
         </div>
       )}
     </div>

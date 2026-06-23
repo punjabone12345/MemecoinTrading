@@ -199,7 +199,7 @@ export default function App() {
             transition={spring}
             style={{ position: 'absolute', inset: 0, overflowY: 'auto', overflowX: 'hidden', WebkitOverflowScrolling: 'touch', padding: '16px 16px 12px' }}
           >
-            {tab === 'discover' && <DiscoverPage tokens={tokens} scanStats={scanStats} />}
+            {tab === 'discover' && <DiscoverPage tokens={tokens} scanStats={scanStats} settings={settings} />}
             {tab === 'watchlist' && <WatchlistPage tokens={tokens} />}
             {tab === 'positions' && (
               <PositionsPage
