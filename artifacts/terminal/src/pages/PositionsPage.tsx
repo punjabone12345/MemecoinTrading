@@ -22,6 +22,7 @@ function PnlDisplay({ pnl, pct }: { pnl?: number; pct?: number }) {
       return () => clearTimeout(t);
     }
     prevPnl.current = pnl;
+    return undefined;
   }, [pnl]);
   const pos = (pnl ?? 0) >= 0;
   return (

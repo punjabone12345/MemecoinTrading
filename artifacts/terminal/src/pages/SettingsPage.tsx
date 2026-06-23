@@ -86,7 +86,7 @@ export default function SettingsPage({ settings: init, onUpdate }: Props) {
     if (numKeys.includes(key)) updated[key] = parseFloat(value) || 0;
     else if (boolKeys.includes(key)) updated[key] = value === 'true';
     else updated[key] = value;
-    setSettings(updated as Settings);
+    setSettings((updated as unknown) as Settings);
   }
 
   async function save() {
