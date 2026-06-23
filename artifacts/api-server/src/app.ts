@@ -24,7 +24,7 @@ if (process.env.NODE_ENV === 'production') {
   app.use(express.static(staticDir));
 
   // SPA fallback: any non-API route serves index.html
-  app.get('*', (_req, res) => {
+  app.use((_req, res) => {
     res.sendFile(path.join(staticDir, 'index.html'));
   });
 } else {
