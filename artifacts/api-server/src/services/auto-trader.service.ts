@@ -17,7 +17,7 @@ export function startAutoTrader(): void {
 
   scanInterval = setInterval(async () => {
     await runScanCycle();
-  }, 30_000);
+  }, 10_000);
 
   logger.info('Auto-trader started');
 }
