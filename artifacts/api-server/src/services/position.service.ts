@@ -6,6 +6,10 @@ import { notifyBought, notifyClosed, notifyTPHit, notifyEmergencyExit } from '..
 import { logger } from '../lib/logger.js';
 import { broadcastPositions, broadcastBalance } from '../websocket/server.js';
 
+// Per-position baseline snapshot for emergency exit detection.
+// Captured on first price update after entry; cleared on close.
+const positionBaselines = new Map<string, { liquidity: number; topHolder: number }>();
+
 function toIST(date: Date): string {
   return date.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', hour12: false });
 }
@@ -215,6 +219,9 @@ export async function closePosition(id: string, currentPrice: number, reason: st
   await setBalance(balance + pos.sizeSol + pnlSol);
   markTokenAvailable(pos.mint);
 
+  // Clean up the emergency-exit baseline so it doesn't persist after close
+  positionBaselines.delete(id);
+
   // Only send the close notification if not suppressed (e.g. emergency exit sends its own)
   if (!options?.silent) {
     await notifyClosed({ name: pos.name, symbol: pos.symbol, pnlSol, pnlPct, reason });
@@ -277,19 +284,49 @@ export async function updatePositionPrice(id: string, currentPrice: number): Pro
     return;
   }
 
-  // Emergency exit checks
+  // ── Emergency exit checks ────────────────────────────────────────────────
+  // Score is an ENTRY filter only — do NOT exit on score alone.
+  // Only exit on structural integrity failures: rug, liquidity drain, creator dump.
   const token = getTokenByMint(pos.mint);
   if (token) {
+    // Establish baseline on first observation after entry
+    if (!positionBaselines.has(id)) {
+      positionBaselines.set(id, {
+        liquidity: token.liquidity,
+        topHolder: token.topHolder,
+      });
+      logger.info({ positionId: id, mint: pos.mint, baseLiquidity: token.liquidity, baseTopHolder: token.topHolder }, 'Emergency-exit baseline captured');
+    }
+    const baseline = positionBaselines.get(id)!;
+
     const emergencyReasons: string[] = [];
-    if (!token.rugcheck) emergencyReasons.push('Rugcheck failed');
-    if (token.buySellRatio < 0.8) emergencyReasons.push('Buy/sell ratio < 0.8');
-    if (token.score < 40) emergencyReasons.push('Score dropped below 40');
+
+    // 1. Rugcheck failure (on-chain freeze/mint authority restored, etc.)
+    if (!token.rugcheck) {
+      emergencyReasons.push('Rugcheck failed (on-chain risk detected)');
+    }
+
+    // 2. Creator / whale sell dump — extreme buy/sell ratio inversion
+    if (token.buySellRatio < 0.5) {
+      emergencyReasons.push(`Extreme sell pressure (BSR ${token.buySellRatio.toFixed(2)}x) — likely creator/whale dump`);
+    }
+
+    // 3. Liquidity drained >30% from entry baseline
+    if (baseline.liquidity > 1000 && token.liquidity < baseline.liquidity * 0.70) {
+      const dropPct = (((baseline.liquidity - token.liquidity) / baseline.liquidity) * 100).toFixed(0);
+      emergencyReasons.push(`Liquidity drained ${dropPct}% ($${(baseline.liquidity / 1000).toFixed(0)}K → $${(token.liquidity / 1000).toFixed(0)}K)`);
+    }
+
+    // 4. Top-holder concentration surged >15pp (coordinated accumulation before dump)
+    if (baseline.topHolder > 0 && token.topHolder > baseline.topHolder + 15) {
+      emergencyReasons.push(`Top-holder concentration surged ${baseline.topHolder.toFixed(1)}% → ${token.topHolder.toFixed(1)}%`);
+    }
 
     if (emergencyReasons.length > 0) {
-      const reason = emergencyReasons.join(', ');
+      const reason = emergencyReasons.join('; ');
       const pnl = pos.sizeSol * (pnlPct / 100);
+      logger.warn({ positionId: id, mint: pos.mint, symbol: pos.symbol, reason, pnl }, 'EMERGENCY EXIT triggered');
       await notifyEmergencyExit({ name: pos.name, symbol: pos.symbol, reason, pnlSol: pnl });
-      // Use silent=true so closePosition does NOT send a second Telegram notification
       await closePosition(id, currentPrice, `EMERGENCY: ${reason}`, { silent: true });
     }
   }
