@@ -38,7 +38,7 @@ function TradeBlockBanner({ token, settings }: { token: Token; settings: Setting
   if (token.buySellRatio < settings.minBuySellRatio)
     reasons.push(`Buy/Sell ratio ${token.buySellRatio.toFixed(2)}x below ${settings.minBuySellRatio}x`);
   if (token.priceChange5m > 50)
-    reasons.push(`5m pump +${token.priceChange5m.toFixed(1)}% — FOMO guard active`);
+    reasons.push(`5m pump +${token.priceChange5m.toFixed(1)}% — FOMO guard (>50% in 5m blocks entry)`);
 
   if (reasons.length === 0) {
     return (

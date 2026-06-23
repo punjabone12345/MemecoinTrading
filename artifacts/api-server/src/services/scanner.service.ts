@@ -88,7 +88,7 @@ function buildFilterResults(pair: DexPair, settings: Awaited<ReturnType<typeof g
   const ageH = pair.pairCreatedAt ? (Date.now() - pair.pairCreatedAt) / 3_600_000 : 0;
   const h1Txns = pair.txns?.h1 ?? { buys: 0, sells: 0 };
   const bsr = h1Txns.sells > 0 ? h1Txns.buys / h1Txns.sells : h1Txns.buys > 0 ? 99 : 1;
-  const change24 = Math.abs(pair.priceChange?.h24 ?? 0);
+  const change5m = pair.priceChange?.m5 ?? 0;
   const dexOk = ALLOWED_DEXES.includes(pair.dexId?.toLowerCase() ?? '');
 
   return [
@@ -98,7 +98,7 @@ function buildFilterResults(pair: DexPair, settings: Awaited<ReturnType<typeof g
     { name: 'Age in range', passed: ageH >= settings.minAgeHours && ageH <= settings.maxAgeHours, value: `${ageH.toFixed(1)}h`, required: `${settings.minAgeHours}h–${settings.maxAgeHours}h` },
     { name: 'Liquidity ≥$50K', passed: liq >= settings.minLiquidity, value: `$${(liq/1000).toFixed(0)}K`, required: `≥$${(settings.minLiquidity/1000).toFixed(0)}K` },
     { name: 'Buy/Sell ≥1.2x', passed: bsr >= settings.minBuySellRatio, value: `${bsr.toFixed(2)}x`, required: `≥${settings.minBuySellRatio}x` },
-    { name: 'Not pumped >500%', passed: change24 <= 500, value: `${change24.toFixed(0)}%`, required: '≤500%' },
+    { name: 'No 5m FOMO >50%', passed: change5m <= 50, value: `${change5m.toFixed(1)}%`, required: '≤50% in 5m' },
     { name: 'Rugcheck pass', passed: rugOk || !settings.rugcheckEnabled, value: rugOk ? 'PASS' : 'FAIL', required: 'PASS' },
     { name: 'DEX supported', passed: dexOk, value: pair.dexId ?? 'unknown', required: 'Raydium/Pump/Orca' },
   ];
@@ -313,6 +313,8 @@ export async function scanTokens(): Promise<void> {
     }
   }
 
+  // scanCount = actual tokens evaluated and stored (not raw DexScreener fetch size)
+  scanCount = tokenCache.size;
   logger.info({ scanCount, passedFilters, eligibleCount }, 'Scan complete');
 }
 

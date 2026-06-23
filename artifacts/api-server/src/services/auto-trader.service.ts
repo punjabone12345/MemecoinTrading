@@ -50,7 +50,7 @@ async function checkEntries(): Promise<void> {
     // Entry conditions
     const meetsScore = token.score >= settings.minEntryScore;
     const meetsBSR = token.buySellRatio >= settings.minBuySellRatio;
-    const notFOMO = token.priceChange5m <= 50; // Block hyper-pumps (>50% in 5m)
+    const notFOMO = token.priceChange5m <= 50; // Block if pumped >50% in last 5 min
 
     if (meetsScore && meetsBSR && notFOMO) {
       const dexUrl = `https://dexscreener.com/solana/${token.mint}`;
