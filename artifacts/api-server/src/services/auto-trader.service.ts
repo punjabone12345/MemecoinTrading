@@ -1,7 +1,9 @@
 import { logger } from '../lib/logger.js';
-import { scanTokens, getAllTokens } from './scanner.service.js';
+import { scanTokens, getAllTokens, setDailyLossStatus } from './scanner.service.js';
 import { getSettings } from './settings.service.js';
 import { openPosition, getOpenPositions } from './position.service.js';
+import { getBalance } from './settings.service.js';
+import { query } from '../lib/db.js';
 import { broadcastTokens } from '../websocket/server.js';
 
 let scanInterval: ReturnType<typeof setInterval> | null = null;
@@ -38,6 +40,26 @@ async function runScanCycle(): Promise<void> {
 
 async function checkEntries(): Promise<void> {
   const settings = await getSettings();
+  const balance = await getBalance();
+
+  // Check daily loss limit upfront so we can surface it in the UI
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const todayRows = await query<{ pnl_sol: string }>(`
+    SELECT pnl_sol FROM positions WHERE status = 'CLOSED' AND exit_time >= $1
+  `, [today.toISOString()]);
+  const dailyPnl = todayRows.reduce((s, r) => s + parseFloat(r.pnl_sol ?? '0'), 0);
+  const dailyLossLimit = -(balance * settings.maxDailyLossPct / 100);
+  const limitHit = dailyPnl <= dailyLossLimit;
+
+  // Publish the daily loss status so the scanner stats and UI can show it
+  setDailyLossStatus(limitHit, dailyPnl, dailyLossLimit);
+
+  if (limitHit) {
+    logger.info({ dailyPnl, dailyLossLimit }, 'Daily loss limit hit, no new entries');
+    return;
+  }
+
   const tokens = getAllTokens();
   const openPositions = await getOpenPositions();
   const openMints = new Set(openPositions.map((p) => p.mint));

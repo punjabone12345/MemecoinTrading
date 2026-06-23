@@ -30,7 +30,26 @@ function StatusBadge({ status }: { status: Token['status'] }) {
   return <span className={`badge ${cls}`}>{status}</span>;
 }
 
-function TradeBlockBanner({ token, settings }: { token: Token; settings: Settings }) {
+function TradeBlockBanner({ token, settings, dailyLossLimitHit, dailyPnl, dailyLossLimit }: {
+  token: Token;
+  settings: Settings;
+  dailyLossLimitHit?: boolean;
+  dailyPnl?: number;
+  dailyLossLimit?: number;
+}) {
+  // Daily loss limit is a global block — show it first, no point checking other conditions
+  if (dailyLossLimitHit) {
+    const pnlStr = dailyPnl !== undefined ? dailyPnl.toFixed(4) : '?';
+    const limitStr = dailyLossLimit !== undefined ? dailyLossLimit.toFixed(4) : '?';
+    return (
+      <div style={{ marginTop: 8, padding: '8px 12px', borderRadius: 8, background: 'rgba(255,68,102,0.08)', border: '1px solid rgba(255,68,102,0.25)', fontSize: 11 }}>
+        <div style={{ color: '#ff4466', fontWeight: 700, marginBottom: 4 }}>🚫 Daily loss limit hit — trading paused until midnight</div>
+        <div style={{ color: '#a03050' }}>Today P&amp;L: <b style={{ color: '#ff4466' }}>{pnlStr} SOL</b> / limit: <b>{limitStr} SOL</b></div>
+        <div style={{ color: '#a03050', marginTop: 3, fontSize: 10 }}>Reset settings &gt; max daily loss % to unlock, or wait for next day</div>
+      </div>
+    );
+  }
+
   const reasons: string[] = [];
 
   if (token.score < settings.minEntryScore)
@@ -43,7 +62,7 @@ function TradeBlockBanner({ token, settings }: { token: Token; settings: Setting
   if (reasons.length === 0) {
     return (
       <div style={{ marginTop: 8, padding: '7px 12px', borderRadius: 8, background: 'rgba(0,255,136,0.06)', border: '1px solid rgba(0,255,136,0.2)', fontSize: 11, color: '#00ff88' }}>
-        ✅ All conditions met — entering position this cycle
+        ✅ All conditions met — entering position next cycle
       </div>
     );
   }
@@ -58,7 +77,7 @@ function TradeBlockBanner({ token, settings }: { token: Token; settings: Setting
   );
 }
 
-function TokenCard({ token, settings }: { token: Token; settings: Settings | null }) {
+function TokenCard({ token, settings, scanStats }: { token: Token; settings: Settings | null; scanStats: ScanStats }) {
   const [open, setOpen] = useState(false);
   const isEligible = token.status === 'ELIGIBLE';
   const isEntered = token.status === 'ENTERED';
@@ -96,7 +115,13 @@ function TokenCard({ token, settings }: { token: Token; settings: Settings | nul
         </div>
 
         {isEligible && settings && (
-          <TradeBlockBanner token={token} settings={settings} />
+          <TradeBlockBanner
+            token={token}
+            settings={settings}
+            dailyLossLimitHit={scanStats.dailyLossLimitHit}
+            dailyPnl={scanStats.dailyPnl}
+            dailyLossLimit={scanStats.dailyLossLimit}
+          />
         )}
         {token.status === 'REJECTED' && token.rejectReason && (
           <div style={{ marginTop: 6, padding: '5px 10px', borderRadius: 6, background: 'rgba(255,68,102,0.06)', border: '1px solid rgba(255,68,102,0.15)', fontSize: 11, color: '#ff6680' }}>
@@ -230,7 +255,7 @@ export default function DiscoverPage({ tokens, scanStats, settings }: Props) {
         </div>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-          {filtered.map((t) => <TokenCard key={t.mint} token={t} settings={settings} />)}
+          {filtered.map((t) => <TokenCard key={t.mint} token={t} settings={settings} scanStats={scanStats} />)}
         </div>
       )}
     </div>

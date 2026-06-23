@@ -30,8 +30,26 @@ let scanCount = 0;
 let passedFilters = 0;
 let eligibleCount = 0;
 
+// Exposed so auto-trader can update this after entry checks
+let dailyLossLimitHit = false;
+let dailyPnlSnapshot = 0;
+let dailyLossLimitSnapshot = 0;
+
+export function setDailyLossStatus(hit: boolean, pnl: number, limit: number): void {
+  dailyLossLimitHit = hit;
+  dailyPnlSnapshot = pnl;
+  dailyLossLimitSnapshot = limit;
+}
+
 export function getScanStats() {
-  return { scanning: scanCount, passed: passedFilters, eligible: eligibleCount };
+  return {
+    scanning: scanCount,
+    passed: passedFilters,
+    eligible: eligibleCount,
+    dailyLossLimitHit,
+    dailyPnl: dailyPnlSnapshot,
+    dailyLossLimit: dailyLossLimitSnapshot,
+  };
 }
 
 export function getAllTokens(): Token[] {
@@ -89,6 +107,7 @@ function buildFilterResults(pair: DexPair, settings: Awaited<ReturnType<typeof g
   const h1Txns = pair.txns?.h1 ?? { buys: 0, sells: 0 };
   const bsr = h1Txns.sells > 0 ? h1Txns.buys / h1Txns.sells : h1Txns.buys > 0 ? 99 : 1;
   const change5m = pair.priceChange?.m5 ?? 0;
+  const change24 = pair.priceChange?.h24 ?? 0;
   const dexOk = ALLOWED_DEXES.includes(pair.dexId?.toLowerCase() ?? '');
 
   return [
@@ -99,6 +118,7 @@ function buildFilterResults(pair: DexPair, settings: Awaited<ReturnType<typeof g
     { name: 'Liquidity ≥$50K', passed: liq >= settings.minLiquidity, value: `$${(liq/1000).toFixed(0)}K`, required: `≥$${(settings.minLiquidity/1000).toFixed(0)}K` },
     { name: 'Buy/Sell ≥1.2x', passed: bsr >= settings.minBuySellRatio, value: `${bsr.toFixed(2)}x`, required: `≥${settings.minBuySellRatio}x` },
     { name: 'No 5m FOMO >50%', passed: change5m <= 50, value: `${change5m.toFixed(1)}%`, required: '≤50% in 5m' },
+    { name: 'Not pumped >500%', passed: change24 <= 500, value: `${change24.toFixed(0)}%`, required: '≤500% in 24h' },
     { name: 'Rugcheck pass', passed: rugOk || !settings.rugcheckEnabled, value: rugOk ? 'PASS' : 'FAIL', required: 'PASS' },
     { name: 'DEX supported', passed: dexOk, value: pair.dexId ?? 'unknown', required: 'Raydium/Pump/Orca' },
   ];
@@ -214,6 +234,7 @@ export async function scanTokens(): Promise<void> {
     else if (mc > settings.maxMc) preReject = `MC too high ($${(mc/1e6).toFixed(1)}M > $${(settings.maxMc/1e6).toFixed(1)}M max)`;
     else if (vol24 < settings.minVolume24h) preReject = `Vol24h too low ($${(vol24/1000).toFixed(0)}K < $${(settings.minVolume24h/1000).toFixed(0)}K min)`;
     else if (ageH > settings.maxAgeHours) preReject = `Age ${ageH.toFixed(1)}h > ${settings.maxAgeHours}h max`;
+    else if (change24 > 500) preReject = `Already pumped ${change24.toFixed(0)}% in 24h (>500% blocks entry)`;
 
     const existing = tokenCache.get(mint);
 
@@ -313,8 +334,10 @@ export async function scanTokens(): Promise<void> {
     }
   }
 
-  // scanCount = actual tokens evaluated and stored (not raw DexScreener fetch size)
+  // Recalculate from full cache so stats match what the UI token list shows
   scanCount = tokenCache.size;
+  eligibleCount = Array.from(tokenCache.values()).filter((t) => t.status === 'ELIGIBLE').length;
+  passedFilters = Array.from(tokenCache.values()).filter((t) => t.status === 'ELIGIBLE' || t.status === 'SCANNING').length;
   logger.info({ scanCount, passedFilters, eligibleCount }, 'Scan complete');
 }
 

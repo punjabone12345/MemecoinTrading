@@ -129,4 +129,7 @@ export interface ScanStats {
   scanning: number;
   passed: number;
   eligible: number;
+  dailyLossLimitHit?: boolean;
+  dailyPnl?: number;
+  dailyLossLimit?: number;
 }
