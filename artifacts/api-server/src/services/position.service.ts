@@ -110,11 +110,40 @@ export async function openPosition(params: {
 
   const slPrice = params.price * (1 - settings.slPct / 100);
 
-  const rows = await query<Record<string, unknown>>(`
-    INSERT INTO positions (mint, name, symbol, entry_price, entry_mc, size_sol, score_at_entry, peak_price, sl_current, mode, dex_url, status)
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'OPEN')
-    RETURNING *
-  `, [params.mint, params.name, params.symbol, params.price, params.mc, sizeSol, params.score, params.price, slPrice, process.env.TRADING_MODE || 'paper', params.dexUrl ?? null]);
+  // Dynamic INSERT: only include columns that actually exist in the DB table.
+  // This handles legacy Render schemas with unknown extra NOT-NULL columns —
+  // we never reference columns we don't own, so no constraint can block us.
+  const colRows = await query<{ column_name: string }>(`
+    SELECT column_name FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = 'positions'
+  `);
+  const existingCols = new Set(colRows.map((r) => r.column_name));
+
+  const wantedCols: Record<string, unknown> = {
+    mint: params.mint,
+    name: params.name,
+    symbol: params.symbol,
+    entry_price: params.price,
+    entry_mc: params.mc,
+    size_sol: sizeSol,
+    score_at_entry: params.score,
+    peak_price: params.price,
+    sl_current: slPrice,
+    mode: process.env.TRADING_MODE || 'paper',
+    dex_url: params.dexUrl ?? null,
+    status: 'OPEN',
+  };
+
+  const colNames = Object.keys(wantedCols).filter((c) => existingCols.has(c));
+  const colValues = colNames.map((c) => wantedCols[c]);
+  const placeholders = colNames.map((_, i) => `$${i + 1}`).join(', ');
+
+  logger.info({ colNames }, 'openPosition: inserting with columns');
+
+  const rows = await query<Record<string, unknown>>(
+    `INSERT INTO positions (${colNames.join(', ')}) VALUES (${placeholders}) RETURNING *`,
+    colValues
+  );
 
   const position = rowToPosition(rows[0]);
   await setBalance(balance - sizeSol);
