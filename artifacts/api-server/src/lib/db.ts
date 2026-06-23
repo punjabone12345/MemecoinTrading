@@ -80,6 +80,54 @@ export async function initDB(): Promise<void> {
     )
   `);
 
+  // ── Schema migrations: safely add any columns that may be missing
+  //    in older production databases (Render, etc.) ──────────────────
+  const migrations = [
+    // positions table
+    `ALTER TABLE positions ADD COLUMN IF NOT EXISTS entry_price  NUMERIC      NOT NULL DEFAULT 0`,
+    `ALTER TABLE positions ADD COLUMN IF NOT EXISTS entry_mc     NUMERIC      NOT NULL DEFAULT 0`,
+    `ALTER TABLE positions ADD COLUMN IF NOT EXISTS entry_time   TIMESTAMPTZ  NOT NULL DEFAULT NOW()`,
+    `ALTER TABLE positions ADD COLUMN IF NOT EXISTS exit_price   NUMERIC`,
+    `ALTER TABLE positions ADD COLUMN IF NOT EXISTS exit_mc      NUMERIC`,
+    `ALTER TABLE positions ADD COLUMN IF NOT EXISTS exit_time    TIMESTAMPTZ`,
+    `ALTER TABLE positions ADD COLUMN IF NOT EXISTS size_sol     NUMERIC      NOT NULL DEFAULT 0`,
+    `ALTER TABLE positions ADD COLUMN IF NOT EXISTS pnl_sol      NUMERIC`,
+    `ALTER TABLE positions ADD COLUMN IF NOT EXISTS pnl_pct      NUMERIC`,
+    `ALTER TABLE positions ADD COLUMN IF NOT EXISTS score_at_entry INTEGER    NOT NULL DEFAULT 0`,
+    `ALTER TABLE positions ADD COLUMN IF NOT EXISTS peak_price   NUMERIC      NOT NULL DEFAULT 0`,
+    `ALTER TABLE positions ADD COLUMN IF NOT EXISTS sl_current   NUMERIC      NOT NULL DEFAULT 0`,
+    `ALTER TABLE positions ADD COLUMN IF NOT EXISTS tp1_hit      BOOLEAN       DEFAULT FALSE`,
+    `ALTER TABLE positions ADD COLUMN IF NOT EXISTS tp2_hit      BOOLEAN       DEFAULT FALSE`,
+    `ALTER TABLE positions ADD COLUMN IF NOT EXISTS tp3_hit      BOOLEAN       DEFAULT FALSE`,
+    `ALTER TABLE positions ADD COLUMN IF NOT EXISTS close_reason TEXT`,
+    `ALTER TABLE positions ADD COLUMN IF NOT EXISTS status       TEXT         NOT NULL DEFAULT 'OPEN'`,
+    `ALTER TABLE positions ADD COLUMN IF NOT EXISTS mode         TEXT         NOT NULL DEFAULT 'paper'`,
+    `ALTER TABLE positions ADD COLUMN IF NOT EXISTS tx_signature TEXT`,
+    `ALTER TABLE positions ADD COLUMN IF NOT EXISTS dex_url      TEXT`,
+    `ALTER TABLE positions ADD COLUMN IF NOT EXISTS notes        TEXT`,
+    `ALTER TABLE positions ADD COLUMN IF NOT EXISTS created_at   TIMESTAMPTZ   DEFAULT NOW()`,
+    // tokens table
+    `ALTER TABLE tokens ADD COLUMN IF NOT EXISTS score          INTEGER  DEFAULT 0`,
+    `ALTER TABLE tokens ADD COLUMN IF NOT EXISTS market_cap     NUMERIC  DEFAULT 0`,
+    `ALTER TABLE tokens ADD COLUMN IF NOT EXISTS volume_24h     NUMERIC  DEFAULT 0`,
+    `ALTER TABLE tokens ADD COLUMN IF NOT EXISTS buy_sell_ratio NUMERIC  DEFAULT 1`,
+    `ALTER TABLE tokens ADD COLUMN IF NOT EXISTS rugcheck       BOOLEAN  DEFAULT FALSE`,
+    `ALTER TABLE tokens ADD COLUMN IF NOT EXISTS top_holder     NUMERIC  DEFAULT 0`,
+    `ALTER TABLE tokens ADD COLUMN IF NOT EXISTS creator_pct    NUMERIC  DEFAULT 0`,
+    `ALTER TABLE tokens ADD COLUMN IF NOT EXISTS status         TEXT     DEFAULT 'SCANNING'`,
+    `ALTER TABLE tokens ADD COLUMN IF NOT EXISTS reject_reason  TEXT`,
+    `ALTER TABLE tokens ADD COLUMN IF NOT EXISTS last_updated   TIMESTAMPTZ DEFAULT NOW()`,
+  ];
+
+  for (const sql of migrations) {
+    try {
+      await query(sql);
+    } catch (err: unknown) {
+      // Log but never crash — a missing column is worse than a failed ALTER
+      logger.warn({ err, sql }, 'Migration skipped (non-fatal)');
+    }
+  }
+
   // Seed settings — DO NOTHING so user changes are preserved
   const seedDefaults: [string, string][] = [
     ['minMc', '500000'],
