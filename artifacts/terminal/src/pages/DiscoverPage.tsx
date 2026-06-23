@@ -2,183 +2,119 @@ import { useState, useMemo } from 'react';
 import { Token, ScanStats } from '../lib/types.js';
 import { formatMC, formatAge, formatPrice } from '../lib/utils.js';
 
-interface Props {
-  tokens: Token[];
-  scanStats: ScanStats;
-}
-
-type SortKey = 'score' | 'marketCap' | 'age' | 'priceChange24h';
-type StatusFilter = 'ALL' | 'ELIGIBLE' | 'SCANNING' | 'ENTERED' | 'REJECTED';
+interface Props { tokens: Token[]; scanStats: ScanStats }
+type Sort = 'score' | 'marketCap' | 'age' | 'priceChange24h';
+type Filter = 'ALL' | 'ELIGIBLE' | 'SCANNING' | 'ENTERED' | 'REJECTED';
 
 function ScoreRing({ score }: { score: number }) {
-  const size = 44;
-  const r = 18;
-  const circ = 2 * Math.PI * r;
+  const size = 46, r = 18, circ = 2 * Math.PI * r;
   const filled = (score / 100) * circ;
   const color = score >= 70 ? '#00ff88' : score >= 50 ? '#ffd700' : '#ff4466';
-
   return (
-    <div className="relative flex-shrink-0" style={{ width: size, height: size }}>
+    <div style={{ position: 'relative', width: size, height: size, flexShrink: 0 }}>
       <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
-        <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="#1e2a3a" strokeWidth={4} />
-        <circle
-          cx={size / 2} cy={size / 2} r={r}
-          fill="none" stroke={color} strokeWidth={4}
-          strokeDasharray={`${filled} ${circ - filled}`}
-          strokeLinecap="round"
-          className="score-ring"
-          style={{ transform: 'rotate(-90deg)', transformOrigin: `${size / 2}px ${size / 2}px` }}
-        />
+        <circle cx={size/2} cy={size/2} r={r} fill="none" stroke="rgba(255,255,255,0.06)" strokeWidth={4} />
+        <circle cx={size/2} cy={size/2} r={r} fill="none" stroke={color} strokeWidth={4}
+          strokeDasharray={`${filled} ${circ - filled}`} strokeLinecap="round"
+          className="score-ring" style={{ filter: `drop-shadow(0 0 4px ${color}66)` }} />
       </svg>
-      <div className="absolute inset-0 flex items-center justify-center">
-        <span className="text-xs font-bold" style={{ color }}>{score}</span>
+      <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+        <span style={{ fontSize: 11, fontWeight: 900, color }}>{score}</span>
       </div>
     </div>
   );
 }
 
 function StatusBadge({ status }: { status: Token['status'] }) {
-  const colors: Record<Token['status'], { bg: string; text: string }> = {
-    ELIGIBLE: { bg: 'rgba(0,255,136,0.15)', text: '#00ff88' },
-    SCANNING: { bg: 'rgba(0,212,255,0.1)', text: '#00d4ff' },
-    ENTERED: { bg: 'rgba(255,215,0,0.15)', text: '#ffd700' },
-    REJECTED: { bg: 'rgba(255,68,102,0.1)', text: '#ff4466' },
-  };
-  const c = colors[status];
-  return (
-    <span
-      className="px-2 py-0.5 rounded text-xs font-bold uppercase"
-      style={{ background: c.bg, color: c.text }}
-    >
-      {status}
-    </span>
-  );
+  const cls = { ELIGIBLE: 'badge-eligible', SCANNING: 'badge-scanning', ENTERED: 'badge-entered', REJECTED: 'badge-rejected' }[status];
+  return <span className={`badge ${cls}`}>{status}</span>;
 }
 
 function TokenCard({ token }: { token: Token }) {
-  const [expanded, setExpanded] = useState(false);
+  const [open, setOpen] = useState(false);
+  const isEligible = token.status === 'ELIGIBLE';
+  const isEntered = token.status === 'ENTERED';
 
   return (
-    <div
-      className="rounded-xl border transition-all"
-      style={{
-        background: 'var(--navy-card)',
-        borderColor: token.status === 'ELIGIBLE' ? 'rgba(0,255,136,0.3)' : token.status === 'ENTERED' ? 'rgba(255,215,0,0.3)' : 'var(--navy-border)',
-      }}
-    >
-      <div className="p-4">
-        <div className="flex items-start justify-between gap-3">
-          <div className="flex items-center gap-3 min-w-0">
-            <ScoreRing score={token.score} />
-            <div className="min-w-0">
-              <div className="flex items-center gap-2 flex-wrap">
-                <span className="font-bold text-sm truncate" style={{ color: 'var(--text)' }}>{token.symbol}</span>
-                <span className="text-xs truncate" style={{ color: 'var(--text-dim)' }}>{token.name}</span>
-                <StatusBadge status={token.status} />
-              </div>
-              <div className="flex items-center gap-3 mt-1 text-xs flex-wrap" style={{ color: 'var(--text-dim)' }}>
-                <span>MC: <b style={{ color: 'var(--text)' }}>{formatMC(token.marketCap)}</b></span>
-                <span>Vol: <b style={{ color: 'var(--text)' }}>{formatMC(token.volume24h)}</b></span>
-                <span>Age: <b style={{ color: 'var(--text)' }}>{formatAge(token.age)}</b></span>
-                <span style={{ color: token.priceChange24h >= 0 ? 'var(--green)' : 'var(--red)' }}>
-                  24h: {token.priceChange24h >= 0 ? '+' : ''}{token.priceChange24h.toFixed(1)}%
-                </span>
-              </div>
+    <div className={`card ${isEligible ? 'card-glow-green' : isEntered ? 'card-glow-gold' : ''}`}
+      style={{ borderColor: isEligible ? 'rgba(0,255,136,0.2)' : isEntered ? 'rgba(255,215,0,0.2)' : undefined, overflow: 'hidden' }}>
+      <div style={{ padding: '14px 16px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <ScoreRing score={token.score} />
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 4 }}>
+              <span style={{ fontWeight: 800, fontSize: 14, color: '#d4e0f0' }}>{token.symbol}</span>
+              <span style={{ fontSize: 11, color: '#3a5070', maxWidth: 100, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{token.name}</span>
+              <StatusBadge status={token.status} />
+            </div>
+            <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', fontSize: 11, color: '#3a5070' }}>
+              <span>MC <b style={{ color: '#7090b0' }}>{formatMC(token.marketCap)}</b></span>
+              <span>Vol <b style={{ color: '#7090b0' }}>{formatMC(token.volume24h)}</b></span>
+              <span>Age <b style={{ color: '#7090b0' }}>{formatAge(token.age)}</b></span>
+              <span style={{ color: token.priceChange24h >= 0 ? '#00ff88' : '#ff4466', fontWeight: 700 }}>
+                {token.priceChange24h >= 0 ? '+' : ''}{token.priceChange24h.toFixed(1)}%
+              </span>
             </div>
           </div>
-          <div className="flex items-center gap-2 flex-shrink-0">
-            <a
-              href={`https://dexscreener.com/solana/${token.mint}`}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="px-2 py-1 rounded text-xs font-medium transition-opacity hover:opacity-80"
-              style={{ background: 'rgba(0,212,255,0.1)', color: 'var(--cyan)', border: '1px solid rgba(0,212,255,0.2)' }}
-              onClick={(e) => e.stopPropagation()}
-            >
-              DEX ↗
-            </a>
-            <button
-              onClick={() => setExpanded(!expanded)}
-              className="px-2 py-1 rounded text-xs transition-opacity hover:opacity-80"
-              style={{ background: 'var(--navy-border)', color: 'var(--text-dim)' }}
-            >
-              {expanded ? '▲' : '▼'}
+          <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
+            <a href={`https://dexscreener.com/solana/${token.mint}`} target="_blank" rel="noopener noreferrer"
+              className="btn-primary" style={{ padding: '5px 10px', fontSize: 11, textDecoration: 'none', display: 'inline-block' }}
+              onClick={(e) => e.stopPropagation()}>DEX ↗</a>
+            <button onClick={() => setOpen(!open)}
+              style={{ width: 28, height: 28, borderRadius: 8, background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.08)', color: '#7090b0', cursor: 'pointer', fontSize: 11 }}>
+              {open ? '▲' : '▼'}
             </button>
           </div>
         </div>
       </div>
 
-      {expanded && (
-        <div className="px-4 pb-4 border-t" style={{ borderColor: 'var(--navy-border)' }}>
-          <div className="pt-3 grid grid-cols-1 md:grid-cols-2 gap-4">
-            {/* Score Breakdown */}
+      {open && (
+        <div style={{ borderTop: '1px solid rgba(255,255,255,0.06)', padding: '14px 16px' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+            {/* Score bars */}
             <div>
-              <div className="text-xs font-semibold mb-2 uppercase tracking-wider" style={{ color: 'var(--text-dim)' }}>Score Breakdown</div>
+              <div className="section-label" style={{ marginBottom: 10 }}>Score Breakdown</div>
               {[
-                { label: 'Price Momentum', val: token.scoreBreakdown?.priceMomentum ?? 0, max: 25 },
-                { label: 'Volume Momentum', val: token.scoreBreakdown?.volumeMomentum ?? 0, max: 25 },
-                { label: 'Buy Pressure', val: token.scoreBreakdown?.buyPressure ?? 0, max: 25 },
-                { label: 'MC Quality', val: token.scoreBreakdown?.mcQuality ?? 0, max: 25 },
+                { label: 'Price Momentum', v: token.scoreBreakdown?.priceMomentum ?? 0, color: '#00d4ff' },
+                { label: 'Volume Momentum', v: token.scoreBreakdown?.volumeMomentum ?? 0, color: '#9b59ff' },
+                { label: 'Buy Pressure', v: token.scoreBreakdown?.buyPressure ?? 0, color: '#00ff88' },
+                { label: 'MC Quality', v: token.scoreBreakdown?.mcQuality ?? 0, color: '#ffd700' },
               ].map((item) => (
-                <div key={item.label} className="mb-1.5">
-                  <div className="flex justify-between text-xs mb-0.5">
-                    <span style={{ color: 'var(--text-dim)' }}>{item.label}</span>
-                    <span style={{ color: 'var(--cyan)' }}>{item.val}/{item.max}</span>
+                <div key={item.label} style={{ marginBottom: 8 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, marginBottom: 4, color: '#3a5070' }}>
+                    <span>{item.label}</span>
+                    <span style={{ color: item.color, fontWeight: 700 }}>{item.v}/25</span>
                   </div>
-                  <div className="h-1.5 rounded-full" style={{ background: 'var(--navy-border)' }}>
-                    <div
-                      className="h-full rounded-full transition-all"
-                      style={{
-                        width: `${(item.val / item.max) * 100}%`,
-                        background: item.val >= item.max * 0.8 ? 'var(--green)' : item.val >= item.max * 0.5 ? 'var(--cyan)' : 'var(--text-dim)',
-                      }}
-                    />
+                  <div style={{ height: 4, borderRadius: 4, background: 'rgba(255,255,255,0.06)' }}>
+                    <div style={{ height: '100%', borderRadius: 4, width: `${(item.v / 25) * 100}%`, background: item.color, boxShadow: `0 0 6px ${item.color}55`, transition: 'width 0.4s ease' }} />
                   </div>
                 </div>
               ))}
             </div>
-
-            {/* Filter Checklist */}
+            {/* Filter checklist */}
             <div>
-              <div className="text-xs font-semibold mb-2 uppercase tracking-wider" style={{ color: 'var(--text-dim)' }}>Filter Checks</div>
-              <div className="space-y-1">
+              <div className="section-label" style={{ marginBottom: 10 }}>Filter Checks</div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
                 {(token.filterResults ?? []).map((f) => (
-                  <div key={f.name} className="flex items-center justify-between text-xs">
-                    <div className="flex items-center gap-1.5">
+                  <div key={f.name} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: 10 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
                       <span>{f.passed ? '✅' : '❌'}</span>
-                      <span style={{ color: f.passed ? 'var(--text)' : 'var(--red)' }}>{f.name}</span>
+                      <span style={{ color: f.passed ? '#7090b0' : '#ff4466' }}>{f.name}</span>
                     </div>
-                    <span style={{ color: 'var(--text-dim)' }}>{f.value}</span>
+                    <span style={{ color: '#3a5070' }}>{f.value}</span>
                   </div>
                 ))}
               </div>
-              <div className="mt-3 pt-3 border-t grid grid-cols-2 gap-2 text-xs" style={{ borderColor: 'var(--navy-border)' }}>
-                <div>
-                  <span style={{ color: 'var(--text-dim)' }}>Price: </span>
-                  <span style={{ color: 'var(--text)' }}>${formatPrice(token.price)}</span>
-                </div>
-                <div>
-                  <span style={{ color: 'var(--text-dim)' }}>B/S: </span>
-                  <span style={{ color: token.buySellRatio >= 1.5 ? 'var(--green)' : 'var(--text)' }}>{token.buySellRatio.toFixed(2)}x</span>
-                </div>
-                <div>
-                  <span style={{ color: 'var(--text-dim)' }}>5m: </span>
-                  <span style={{ color: token.priceChange5m >= 0 ? 'var(--green)' : 'var(--red)' }}>
-                    {token.priceChange5m >= 0 ? '+' : ''}{token.priceChange5m.toFixed(2)}%
-                  </span>
-                </div>
-                <div>
-                  <span style={{ color: 'var(--text-dim)' }}>Trend: </span>
-                  <span style={{ color: token.consecutiveTrending >= 3 ? 'var(--green)' : 'var(--text)' }}>
-                    {token.consecutiveTrending}/3 ↑
-                  </span>
-                </div>
+              <div style={{ marginTop: 10, paddingTop: 10, borderTop: '1px solid rgba(255,255,255,0.06)', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, fontSize: 11 }}>
+                <span style={{ color: '#3a5070' }}>Price <b style={{ color: '#7090b0' }}>${formatPrice(token.price)}</b></span>
+                <span style={{ color: '#3a5070' }}>B/S <b style={{ color: token.buySellRatio >= 1.5 ? '#00ff88' : '#7090b0' }}>{token.buySellRatio.toFixed(2)}x</b></span>
+                <span style={{ color: '#3a5070' }}>5m <b style={{ color: token.priceChange5m >= 0 ? '#00ff88' : '#ff4466' }}>{token.priceChange5m >= 0 ? '+' : ''}{token.priceChange5m.toFixed(2)}%</b></span>
+                <span style={{ color: '#3a5070' }}>Trend <b style={{ color: token.consecutiveTrending >= 3 ? '#00ff88' : '#7090b0' }}>{token.consecutiveTrending}/3 ↑</b></span>
               </div>
             </div>
           </div>
-
           {token.rejectReason && (
-            <div className="mt-3 px-3 py-2 rounded text-xs" style={{ background: 'rgba(255,68,102,0.1)', color: 'var(--red)', border: '1px solid rgba(255,68,102,0.2)' }}>
+            <div style={{ marginTop: 10, padding: '8px 12px', borderRadius: 10, background: 'rgba(255,68,102,0.08)', border: '1px solid rgba(255,68,102,0.18)', fontSize: 11, color: '#ff4466' }}>
               ❌ Rejected: {token.rejectReason}
             </div>
           )}
@@ -188,104 +124,81 @@ function TokenCard({ token }: { token: Token }) {
   );
 }
 
+const FILTERS: Filter[] = ['ALL', 'ELIGIBLE', 'SCANNING', 'ENTERED', 'REJECTED'];
+const FILTER_COLOR: Record<Filter, string> = { ALL: '#00d4ff', ELIGIBLE: '#00ff88', SCANNING: '#00d4ff', ENTERED: '#ffd700', REJECTED: '#ff4466' };
+
 export default function DiscoverPage({ tokens, scanStats }: Props) {
-  const [sortKey, setSortKey] = useState<SortKey>('score');
-  const [statusFilter, setStatusFilter] = useState<StatusFilter>('ALL');
+  const [sort, setSort] = useState<Sort>('score');
+  const [filter, setFilter] = useState<Filter>('ALL');
   const [search, setSearch] = useState('');
 
   const filtered = useMemo(() => {
     let arr = [...tokens];
-    if (statusFilter !== 'ALL') arr = arr.filter((t) => t.status === statusFilter);
-    if (search) {
-      const q = search.toLowerCase();
-      arr = arr.filter((t) => t.symbol.toLowerCase().includes(q) || t.name.toLowerCase().includes(q));
-    }
-    arr.sort((a, b) => {
-      if (sortKey === 'score') return b.score - a.score;
-      if (sortKey === 'marketCap') return b.marketCap - a.marketCap;
-      if (sortKey === 'age') return a.age - b.age;
-      if (sortKey === 'priceChange24h') return b.priceChange24h - a.priceChange24h;
-      return 0;
-    });
+    if (filter !== 'ALL') arr = arr.filter((t) => t.status === filter);
+    if (search) { const q = search.toLowerCase(); arr = arr.filter((t) => t.symbol.toLowerCase().includes(q) || t.name.toLowerCase().includes(q)); }
+    arr.sort((a, b) => sort === 'score' ? b.score - a.score : sort === 'marketCap' ? b.marketCap - a.marketCap : sort === 'age' ? a.age - b.age : b.priceChange24h - a.priceChange24h);
     return arr;
-  }, [tokens, sortKey, statusFilter, search]);
+  }, [tokens, sort, filter, search]);
 
   return (
-    <div>
-      {/* Stats Header */}
-      <div className="grid grid-cols-3 gap-3 mb-4">
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      {/* Stats row */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8 }}>
         {[
-          { label: 'Scanning', value: scanStats.scanning, color: 'var(--cyan)' },
-          { label: 'Passed Filters', value: scanStats.passed, color: 'var(--gold)' },
-          { label: 'Eligible', value: scanStats.eligible, color: 'var(--green)' },
+          { label: 'Scanning', value: scanStats.scanning, color: '#00d4ff', glow: 'card-glow-cyan' },
+          { label: 'Passed', value: scanStats.passed, color: '#ffd700', glow: 'card-glow-gold' },
+          { label: 'Eligible', value: scanStats.eligible, color: '#00ff88', glow: 'card-glow-green' },
         ].map((s) => (
-          <div
-            key={s.label}
-            className="rounded-xl p-3 text-center border"
-            style={{ background: 'var(--navy-card)', borderColor: 'var(--navy-border)' }}
-          >
-            <div className="text-2xl font-bold" style={{ color: s.color }}>{s.value}</div>
-            <div className="text-xs mt-0.5" style={{ color: 'var(--text-dim)' }}>{s.label}</div>
+          <div key={s.label} className={`card ${s.glow}`} style={{ padding: '12px 8px', textAlign: 'center' }}>
+            <div style={{ fontSize: 26, fontWeight: 900, color: s.color, lineHeight: 1 }}>{s.value}</div>
+            <div style={{ fontSize: 9, color: '#3a5070', marginTop: 4, letterSpacing: '0.08em', fontWeight: 700 }}>{s.label.toUpperCase()}</div>
           </div>
         ))}
       </div>
 
-      {/* Controls */}
-      <div className="flex flex-wrap gap-2 mb-4">
-        <input
-          type="text"
-          placeholder="Search token..."
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          className="px-3 py-1.5 rounded-lg text-sm flex-1 min-w-[150px]"
-          style={{
-            background: 'var(--navy-card)',
-            border: '1px solid var(--navy-border)',
-            color: 'var(--text)',
-            outline: 'none',
-          }}
-        />
-        <select
-          value={sortKey}
-          onChange={(e) => setSortKey(e.target.value as SortKey)}
-          className="px-3 py-1.5 rounded-lg text-sm"
-          style={{ background: 'var(--navy-card)', border: '1px solid var(--navy-border)', color: 'var(--text)' }}
-        >
-          <option value="score">Sort: Score</option>
-          <option value="marketCap">Sort: Market Cap</option>
-          <option value="age">Sort: Newest</option>
-          <option value="priceChange24h">Sort: 24h Change</option>
+      {/* Search + Sort */}
+      <div style={{ display: 'flex', gap: 8 }}>
+        <input type="text" placeholder="Search token..." value={search} onChange={(e) => setSearch(e.target.value)}
+          className="input-premium" style={{ flex: 1, padding: '9px 12px', fontSize: 13 }} />
+        <select value={sort} onChange={(e) => setSort(e.target.value as Sort)}
+          style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 10, color: '#d4e0f0', padding: '9px 10px', fontSize: 12, cursor: 'pointer' }}>
+          <option value="score">Score</option>
+          <option value="marketCap">Mkt Cap</option>
+          <option value="age">Newest</option>
+          <option value="priceChange24h">24h %</option>
         </select>
-        <div className="flex gap-1">
-          {(['ALL', 'ELIGIBLE', 'SCANNING', 'ENTERED', 'REJECTED'] as StatusFilter[]).map((s) => (
-            <button
-              key={s}
-              onClick={() => setStatusFilter(s)}
-              className="px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all"
-              style={{
-                background: statusFilter === s ? 'rgba(0,212,255,0.15)' : 'var(--navy-card)',
-                border: `1px solid ${statusFilter === s ? 'var(--cyan)' : 'var(--navy-border)'}`,
-                color: statusFilter === s ? 'var(--cyan)' : 'var(--text-dim)',
-              }}
-            >
-              {s}
-            </button>
-          ))}
-        </div>
       </div>
 
-      {/* Token List */}
-      <div className="space-y-2">
-        {filtered.length === 0 ? (
-          <div className="text-center py-16" style={{ color: 'var(--text-dim)' }}>
-            <div className="text-4xl mb-3">🔍</div>
-            <div>Scanning Solana for momentum tokens...</div>
-            <div className="text-xs mt-1">Updates every 30 seconds</div>
-          </div>
-        ) : (
-          filtered.map((token) => <TokenCard key={token.mint} token={token} />)
-        )}
+      {/* Filter chips */}
+      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+        {FILTERS.map((f) => {
+          const active = filter === f;
+          const c = FILTER_COLOR[f];
+          return (
+            <button key={f} onClick={() => setFilter(f)}
+              style={{
+                padding: '5px 12px', borderRadius: 20, fontSize: 10, fontWeight: 800, letterSpacing: '0.05em', cursor: 'pointer',
+                background: active ? `${c}22` : 'rgba(255,255,255,0.03)',
+                border: `1px solid ${active ? `${c}55` : 'rgba(255,255,255,0.07)'}`,
+                color: active ? c : '#3a5070',
+                boxShadow: active ? `0 0 12px ${c}22` : 'none',
+              }}>{f}</button>
+          );
+        })}
       </div>
+
+      {/* Token list */}
+      {filtered.length === 0 ? (
+        <div style={{ textAlign: 'center', padding: '48px 20px', color: '#3a5070' }}>
+          <div style={{ fontSize: 48, marginBottom: 12 }}>🔍</div>
+          <div style={{ fontWeight: 700, color: '#7090b0', marginBottom: 6 }}>Scanning Solana...</div>
+          <div style={{ fontSize: 12 }}>Updates every 30 seconds</div>
+        </div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {filtered.map((t) => <TokenCard key={t.mint} token={t} />)}
+        </div>
+      )}
     </div>
   );
 }

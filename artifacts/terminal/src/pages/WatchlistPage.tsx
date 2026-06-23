@@ -2,142 +2,102 @@ import { useMemo, useState } from 'react';
 import { Token } from '../lib/types.js';
 import { formatMC, formatAge, formatPrice } from '../lib/utils.js';
 
-interface Props {
-  tokens: Token[];
-}
+interface Props { tokens: Token[] }
 
-function MiniBar({ value, max, color }: { value: number; max: number; color: string }) {
-  const pct = Math.min(100, (value / max) * 100);
+function Bar({ value, max, color }: { value: number; max: number; color: string }) {
   return (
-    <div className="h-1 rounded-full overflow-hidden" style={{ background: 'var(--navy-border)' }}>
-      <div className="h-full rounded-full transition-all duration-500" style={{ width: `${pct}%`, background: color }} />
+    <div style={{ height: 4, borderRadius: 4, background: 'rgba(255,255,255,0.06)' }}>
+      <div style={{ height: '100%', width: `${Math.min(100, (value / max) * 100)}%`, borderRadius: 4, background: color, boxShadow: `0 0 6px ${color}44`, transition: 'width 0.4s ease' }} />
     </div>
   );
 }
 
 function TokenRow({ token }: { token: Token }) {
-  const [expanded, setExpanded] = useState(false);
-  const scoreColor = token.score >= 70 ? 'var(--green)' : token.score >= 50 ? 'var(--gold)' : 'var(--text-mid)';
-  const change = token.priceChange5m;
-  const changeColor = change >= 0 ? 'var(--green)' : 'var(--red)';
+  const [open, setOpen] = useState(false);
+  const color = token.score >= 70 ? '#00ff88' : token.score >= 50 ? '#ffd700' : '#7090b0';
+  const ch = token.priceChange5m;
+  const chColor = ch >= 0 ? '#00ff88' : '#ff4466';
+  const isEligible = token.status === 'ELIGIBLE';
 
   return (
-    <div
-      className="rounded-2xl border overflow-hidden transition-all duration-200"
-      style={{
-        background: 'var(--navy-card)',
-        borderColor: token.score >= 70 ? 'rgba(0,255,136,0.25)' : 'var(--navy-border)',
-        boxShadow: token.score >= 70 ? '0 0 20px rgba(0,255,136,0.06)' : 'none',
-      }}
-    >
-      <button
-        className="w-full p-4 text-left"
-        onClick={() => setExpanded(!expanded)}
-      >
-        <div className="flex items-center gap-3">
-          {/* Score circle */}
-          <div
-            className="w-11 h-11 rounded-full flex items-center justify-center flex-shrink-0 font-black text-sm border-2"
-            style={{ borderColor: scoreColor, color: scoreColor, background: `${scoreColor}15` }}
-          >
-            {token.score}
+    <div className={`card ${isEligible ? 'card-glow-green' : ''}`}
+      style={{ borderColor: isEligible ? 'rgba(0,255,136,0.2)' : undefined, overflow: 'hidden' }}>
+      <button onClick={() => setOpen(!open)} style={{ width: '100%', display: 'block', background: 'transparent', border: 'none', cursor: 'pointer', padding: '14px 16px', textAlign: 'left' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          {/* Score bubble */}
+          <div style={{
+            width: 44, height: 44, borderRadius: 14, flexShrink: 0,
+            background: `${color}18`, border: `2px solid ${color}55`,
+            display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+            boxShadow: `0 0 14px ${color}22`,
+          }}>
+            <span style={{ fontSize: 14, fontWeight: 900, color, lineHeight: 1 }}>{token.score}</span>
+            <span style={{ fontSize: 8, color: color + '99', fontWeight: 700, letterSpacing: '0.04em' }}>SCORE</span>
           </div>
 
-          {/* Token info */}
-          <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-2 mb-0.5">
-              <span className="font-bold text-sm" style={{ color: 'var(--text)' }}>{token.symbol}</span>
-              <span
-                className="px-1.5 py-0.5 rounded-md text-xs font-bold"
-                style={{ background: 'rgba(0,212,255,0.12)', color: 'var(--cyan)' }}
-              >
-                {token.dexId}
-              </span>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginBottom: 4, flexWrap: 'wrap' }}>
+              <span style={{ fontWeight: 800, fontSize: 14, color: '#d4e0f0' }}>{token.symbol}</span>
+              <span style={{ fontSize: 10, padding: '2px 7px', borderRadius: 6, background: 'rgba(0,212,255,0.08)', color: '#00d4ff', border: '1px solid rgba(0,212,255,0.18)', fontWeight: 700 }}>{token.dexId}</span>
+              {isEligible && <span className="badge badge-eligible">ELIGIBLE</span>}
             </div>
-            <div className="text-xs truncate" style={{ color: 'var(--text-dim)' }}>
-              MC: <b style={{ color: 'var(--text-mid)' }}>{formatMC(token.marketCap)}</b>
-              {' · '}Vol: <b style={{ color: 'var(--text-mid)' }}>{formatMC(token.volume24h)}</b>
-              {' · '}{formatAge(token.age)}
+            <div style={{ fontSize: 11, color: '#3a5070' }}>
+              MC <b style={{ color: '#7090b0' }}>{formatMC(token.marketCap)}</b>
+              {' · '}Vol <b style={{ color: '#7090b0' }}>{formatMC(token.volume24h)}</b>
+              {' · '}<b style={{ color: '#7090b0' }}>{formatAge(token.age)}</b>
             </div>
           </div>
 
-          {/* Right side */}
-          <div className="text-right flex-shrink-0">
-            <div className="font-bold text-sm" style={{ color: changeColor }}>
-              {change >= 0 ? '+' : ''}{change.toFixed(2)}%
+          <div style={{ textAlign: 'right', flexShrink: 0 }}>
+            <div style={{ fontWeight: 800, fontSize: 14, color: chColor }}>
+              {ch >= 0 ? '+' : ''}{ch.toFixed(2)}%
             </div>
-            <div className="text-xs" style={{ color: 'var(--text-dim)' }}>5m</div>
+            <div style={{ fontSize: 10, color: '#3a5070' }}>5m</div>
           </div>
         </div>
 
-        {/* Score bar */}
-        <div className="mt-3">
-          <MiniBar value={token.score} max={100} color={scoreColor} />
+        <div style={{ marginTop: 10 }}>
+          <Bar value={token.score} max={100} color={color} />
         </div>
       </button>
 
-      {expanded && (
-        <div className="px-4 pb-4 border-t" style={{ borderColor: 'var(--navy-border)' }}>
-          <div className="pt-3 grid grid-cols-2 gap-3 text-xs">
-            <div className="space-y-2">
-              <div className="flex justify-between">
-                <span style={{ color: 'var(--text-dim)' }}>Price</span>
-                <span style={{ color: 'var(--text)' }}>${formatPrice(token.price)}</span>
+      {open && (
+        <div style={{ padding: '14px 16px', borderTop: '1px solid rgba(255,255,255,0.06)' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px 16px', fontSize: 12, marginBottom: 12 }}>
+            {[
+              ['Price', `$${formatPrice(token.price)}`, '#d4e0f0'],
+              ['B/S Ratio', `${token.buySellRatio.toFixed(2)}x`, token.buySellRatio >= 1.5 ? '#00ff88' : '#d4e0f0'],
+              ['Liquidity', formatMC(token.liquidity), '#d4e0f0'],
+              ['1h Change', `${token.priceChange1h >= 0 ? '+' : ''}${token.priceChange1h.toFixed(2)}%`, token.priceChange1h >= 0 ? '#00ff88' : '#ff4466'],
+            ].map(([l, v, c]) => (
+              <div key={String(l)}>
+                <span style={{ color: '#3a5070' }}>{l} </span>
+                <b style={{ color: c as string }}>{v}</b>
               </div>
-              <div className="flex justify-between">
-                <span style={{ color: 'var(--text-dim)' }}>B/S Ratio</span>
-                <span style={{ color: token.buySellRatio >= 1.5 ? 'var(--green)' : 'var(--text)' }}>
-                  {token.buySellRatio.toFixed(2)}x
-                </span>
-              </div>
-              <div className="flex justify-between">
-                <span style={{ color: 'var(--text-dim)' }}>Liquidity</span>
-                <span style={{ color: 'var(--text)' }}>{formatMC(token.liquidity)}</span>
-              </div>
-              <div className="flex justify-between">
-                <span style={{ color: 'var(--text-dim)' }}>1h change</span>
-                <span style={{ color: token.priceChange1h >= 0 ? 'var(--green)' : 'var(--red)' }}>
-                  {token.priceChange1h >= 0 ? '+' : ''}{token.priceChange1h.toFixed(2)}%
-                </span>
-              </div>
-            </div>
-            <div className="space-y-2">
-              <div>
-                <div className="flex justify-between mb-1">
-                  <span style={{ color: 'var(--text-dim)' }}>Price Mom.</span>
-                  <span style={{ color: 'var(--cyan)' }}>{token.scoreBreakdown?.priceMomentum ?? 0}/25</span>
-                </div>
-                <MiniBar value={token.scoreBreakdown?.priceMomentum ?? 0} max={25} color="var(--cyan)" />
-              </div>
-              <div>
-                <div className="flex justify-between mb-1">
-                  <span style={{ color: 'var(--text-dim)' }}>Vol. Mom.</span>
-                  <span style={{ color: 'var(--cyan)' }}>{token.scoreBreakdown?.volumeMomentum ?? 0}/25</span>
-                </div>
-                <MiniBar value={token.scoreBreakdown?.volumeMomentum ?? 0} max={25} color="var(--purple)" />
-              </div>
-              <div>
-                <div className="flex justify-between mb-1">
-                  <span style={{ color: 'var(--text-dim)' }}>Buy Press.</span>
-                  <span style={{ color: 'var(--cyan)' }}>{token.scoreBreakdown?.buyPressure ?? 0}/25</span>
-                </div>
-                <MiniBar value={token.scoreBreakdown?.buyPressure ?? 0} max={25} color="var(--green)" />
-              </div>
-            </div>
+            ))}
           </div>
 
-          <div className="mt-3 flex gap-2">
-            <a
-              href={`https://dexscreener.com/solana/${token.mint}`}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="flex-1 py-2 rounded-xl text-xs font-semibold text-center transition-opacity hover:opacity-80"
-              style={{ background: 'var(--cyan-dim)', color: 'var(--cyan)', border: '1px solid rgba(0,212,255,0.2)' }}
-              onClick={(e) => e.stopPropagation()}
-            >
-              View on DexScreener ↗
-            </a>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
+            {[
+              { label: 'Price Momentum', v: token.scoreBreakdown?.priceMomentum ?? 0, color: '#00d4ff' },
+              { label: 'Volume Momentum', v: token.scoreBreakdown?.volumeMomentum ?? 0, color: '#9b59ff' },
+              { label: 'Buy Pressure', v: token.scoreBreakdown?.buyPressure ?? 0, color: '#00ff88' },
+            ].map((item) => (
+              <div key={item.label}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, marginBottom: 4, color: '#3a5070' }}>
+                  <span>{item.label}</span>
+                  <b style={{ color: item.color }}>{item.v}/25</b>
+                </div>
+                <Bar value={item.v} max={25} color={item.color} />
+              </div>
+            ))}
           </div>
+
+          <a href={`https://dexscreener.com/solana/${token.mint}`} target="_blank" rel="noopener noreferrer"
+            className="btn-primary" onClick={(e) => e.stopPropagation()}
+            style={{ display: 'block', marginTop: 12, padding: '10px', fontSize: 12, textDecoration: 'none', textAlign: 'center' }}>
+            View on DexScreener ↗
+          </a>
         </div>
       )}
     </div>
@@ -145,52 +105,36 @@ function TokenRow({ token }: { token: Token }) {
 }
 
 export default function WatchlistPage({ tokens }: Props) {
-  const eligible = useMemo(
-    () => tokens.filter((t) => t.status === 'ELIGIBLE' || t.status === 'SCANNING').sort((a, b) => b.score - a.score),
-    [tokens]
-  );
-
-  const topTokens = useMemo(
-    () => tokens.filter((t) => t.score >= 50).sort((a, b) => b.score - a.score).slice(0, 30),
-    [tokens]
-  );
-
-  const display = eligible.length > 0 ? eligible : topTokens;
+  const eligible = useMemo(() => tokens.filter((t) => t.status === 'ELIGIBLE' || t.status === 'SCANNING').sort((a, b) => b.score - a.score), [tokens]);
+  const top = useMemo(() => tokens.filter((t) => t.score >= 40).sort((a, b) => b.score - a.score).slice(0, 30), [tokens]);
+  const display = eligible.length > 0 ? eligible : top;
+  const avgScore = display.length > 0 ? Math.round(display.reduce((s, t) => s + t.score, 0) / display.length) : 0;
 
   return (
-    <div className="space-y-3">
-      {/* Header stats */}
-      <div className="grid grid-cols-3 gap-2">
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8 }}>
         {[
-          { label: 'Watchlist', value: display.length, color: 'var(--cyan)' },
-          { label: 'Eligible', value: tokens.filter((t) => t.status === 'ELIGIBLE').length, color: 'var(--green)' },
-          { label: 'Avg Score', value: display.length > 0 ? Math.round(display.reduce((s, t) => s + t.score, 0) / display.length) : 0, color: 'var(--gold)' },
+          { label: 'Watchlist', value: display.length, color: '#00d4ff', glow: 'card-glow-cyan' },
+          { label: 'Eligible', value: tokens.filter((t) => t.status === 'ELIGIBLE').length, color: '#00ff88', glow: 'card-glow-green' },
+          { label: 'Avg Score', value: avgScore, color: '#ffd700', glow: 'card-glow-gold' },
         ].map((s) => (
-          <div
-            key={s.label}
-            className="rounded-2xl p-3 text-center border"
-            style={{ background: 'var(--navy-card)', borderColor: 'var(--navy-border)' }}
-          >
-            <div className="text-xl font-black" style={{ color: s.color }}>{s.value}</div>
-            <div className="text-xs mt-0.5" style={{ color: 'var(--text-dim)' }}>{s.label}</div>
+          <div key={s.label} className={`card ${s.glow}`} style={{ padding: '12px 8px', textAlign: 'center' }}>
+            <div style={{ fontSize: 24, fontWeight: 900, color: s.color }}>{s.value}</div>
+            <div style={{ fontSize: 9, color: '#3a5070', marginTop: 4, fontWeight: 700, letterSpacing: '0.08em' }}>{s.label.toUpperCase()}</div>
           </div>
         ))}
       </div>
 
       {display.length === 0 ? (
-        <div className="flex flex-col items-center justify-center py-20" style={{ color: 'var(--text-dim)' }}>
-          <div className="text-5xl mb-4">⭐</div>
-          <div className="font-semibold mb-1" style={{ color: 'var(--text-mid)' }}>No tokens found yet</div>
-          <div className="text-sm text-center">Scanner is working — tokens will appear here as they pass filters</div>
+        <div style={{ textAlign: 'center', padding: '48px 20px', color: '#3a5070' }}>
+          <div style={{ fontSize: 48, marginBottom: 12 }}>⭐</div>
+          <div style={{ fontWeight: 700, color: '#7090b0', marginBottom: 6 }}>No tokens found yet</div>
+          <div style={{ fontSize: 12 }}>Tokens appear here as they pass filters</div>
         </div>
       ) : (
         <>
-          <div className="text-xs font-semibold uppercase tracking-wider" style={{ color: 'var(--text-dim)' }}>
-            {eligible.length > 0 ? `${eligible.length} Eligible Tokens` : `Top Scoring Tokens`}
-          </div>
-          {display.map((token) => (
-            <TokenRow key={token.mint} token={token} />
-          ))}
+          <div className="section-label">{eligible.length > 0 ? `${eligible.length} Eligible Tokens` : 'Top Scoring Tokens'}</div>
+          {display.map((t) => <TokenRow key={t.mint} token={t} />)}
         </>
       )}
     </div>

@@ -2,103 +2,101 @@ import { useState } from 'react';
 import { Settings } from '../lib/types.js';
 import { api } from '../lib/api.js';
 
-interface Props {
-  settings: Settings;
-  onUpdate: (s: Settings) => void;
+interface Props { settings: Settings; onUpdate: (s: Settings) => void }
+
+function Toggle({ label, value, onChange }: { label: string; value: boolean; onChange: (v: string) => void }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 0' }}>
+      <span style={{ fontSize: 13, color: '#d4e0f0', fontWeight: 600 }}>{label}</span>
+      <button onClick={() => onChange(value ? 'false' : 'true')}
+        style={{
+          position: 'relative', width: 48, height: 26, borderRadius: 13, border: 'none', cursor: 'pointer',
+          background: value ? 'linear-gradient(135deg, #00d4ff, #0090cc)' : 'rgba(255,255,255,0.08)',
+          boxShadow: value ? '0 0 12px rgba(0,212,255,0.35)' : 'none',
+          transition: 'all 0.25s ease',
+        }}>
+        <div style={{
+          position: 'absolute', top: 3, width: 20, height: 20, borderRadius: '50%',
+          background: 'white', transition: 'left 0.25s ease',
+          left: value ? 25 : 3,
+          boxShadow: '0 1px 4px rgba(0,0,0,0.3)',
+        }} />
+      </button>
+    </div>
+  );
 }
 
-function SettingInput({
-  label, value, onChange, type = 'number', min, max, step, suffix,
-}: {
-  label: string; value: number | string | boolean; onChange: (v: string) => void;
-  type?: 'number' | 'text' | 'toggle'; min?: number; max?: number; step?: number; suffix?: string;
+function NumberInput({ label, value, onChange, min, max, step, suffix }: {
+  label: string; value: number; onChange: (v: string) => void;
+  min?: number; max?: number; step?: number; suffix?: string;
 }) {
-  if (type === 'toggle') {
-    return (
-      <div className="flex items-center justify-between py-2">
-        <span className="text-sm" style={{ color: 'var(--text)' }}>{label}</span>
-        <button
-          onClick={() => onChange(value ? 'false' : 'true')}
-          className="relative w-12 h-6 rounded-full transition-all"
-          style={{ background: value ? 'var(--cyan)' : 'var(--navy-border)' }}
-        >
-          <div className="absolute top-0.5 w-5 h-5 rounded-full bg-white transition-all"
-            style={{ left: value ? '26px' : '2px' }} />
-        </button>
-      </div>
-    );
-  }
   return (
-    <div className="py-2">
-      <label className="text-xs block mb-1" style={{ color: 'var(--text-dim)' }}>{label}</label>
-      <div className="flex items-center gap-2">
-        <input
-          type={type}
-          value={String(value)}
-          min={min}
-          max={max}
-          step={step}
-          onChange={(e) => onChange(e.target.value)}
-          className="flex-1 px-3 py-1.5 rounded-lg text-sm"
-          style={{
-            background: 'var(--navy)',
-            border: '1px solid var(--navy-border)',
-            color: 'var(--text)',
-            outline: 'none',
-          }}
-        />
-        {suffix && <span className="text-xs" style={{ color: 'var(--text-dim)' }}>{suffix}</span>}
+    <div style={{ padding: '6px 0' }}>
+      <div style={{ fontSize: 11, color: '#3a5070', fontWeight: 700, marginBottom: 6, letterSpacing: '0.04em' }}>{label}</div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <input type="number" value={value} min={min} max={max} step={step} onChange={(e) => onChange(e.target.value)}
+          className="input-premium" style={{ flex: 1 }} />
+        {suffix && <span style={{ fontSize: 12, color: '#3a5070', fontWeight: 600, flexShrink: 0 }}>{suffix}</span>}
       </div>
     </div>
   );
 }
 
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
+function TextInput({ label, value, onChange }: { label: string; value: string; onChange: (v: string) => void }) {
   return (
-    <div className="rounded-xl border p-4 mb-4" style={{ background: 'var(--navy-card)', borderColor: 'var(--navy-border)' }}>
-      <h3 className="text-xs font-bold uppercase tracking-wider mb-3" style={{ color: 'var(--cyan)' }}>{title}</h3>
-      {children}
+    <div style={{ padding: '6px 0' }}>
+      <div style={{ fontSize: 11, color: '#3a5070', fontWeight: 700, marginBottom: 6, letterSpacing: '0.04em' }}>{label}</div>
+      <input type="text" value={value} onChange={(e) => onChange(e.target.value)} className="input-premium" />
     </div>
   );
 }
 
-export default function SettingsPage({ settings: initial, onUpdate }: Props) {
-  const [settings, setSettings] = useState(initial);
+function Section({ title, color = '#00d4ff', children }: { title: string; color?: string; children: React.ReactNode }) {
+  const [collapsed, setCollapsed] = useState(false);
+  return (
+    <div className="card" style={{ overflow: 'hidden', marginBottom: 8 }}>
+      <button onClick={() => setCollapsed(!collapsed)}
+        style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '14px 16px', background: 'transparent', border: 'none', cursor: 'pointer' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <div style={{ width: 3, height: 14, borderRadius: 2, background: color }} />
+          <span style={{ fontSize: 12, fontWeight: 800, letterSpacing: '0.08em', textTransform: 'uppercase', color: '#d4e0f0' }}>{title}</span>
+        </div>
+        <span style={{ color: '#3a5070', fontSize: 12 }}>{collapsed ? '▶' : '▼'}</span>
+      </button>
+      {!collapsed && (
+        <div style={{ padding: '0 16px 14px', borderTop: '1px solid rgba(255,255,255,0.05)' }}>
+          {children}
+        </div>
+      )}
+    </div>
+  );
+}
+
+export default function SettingsPage({ settings: init, onUpdate }: Props) {
+  const [settings, setSettings] = useState(init);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
-  const [resetInput, setResetInput] = useState('');
   const [showReset, setShowReset] = useState(false);
+  const [resetInput, setResetInput] = useState('');
 
   function update(key: keyof Settings, value: string) {
-    const numKeys = [
-      'minMc', 'minVolume24h', 'minAgeHours', 'maxAgeHours', 'scanFrequencyMs',
-      'minBuySellRatio', 'maxTopHolder', 'maxCreatorPct', 'minLiquidity',
-      'minEntryScore', 'trendChecksRequired', 'maxOpenPositions',
-      'sizeScore90', 'sizeScore80', 'sizeScore70',
-      'slPct', 'tp1Pct', 'tp1ClosePct', 'tp2Pct', 'tp2ClosePct', 'tp3Pct', 'tp3ClosePct',
-      'trailingSLPct', 'maxDailyLossPct', 'startingBalanceSol', 'currentBalanceSol',
-      'slippagePct', 'priorityFeeSol',
-    ];
+    const numKeys = ['minMc','maxMc','minVolume24h','minAgeHours','maxAgeHours','scanFrequencyMs','minBuySellRatio','maxTopHolder','maxCreatorPct','minLiquidity','minEntryScore','trendChecksRequired','maxOpenPositions','sizeScore90','sizeScore80','sizeScore70','slPct','tp1Pct','tp1ClosePct','tp2Pct','tp2ClosePct','tp3Pct','tp3ClosePct','trailingSLPct','maxDailyLossPct','startingBalanceSol','currentBalanceSol','slippagePct','priorityFeeSol'];
     const boolKeys = ['rugcheckEnabled'];
-    const updated = { ...settings };
-    if (numKeys.includes(key)) (updated as Record<string, unknown>)[key] = parseFloat(value) || 0;
-    else if (boolKeys.includes(key)) (updated as Record<string, unknown>)[key] = value === 'true';
-    else (updated as Record<string, unknown>)[key] = value;
-    setSettings(updated);
+    const updated = { ...settings } as Record<string, unknown>;
+    if (numKeys.includes(key)) updated[key] = parseFloat(value) || 0;
+    else if (boolKeys.includes(key)) updated[key] = value === 'true';
+    else updated[key] = value;
+    setSettings(updated as Settings);
   }
 
   async function save() {
     setSaving(true);
     try {
-      const payload: Record<string, string> = {};
-      for (const [k, v] of Object.entries(settings)) payload[k] = String(v);
       const updated = await api.updateSettings(settings);
       onUpdate(updated);
       setSaved(true);
-      setTimeout(() => setSaved(false), 2000);
-    } finally {
-      setSaving(false);
-    }
+      setTimeout(() => setSaved(false), 2500);
+    } finally { setSaving(false); }
   }
 
   async function handleReset() {
@@ -109,113 +107,94 @@ export default function SettingsPage({ settings: initial, onUpdate }: Props) {
     window.location.reload();
   }
 
+  const n = (k: keyof Settings) => settings[k] as number;
+  const b = (k: keyof Settings) => settings[k] as boolean;
+  const s = (k: keyof Settings) => settings[k] as string;
+
   return (
-    <div className="max-w-2xl">
-      <Section title="Scanning">
-        <SettingInput label="Min Market Cap ($)" value={settings.minMc} onChange={(v) => update('minMc', v)} min={0} step={10000} />
-        <SettingInput label="Max Market Cap ($)" value={settings.maxMc} onChange={(v) => update('maxMc', v)} min={100000} step={500000} />
-        <SettingInput label="Min 24h Volume ($)" value={settings.minVolume24h} onChange={(v) => update('minVolume24h', v)} min={0} step={10000} />
-        <SettingInput label="Min Age (hours)" value={settings.minAgeHours} onChange={(v) => update('minAgeHours', v)} min={0} step={0.5} />
-        <SettingInput label="Max Age (hours)" value={settings.maxAgeHours} onChange={(v) => update('maxAgeHours', v)} min={1} step={24} />
-        <SettingInput label="Scan Frequency (ms)" value={settings.scanFrequencyMs} onChange={(v) => update('scanFrequencyMs', v)} min={10000} step={5000} />
+    <div style={{ maxWidth: 520, paddingBottom: 20 }}>
+      <Section title="Scanning" color="#00d4ff">
+        <NumberInput label="Min Market Cap ($)" value={n('minMc')} onChange={(v) => update('minMc', v)} min={0} step={10000} />
+        <NumberInput label="Max Market Cap ($)" value={n('maxMc')} onChange={(v) => update('maxMc', v)} min={100000} step={500000} />
+        <NumberInput label="Min 24h Volume ($)" value={n('minVolume24h')} onChange={(v) => update('minVolume24h', v)} min={0} step={10000} />
+        <NumberInput label="Min Age (hours)" value={n('minAgeHours')} onChange={(v) => update('minAgeHours', v)} min={0} step={0.5} />
+        <NumberInput label="Max Age (hours)" value={n('maxAgeHours')} onChange={(v) => update('maxAgeHours', v)} min={1} step={24} />
+        <NumberInput label="Scan Frequency (ms)" value={n('scanFrequencyMs')} onChange={(v) => update('scanFrequencyMs', v)} min={10000} step={5000} />
       </Section>
 
-      <Section title="Quality Filters">
-        <SettingInput label="Min Buy/Sell Ratio" value={settings.minBuySellRatio} onChange={(v) => update('minBuySellRatio', v)} min={1} max={5} step={0.1} />
-        <SettingInput label="Max Top Holder %" value={settings.maxTopHolder} onChange={(v) => update('maxTopHolder', v)} min={1} max={100} step={1} suffix="%" />
-        <SettingInput label="Max Creator %" value={settings.maxCreatorPct} onChange={(v) => update('maxCreatorPct', v)} min={1} max={100} step={1} suffix="%" />
-        <SettingInput label="Min Liquidity ($)" value={settings.minLiquidity} onChange={(v) => update('minLiquidity', v)} min={0} step={5000} />
-        <SettingInput label="Rugcheck Enabled" value={settings.rugcheckEnabled} onChange={(v) => update('rugcheckEnabled', v)} type="toggle" />
+      <Section title="Quality Filters" color="#9b59ff">
+        <NumberInput label="Min Buy/Sell Ratio" value={n('minBuySellRatio')} onChange={(v) => update('minBuySellRatio', v)} min={1} max={5} step={0.1} />
+        <NumberInput label="Min Liquidity ($)" value={n('minLiquidity')} onChange={(v) => update('minLiquidity', v)} min={0} step={5000} />
+        <NumberInput label="Max Top Holder %" value={n('maxTopHolder')} onChange={(v) => update('maxTopHolder', v)} min={1} max={100} step={1} suffix="%" />
+        <NumberInput label="Max Creator %" value={n('maxCreatorPct')} onChange={(v) => update('maxCreatorPct', v)} min={1} max={100} step={1} suffix="%" />
+        <Toggle label="Rugcheck Enabled" value={b('rugcheckEnabled')} onChange={(v) => update('rugcheckEnabled', v)} />
       </Section>
 
-      <Section title="Scoring & Entry">
-        <SettingInput label="Min Entry Score (0-100)" value={settings.minEntryScore} onChange={(v) => update('minEntryScore', v)} min={50} max={100} step={5} />
-        <SettingInput label="Trend Checks Required" value={settings.trendChecksRequired} onChange={(v) => update('trendChecksRequired', v)} min={1} max={10} step={1} />
+      <Section title="Scoring & Entry" color="#ffd700">
+        <NumberInput label="Min Entry Score (0–100)" value={n('minEntryScore')} onChange={(v) => update('minEntryScore', v)} min={0} max={100} step={5} />
+        <NumberInput label="Trend Checks Required" value={n('trendChecksRequired')} onChange={(v) => update('trendChecksRequired', v)} min={1} max={10} step={1} />
       </Section>
 
-      <Section title="Position Sizing">
-        <SettingInput label="Max Open Positions" value={settings.maxOpenPositions} onChange={(v) => update('maxOpenPositions', v)} min={1} max={20} step={1} />
-        <SettingInput label="Size at Score 90+ (% of portfolio)" value={settings.sizeScore90} onChange={(v) => update('sizeScore90', v)} min={0.1} max={10} step={0.1} suffix="%" />
-        <SettingInput label="Size at Score 80-89 (% of portfolio)" value={settings.sizeScore80} onChange={(v) => update('sizeScore80', v)} min={0.1} max={10} step={0.1} suffix="%" />
-        <SettingInput label="Size at Score 70-79 (% of portfolio)" value={settings.sizeScore70} onChange={(v) => update('sizeScore70', v)} min={0.1} max={10} step={0.1} suffix="%" />
+      <Section title="Position Sizing" color="#00ff88">
+        <NumberInput label="Max Open Positions" value={n('maxOpenPositions')} onChange={(v) => update('maxOpenPositions', v)} min={1} max={20} step={1} />
+        <NumberInput label="Size @ Score 90+ (% portfolio)" value={n('sizeScore90')} onChange={(v) => update('sizeScore90', v)} min={0.1} max={10} step={0.1} suffix="%" />
+        <NumberInput label="Size @ Score 80–89" value={n('sizeScore80')} onChange={(v) => update('sizeScore80', v)} min={0.1} max={10} step={0.1} suffix="%" />
+        <NumberInput label="Size @ Score 70–79" value={n('sizeScore70')} onChange={(v) => update('sizeScore70', v)} min={0.1} max={10} step={0.1} suffix="%" />
       </Section>
 
-      <Section title="Take Profit / Stop Loss">
-        <SettingInput label="Stop Loss %" value={settings.slPct} onChange={(v) => update('slPct', v)} min={5} max={50} step={5} suffix="%" />
-        <SettingInput label="TP1 Gain %" value={settings.tp1Pct} onChange={(v) => update('tp1Pct', v)} min={20} max={500} step={10} suffix="%" />
-        <SettingInput label="TP1 Close %" value={settings.tp1ClosePct} onChange={(v) => update('tp1ClosePct', v)} min={10} max={100} step={5} suffix="%" />
-        <SettingInput label="TP2 Gain %" value={settings.tp2Pct} onChange={(v) => update('tp2Pct', v)} min={50} max={1000} step={25} suffix="%" />
-        <SettingInput label="TP2 Close %" value={settings.tp2ClosePct} onChange={(v) => update('tp2ClosePct', v)} min={10} max={100} step={5} suffix="%" />
-        <SettingInput label="TP3 Gain %" value={settings.tp3Pct} onChange={(v) => update('tp3Pct', v)} min={100} max={2000} step={50} suffix="%" />
-        <SettingInput label="TP3 Close %" value={settings.tp3ClosePct} onChange={(v) => update('tp3ClosePct', v)} min={10} max={100} step={5} suffix="%" />
-        <SettingInput label="Trailing SL %" value={settings.trailingSLPct} onChange={(v) => update('trailingSLPct', v)} min={5} max={50} step={5} suffix="%" />
+      <Section title="Take Profit / Stop Loss" color="#ff4466">
+        <NumberInput label="Stop Loss %" value={n('slPct')} onChange={(v) => update('slPct', v)} min={5} max={50} step={5} suffix="%" />
+        <NumberInput label="TP1 Gain %" value={n('tp1Pct')} onChange={(v) => update('tp1Pct', v)} min={20} max={500} step={10} suffix="%" />
+        <NumberInput label="TP1 Close %" value={n('tp1ClosePct')} onChange={(v) => update('tp1ClosePct', v)} min={10} max={100} step={5} suffix="%" />
+        <NumberInput label="TP2 Gain %" value={n('tp2Pct')} onChange={(v) => update('tp2Pct', v)} min={50} max={1000} step={25} suffix="%" />
+        <NumberInput label="TP2 Close %" value={n('tp2ClosePct')} onChange={(v) => update('tp2ClosePct', v)} min={10} max={100} step={5} suffix="%" />
+        <NumberInput label="TP3 Gain %" value={n('tp3Pct')} onChange={(v) => update('tp3Pct', v)} min={100} max={2000} step={50} suffix="%" />
+        <NumberInput label="TP3 Close %" value={n('tp3ClosePct')} onChange={(v) => update('tp3ClosePct', v)} min={10} max={100} step={5} suffix="%" />
+        <NumberInput label="Trailing SL %" value={n('trailingSLPct')} onChange={(v) => update('trailingSLPct', v)} min={5} max={50} step={5} suffix="%" />
       </Section>
 
-      <Section title="Risk Management">
-        <SettingInput label="Max Daily Loss %" value={settings.maxDailyLossPct} onChange={(v) => update('maxDailyLossPct', v)} min={1} max={20} step={0.5} suffix="%" />
+      <Section title="Risk Management" color="#ffd700">
+        <NumberInput label="Max Daily Loss %" value={n('maxDailyLossPct')} onChange={(v) => update('maxDailyLossPct', v)} min={1} max={20} step={0.5} suffix="%" />
       </Section>
 
-      <Section title="Paper Trading">
-        <SettingInput label="Starting Balance (SOL)" value={settings.startingBalanceSol} onChange={(v) => update('startingBalanceSol', v)} min={0.1} step={1} suffix="SOL" />
-        <SettingInput label="Current Balance (SOL)" value={settings.currentBalanceSol} onChange={(v) => update('currentBalanceSol', v)} min={0} step={0.1} suffix="SOL" />
+      <Section title="Paper Trading Balance" color="#00d4ff">
+        <NumberInput label="Starting Balance (SOL)" value={n('startingBalanceSol')} onChange={(v) => update('startingBalanceSol', v)} min={0.1} step={1} suffix="SOL" />
+        <NumberInput label="Current Balance (SOL)" value={n('currentBalanceSol')} onChange={(v) => update('currentBalanceSol', v)} min={0} step={0.1} suffix="SOL" />
       </Section>
 
-      <Section title="Live Trading (Future)">
-        <SettingInput label="RPC Endpoint" value={settings.rpcEndpoint} onChange={(v) => update('rpcEndpoint', v)} type="text" />
-        <SettingInput label="Slippage %" value={settings.slippagePct} onChange={(v) => update('slippagePct', v)} min={0.1} max={10} step={0.1} suffix="%" />
-        <SettingInput label="Priority Fee (SOL)" value={settings.priorityFeeSol} onChange={(v) => update('priorityFeeSol', v)} min={0} max={0.01} step={0.0001} suffix="SOL" />
-        <div className="py-2 text-xs" style={{ color: 'var(--text-dim)' }}>
-          Wallet: {settings.walletPublicKey || 'Not configured (set WALLET_PRIVATE_KEY env var for live mode)'}
+      <Section title="Live Trading (Render)" color="#9b59ff">
+        <TextInput label="RPC Endpoint" value={s('rpcEndpoint')} onChange={(v) => update('rpcEndpoint', v)} />
+        <NumberInput label="Slippage %" value={n('slippagePct')} onChange={(v) => update('slippagePct', v)} min={0.1} max={10} step={0.1} suffix="%" />
+        <NumberInput label="Priority Fee (SOL)" value={n('priorityFeeSol')} onChange={(v) => update('priorityFeeSol', v)} min={0} max={0.01} step={0.0001} suffix="SOL" />
+        <div style={{ padding: '8px 0', fontSize: 11, color: '#3a5070' }}>
+          Wallet: <span style={{ color: '#7090b0' }}>{s('walletPublicKey') || 'Not configured (set SOLANA_PRIVATE_KEY on Render)'}</span>
         </div>
       </Section>
 
-      {/* Save Button */}
-      <button
-        onClick={save}
-        disabled={saving}
-        className="w-full py-3 rounded-xl font-bold text-sm transition-all mb-4"
-        style={{
-          background: saved ? 'var(--green)' : 'var(--cyan)',
-          color: 'var(--navy)',
-          opacity: saving ? 0.7 : 1,
-        }}
-      >
-        {saving ? 'Saving...' : saved ? '✅ Saved!' : 'Save Settings'}
+      {/* Save */}
+      <button onClick={save} disabled={saving} className="btn-solid-cyan"
+        style={{ width: '100%', padding: '16px', fontSize: 15, marginBottom: 12, opacity: saving ? 0.7 : 1 }}>
+        {saving ? 'Saving…' : saved ? '✅ Saved!' : 'Save Settings'}
       </button>
 
-      {/* Reset Button */}
-      <div className="rounded-xl border p-4" style={{ background: 'rgba(255,68,102,0.05)', borderColor: 'rgba(255,68,102,0.2)' }}>
-        <h3 className="text-xs font-bold uppercase tracking-wider mb-2" style={{ color: 'var(--red)' }}>⚠️ Danger Zone</h3>
-        <p className="text-xs mb-3" style={{ color: 'var(--text-dim)' }}>
-          Reset All Data will delete all positions (open & closed) and restore balance to the starting balance setting.
+      {/* Danger zone */}
+      <div style={{ padding: 16, borderRadius: 16, background: 'rgba(255,68,102,0.05)', border: '1px solid rgba(255,68,102,0.18)' }}>
+        <div style={{ fontSize: 11, fontWeight: 800, color: '#ff4466', letterSpacing: '0.08em', marginBottom: 8 }}>⚠️ DANGER ZONE</div>
+        <p style={{ fontSize: 12, color: '#3a5070', marginBottom: 12, lineHeight: 1.5 }}>
+          Resets all positions and restores balance to starting balance.
         </p>
         {!showReset ? (
-          <button onClick={() => setShowReset(true)}
-            className="px-4 py-2 rounded-lg text-sm font-semibold"
-            style={{ background: 'rgba(255,68,102,0.15)', color: 'var(--red)', border: '1px solid rgba(255,68,102,0.3)' }}>
-            Reset All Data
-          </button>
+          <button onClick={() => setShowReset(true)} className="btn-red" style={{ padding: '10px 20px', fontSize: 13 }}>Reset All Data</button>
         ) : (
-          <div className="space-y-2">
-            <p className="text-xs font-semibold" style={{ color: 'var(--red)' }}>Type RESET to confirm:</p>
-            <input
-              type="text"
-              value={resetInput}
-              onChange={(e) => setResetInput(e.target.value)}
-              placeholder="RESET"
-              className="w-full px-3 py-2 rounded-lg text-sm"
-              style={{ background: 'var(--navy)', border: '1px solid rgba(255,68,102,0.4)', color: 'var(--text)', outline: 'none' }}
-            />
-            <div className="flex gap-2">
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <div style={{ fontSize: 12, color: '#ff4466', fontWeight: 700 }}>Type RESET to confirm:</div>
+            <input type="text" value={resetInput} onChange={(e) => setResetInput(e.target.value)} placeholder="RESET"
+              className="input-premium" style={{ borderColor: 'rgba(255,68,102,0.3)' }} />
+            <div style={{ display: 'flex', gap: 8 }}>
               <button onClick={() => { setShowReset(false); setResetInput(''); }}
-                className="flex-1 py-2 rounded-lg text-sm" style={{ background: 'var(--navy-border)', color: 'var(--text)' }}>
-                Cancel
-              </button>
-              <button onClick={handleReset} disabled={resetInput !== 'RESET'}
-                className="flex-1 py-2 rounded-lg text-sm font-semibold transition-opacity"
-                style={{ background: resetInput === 'RESET' ? 'var(--red)' : 'rgba(255,68,102,0.3)', color: 'white', opacity: resetInput === 'RESET' ? 1 : 0.5 }}>
-                Confirm Reset
-              </button>
+                style={{ flex: 1, padding: '10px', borderRadius: 12, background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.08)', color: '#7090b0', cursor: 'pointer', fontWeight: 700 }}>Cancel</button>
+              <button onClick={handleReset} disabled={resetInput !== 'RESET'} className="btn-solid-red"
+                style={{ flex: 1, padding: '10px', fontSize: 13, opacity: resetInput === 'RESET' ? 1 : 0.4 }}>Confirm Reset</button>
             </div>
           </div>
         )}

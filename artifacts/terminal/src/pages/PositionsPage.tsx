@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { Position, Analytics } from '../lib/types.js';
 import { api } from '../lib/api.js';
-import { formatSOL, formatPct, formatMC, formatPrice, toIST } from '../lib/utils.js';
+import { formatSOL, formatPct, formatPrice, toIST } from '../lib/utils.js';
 
 interface Props {
   openPositions: Position[];
@@ -13,137 +13,98 @@ interface Props {
 
 function PnlDisplay({ pnl, pct }: { pnl?: number; pct?: number }) {
   const prevPnl = useRef<number | undefined>(pnl);
-  const [animClass, setAnimClass] = useState('');
-
+  const [anim, setAnim] = useState('');
   useEffect(() => {
     if (pnl !== undefined && prevPnl.current !== undefined) {
-      setAnimClass(pnl > prevPnl.current ? 'animate-up' : pnl < prevPnl.current ? 'animate-down' : '');
-      const t = setTimeout(() => setAnimClass(''), 300);
+      setAnim(pnl > prevPnl.current ? 'animate-up' : pnl < prevPnl.current ? 'animate-down' : '');
+      const t = setTimeout(() => setAnim(''), 300);
       prevPnl.current = pnl;
       return () => clearTimeout(t);
     }
     prevPnl.current = pnl;
   }, [pnl]);
-
-  const isPos = (pnl ?? 0) >= 0;
+  const pos = (pnl ?? 0) >= 0;
   return (
-    <div className={`text-right ${animClass}`}>
-      <div className="font-bold text-sm" style={{ color: isPos ? 'var(--green)' : 'var(--red)' }}>
-        {pnl !== undefined ? formatSOL(pnl) : '—'}
+    <div className={`${anim}`} style={{ textAlign: 'right' }}>
+      <div style={{ fontWeight: 900, fontSize: 15, color: pos ? '#00ff88' : '#ff4466' }}>{pnl !== undefined ? formatSOL(pnl) : '—'}</div>
+      <div style={{ fontSize: 11, color: pos ? '#00ff8899' : '#ff446699' }}>{pct !== undefined ? formatPct(pct) : ''}</div>
+    </div>
+  );
+}
+
+function TPBar({ pos }: { pos: Position }) {
+  const pnlPct = pos.pnlPct ?? (((pos.currentPrice ?? pos.entryPrice) - pos.entryPrice) / pos.entryPrice * 100);
+  const tps = [70, 150, 300];
+  const maxPct = 350;
+  const progress = Math.min(100, Math.max(0, (pnlPct / maxPct) * 100));
+  const trackColor = pnlPct >= 300 ? '#ffd700' : pnlPct >= 150 ? '#00d4ff' : pnlPct >= 70 ? '#00ff88' : pnlPct < 0 ? '#ff4466' : '#3a5070';
+  return (
+    <div style={{ marginTop: 10 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, marginBottom: 6, color: '#3a5070' }}>
+        <span>TP Progress</span>
+        <span style={{ color: trackColor, fontWeight: 800 }}>{pnlPct.toFixed(1)}%</span>
       </div>
-      <div className="text-xs" style={{ color: isPos ? 'var(--green)' : 'var(--red)' }}>
-        {pct !== undefined ? formatPct(pct) : ''}
+      <div style={{ position: 'relative', height: 6, borderRadius: 6, background: 'rgba(255,255,255,0.06)' }}>
+        <div style={{ height: '100%', borderRadius: 6, width: `${progress}%`, background: trackColor, boxShadow: `0 0 8px ${trackColor}55`, transition: 'width 0.5s ease' }} />
+        {tps.map((tp, i) => {
+          const hit = [pos.tp1Hit, pos.tp2Hit, pos.tp3Hit][i];
+          return (
+            <div key={tp} style={{
+              position: 'absolute', top: '50%', transform: 'translate(-50%, -50%)',
+              left: `${Math.min(100, (tp / maxPct) * 100)}%`,
+              width: 10, height: 10, borderRadius: '50%',
+              background: hit ? '#ffd700' : '#080d1a',
+              border: `2px solid ${hit ? '#ffd700' : 'rgba(255,255,255,0.15)'}`,
+              boxShadow: hit ? '0 0 6px #ffd700' : 'none',
+            }} />
+          );
+        })}
+      </div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 9, marginTop: 4, color: '#3a5070', fontWeight: 700 }}>
+        <span>+70%</span><span>+150%</span><span>+300%</span>
       </div>
     </div>
   );
 }
 
-function TPBar({ pos, settings }: { pos: Position; settings?: { tp1Pct?: number; tp2Pct?: number; tp3Pct?: number } }) {
-  const pnlPct = pos.pnlPct ?? ((((pos.currentPrice ?? pos.entryPrice) - pos.entryPrice) / pos.entryPrice) * 100);
-  const tp1 = 70; const tp2 = 150; const tp3 = 300;
-  const maxPct = 350;
-  const progress = Math.min(100, Math.max(0, (pnlPct / maxPct) * 100));
-
+function Modal({ onClose, children }: { onClose: () => void; children: React.ReactNode }) {
   return (
-    <div className="mt-2">
-      <div className="flex justify-between text-xs mb-1" style={{ color: 'var(--text-dim)' }}>
-        <span>TP Progress</span>
-        <span style={{ color: 'var(--cyan)' }}>{pnlPct.toFixed(1)}%</span>
-      </div>
-      <div className="relative h-2 rounded-full" style={{ background: 'var(--navy-border)' }}>
-        <div
-          className="h-full rounded-full transition-all"
-          style={{
-            width: `${progress}%`,
-            background: pnlPct >= tp3 ? 'var(--gold)' : pnlPct >= tp2 ? 'var(--cyan)' : pnlPct >= tp1 ? 'var(--green)' : pnlPct < 0 ? 'var(--red)' : '#64748b',
-          }}
-        />
-        {[tp1, tp2, tp3].map((tp, i) => {
-          const pct = Math.min(100, (tp / maxPct) * 100);
-          const hit = [pos.tp1Hit, pos.tp2Hit, pos.tp3Hit][i];
-          return (
-            <div key={tp} className="absolute top-1/2 -translate-y-1/2 w-2 h-2 rounded-full border"
-              style={{
-                left: `${pct}%`,
-                background: hit ? 'var(--gold)' : 'var(--navy)',
-                borderColor: hit ? 'var(--gold)' : 'var(--text-dim)',
-              }}
-            />
-          );
-        })}
-      </div>
-      <div className="flex justify-between text-xs mt-0.5" style={{ color: 'var(--text-dim)' }}>
-        <span>TP1 +{tp1}%</span><span>TP2 +{tp2}%</span><span>TP3 +{tp3}%</span>
+    <div style={{ position: 'fixed', inset: 0, zIndex: 100, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20, background: 'rgba(0,0,0,0.75)', backdropFilter: 'blur(8px)' }} onClick={onClose}>
+      <div onClick={(e) => e.stopPropagation()} style={{ background: '#0c1220', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 20, padding: 24, width: '100%', maxWidth: 420, boxShadow: '0 24px 64px rgba(0,0,0,0.8)' }}>
+        {children}
       </div>
     </div>
   );
 }
 
 function EditModal({ pos, onClose, onSave }: { pos: Position; onClose: () => void; onSave: () => void }) {
-  const [form, setForm] = useState({
-    entryPrice: String(pos.entryPrice),
-    sizeSol: String(pos.sizeSol),
-    slCurrent: String(pos.slCurrent),
-    notes: pos.notes ?? '',
-  });
+  const [form, setForm] = useState({ entryPrice: String(pos.entryPrice), sizeSol: String(pos.sizeSol), slCurrent: String(pos.slCurrent), notes: pos.notes ?? '' });
   const [loading, setLoading] = useState(false);
-
-  async function handleSave() {
+  async function save() {
     setLoading(true);
-    try {
-      await api.editPosition(pos.id, {
-        entryPrice: parseFloat(form.entryPrice),
-        sizeSol: parseFloat(form.sizeSol),
-        slCurrent: parseFloat(form.slCurrent),
-        notes: form.notes,
-      });
-      onSave();
-      onClose();
-    } finally {
-      setLoading(false);
-    }
+    try { await api.editPosition(pos.id, { entryPrice: parseFloat(form.entryPrice), sizeSol: parseFloat(form.sizeSol), slCurrent: parseFloat(form.slCurrent), notes: form.notes }); onSave(); onClose(); }
+    finally { setLoading(false); }
   }
-
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: 'rgba(0,0,0,0.7)' }}>
-      <div className="rounded-2xl p-6 w-full max-w-md" style={{ background: 'var(--navy-card)', border: '1px solid var(--navy-border)' }}>
-        <h3 className="font-bold text-lg mb-4" style={{ color: 'var(--cyan)' }}>Edit Position — {pos.symbol}</h3>
-        <div className="space-y-3">
-          {[
-            { label: 'Entry Price', key: 'entryPrice' },
-            { label: 'Size (SOL)', key: 'sizeSol' },
-            { label: 'Stop Loss Price', key: 'slCurrent' },
-          ].map(({ label, key }) => (
-            <div key={key}>
-              <label className="text-xs mb-1 block" style={{ color: 'var(--text-dim)' }}>{label}</label>
-              <input
-                type="number"
-                value={form[key as keyof typeof form]}
-                onChange={(e) => setForm({ ...form, [key]: e.target.value })}
-                className="w-full px-3 py-2 rounded-lg text-sm"
-                style={{ background: 'var(--navy)', border: '1px solid var(--navy-border)', color: 'var(--text)' }}
-              />
-            </div>
-          ))}
-          <div>
-            <label className="text-xs mb-1 block" style={{ color: 'var(--text-dim)' }}>Notes</label>
-            <textarea
-              value={form.notes}
-              onChange={(e) => setForm({ ...form, notes: e.target.value })}
-              rows={2}
-              className="w-full px-3 py-2 rounded-lg text-sm resize-none"
-              style={{ background: 'var(--navy)', border: '1px solid var(--navy-border)', color: 'var(--text)' }}
-            />
+    <Modal onClose={onClose}>
+      <h3 style={{ fontWeight: 900, fontSize: 16, color: '#00d4ff', marginBottom: 20 }}>Edit — {pos.symbol}</h3>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        {[['Entry Price', 'entryPrice'], ['Size (SOL)', 'sizeSol'], ['Stop Loss Price', 'slCurrent']].map(([label, key]) => (
+          <div key={key}>
+            <div style={{ fontSize: 11, color: '#3a5070', marginBottom: 5, fontWeight: 700 }}>{label}</div>
+            <input type="number" value={form[key as keyof typeof form]} onChange={(e) => setForm({ ...form, [key]: e.target.value })} className="input-premium" />
           </div>
-        </div>
-        <div className="flex gap-2 mt-4">
-          <button onClick={onClose} className="flex-1 py-2 rounded-lg text-sm" style={{ background: 'var(--navy-border)', color: 'var(--text)' }}>Cancel</button>
-          <button onClick={handleSave} disabled={loading} className="flex-1 py-2 rounded-lg text-sm font-semibold" style={{ background: 'var(--cyan)', color: 'var(--navy)' }}>
-            {loading ? 'Saving...' : 'Save'}
-          </button>
+        ))}
+        <div>
+          <div style={{ fontSize: 11, color: '#3a5070', marginBottom: 5, fontWeight: 700 }}>Notes</div>
+          <textarea value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} rows={2} className="input-premium" style={{ resize: 'none' }} />
         </div>
       </div>
-    </div>
+      <div style={{ display: 'flex', gap: 10, marginTop: 20 }}>
+        <button onClick={onClose} style={{ flex: 1, padding: 12, borderRadius: 12, background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.08)', color: '#7090b0', cursor: 'pointer', fontWeight: 700 }}>Cancel</button>
+        <button onClick={save} disabled={loading} className="btn-solid-cyan" style={{ flex: 1, padding: 12, fontSize: 14 }}>{loading ? 'Saving…' : 'Save'}</button>
+      </div>
+    </Modal>
   );
 }
 
@@ -152,36 +113,27 @@ function CloseModal({ pos, onClose, onConfirm }: { pos: Position; onClose: () =>
   const price = pos.currentPrice ?? pos.entryPrice;
   const pnlPct = ((price - pos.entryPrice) / pos.entryPrice) * 100;
   const pnlSol = pos.sizeSol * (pnlPct / 100);
-
-  async function handleClose() {
+  async function close() {
     setLoading(true);
-    try {
-      await api.closePosition(pos.id, price);
-      onConfirm();
-      onClose();
-    } finally {
-      setLoading(false);
-    }
+    try { await api.closePosition(pos.id, price); onConfirm(); onClose(); }
+    finally { setLoading(false); }
   }
-
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: 'rgba(0,0,0,0.7)' }}>
-      <div className="rounded-2xl p-6 w-full max-w-sm" style={{ background: 'var(--navy-card)', border: '1px solid var(--navy-border)' }}>
-        <h3 className="font-bold text-lg mb-4" style={{ color: 'var(--red)' }}>Close Position — {pos.symbol}</h3>
-        <div className="space-y-2 text-sm mb-4">
-          <div className="flex justify-between"><span style={{ color: 'var(--text-dim)' }}>Close Price</span><span>${formatPrice(price)}</span></div>
-          <div className="flex justify-between"><span style={{ color: 'var(--text-dim)' }}>P&L</span>
-            <span style={{ color: pnlSol >= 0 ? 'var(--green)' : 'var(--red)' }}>{formatSOL(pnlSol)} ({formatPct(pnlPct)})</span>
+    <Modal onClose={onClose}>
+      <h3 style={{ fontWeight: 900, fontSize: 16, color: '#ff4466', marginBottom: 20 }}>Close — {pos.symbol}</h3>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 20 }}>
+        {[['Close Price', `$${formatPrice(price)}`, '#d4e0f0'], ['P&L', `${formatSOL(pnlSol)} (${formatPct(pnlPct)})`, pnlSol >= 0 ? '#00ff88' : '#ff4466']].map(([l, v, c]) => (
+          <div key={String(l)} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13 }}>
+            <span style={{ color: '#3a5070' }}>{l}</span>
+            <span style={{ color: c as string, fontWeight: 800 }}>{v}</span>
           </div>
-        </div>
-        <div className="flex gap-2">
-          <button onClick={onClose} className="flex-1 py-2 rounded-lg text-sm" style={{ background: 'var(--navy-border)', color: 'var(--text)' }}>Cancel</button>
-          <button onClick={handleClose} disabled={loading} className="flex-1 py-2 rounded-lg text-sm font-semibold" style={{ background: 'var(--red)', color: 'white' }}>
-            {loading ? 'Closing...' : 'Close Position'}
-          </button>
-        </div>
+        ))}
       </div>
-    </div>
+      <div style={{ display: 'flex', gap: 10 }}>
+        <button onClick={onClose} style={{ flex: 1, padding: 12, borderRadius: 12, background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.08)', color: '#7090b0', cursor: 'pointer', fontWeight: 700 }}>Cancel</button>
+        <button onClick={close} disabled={loading} className="btn-solid-red" style={{ flex: 1, padding: 12, fontSize: 14 }}>{loading ? 'Closing…' : 'Close Position'}</button>
+      </div>
+    </Modal>
   );
 }
 
@@ -189,93 +141,63 @@ function PositionCard({ pos, onRefresh }: { pos: Position; onRefresh: () => Prom
   const [showEdit, setShowEdit] = useState(false);
   const [showClose, setShowClose] = useState(false);
   const [deleting, setDeleting] = useState(false);
-
-  const currentPrice = pos.currentPrice ?? pos.entryPrice;
-  const pnlPct = pos.pnlPct ?? ((currentPrice - pos.entryPrice) / pos.entryPrice * 100);
+  const current = pos.currentPrice ?? pos.entryPrice;
+  const pnlPct = pos.pnlPct ?? ((current - pos.entryPrice) / pos.entryPrice * 100);
   const pnlSol = pos.pnlSol ?? (pos.sizeSol * pnlPct / 100);
+  const isPos = pnlPct >= 0;
 
-  async function handleDelete() {
-    if (!confirm(`Delete ${pos.symbol} position? This will restore the SOL to your balance.`)) return;
+  async function del() {
+    if (!confirm(`Delete ${pos.symbol}?`)) return;
     setDeleting(true);
-    try {
-      await api.deletePosition(pos.id);
-      await onRefresh();
-    } finally {
-      setDeleting(false);
-    }
+    try { await api.deletePosition(pos.id); await onRefresh(); } finally { setDeleting(false); }
   }
 
   return (
     <>
-      <div className="rounded-xl border p-4 transition-all" style={{
-        background: 'var(--navy-card)',
-        borderColor: pnlPct >= 0 ? 'rgba(0,255,136,0.2)' : 'rgba(255,68,102,0.2)',
-      }}>
-        <div className="flex items-start justify-between gap-2">
-          <div className="min-w-0">
-            <div className="flex items-center gap-2 flex-wrap">
-              <span className="font-bold" style={{ color: 'var(--text)' }}>{pos.symbol}</span>
-              <span className="text-xs" style={{ color: 'var(--text-dim)' }}>{pos.name}</span>
-              <span className="px-1.5 py-0.5 rounded text-xs" style={{ background: 'rgba(0,212,255,0.1)', color: 'var(--cyan)' }}>
-                Score: {pos.scoreAtEntry}
-              </span>
+      <div className={`card ${isPos ? 'card-glow-green' : 'card-glow-red'}`}
+        style={{ padding: '16px', borderColor: isPos ? 'rgba(0,255,136,0.18)' : 'rgba(255,68,102,0.18)' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 10 }}>
+          <div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+              <span style={{ fontWeight: 900, fontSize: 15, color: '#d4e0f0' }}>{pos.symbol}</span>
+              <span style={{ fontSize: 11, color: '#3a5070' }}>{pos.name}</span>
+              <span style={{ padding: '2px 7px', borderRadius: 6, fontSize: 10, fontWeight: 700, background: 'rgba(0,212,255,0.1)', color: '#00d4ff', border: '1px solid rgba(0,212,255,0.2)' }}>Score: {pos.scoreAtEntry}</span>
             </div>
-            <div className="text-xs mt-0.5" style={{ color: 'var(--text-dim)' }}>{toIST(pos.entryTime)}</div>
+            <div style={{ fontSize: 11, color: '#3a5070' }}>{toIST(pos.entryTime)}</div>
           </div>
           <PnlDisplay pnl={pnlSol} pct={pnlPct} />
         </div>
 
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mt-3 text-xs">
-          <div><span style={{ color: 'var(--text-dim)' }}>Entry: </span><span>${formatPrice(pos.entryPrice)}</span></div>
-          <div><span style={{ color: 'var(--text-dim)' }}>Current: </span>
-            <span style={{ color: pnlPct >= 0 ? 'var(--green)' : 'var(--red)' }}>${formatPrice(currentPrice)}</span>
-          </div>
-          <div><span style={{ color: 'var(--text-dim)' }}>Size: </span><span>{pos.sizeSol.toFixed(3)} SOL</span></div>
-          <div><span style={{ color: 'var(--text-dim)' }}>SL: </span><span style={{ color: 'var(--red)' }}>${formatPrice(pos.slCurrent)}</span></div>
-          <div><span style={{ color: 'var(--text-dim)' }}>Entry MC: </span><span>{formatMC(pos.entryMc)}</span></div>
-          <div><span style={{ color: 'var(--text-dim)' }}>Curr MC: </span><span>{formatMC(pos.currentMc ?? pos.entryMc)}</span></div>
-          <div><span style={{ color: 'var(--text-dim)' }}>B/S: </span>
-            <span style={{ color: (pos.buySellRatio ?? 1) >= 1.5 ? 'var(--green)' : 'var(--text)' }}>
-              {(pos.buySellRatio ?? 1).toFixed(2)}x
-            </span>
-          </div>
-          <div><span style={{ color: 'var(--text-dim)' }}>TP: </span>
-            <span style={{ color: 'var(--gold)' }}>
-              {[pos.tp1Hit && 'TP1', pos.tp2Hit && 'TP2', pos.tp3Hit && 'TP3'].filter(Boolean).join(' ') || 'None'}
-            </span>
-          </div>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px 16px', marginBottom: 10 }}>
+          {[
+            ['Entry', `$${formatPrice(pos.entryPrice)}`, '#d4e0f0'],
+            ['Current', `$${formatPrice(current)}`, isPos ? '#00ff88' : '#ff4466'],
+            ['Size', `${pos.sizeSol.toFixed(3)} SOL`, '#d4e0f0'],
+            ['Stop Loss', `$${formatPrice(pos.slCurrent)}`, '#ff4466'],
+            ['Entry MC', undefined, undefined],
+            ['B/S Ratio', `${(pos.buySellRatio ?? 1).toFixed(2)}x`, (pos.buySellRatio ?? 1) >= 1.5 ? '#00ff88' : '#d4e0f0'],
+          ].map(([label, val, col], idx) => val !== undefined ? (
+            <div key={idx} style={{ fontSize: 11 }}>
+              <span style={{ color: '#3a5070' }}>{label} </span>
+              <b style={{ color: col as string }}>{val}</b>
+            </div>
+          ) : null)}
         </div>
 
         <TPBar pos={pos} />
 
-        <div className="flex items-center gap-2 mt-3 flex-wrap">
+        <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
           {pos.dexUrl && (
-            <a href={pos.dexUrl} target="_blank" rel="noopener noreferrer"
-              className="px-2.5 py-1 rounded text-xs transition-opacity hover:opacity-80"
-              style={{ background: 'rgba(0,212,255,0.1)', color: 'var(--cyan)', border: '1px solid rgba(0,212,255,0.2)' }}>
-              DEX ↗
-            </a>
+            <a href={pos.dexUrl} target="_blank" rel="noopener noreferrer" className="btn-primary" style={{ padding: '7px 12px', fontSize: 11, textDecoration: 'none' }}>DEX ↗</a>
           )}
-          <button onClick={() => setShowEdit(true)}
-            className="px-2.5 py-1 rounded text-xs font-medium transition-opacity hover:opacity-80"
-            style={{ background: 'rgba(0,212,255,0.1)', color: 'var(--cyan)', border: '1px solid rgba(0,212,255,0.2)' }}>
-            EDIT
-          </button>
-          <button onClick={() => setShowClose(true)}
-            className="px-2.5 py-1 rounded text-xs font-medium transition-opacity hover:opacity-80"
-            style={{ background: 'rgba(255,68,102,0.1)', color: 'var(--red)', border: '1px solid rgba(255,68,102,0.2)' }}>
-            CLOSE
-          </button>
-          <button onClick={handleDelete} disabled={deleting}
-            className="px-2.5 py-1 rounded text-xs font-medium transition-opacity hover:opacity-80"
-            style={{ background: 'rgba(100,116,139,0.1)', color: 'var(--text-dim)', border: '1px solid var(--navy-border)' }}>
-            {deleting ? '...' : 'DELETE'}
+          <button onClick={() => setShowEdit(true)} className="btn-primary" style={{ padding: '7px 12px', fontSize: 11 }}>Edit</button>
+          <button onClick={() => setShowClose(true)} className="btn-red" style={{ padding: '7px 12px', fontSize: 11 }}>Close</button>
+          <button onClick={del} disabled={deleting} style={{ padding: '7px 12px', fontSize: 11, borderRadius: 12, background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)', color: '#3a5070', cursor: 'pointer' }}>
+            {deleting ? '…' : 'Delete'}
           </button>
         </div>
 
-        {pos.notes && (
-          <div className="mt-2 text-xs italic" style={{ color: 'var(--text-dim)' }}>📝 {pos.notes}</div>
-        )}
+        {pos.notes && <div style={{ marginTop: 8, fontSize: 11, color: '#3a5070', fontStyle: 'italic' }}>📝 {pos.notes}</div>}
       </div>
 
       {showEdit && <EditModal pos={pos} onClose={() => setShowEdit(false)} onSave={onRefresh} />}
@@ -285,41 +207,36 @@ function PositionCard({ pos, onRefresh }: { pos: Position; onRefresh: () => Prom
 }
 
 export default function PositionsPage({ openPositions, closedPositions, balance, analytics, onRefresh }: Props) {
-  const unrealizedPnl = openPositions.reduce((s, p) => s + (p.pnlSol ?? 0), 0);
-
+  const unrealized = openPositions.reduce((s, p) => s + (p.pnlSol ?? 0), 0);
   return (
-    <div>
-      {/* Summary */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
         {[
-          { label: 'Open Positions', value: openPositions.length, color: 'var(--cyan)', format: String },
-          { label: 'Unrealized PNL', value: unrealizedPnl, color: unrealizedPnl >= 0 ? 'var(--green)' : 'var(--red)', format: (v: number) => `${v >= 0 ? '+' : ''}${v.toFixed(4)} SOL` },
-          { label: "Today's PNL", value: analytics?.dailyPnl ?? 0, color: (analytics?.dailyPnl ?? 0) >= 0 ? 'var(--green)' : 'var(--red)', format: (v: number) => `${v >= 0 ? '+' : ''}${v.toFixed(4)} SOL` },
-          { label: 'Win Rate', value: analytics?.winRate ?? 0, color: 'var(--gold)', format: (v: number) => `${v.toFixed(1)}%` },
+          { label: 'Open Positions', value: String(openPositions.length), color: '#00d4ff' },
+          { label: 'Unrealized PNL', value: `${unrealized >= 0 ? '+' : ''}${unrealized.toFixed(4)} SOL`, color: unrealized >= 0 ? '#00ff88' : '#ff4466' },
+          { label: "Today's PNL", value: `${(analytics?.dailyPnl ?? 0) >= 0 ? '+' : ''}${(analytics?.dailyPnl ?? 0).toFixed(4)} SOL`, color: (analytics?.dailyPnl ?? 0) >= 0 ? '#00ff88' : '#ff4466' },
+          { label: 'Win Rate', value: `${(analytics?.winRate ?? 0).toFixed(1)}%`, color: '#ffd700' },
         ].map((s) => (
-          <div key={s.label} className="rounded-xl p-3 border" style={{ background: 'var(--navy-card)', borderColor: 'var(--navy-border)' }}>
-            <div className="text-lg font-bold" style={{ color: s.color }}>{(s.format as (v: number) => string)(s.value as number)}</div>
-            <div className="text-xs mt-0.5" style={{ color: 'var(--text-dim)' }}>{s.label}</div>
+          <div key={s.label} className="card" style={{ padding: '14px 16px' }}>
+            <div style={{ fontSize: 17, fontWeight: 900, color: s.color, lineHeight: 1.1 }}>{s.value}</div>
+            <div style={{ fontSize: 10, color: '#3a5070', marginTop: 5, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase' }}>{s.label}</div>
           </div>
         ))}
       </div>
 
-      {/* Open Positions */}
-      <div className="mb-6">
-        <h2 className="text-sm font-semibold mb-3 uppercase tracking-wider" style={{ color: 'var(--text-dim)' }}>
-          Open Positions ({openPositions.length})
-        </h2>
-        {openPositions.length === 0 ? (
-          <div className="text-center py-12 rounded-xl border" style={{ background: 'var(--navy-card)', borderColor: 'var(--navy-border)', color: 'var(--text-dim)' }}>
-            <div className="text-3xl mb-2">📊</div>
-            <div>No open positions. The scanner is looking for entries...</div>
-          </div>
-        ) : (
-          <div className="space-y-3">
-            {openPositions.map((p) => <PositionCard key={p.id} pos={p} onRefresh={onRefresh} />)}
-          </div>
-        )}
-      </div>
+      <div className="section-label" style={{ marginTop: 4 }}>Open Positions ({openPositions.length})</div>
+
+      {openPositions.length === 0 ? (
+        <div className="card" style={{ padding: '40px 20px', textAlign: 'center', color: '#3a5070' }}>
+          <div style={{ fontSize: 40, marginBottom: 10 }}>📊</div>
+          <div style={{ fontWeight: 700, color: '#7090b0', marginBottom: 4 }}>No open positions</div>
+          <div style={{ fontSize: 12 }}>Scanner is looking for entries...</div>
+        </div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          {openPositions.map((p) => <PositionCard key={p.id} pos={p} onRefresh={onRefresh} />)}
+        </div>
+      )}
     </div>
   );
 }

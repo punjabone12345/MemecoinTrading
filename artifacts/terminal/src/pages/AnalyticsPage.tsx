@@ -1,74 +1,58 @@
 import { useState, useMemo } from 'react';
 import { Position, Analytics } from '../lib/types.js';
 import { api } from '../lib/api.js';
-import { formatSOL, formatPct, formatMC, formatPrice, toIST, holdTime } from '../lib/utils.js';
+import { formatSOL, formatPct, formatPrice, toIST, holdTime } from '../lib/utils.js';
 
-interface Props {
-  analytics: Analytics | null;
-  closedPositions: Position[];
-  balance: number;
-  onRefresh: () => Promise<void>;
-}
-
-type SortKey = 'exitTime' | 'pnlSol' | 'pnlPct' | 'entryTime' | 'scoreAtEntry';
-type SortDir = 'asc' | 'desc';
+interface Props { analytics: Analytics | null; closedPositions: Position[]; balance: number; onRefresh: () => Promise<void> }
+type Sort = 'exitTime' | 'pnlSol' | 'pnlPct' | 'entryTime' | 'scoreAtEntry';
+type Dir = 'asc' | 'desc';
 
 function StatCard({ label, value, color, sub }: { label: string; value: string; color?: string; sub?: string }) {
   return (
-    <div className="rounded-xl p-4 border" style={{ background: 'var(--navy-card)', borderColor: 'var(--navy-border)' }}>
-      <div className="text-lg font-bold" style={{ color: color ?? 'var(--text)' }}>{value}</div>
-      <div className="text-xs mt-0.5" style={{ color: 'var(--text-dim)' }}>{label}</div>
-      {sub && <div className="text-xs mt-0.5" style={{ color: 'var(--text-dim)' }}>{sub}</div>}
+    <div className="card" style={{ padding: '14px 16px' }}>
+      <div style={{ fontSize: 18, fontWeight: 900, color: color ?? '#d4e0f0', letterSpacing: '-0.01em', lineHeight: 1.1 }}>{value}</div>
+      <div style={{ fontSize: 10, color: '#3a5070', marginTop: 5, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase' }}>{label}</div>
+      {sub && <div style={{ fontSize: 10, color: '#3a5070', marginTop: 2 }}>{sub}</div>}
     </div>
   );
 }
 
-function MiniChart({ positions }: { positions: Position[] }) {
+function PnlChart({ positions }: { positions: Position[] }) {
   if (positions.length < 2) return null;
-
   const sorted = [...positions].sort((a, b) => new Date(a.exitTime!).getTime() - new Date(b.exitTime!).getTime());
   let running = 0;
-  const points = sorted.map((p, i) => {
-    running += p.pnlSol ?? 0;
-    return { x: i, y: running, pnl: p.pnlSol ?? 0 };
-  });
-
-  const maxY = Math.max(...points.map((p) => p.y));
-  const minY = Math.min(...points.map((p) => p.y));
+  const pts = sorted.map((p, i) => { running += p.pnlSol ?? 0; return { x: i, y: running }; });
+  const maxY = Math.max(...pts.map((p) => p.y), 0);
+  const minY = Math.min(...pts.map((p) => p.y), 0);
   const range = maxY - minY || 1;
-  const W = 600; const H = 120;
-  const pad = 10;
-
-  const mapX = (i: number) => pad + (i / Math.max(points.length - 1, 1)) * (W - pad * 2);
-  const mapY = (y: number) => H - pad - ((y - minY) / range) * (H - pad * 2);
-
-  const pathD = points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${mapX(i)} ${mapY(p.y)}`).join(' ');
-  const areaD = `${pathD} L ${mapX(points.length - 1)} ${H} L ${mapX(0)} ${H} Z`;
-
-  const lastY = points[points.length - 1].y;
-  const color = lastY >= 0 ? '#00ff88' : '#ff4466';
-
+  const W = 600, H = 90, pad = 8;
+  const mx = (i: number) => pad + (i / Math.max(pts.length - 1, 1)) * (W - pad * 2);
+  const my = (y: number) => H - pad - ((y - minY) / range) * (H - pad * 2);
+  const path = pts.map((p, i) => `${i === 0 ? 'M' : 'L'}${mx(i)} ${my(p.y)}`).join(' ');
+  const area = `${path} L${mx(pts.length - 1)} ${H} L${mx(0)} ${H} Z`;
+  const last = pts[pts.length - 1].y;
+  const col = last >= 0 ? '#00ff88' : '#ff4466';
   return (
-    <div className="rounded-xl border p-4 mb-4" style={{ background: 'var(--navy-card)', borderColor: 'var(--navy-border)' }}>
-      <div className="text-sm font-semibold mb-3" style={{ color: 'var(--text-dim)' }}>Cumulative PNL</div>
-      <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ height: '100px' }}>
+    <div className="card" style={{ padding: '16px', marginBottom: 4 }}>
+      <div className="section-label" style={{ marginBottom: 12 }}>Cumulative PNL</div>
+      <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: 72, display: 'block' }}>
         <defs>
-          <linearGradient id="pnlGrad" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor={color} stopOpacity="0.3" />
-            <stop offset="100%" stopColor={color} stopOpacity="0" />
+          <linearGradient id="pnlg" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor={col} stopOpacity="0.25" />
+            <stop offset="100%" stopColor={col} stopOpacity="0" />
           </linearGradient>
         </defs>
-        <path d={areaD} fill="url(#pnlGrad)" />
-        <path d={pathD} fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-        <line x1={pad} y1={mapY(0)} x2={W - pad} y2={mapY(0)} stroke="var(--navy-border)" strokeWidth="1" strokeDasharray="4,4" />
+        <path d={area} fill="url(#pnlg)" />
+        <path d={path} fill="none" stroke={col} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ filter: `drop-shadow(0 0 4px ${col}88)` }} />
+        <line x1={pad} y1={my(0)} x2={W - pad} y2={my(0)} stroke="rgba(255,255,255,0.08)" strokeWidth="1" strokeDasharray="4,4" />
       </svg>
     </div>
   );
 }
 
-export default function AnalyticsPage({ analytics, closedPositions, balance, onRefresh }: Props) {
-  const [sortKey, setSortKey] = useState<SortKey>('exitTime');
-  const [sortDir, setSortDir] = useState<SortDir>('desc');
+export default function AnalyticsPage({ analytics: a, closedPositions, balance, onRefresh }: Props) {
+  const [sortKey, setSortKey] = useState<Sort>('exitTime');
+  const [sortDir, setSortDir] = useState<Dir>('desc');
   const [deleting, setDeleting] = useState<string | null>(null);
 
   const sorted = useMemo(() => {
@@ -85,144 +69,100 @@ export default function AnalyticsPage({ analytics, closedPositions, balance, onR
     return arr;
   }, [closedPositions, sortKey, sortDir]);
 
-  function toggleSort(key: SortKey) {
-    if (sortKey === key) setSortDir(sortDir === 'desc' ? 'asc' : 'desc');
-    else { setSortKey(key); setSortDir('desc'); }
+  function toggleSort(k: Sort) {
+    if (sortKey === k) setSortDir(sortDir === 'desc' ? 'asc' : 'desc');
+    else { setSortKey(k); setSortDir('desc'); }
   }
 
   function exportCSV() {
-    const headers = ['Symbol', 'Name', 'Entry Time (IST)', 'Exit Time (IST)', 'Hold Time', 'Entry Price', 'Exit Price', 'Entry MC', 'Exit MC', 'Size SOL', 'PNL SOL', 'PNL %', 'Peak Gain %', 'Score', 'Close Reason', 'TP1', 'TP2', 'TP3', 'Mode'];
-    const rows = closedPositions.map((p) => [
-      p.symbol, p.name, toIST(p.entryTime), toIST(p.exitTime ?? ''), holdTime(p.entryTime, p.exitTime),
-      p.entryPrice, p.exitPrice ?? '', p.entryMc, p.exitMc ?? '',
-      p.sizeSol, p.pnlSol ?? '', p.pnlPct ?? '',
-      p.peakPrice ? (((p.peakPrice - p.entryPrice) / p.entryPrice) * 100).toFixed(2) : '',
-      p.scoreAtEntry, p.closeReason ?? '', p.tp1Hit, p.tp2Hit, p.tp3Hit, p.mode,
-    ]);
+    const headers = ['Symbol', 'Entry (IST)', 'Exit (IST)', 'Hold', 'Entry $', 'Exit $', 'PNL SOL', 'PNL %', 'Score', 'Reason'];
+    const rows = closedPositions.map((p) => [p.symbol, toIST(p.entryTime), toIST(p.exitTime ?? ''), holdTime(p.entryTime, p.exitTime), p.entryPrice, p.exitPrice ?? '', p.pnlSol ?? '', p.pnlPct ?? '', p.scoreAtEntry, p.closeReason ?? '']);
     const csv = [headers, ...rows].map((r) => r.join(',')).join('\n');
-    const blob = new Blob([csv], { type: 'text/csv' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a'); a.href = url; a.download = `apex-trades-${Date.now()}.csv`; a.click();
+    const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
+    const a = document.createElement('a'); a.href = url; a.download = `apex-${Date.now()}.csv`; a.click();
     URL.revokeObjectURL(url);
   }
 
   async function handleDelete(id: string) {
-    if (!confirm('Delete this trade record?')) return;
+    if (!confirm('Delete this trade?')) return;
     setDeleting(id);
     try { await api.deletePosition(id); await onRefresh(); } finally { setDeleting(null); }
   }
 
-  const a = analytics;
+  const winRate = a?.winRate ?? 0;
+  const totalPnl = a?.totalPnlSol ?? 0;
+  const pf = a?.profitFactor ?? 0;
 
   return (
-    <div>
-      {/* Performance Stats */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
-        <StatCard label="Total Trades" value={String(a?.totalTrades ?? 0)} color="var(--cyan)" />
-        <StatCard label="Win Rate" value={`${(a?.winRate ?? 0).toFixed(1)}%`} color={(a?.winRate ?? 0) >= 55 ? 'var(--green)' : 'var(--gold)'} />
-        <StatCard label="Total PNL" value={`${(a?.totalPnlSol ?? 0) >= 0 ? '+' : ''}${(a?.totalPnlSol ?? 0).toFixed(4)} SOL`} color={(a?.totalPnlSol ?? 0) >= 0 ? 'var(--green)' : 'var(--red)'} />
-        <StatCard label="Profit Factor" value={(a?.profitFactor ?? 0).toFixed(2)} color={(a?.profitFactor ?? 0) >= 1.5 ? 'var(--green)' : 'var(--text)'} />
-        <StatCard label="Best Trade" value={`+${(a?.bestTrade ?? 0).toFixed(1)}%`} color="var(--green)" />
-        <StatCard label="Worst Trade" value={`${(a?.worstTrade ?? 0).toFixed(1)}%`} color="var(--red)" />
-        <StatCard label="Current Streak" value={`${(a?.currentStreak ?? 0) >= 0 ? '+' : ''}${a?.currentStreak ?? 0}`} color={(a?.currentStreak ?? 0) >= 0 ? 'var(--green)' : 'var(--red)'} sub={`Max W: ${a?.maxWinStreak ?? 0} / L: ${a?.maxLossStreak ?? 0}`} />
-        <StatCard label="Max Drawdown" value={`-${(a?.maxDrawdown ?? 0).toFixed(1)}%`} color="var(--red)" />
-        <StatCard label="Avg Hold Time" value={`${(a?.avgHoldTimeMinutes ?? 0).toFixed(0)}m`} color="var(--text)" />
-        <StatCard label="Daily PNL" value={`${(a?.dailyPnl ?? 0) >= 0 ? '+' : ''}${(a?.dailyPnl ?? 0).toFixed(4)} SOL`} color={(a?.dailyPnl ?? 0) >= 0 ? 'var(--green)' : 'var(--red)'} />
-        <StatCard label="Balance" value={`${balance.toFixed(3)} SOL`} color="var(--cyan)" />
-        <StatCard label="Open Positions" value={String(a?.openPositionsCount ?? 0)} color="var(--cyan)" />
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+      {/* Stats grid */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+        <StatCard label="Total Trades" value={String(a?.totalTrades ?? 0)} color="#00d4ff" />
+        <StatCard label="Win Rate" value={`${winRate.toFixed(1)}%`} color={winRate >= 55 ? '#00ff88' : '#ffd700'} />
+        <StatCard label="Total PNL" value={`${totalPnl >= 0 ? '+' : ''}${totalPnl.toFixed(4)} SOL`} color={totalPnl >= 0 ? '#00ff88' : '#ff4466'} />
+        <StatCard label="Profit Factor" value={pf.toFixed(2)} color={pf >= 1.5 ? '#00ff88' : '#d4e0f0'} />
+        <StatCard label="Best Trade" value={`+${(a?.bestTrade ?? 0).toFixed(1)}%`} color="#00ff88" />
+        <StatCard label="Worst Trade" value={`${(a?.worstTrade ?? 0).toFixed(1)}%`} color="#ff4466" />
+        <StatCard label="Streak" value={`${(a?.currentStreak ?? 0) >= 0 ? '+' : ''}${a?.currentStreak ?? 0}`}
+          color={(a?.currentStreak ?? 0) >= 0 ? '#00ff88' : '#ff4466'}
+          sub={`Max W: ${a?.maxWinStreak ?? 0}  L: ${a?.maxLossStreak ?? 0}`} />
+        <StatCard label="Max Drawdown" value={`-${(a?.maxDrawdown ?? 0).toFixed(1)}%`} color="#ff4466" />
+        <StatCard label="Avg Hold" value={`${(a?.avgHoldTimeMinutes ?? 0).toFixed(0)}m`} color="#d4e0f0" />
+        <StatCard label="Daily PNL" value={`${(a?.dailyPnl ?? 0) >= 0 ? '+' : ''}${(a?.dailyPnl ?? 0).toFixed(4)} SOL`}
+          color={(a?.dailyPnl ?? 0) >= 0 ? '#00ff88' : '#ff4466'} />
+        <StatCard label="Balance" value={`${balance.toFixed(3)} SOL`} color="#00d4ff" />
+        <StatCard label="Open Positions" value={String(a?.openPositionsCount ?? 0)} color="#00d4ff" />
       </div>
 
-      {/* Chart */}
-      <MiniChart positions={closedPositions.filter((p) => p.exitTime)} />
+      <PnlChart positions={closedPositions.filter((p) => p.exitTime)} />
 
-      {/* Trade Table */}
-      <div className="rounded-xl border overflow-hidden" style={{ background: 'var(--navy-card)', borderColor: 'var(--navy-border)' }}>
-        <div className="flex items-center justify-between p-4 border-b" style={{ borderColor: 'var(--navy-border)' }}>
-          <h2 className="font-semibold text-sm" style={{ color: 'var(--text)' }}>Closed Trades ({closedPositions.length})</h2>
-          <button onClick={exportCSV} className="px-3 py-1.5 rounded-lg text-xs font-semibold transition-opacity hover:opacity-80"
-            style={{ background: 'rgba(0,212,255,0.15)', color: 'var(--cyan)', border: '1px solid rgba(0,212,255,0.3)' }}>
-            📥 Export CSV
-          </button>
+      {/* Trade history */}
+      <div className="card" style={{ overflow: 'hidden' }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '14px 16px', borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
+          <span style={{ fontWeight: 800, color: '#d4e0f0', fontSize: 13 }}>Closed Trades ({closedPositions.length})</span>
+          <button onClick={exportCSV} className="btn-primary" style={{ padding: '6px 12px', fontSize: 11 }}>📥 Export CSV</button>
         </div>
-
-        <div className="overflow-x-auto">
-          <table className="w-full text-xs">
+        <div style={{ overflowX: 'auto' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
             <thead>
-              <tr style={{ background: '#0d1526' }}>
-                {[
-                  { label: 'Token', key: null },
-                  { label: 'Entry (IST)', key: 'entryTime' },
-                  { label: 'Exit (IST)', key: 'exitTime' },
-                  { label: 'Hold', key: null },
-                  { label: 'Entry $', key: null },
-                  { label: 'Exit $', key: null },
-                  { label: 'PNL SOL', key: 'pnlSol' },
-                  { label: 'PNL %', key: 'pnlPct' },
-                  { label: 'Peak %', key: null },
-                  { label: 'Score', key: 'scoreAtEntry' },
-                  { label: 'Reason', key: null },
-                  { label: 'Actions', key: null },
-                ].map(({ label, key }) => (
-                  <th
-                    key={label}
-                    className={`px-3 py-2.5 text-left font-semibold ${key ? 'cursor-pointer hover:opacity-80' : ''}`}
-                    style={{ color: 'var(--text-dim)', whiteSpace: 'nowrap' }}
-                    onClick={() => key && toggleSort(key as SortKey)}
-                  >
-                    {label}{key && sortKey === key ? (sortDir === 'desc' ? ' ↓' : ' ↑') : ''}
+              <tr style={{ background: 'rgba(255,255,255,0.02)' }}>
+                {[['Token', null], ['Exit (IST)', 'exitTime'], ['Hold', null], ['Entry $', null], ['Exit $', null], ['PNL SOL', 'pnlSol'], ['PNL %', 'pnlPct'], ['Score', 'scoreAtEntry'], ['', null]].map(([l, k]) => (
+                  <th key={String(l)} onClick={() => k && toggleSort(k as Sort)}
+                    style={{ padding: '10px 12px', textAlign: 'left', color: '#3a5070', whiteSpace: 'nowrap', fontWeight: 700, cursor: k ? 'pointer' : 'default', letterSpacing: '0.05em', fontSize: 10 }}>
+                    {l}{k && sortKey === k ? (sortDir === 'desc' ? ' ↓' : ' ↑') : ''}
                   </th>
                 ))}
               </tr>
             </thead>
             <tbody>
               {sorted.length === 0 ? (
-                <tr><td colSpan={12} className="text-center py-10" style={{ color: 'var(--text-dim)' }}>No closed trades yet</td></tr>
-              ) : (
-                sorted.map((p) => {
-                  const pnlPos = (p.pnlSol ?? 0) >= 0;
-                  const peakPct = p.peakPrice ? ((p.peakPrice - p.entryPrice) / p.entryPrice) * 100 : 0;
-                  return (
-                    <tr key={p.id} className="border-t" style={{ borderColor: 'var(--navy-border)' }}>
-                      <td className="px-3 py-2.5" style={{ whiteSpace: 'nowrap' }}>
-                        <div className="font-bold" style={{ color: 'var(--text)' }}>{p.symbol}</div>
-                        <div style={{ color: 'var(--text-dim)' }}>{p.name.slice(0, 12)}</div>
-                      </td>
-                      <td className="px-3 py-2.5" style={{ color: 'var(--text-dim)', whiteSpace: 'nowrap' }}>{toIST(p.entryTime)}</td>
-                      <td className="px-3 py-2.5" style={{ color: 'var(--text-dim)', whiteSpace: 'nowrap' }}>{p.exitTime ? toIST(p.exitTime) : '—'}</td>
-                      <td className="px-3 py-2.5" style={{ color: 'var(--text-dim)' }}>{holdTime(p.entryTime, p.exitTime)}</td>
-                      <td className="px-3 py-2.5" style={{ color: 'var(--text)' }}>${formatPrice(p.entryPrice)}</td>
-                      <td className="px-3 py-2.5" style={{ color: 'var(--text)' }}>{p.exitPrice ? `$${formatPrice(p.exitPrice)}` : '—'}</td>
-                      <td className="px-3 py-2.5 font-bold" style={{ color: pnlPos ? 'var(--green)' : 'var(--red)' }}>
-                        {p.pnlSol !== undefined ? formatSOL(p.pnlSol) : '—'}
-                      </td>
-                      <td className="px-3 py-2.5 font-bold" style={{ color: pnlPos ? 'var(--green)' : 'var(--red)' }}>
-                        {p.pnlPct !== undefined ? formatPct(p.pnlPct) : '—'}
-                      </td>
-                      <td className="px-3 py-2.5" style={{ color: 'var(--gold)' }}>
-                        {peakPct > 0 ? `+${peakPct.toFixed(1)}%` : '—'}
-                      </td>
-                      <td className="px-3 py-2.5" style={{ color: 'var(--cyan)' }}>{p.scoreAtEntry}</td>
-                      <td className="px-3 py-2.5" style={{ color: 'var(--text-dim)', maxWidth: '120px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {p.closeReason ?? '—'}
-                      </td>
-                      <td className="px-3 py-2.5">
-                        <div className="flex items-center gap-1">
-                          {p.dexUrl && (
-                            <a href={p.dexUrl} target="_blank" rel="noopener noreferrer"
-                              className="px-1.5 py-0.5 rounded text-xs" style={{ background: 'rgba(0,212,255,0.1)', color: 'var(--cyan)' }}>
-                              DEX
-                            </a>
-                          )}
-                          <button onClick={() => handleDelete(p.id)} disabled={deleting === p.id}
-                            className="px-1.5 py-0.5 rounded text-xs" style={{ background: 'rgba(255,68,102,0.1)', color: 'var(--red)' }}>
-                            {deleting === p.id ? '...' : 'Del'}
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })
-              )}
+                <tr><td colSpan={9} style={{ textAlign: 'center', padding: '32px', color: '#3a5070' }}>No closed trades yet</td></tr>
+              ) : sorted.map((p) => {
+                const pos = (p.pnlSol ?? 0) >= 0;
+                return (
+                  <tr key={p.id} style={{ borderTop: '1px solid rgba(255,255,255,0.04)' }}>
+                    <td style={{ padding: '10px 12px', whiteSpace: 'nowrap' }}>
+                      <div style={{ fontWeight: 800, color: '#d4e0f0' }}>{p.symbol}</div>
+                      <div style={{ color: '#3a5070', fontSize: 10 }}>{p.name.slice(0, 10)}</div>
+                    </td>
+                    <td style={{ padding: '10px 12px', color: '#3a5070', whiteSpace: 'nowrap' }}>{p.exitTime ? toIST(p.exitTime) : '—'}</td>
+                    <td style={{ padding: '10px 12px', color: '#3a5070' }}>{holdTime(p.entryTime, p.exitTime)}</td>
+                    <td style={{ padding: '10px 12px', color: '#d4e0f0' }}>${formatPrice(p.entryPrice)}</td>
+                    <td style={{ padding: '10px 12px', color: '#d4e0f0' }}>{p.exitPrice ? `$${formatPrice(p.exitPrice)}` : '—'}</td>
+                    <td style={{ padding: '10px 12px', fontWeight: 800, color: pos ? '#00ff88' : '#ff4466' }}>{p.pnlSol !== undefined ? formatSOL(p.pnlSol) : '—'}</td>
+                    <td style={{ padding: '10px 12px', fontWeight: 800, color: pos ? '#00ff88' : '#ff4466' }}>{p.pnlPct !== undefined ? formatPct(p.pnlPct) : '—'}</td>
+                    <td style={{ padding: '10px 12px', color: '#00d4ff' }}>{p.scoreAtEntry}</td>
+                    <td style={{ padding: '10px 12px' }}>
+                      <div style={{ display: 'flex', gap: 4 }}>
+                        {p.dexUrl && <a href={p.dexUrl} target="_blank" rel="noopener noreferrer" className="btn-primary" style={{ padding: '4px 8px', fontSize: 10, textDecoration: 'none' }}>DEX</a>}
+                        <button onClick={() => handleDelete(p.id)} disabled={deleting === p.id} className="btn-red" style={{ padding: '4px 8px', fontSize: 10 }}>
+                          {deleting === p.id ? '…' : 'Del'}
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
