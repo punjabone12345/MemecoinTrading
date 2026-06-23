@@ -109,9 +109,11 @@ export async function initDB(): Promise<void> {
     `ALTER TABLE positions ADD COLUMN IF NOT EXISTS dex_url      TEXT`,
     `ALTER TABLE positions ADD COLUMN IF NOT EXISTS notes        TEXT`,
     `ALTER TABLE positions ADD COLUMN IF NOT EXISTS created_at   TIMESTAMPTZ   DEFAULT NOW()`,
-    // ── Legacy schema heal: drop NOT NULL from any extra column that has no
-    //    default — catches position_id and any other old columns so our INSERT
-    //    never fails on columns we don't provide.  Skips 'id' (true PK).
+    // ── Legacy schema heal (whitelist approach) ──────────────────────────────
+    // Drop NOT NULL from ANY column not in our known required set.
+    // This catches 'position_id' (and any other legacy columns) regardless of
+    // whether they have a DEFAULT — the old filter (column_default IS NULL)
+    // was skipping columns that had a DEFAULT but were still NOT NULL.
     `DO $$
      DECLARE r RECORD;
      BEGIN
@@ -120,8 +122,12 @@ export async function initDB(): Promise<void> {
          WHERE table_schema = 'public'
            AND table_name   = 'positions'
            AND is_nullable  = 'NO'
-           AND column_default IS NULL
-           AND column_name NOT IN ('id')
+           AND column_name NOT IN (
+             'id','mint','name','symbol',
+             'entry_price','entry_mc','entry_time',
+             'size_sol','score_at_entry','peak_price',
+             'sl_current','status','mode'
+           )
        LOOP
          EXECUTE 'ALTER TABLE positions ALTER COLUMN ' || quote_ident(r.column_name) || ' DROP NOT NULL';
        END LOOP;
