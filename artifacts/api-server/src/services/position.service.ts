@@ -67,13 +67,13 @@ export async function openPosition(params: {
   const open = await getOpenPositions();
 
   if (open.length >= settings.maxOpenPositions) {
-    logger.info('Max positions reached, skipping');
+    logger.warn({ openCount: open.length, max: settings.maxOpenPositions }, 'openPosition blocked: max open positions reached');
     return null;
   }
 
   // Prevent duplicate open positions for the same mint
   if (open.some((p) => p.mint === params.mint)) {
-    logger.info({ mint: params.mint }, 'Already have open position for this mint, skipping');
+    logger.warn({ mint: params.mint }, 'openPosition blocked: already have open position for this mint');
     return null;
   }
 
@@ -88,7 +88,7 @@ export async function openPosition(params: {
   const balance = await getBalance();
   const dailyLossLimit = -(balance * settings.maxDailyLossPct / 100);
   if (dailyPnl <= dailyLossLimit) {
-    logger.info({ dailyPnl, dailyLossLimit }, 'Daily loss limit hit, no new entries');
+    logger.warn({ dailyPnl, dailyLossLimit, balance, maxDailyLossPct: settings.maxDailyLossPct }, 'openPosition blocked: daily loss limit hit');
     return null;
   }
 
@@ -98,8 +98,13 @@ export async function openPosition(params: {
   else sizePct = settings.sizeScore70;
 
   const sizeSol = balance * sizePct / 100;
+  logger.info({ balance, sizePct, sizeSol, score: params.score }, 'openPosition: computed trade size');
+  if (sizeSol <= 0) {
+    logger.warn({ sizeSol, sizePct, balance }, 'openPosition blocked: trade size is 0 — check sizeScore settings');
+    return null;
+  }
   if (sizeSol > balance) {
-    logger.warn('Insufficient balance');
+    logger.warn({ sizeSol, balance }, 'openPosition blocked: insufficient balance');
     return null;
   }
 
