@@ -84,6 +84,7 @@ export async function initDB(): Promise<void> {
   //    in older production databases (Render, etc.) ──────────────────
   const migrations = [
     // positions table
+    `ALTER TABLE positions ADD COLUMN IF NOT EXISTS mint         TEXT         NOT NULL DEFAULT ''`,
     `ALTER TABLE positions ADD COLUMN IF NOT EXISTS entry_price  NUMERIC      NOT NULL DEFAULT 0`,
     `ALTER TABLE positions ADD COLUMN IF NOT EXISTS entry_mc     NUMERIC      NOT NULL DEFAULT 0`,
     `ALTER TABLE positions ADD COLUMN IF NOT EXISTS entry_time   TIMESTAMPTZ  NOT NULL DEFAULT NOW()`,
