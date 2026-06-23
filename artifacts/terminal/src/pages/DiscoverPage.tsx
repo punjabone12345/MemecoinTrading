@@ -35,8 +35,6 @@ function TradeBlockBanner({ token, settings }: { token: Token; settings: Setting
 
   if (token.score < settings.minEntryScore)
     reasons.push(`Score ${token.score} below min ${settings.minEntryScore}`);
-  if (token.consecutiveTrending < settings.trendChecksRequired)
-    reasons.push(`Trend ${token.consecutiveTrending}/${settings.trendChecksRequired} scans confirmed`);
   if (token.buySellRatio < settings.minBuySellRatio)
     reasons.push(`Buy/Sell ratio ${token.buySellRatio.toFixed(2)}x below ${settings.minBuySellRatio}x`);
   if (token.priceChange5m > 50)
