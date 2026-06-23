@@ -23,6 +23,20 @@ export async function query<T = unknown>(sql: string, params?: unknown[]): Promi
 }
 
 export async function initDB(): Promise<void> {
+  // ── Legacy schema detection ───────────────────────────────────────────────
+  // Old Render DBs have a `position_id SERIAL PRIMARY KEY` column which makes
+  // every INSERT fail (can't drop NOT NULL from a PK). Since no trade has ever
+  // successfully completed under that schema, we drop and recreate cleanly.
+  const legacyCols = await query<{ column_name: string }>(`
+    SELECT column_name FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = 'positions'
+      AND column_name = 'position_id'
+  `);
+  if (legacyCols.length > 0) {
+    logger.warn('Legacy positions table detected (position_id PK) — dropping and recreating');
+    await query(`DROP TABLE IF EXISTS positions CASCADE`);
+  }
+
   await query(`
     CREATE TABLE IF NOT EXISTS positions (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
