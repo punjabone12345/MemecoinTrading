@@ -1,5 +1,5 @@
 import { logger } from '../lib/logger.js';
-import { scanTokens, getAllTokens, setDailyLossStatus } from './scanner.service.js';
+import { scanTokens, getAllTokens, setDailyLossStatus, markTokenEntered } from './scanner.service.js';
 import { getSettings } from './settings.service.js';
 import { openPosition, getOpenPositions } from './position.service.js';
 import { getBalance } from './settings.service.js';
@@ -27,6 +27,18 @@ async function runScanCycle(): Promise<void> {
   isRunning = true;
   try {
     await scanTokens();
+
+    // CRITICAL: After every scan, sync DB open positions back into the
+    // in-memory cache.  On a server restart the cache is empty, so tokens
+    // that already have open positions would be marked ELIGIBLE by the
+    // scanner and appear tradeable — but checkEntries() would skip them
+    // (duplicate guard).  This sync ensures the UI shows ENTERED and only
+    // truly fresh tokens are considered for entry.
+    const openPositions = await getOpenPositions();
+    for (const pos of openPositions) {
+      markTokenEntered(pos.mint);
+    }
+
     await broadcastTokens();
     await checkEntries();
     // Re-broadcast after entries so the UI immediately reflects ENTERED status
@@ -64,30 +76,50 @@ async function checkEntries(): Promise<void> {
   const openPositions = await getOpenPositions();
   const openMints = new Set(openPositions.map((p) => p.mint));
 
+  let attempted = 0;
+  let skippedDuplicate = 0;
+  let skippedNotEligible = 0;
+  let skippedConditions = 0;
+
   for (const token of tokens) {
-    if (openPositions.length >= settings.maxOpenPositions) break;
-    if (openMints.has(token.mint)) continue;
-    if (token.status !== 'ELIGIBLE') continue;
+    if (openPositions.length + attempted >= settings.maxOpenPositions) break;
+    if (openMints.has(token.mint)) { skippedDuplicate++; continue; }
+    if (token.status !== 'ELIGIBLE') { skippedNotEligible++; continue; }
 
     // Entry conditions
     const meetsScore = token.score >= settings.minEntryScore;
     const meetsBSR = token.buySellRatio >= settings.minBuySellRatio;
     const notFOMO = token.priceChange5m <= 50; // Block if pumped >50% in last 5 min
 
-    if (meetsScore && meetsBSR && notFOMO) {
-      const dexUrl = `https://dexscreener.com/solana/${token.mint}`;
-      await openPosition({
-        mint: token.mint,
-        name: token.name,
-        symbol: token.symbol,
-        score: token.score,
-        price: token.price,
-        mc: token.marketCap,
-        dexUrl,
-      });
+    if (!meetsScore || !meetsBSR || !notFOMO) {
+      logger.info(
+        { mint: token.mint, symbol: token.symbol, score: token.score, minEntryScore: settings.minEntryScore, bsr: token.buySellRatio, minBSR: settings.minBuySellRatio, priceChange5m: token.priceChange5m, meetsScore, meetsBSR, notFOMO },
+        'Eligible token skipped — entry conditions not met'
+      );
+      skippedConditions++;
+      continue;
+    }
+
+    const dexUrl = `https://dexscreener.com/solana/${token.mint}`;
+    logger.info({ mint: token.mint, symbol: token.symbol, score: token.score }, 'Attempting to open position');
+    const position = await openPosition({
+      mint: token.mint,
+      name: token.name,
+      symbol: token.symbol,
+      score: token.score,
+      price: token.price,
+      mc: token.marketCap,
+      dexUrl,
+    });
+    if (position) {
       openMints.add(token.mint);
+      attempted++;
+    } else {
+      logger.warn({ mint: token.mint, symbol: token.symbol }, 'openPosition returned null — skipping');
     }
   }
+
+  logger.info({ attempted, skippedDuplicate, skippedNotEligible, skippedConditions }, 'checkEntries complete');
 }
 
 export function stopAutoTrader(): void {

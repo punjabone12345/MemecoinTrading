@@ -42,10 +42,13 @@ export function setDailyLossStatus(hit: boolean, pnl: number, limit: number): vo
 }
 
 export function getScanStats() {
+  // Recompute eligible from the live cache so it stays accurate after
+  // markTokenEntered() is called post-scan (e.g. to sync DB open positions)
+  const liveEligible = Array.from(tokenCache.values()).filter((t) => t.status === 'ELIGIBLE').length;
   return {
     scanning: scanCount,
     passed: passedFilters,
-    eligible: eligibleCount,
+    eligible: liveEligible,
     dailyLossLimitHit,
     dailyPnl: dailyPnlSnapshot,
     dailyLossLimit: dailyLossLimitSnapshot,
