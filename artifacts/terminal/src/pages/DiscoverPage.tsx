@@ -43,7 +43,7 @@ function TradeBlockBanner({ token, settings }: { token: Token; settings: Setting
   if (reasons.length === 0) {
     return (
       <div style={{ marginTop: 8, padding: '7px 12px', borderRadius: 8, background: 'rgba(0,255,136,0.06)', border: '1px solid rgba(0,255,136,0.2)', fontSize: 11, color: '#00ff88' }}>
-        ✅ Waiting for next scan cycle to enter
+        ✅ All conditions met — entering position this cycle
       </div>
     );
   }
@@ -97,6 +97,11 @@ function TokenCard({ token, settings }: { token: Token; settings: Settings | nul
 
         {isEligible && settings && (
           <TradeBlockBanner token={token} settings={settings} />
+        )}
+        {token.status === 'REJECTED' && token.rejectReason && (
+          <div style={{ marginTop: 6, padding: '5px 10px', borderRadius: 6, background: 'rgba(255,68,102,0.06)', border: '1px solid rgba(255,68,102,0.15)', fontSize: 11, color: '#ff6680' }}>
+            ❌ {token.rejectReason}
+          </div>
         )}
       </div>
 

@@ -208,13 +208,32 @@ export async function scanTokens(): Promise<void> {
     const change5m = pair.priceChange?.m5 ?? 0;
     const price = parseFloat(pair.priceUsd ?? '0');
 
-    // Quick pre-filter
-    if (mc < settings.minMc || mc > settings.maxMc || vol24 < settings.minVolume24h) continue;
-    if (ageH > settings.maxAgeHours) continue;
+    // Quick pre-filter — still store in cache as REJECTED so UI shows all tokens
+    let preReject: string | undefined;
+    if (mc < settings.minMc) preReject = `MC too low ($${(mc/1000).toFixed(0)}K < $${(settings.minMc/1000).toFixed(0)}K min)`;
+    else if (mc > settings.maxMc) preReject = `MC too high ($${(mc/1e6).toFixed(1)}M > $${(settings.maxMc/1e6).toFixed(1)}M max)`;
+    else if (vol24 < settings.minVolume24h) preReject = `Vol24h too low ($${(vol24/1000).toFixed(0)}K < $${(settings.minVolume24h/1000).toFixed(0)}K min)`;
+    else if (ageH > settings.maxAgeHours) preReject = `Age ${ageH.toFixed(1)}h > ${settings.maxAgeHours}h max`;
+
+    const existing = tokenCache.get(mint);
+
+    if (preReject) {
+      if (existing?.status === 'ENTERED') continue; // Never downgrade entered tokens
+      tokenCache.set(mint, {
+        mint, name: pair.baseToken.name || 'Unknown', symbol: pair.baseToken.symbol || '???',
+        score: 0, marketCap: mc, volume24h: vol24, priceChange1h: change1h, priceChange5m: change5m,
+        priceChange24h: change24, buySellRatio: bsr, liquidity: liq, age: ageH,
+        dexId: pair.dexId ?? '', pairAddress: pair.pairAddress, price,
+        rugcheck: true, freezeAuthority: false, mintAuthority: false,
+        topHolder: existing?.topHolder ?? 0, creatorPct: existing?.creatorPct ?? 0,
+        status: 'REJECTED', rejectReason: preReject, scoreBreakdown: { priceMomentum: 0, volumeMomentum: 0, buyPressure: 0, mcQuality: 0, total: 0 },
+        filterResults: [], consecutiveTrending: 0, volume1hPrev: 0, volume1hCurrent: 0, lastChecked: Date.now(),
+      });
+      continue;
+    }
 
     // Rugcheck (with cache)
     let rugOk = true;
-    const existing = tokenCache.get(mint);
     if (existing && Date.now() - existing.lastChecked < 5 * 60_000) {
       rugOk = existing.rugcheck;
     } else if (settings.rugcheckEnabled) {

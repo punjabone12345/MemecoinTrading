@@ -27,6 +27,8 @@ async function runScanCycle(): Promise<void> {
     await scanTokens();
     await broadcastTokens();
     await checkEntries();
+    // Re-broadcast after entries so the UI immediately reflects ENTERED status
+    await broadcastTokens();
   } catch (err) {
     logger.error({ err }, 'Scan cycle error');
   } finally {
