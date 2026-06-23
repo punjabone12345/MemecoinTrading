@@ -12,6 +12,7 @@ export async function getSettings(): Promise<Settings> {
 
   return {
     minMc: num('minMc', 500000),
+    maxMc: num('maxMc', 7000000),
     minVolume24h: num('minVolume24h', 100000),
     minAgeHours: num('minAgeHours', 1),
     maxAgeHours: num('maxAgeHours', 168),

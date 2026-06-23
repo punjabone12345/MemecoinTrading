@@ -83,6 +83,7 @@ export async function initDB(): Promise<void> {
   // Seed settings — DO NOTHING so user changes are preserved
   const seedDefaults: [string, string][] = [
     ['minMc', '500000'],
+    ['maxMc', '7000000'],
     ['minVolume24h', '100000'],
     ['minAgeHours', '0'],
     ['maxAgeHours', '720'],
@@ -127,6 +128,7 @@ export async function initDB(): Promise<void> {
   const forceDefaults: [string, string][] = [
     ['minAgeHours', '0'],
     ['maxAgeHours', '720'],
+    ['maxMc', '7000000'],
     ['minBuySellRatio', '1.1'],
     ['minLiquidity', '20000'],
     ['rugcheckEnabled', 'false'],

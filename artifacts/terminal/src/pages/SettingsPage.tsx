@@ -113,6 +113,7 @@ export default function SettingsPage({ settings: initial, onUpdate }: Props) {
     <div className="max-w-2xl">
       <Section title="Scanning">
         <SettingInput label="Min Market Cap ($)" value={settings.minMc} onChange={(v) => update('minMc', v)} min={0} step={10000} />
+        <SettingInput label="Max Market Cap ($)" value={settings.maxMc} onChange={(v) => update('maxMc', v)} min={100000} step={500000} />
         <SettingInput label="Min 24h Volume ($)" value={settings.minVolume24h} onChange={(v) => update('minVolume24h', v)} min={0} step={10000} />
         <SettingInput label="Min Age (hours)" value={settings.minAgeHours} onChange={(v) => update('minAgeHours', v)} min={0} step={0.5} />
         <SettingInput label="Max Age (hours)" value={settings.maxAgeHours} onChange={(v) => update('maxAgeHours', v)} min={1} step={24} />

@@ -93,6 +93,7 @@ function buildFilterResults(pair: DexPair, settings: Awaited<ReturnType<typeof g
 
   return [
     { name: 'Market Cap ≥$500K', passed: mc >= settings.minMc, value: `$${(mc/1000).toFixed(0)}K`, required: `≥$${(settings.minMc/1000).toFixed(0)}K` },
+    { name: 'Market Cap ≤$7M', passed: mc <= settings.maxMc, value: `$${(mc/1_000_000).toFixed(2)}M`, required: `≤$${(settings.maxMc/1_000_000).toFixed(0)}M` },
     { name: '24h Volume ≥$100K', passed: vol24 >= settings.minVolume24h, value: `$${(vol24/1000).toFixed(0)}K`, required: `≥$${(settings.minVolume24h/1000).toFixed(0)}K` },
     { name: 'Age in range', passed: ageH >= settings.minAgeHours && ageH <= settings.maxAgeHours, value: `${ageH.toFixed(1)}h`, required: `${settings.minAgeHours}h–${settings.maxAgeHours}h` },
     { name: 'Liquidity ≥$50K', passed: liq >= settings.minLiquidity, value: `$${(liq/1000).toFixed(0)}K`, required: `≥$${(settings.minLiquidity/1000).toFixed(0)}K` },
@@ -207,8 +208,8 @@ export async function scanTokens(): Promise<void> {
     const change5m = pair.priceChange?.m5 ?? 0;
     const price = parseFloat(pair.priceUsd ?? '0');
 
-    // Quick pre-filter (MC and volume only — age is lenient)
-    if (mc < settings.minMc || vol24 < settings.minVolume24h) continue;
+    // Quick pre-filter
+    if (mc < settings.minMc || mc > settings.maxMc || vol24 < settings.minVolume24h) continue;
     if (ageH > settings.maxAgeHours) continue;
 
     // Rugcheck (with cache)

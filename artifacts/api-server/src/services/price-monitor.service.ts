@@ -25,7 +25,7 @@ async function fetchPrices(mints: string[]): Promise<Map<string, { price: number
 
     for (const chunk of chunks) {
       const res = await axios.get<DexPriceResult>(
-        `https://api.dexscreener.com/dex/tokens/${chunk.join(',')}`,
+        `https://api.dexscreener.com/latest/dex/tokens/${chunk.join(',')}`,
         { timeout: 5000 }
       );
       for (const pair of res.data?.pairs ?? []) {

@@ -92,6 +92,7 @@ export interface Analytics {
 
 export interface Settings {
   minMc: number;
+  maxMc: number;
   minVolume24h: number;
   minAgeHours: number;
   maxAgeHours: number;
