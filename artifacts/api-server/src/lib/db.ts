@@ -181,6 +181,7 @@ export async function initDB(): Promise<void> {
     ['minLiquidity', '20000'],
     ['rugcheckEnabled', 'false'],
     ['minEntryScore', '50'],
+    ['trendChecksRequired', '1'],
   ];
 
   for (const [key, value] of forceDefaults) {
