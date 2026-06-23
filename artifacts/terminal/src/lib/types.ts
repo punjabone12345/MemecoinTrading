@@ -34,6 +34,7 @@ export interface Token {
   creatorPct: number;
   status: 'SCANNING' | 'ELIGIBLE' | 'ENTERED' | 'REJECTED';
   rejectReason?: string;
+  tradedToday?: boolean;
   scoreBreakdown: ScoreBreakdown;
   filterResults: FilterResult[];
   consecutiveTrending: number;

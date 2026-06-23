@@ -126,7 +126,7 @@ export default function AnalyticsPage({ analytics: a, closedPositions, balance, 
           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
             <thead>
               <tr style={{ background: 'rgba(255,255,255,0.02)' }}>
-                {[['Token', null], ['Exit (IST)', 'exitTime'], ['Hold', null], ['Entry $', null], ['Exit $', null], ['PNL SOL', 'pnlSol'], ['PNL %', 'pnlPct'], ['Score', 'scoreAtEntry'], ['', null]].map(([l, k]) => (
+                {[['Token', null], ['Exit (IST)', 'exitTime'], ['Hold', null], ['Entry $', null], ['Exit $', null], ['PNL SOL', 'pnlSol'], ['PNL %', 'pnlPct'], ['Score', 'scoreAtEntry'], ['Close Reason', null], ['', null]].map(([l, k]) => (
                   <th key={String(l)} onClick={() => k && toggleSort(k as Sort)}
                     style={{ padding: '10px 12px', textAlign: 'left', color: '#3a5070', whiteSpace: 'nowrap', fontWeight: 700, cursor: k ? 'pointer' : 'default', letterSpacing: '0.05em', fontSize: 10 }}>
                     {l}{k && sortKey === k ? (sortDir === 'desc' ? ' ↓' : ' ↑') : ''}
@@ -136,9 +136,11 @@ export default function AnalyticsPage({ analytics: a, closedPositions, balance, 
             </thead>
             <tbody>
               {sorted.length === 0 ? (
-                <tr><td colSpan={9} style={{ textAlign: 'center', padding: '32px', color: '#3a5070' }}>No closed trades yet</td></tr>
+                <tr><td colSpan={10} style={{ textAlign: 'center', padding: '32px', color: '#3a5070' }}>No closed trades yet</td></tr>
               ) : sorted.map((p) => {
                 const pos = (p.pnlSol ?? 0) >= 0;
+                const isEmergency = p.closeReason?.startsWith('EMERGENCY');
+                const reasonColor = isEmergency ? '#ff4466' : p.closeReason?.includes('Stop Loss') ? '#ffd700' : '#3a5070';
                 return (
                   <tr key={p.id} style={{ borderTop: '1px solid rgba(255,255,255,0.04)' }}>
                     <td style={{ padding: '10px 12px', whiteSpace: 'nowrap' }}>
@@ -152,6 +154,9 @@ export default function AnalyticsPage({ analytics: a, closedPositions, balance, 
                     <td style={{ padding: '10px 12px', fontWeight: 800, color: pos ? '#00ff88' : '#ff4466' }}>{p.pnlSol !== undefined ? formatSOL(p.pnlSol) : '—'}</td>
                     <td style={{ padding: '10px 12px', fontWeight: 800, color: pos ? '#00ff88' : '#ff4466' }}>{p.pnlPct !== undefined ? formatPct(p.pnlPct) : '—'}</td>
                     <td style={{ padding: '10px 12px', color: '#00d4ff' }}>{p.scoreAtEntry}</td>
+                    <td style={{ padding: '10px 12px', maxWidth: 160, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                      <span style={{ fontSize: 10, color: reasonColor, fontWeight: 600 }} title={p.closeReason ?? ''}>{p.closeReason ?? '—'}</span>
+                    </td>
                     <td style={{ padding: '10px 12px' }}>
                       <div style={{ display: 'flex', gap: 4 }}>
                         {p.dexUrl && <a href={p.dexUrl} target="_blank" rel="noopener noreferrer" className="btn-primary" style={{ padding: '4px 8px', fontSize: 10, textDecoration: 'none' }}>DEX</a>}

@@ -351,7 +351,24 @@ export async function scanTokens(): Promise<void> {
       ? 'REJECTED'
       : 'SCANNING';
 
-    if (status === 'ELIGIBLE') eligibleCount++;
+    // Audit log every token decision
+    if (status === 'ELIGIBLE') {
+      logger.info(
+        { mint, symbol: pair.baseToken.symbol, score: scoreBreakdown.total, threshold: settings.minEntryScore, breakdown: scoreBreakdown },
+        'AUDIT ACCEPTED: token meets all requirements — status=ELIGIBLE'
+      );
+      eligibleCount++;
+    } else if (status === 'SCANNING') {
+      logger.debug(
+        { mint, symbol: pair.baseToken.symbol, score: scoreBreakdown.total, threshold: settings.minEntryScore },
+        'AUDIT SCANNING: passed filters but score below threshold'
+      );
+    } else if (status === 'REJECTED') {
+      logger.debug(
+        { mint, symbol: pair.baseToken.symbol, score: scoreBreakdown.total, reason: rejectReason },
+        'AUDIT REJECTED: failed filter check'
+      );
+    }
 
     const token: Token = {
       mint,
@@ -376,6 +393,7 @@ export async function scanTokens(): Promise<void> {
       creatorPct: existing?.creatorPct ?? 0,
       status,
       rejectReason,
+      tradedToday: tradedTodaySet.has(mint),
       scoreBreakdown,
       filterResults,
       consecutiveTrending: consecutive,
@@ -411,4 +429,16 @@ export function markTokenAvailable(mint: string): void {
   enteredMints.delete(mint);
   const t = tokenCache.get(mint);
   if (t) tokenCache.set(mint, { ...t, status: 'ELIGIBLE' });
+}
+
+const tradedTodaySet = new Set<string>();
+
+export function setTradedTodayMints(mints: Set<string>): void {
+  tradedTodaySet.clear();
+  for (const m of mints) tradedTodaySet.add(m);
+  // Update cache for any tokens already present
+  for (const mint of mints) {
+    const t = tokenCache.get(mint);
+    if (t) tokenCache.set(mint, { ...t, tradedToday: true });
+  }
 }

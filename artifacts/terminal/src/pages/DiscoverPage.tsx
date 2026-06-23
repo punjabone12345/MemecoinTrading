@@ -114,6 +114,12 @@ function TokenCard({ token, settings, scanStats }: { token: Token; settings: Set
           </div>
         </div>
 
+        {token.tradedToday && token.status !== 'ENTERED' && (
+          <div style={{ marginTop: 6, padding: '7px 12px', borderRadius: 8, background: 'rgba(155,89,255,0.08)', border: '1px solid rgba(155,89,255,0.25)', fontSize: 11 }}>
+            <span style={{ color: '#9b59ff', fontWeight: 700 }}>🚫 Already traded today</span>
+            <span style={{ color: '#6a3a9a', marginLeft: 6 }}>— no re-entry until IST midnight</span>
+          </div>
+        )}
         {isEligible && settings && (
           <TradeBlockBanner
             token={token}

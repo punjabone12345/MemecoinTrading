@@ -211,26 +211,5 @@ export async function initDB(): Promise<void> {
     );
   }
 
-  // Force-update the critical filter settings to lenient defaults
-  // so old stale strict settings don't block the scanner
-  const forceDefaults: [string, string][] = [
-    ['minAgeHours', '0'],
-    ['maxAgeHours', '720'],
-    ['maxMc', '7000000'],
-    ['minBuySellRatio', '1.1'],
-    ['minLiquidity', '20000'],
-    ['rugcheckEnabled', 'false'],
-    ['minEntryScore', '50'],
-    ['trendChecksRequired', '1'],
-  ];
-
-  for (const [key, value] of forceDefaults) {
-    await query(
-      `INSERT INTO settings (key, value, updated_at) VALUES ($1, $2, NOW())
-       ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = NOW()`,
-      [key, value]
-    );
-  }
-
   logger.info('Database initialized');
 }

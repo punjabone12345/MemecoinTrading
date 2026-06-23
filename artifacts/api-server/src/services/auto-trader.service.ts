@@ -1,5 +1,5 @@
 import { logger } from '../lib/logger.js';
-import { scanTokens, getAllTokens, setDailyLossStatus, markTokenEntered } from './scanner.service.js';
+import { scanTokens, getAllTokens, setDailyLossStatus, markTokenEntered, setTradedTodayMints } from './scanner.service.js';
 import { getSettings } from './settings.service.js';
 import { openPosition, getOpenPositions } from './position.service.js';
 import { getBalance } from './settings.service.js';
@@ -85,6 +85,9 @@ async function checkEntries(): Promise<void> {
   `, [istMidnightISO]);
   const tradedTodayMints = new Set(tradedTodayRows.map((r) => r.mint));
 
+  // Share with scanner so tokens get tradedToday=true flag for the UI
+  setTradedTodayMints(tradedTodayMints);
+
   let attempted = 0;
   let skippedDuplicate = 0;
   let skippedTradedToday = 0;
@@ -96,14 +99,23 @@ async function checkEntries(): Promise<void> {
       logger.info({ openCount: openPositions.length, attempted, max: settings.maxOpenPositions }, 'Max open positions reached — stopping entry loop');
       break;
     }
-    if (openMints.has(token.mint)) { skippedDuplicate++; continue; }
-    if (tradedTodayMints.has(token.mint)) { skippedTradedToday++; continue; }
+    if (openMints.has(token.mint)) {
+      logger.debug({ mint: token.mint, symbol: token.symbol }, 'SKIP: already has open position');
+      skippedDuplicate++; continue;
+    }
+    if (tradedTodayMints.has(token.mint)) {
+      logger.info({ mint: token.mint, symbol: token.symbol }, 'SKIP: already traded today (no re-entry until IST midnight)');
+      skippedTradedToday++; continue;
+    }
 
     // ELIGIBLE is already a full gate: scanner sets it only when ALL filter checks pass
     // AND score >= minEntryScore. Do NOT re-check those same conditions here — a
     // settings read race between scanTokens() and checkEntries() can cause valid
     // ELIGIBLE tokens to be blocked by a stale/different minEntryScore value.
-    if (token.status !== 'ELIGIBLE') { skippedNotEligible++; continue; }
+    if (token.status !== 'ELIGIBLE') {
+      logger.debug({ mint: token.mint, symbol: token.symbol, status: token.status, score: token.score, threshold: settings.minEntryScore, rejectReason: token.rejectReason }, 'SKIP: not ELIGIBLE');
+      skippedNotEligible++; continue;
+    }
 
     // Guard: skip if scanner returned price=0 (DexScreener missing priceUsd)
     // We can't open a position without an entry price.

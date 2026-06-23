@@ -196,7 +196,7 @@ export async function openPosition(params: {
   return position;
 }
 
-export async function closePosition(id: string, currentPrice: number, reason: string): Promise<Position | null> {
+export async function closePosition(id: string, currentPrice: number, reason: string, options?: { silent?: boolean }): Promise<Position | null> {
   const pos = await getPositionById(id);
   if (!pos || pos.status !== 'OPEN') return null;
 
@@ -215,7 +215,10 @@ export async function closePosition(id: string, currentPrice: number, reason: st
   await setBalance(balance + pos.sizeSol + pnlSol);
   markTokenAvailable(pos.mint);
 
-  await notifyClosed({ name: pos.name, symbol: pos.symbol, pnlSol, pnlPct, reason });
+  // Only send the close notification if not suppressed (e.g. emergency exit sends its own)
+  if (!options?.silent) {
+    await notifyClosed({ name: pos.name, symbol: pos.symbol, pnlSol, pnlPct, reason });
+  }
   await broadcastPositions();
   await broadcastBalance();
 
@@ -286,7 +289,8 @@ export async function updatePositionPrice(id: string, currentPrice: number): Pro
       const reason = emergencyReasons.join(', ');
       const pnl = pos.sizeSol * (pnlPct / 100);
       await notifyEmergencyExit({ name: pos.name, symbol: pos.symbol, reason, pnlSol: pnl });
-      await closePosition(id, currentPrice, `EMERGENCY: ${reason}`);
+      // Use silent=true so closePosition does NOT send a second Telegram notification
+      await closePosition(id, currentPrice, `EMERGENCY: ${reason}`, { silent: true });
     }
   }
 }
