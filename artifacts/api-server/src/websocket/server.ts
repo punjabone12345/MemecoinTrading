@@ -1,44 +1,59 @@
-import { WebSocketServer, type WebSocket } from "ws";
-import type { IncomingMessage, Server } from "http";
-import { logger } from "../lib/logger.js";
+import { WebSocketServer, WebSocket } from 'ws';
+import { IncomingMessage, Server } from 'http';
+import { logger } from '../lib/logger.js';
+import { WSMessage } from '../types/index.js';
 
-export type WsMessage = { type: string; data: unknown; timestamp: number };
+let wss: WebSocketServer | null = null;
 
-let _wss: WebSocketServer | null = null;
+export function initWebSocket(server: Server): void {
+  wss = new WebSocketServer({ server, path: '/ws' });
 
-function send(ws: WebSocket, msg: WsMessage) {
-  if (ws.readyState === ws.OPEN) {
-    try { ws.send(JSON.stringify(msg)); } catch { /* ignore */ }
+  wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
+    logger.info({ ip: req.socket.remoteAddress }, 'WS client connected');
+
+    ws.on('error', (err) => logger.warn({ err }, 'WS error'));
+    ws.on('close', () => logger.debug('WS client disconnected'));
+
+    // Send initial ping
+    safeSend(ws, { type: 'alert', data: { message: 'Connected to Apex Meme Trader' } });
+  });
+
+  logger.info('WebSocket server initialized on /ws');
+}
+
+function safeSend(ws: WebSocket, msg: WSMessage): void {
+  if (ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify(msg));
   }
 }
 
-export function broadcast(msg: WsMessage) {
-  if (!_wss) return;
-  _wss.clients.forEach((client) => send(client as WebSocket, msg));
+export function broadcast(msg: WSMessage): void {
+  if (!wss) return;
+  const payload = JSON.stringify(msg);
+  for (const client of wss.clients) {
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(payload);
+    }
+  }
 }
 
-export function initWebSocketServer(server: Server) {
-  const wss = new WebSocketServer({ server, path: "/ws" });
-  _wss = wss;
+export async function broadcastPositions(): Promise<void> {
+  // Imported lazily to avoid circular deps
+  const { getOpenPositions, getAnalytics } = await import('../services/position.service.js');
+  const [positions, analytics] = await Promise.all([getOpenPositions(), getAnalytics()]);
+  broadcast({ type: 'positions', data: positions });
+  broadcast({ type: 'analytics', data: analytics });
+}
 
-  wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
-    logger.info({ ip: req.socket.remoteAddress }, "WS client connected");
+export async function broadcastBalance(): Promise<void> {
+  const { getBalance } = await import('../services/settings.service.js');
+  const balance = await getBalance();
+  broadcast({ type: 'balance', data: { balance } });
+}
 
-    const pingInterval = setInterval(() => {
-      send(ws, { type: "ping", data: null, timestamp: Date.now() });
-    }, 25_000);
-
-    ws.on("message", (raw) => {
-      try {
-        const msg = JSON.parse(raw.toString()) as { type: string };
-        if (msg.type === "ping") send(ws, { type: "pong", data: null, timestamp: Date.now() });
-      } catch { /* ignore */ }
-    });
-
-    ws.on("close", () => { clearInterval(pingInterval); logger.info("WS client disconnected"); });
-    ws.on("error", (err) => { logger.warn({ err }, "WS client error"); });
-  });
-
-  logger.info("WebSocket server initialized at /ws");
-  return wss;
+export async function broadcastTokens(): Promise<void> {
+  const { getAllTokens, getScanStats } = await import('../services/scanner.service.js');
+  const tokens = getAllTokens();
+  const stats = getScanStats();
+  broadcast({ type: 'tokens', data: { tokens, stats } });
 }

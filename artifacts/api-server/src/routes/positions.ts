@@ -1,86 +1,60 @@
-import { Router, type IRouter } from "express";
-import { paperTradingService } from "../services/paper-trading.service.js";
+import { Router } from 'express';
+import {
+  getOpenPositions,
+  getClosedPositions,
+  closePosition,
+  editPosition,
+  deletePosition,
+  getAnalytics,
+} from '../services/position.service.js';
+import { getBalance } from '../services/settings.service.js';
 
-const router: IRouter = Router();
+const router = Router();
 
-router.get("/positions", (_req, res) => {
-  const positions = paperTradingService.getOpenPositionsWithLivePnl();
-  const portfolio = paperTradingService.getPortfolio();
-  res.json({
-    success: true,
-    data: {
-      positions,
-      portfolio: {
-        solBalance: portfolio.solBalance,
-        totalPnlSol: portfolio.totalPnlSol,
-        totalPnlPercent: portfolio.totalPnlPercent,
-        openPositionsCount: portfolio.openPositionsCount,
-        openPositionsValueSol: portfolio.openPositionsValueSol,
-        initialBalance: portfolio.initialBalance,
-      },
-    },
-  });
+router.get('/', async (_req, res) => {
+  const [open, closed] = await Promise.all([getOpenPositions(), getClosedPositions()]);
+  res.json({ open, closed });
 });
 
-router.get("/positions/all", (_req, res) => {
-  const all = paperTradingService.getAllTrades();
-  res.json({ success: true, count: all.length, data: all });
+router.get('/open', async (_req, res) => {
+  const positions = await getOpenPositions();
+  res.json(positions);
 });
 
-router.get("/positions/closed", (_req, res) => {
-  const closed = paperTradingService.getClosedTrades();
-  res.json({ success: true, count: closed.length, data: closed });
+router.get('/closed', async (_req, res) => {
+  const positions = await getClosedPositions();
+  res.json(positions);
 });
 
-router.get("/positions/portfolio", (_req, res) => {
-  const portfolio = paperTradingService.getPortfolio();
-  res.json({ success: true, data: portfolio });
+router.get('/analytics', async (_req, res) => {
+  const [analytics, balance] = await Promise.all([getAnalytics(), getBalance()]);
+  res.json({ ...analytics, balance });
 });
 
-router.delete("/positions/history/:id", (req, res) => {
-  try {
-    paperTradingService.deleteClosedTrade(req.params.id);
-    res.json({ success: true, message: "Trade deleted and balance restored" });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "Unknown error";
-    res.status(404).json({ success: false, error: message });
-  }
+router.post('/:id/close', async (req, res) => {
+  const { id } = req.params;
+  const { currentPrice } = req.body as { currentPrice?: number };
+  if (!currentPrice) return res.status(400).json({ error: 'currentPrice required' });
+
+  const position = await closePosition(id, currentPrice, 'Manual close');
+  if (!position) return res.status(404).json({ error: 'Position not found or already closed' });
+  res.json(position);
 });
 
-router.patch("/positions/history/:id", (req, res) => {
-  try {
-    const { pnlSol, pnlPercent, entryPrice, exitPrice, closeReason, note, tradeSource } = req.body as {
-      pnlSol?: number;
-      pnlPercent?: number;
-      entryPrice?: number;
-      exitPrice?: number;
-      closeReason?: "manual" | "stop_loss" | "take_profit";
-      note?: string;
-      tradeSource?: "bot" | "rss";
-    };
-    const updated = paperTradingService.editClosedTrade(req.params.id, {
-      pnlSol,
-      pnlPercent,
-      entryPrice,
-      exitPrice,
-      closeReason,
-      note,
-      tradeSource,
-    });
-    res.json({ success: true, data: updated });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "Unknown error";
-    res.status(404).json({ success: false, error: message });
-  }
+router.patch('/:id', async (req, res) => {
+  const { id } = req.params;
+  const updates = req.body as {
+    entryPrice?: number; sizeSol?: number; slCurrent?: number;
+    tp1Hit?: boolean; tp2Hit?: boolean; tp3Hit?: boolean; notes?: string;
+  };
+  const position = await editPosition(id, updates);
+  if (!position) return res.status(404).json({ error: 'Position not found' });
+  res.json(position);
 });
 
-router.get("/positions/:id", (req, res) => {
-  const position = paperTradingService.getPositionById(req.params.id);
-  if (!position) {
-    res.status(404).json({ success: false, error: "Position not found" });
-    return;
-  }
-  res.json({ success: true, data: position });
+router.delete('/:id', async (req, res) => {
+  await deletePosition(req.params.id);
+  res.json({ success: true });
 });
 
 export default router;

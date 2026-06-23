@@ -1,10 +1,14 @@
-import { Router, type IRouter } from "express";
-import healthRouter from "./health.js";
-import earlyDiscoveryRouter from "./early-discovery.js";
+import { Router } from 'express';
+import positionsRouter from './positions.js';
+import scannerRouter from './scanner.js';
+import settingsRouter from './settings.js';
 
-const router: IRouter = Router();
+const router = Router();
 
-router.use(healthRouter);
-router.use(earlyDiscoveryRouter);
+router.get('/health', (_req, res) => res.json({ status: 'ok', ts: new Date().toISOString() }));
+
+router.use('/positions', positionsRouter);
+router.use('/scanner', scannerRouter);
+router.use('/settings', settingsRouter);
 
 export default router;

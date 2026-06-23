@@ -1,98 +1,17 @@
-import express, { type Express } from "express";
-import cors from "cors";
-import pinoHttp from "pino-http";
-import path from "path";
-import { fileURLToPath } from "url";
-import router from "./routes/index.js";
-import { logger } from "./lib/logger.js";
+import express from 'express';
+import cors from 'cors';
+import { pinoHttp } from 'pino-http';
+import { logger } from './lib/logger.js';
+import apiRouter from './routes/index.js';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const app = express();
 
-const app: Express = express();
-
-app.use(
-  pinoHttp({
-    logger,
-    // Silence /api/healthz ping requests so UptimeRobot pings don't flood logs
-    autoLogging: {
-      ignore: (req) => req.url === "/api/healthz",
-    },
-    serializers: {
-      req(req) {
-        return {
-          id: req.id,
-          method: req.method,
-          url: req.url?.split("?")[0],
-        };
-      },
-      res(res) {
-        return {
-          statusCode: res.statusCode,
-        };
-      },
-    },
-  }),
-);
-
-app.use(
-  cors({
-    origin: "*",
-    methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
-  }),
-);
-
+app.use(cors({ origin: '*' }));
 app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.use(pinoHttp({ logger, autoLogging: { ignore: (req) => req.url === '/api/health' } }));
 
-app.use("/api", router);
+app.use('/api', apiRouter);
 
-// ── Single-service deployment (Render, Railway, etc.) ─────────────────────
-// When SERVE_FRONTEND=true or NODE_ENV=production AND the frontend build
-// exists, serve it from the same process so one Render service handles both.
-const shouldServeFrontend =
-  process.env["SERVE_FRONTEND"] === "true" ||
-  process.env["NODE_ENV"] === "production";
-
-if (shouldServeFrontend) {
-  // In the compiled bundle (dist/index.mjs) __dirname = artifacts/api-server/dist
-  // The frontend build lands at artifacts/terminal/dist/public
-  const frontendDir = path.resolve(__dirname, "../../terminal/dist/public");
-
-  // Hashed assets (JS/CSS bundles) get long-term cache; index.html must never be cached
-  // so browsers always fetch the latest entry point on every deploy.
-  app.use(express.static(frontendDir, {
-    maxAge: "1y",
-    etag: true,
-    setHeaders(res, filePath) {
-      if (filePath.endsWith("index.html")) {
-        res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
-        res.setHeader("Pragma", "no-cache");
-        res.setHeader("Expires", "0");
-      }
-    },
-  }));
-
-  // SPA fallback — anything that isn't an /api call gets index.html
-  app.get(/^(?!\/api).*/, (_req, res) => {
-    res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
-    res.sendFile(path.join(frontendDir, "index.html"));
-  });
-
-  logger.info({ frontendDir }, "Serving frontend static files");
-}
-
-app.use(
-  (
-    err: Error,
-    _req: express.Request,
-    res: express.Response,
-    _next: express.NextFunction,
-  ) => {
-    logger.error({ err }, "Unhandled error");
-    res.status(500).json({ success: false, error: "Internal server error" });
-  },
-);
+app.get('/', (_req, res) => res.json({ name: 'Apex Meme Trader API', status: 'running' }));
 
 export default app;
