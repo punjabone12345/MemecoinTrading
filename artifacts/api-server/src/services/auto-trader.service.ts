@@ -26,19 +26,17 @@ async function runScanCycle(): Promise<void> {
   if (isRunning) return;
   isRunning = true;
   try {
-    await scanTokens();
-
-    // CRITICAL: After every scan, sync DB open positions back into the
-    // in-memory cache.  On a server restart the cache is empty, so tokens
-    // that already have open positions would be marked ELIGIBLE by the
-    // scanner and appear tradeable — but checkEntries() would skip them
-    // (duplicate guard).  This sync ensures the UI shows ENTERED and only
-    // truly fresh tokens are considered for entry.
-    const openPositions = await getOpenPositions();
-    for (const pos of openPositions) {
+    // CRITICAL: Sync DB open positions into in-memory cache BEFORE scanning.
+    // On a server restart the cache is empty — if we scan first, opened tokens
+    // get re-evaluated as ELIGIBLE for that cycle. Syncing first ensures
+    // scanTokens() sees the correct ENTERED status and never re-marks them
+    // ELIGIBLE, so the UI and checkEntries() are always in sync.
+    const openPositionsPre = await getOpenPositions();
+    for (const pos of openPositionsPre) {
       markTokenEntered(pos.mint);
     }
 
+    await scanTokens();
     await broadcastTokens();
     await checkEntries();
     // Re-broadcast after entries so the UI immediately reflects ENTERED status

@@ -26,6 +26,10 @@ interface DexPair {
 }
 
 const tokenCache = new Map<string, Token>();
+// Persistent set of mints that have open positions — survives between scan
+// cycles and is checked during scanTokens() so even a cold-cache restart
+// never re-marks an entered token as ELIGIBLE.
+const enteredMints = new Set<string>();
 let scanCount = 0;
 let passedFilters = 0;
 let eligibleCount = 0;
@@ -242,7 +246,7 @@ export async function scanTokens(): Promise<void> {
     const existing = tokenCache.get(mint);
 
     if (preReject) {
-      if (existing?.status === 'ENTERED') continue; // Never downgrade entered tokens
+      if (enteredMints.has(mint)) continue; // Never downgrade entered tokens
       tokenCache.set(mint, {
         mint, name: pair.baseToken.name || 'Unknown', symbol: pair.baseToken.symbol || '???',
         score: 0, marketCap: mc, volume24h: vol24, priceChange1h: change1h, priceChange5m: change5m,
@@ -286,7 +290,7 @@ export async function scanTokens(): Promise<void> {
     const isUp = change5m > 0 && (scoreBreakdown.total >= (existing?.score ?? 0));
     const consecutive = isUp ? prevConsecutive + 1 : 0;
 
-    const status: Token['status'] = existing?.status === 'ENTERED'
+    const status: Token['status'] = enteredMints.has(mint)
       ? 'ENTERED'
       : allPassed && scoreBreakdown.total >= settings.minEntryScore
       ? 'ELIGIBLE'
@@ -345,11 +349,13 @@ export async function scanTokens(): Promise<void> {
 }
 
 export function markTokenEntered(mint: string): void {
+  enteredMints.add(mint);
   const t = tokenCache.get(mint);
   if (t) tokenCache.set(mint, { ...t, status: 'ENTERED' });
 }
 
 export function markTokenAvailable(mint: string): void {
+  enteredMints.delete(mint);
   const t = tokenCache.get(mint);
   if (t) tokenCache.set(mint, { ...t, status: 'ELIGIBLE' });
 }
