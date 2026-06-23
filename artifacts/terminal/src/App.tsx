@@ -120,6 +120,30 @@ export default function App() {
     return () => { destroyed = true; wsRef.current?.close(); };
   }, []);
 
+  // Polling fallback: refresh positions, balance and tokens every 5s
+  // This keeps the UI accurate even when the WebSocket is disconnected.
+  useEffect(() => {
+    const poll = async () => {
+      try {
+        const [posData, scanData, settingsData] = await Promise.all([
+          api.getPositions(),
+          api.getScanner(),
+          api.getSettings(),
+        ]);
+        setOpenPositions(posData.open);
+        setClosedPositions(posData.closed);
+        setTokens(scanData.tokens);
+        setScanStats(scanData.stats);
+        setBalance(settingsData.currentBalanceSol);
+        setSettings(settingsData);
+      } catch {
+        // Silently ignore poll errors
+      }
+    };
+    const id = setInterval(poll, 5000);
+    return () => clearInterval(id);
+  }, []);
+
   const refreshClosed = useCallback(async () => {
     try { setClosedPositions(await api.getClosedPositions()); } catch {}
   }, []);

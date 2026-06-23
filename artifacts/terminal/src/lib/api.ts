@@ -5,6 +5,7 @@ const API_BASE = '/api';
 async function apiFetch<T>(path: string, opts?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     headers: { 'Content-Type': 'application/json' },
+    cache: 'no-store',
     ...opts,
   });
   if (!res.ok) throw new Error(`API ${path} failed: ${res.status}`);
