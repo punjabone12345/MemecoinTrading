@@ -27,16 +27,37 @@ export const api = {
   updateSettings: (updates: Partial<Settings>) =>
     apiFetch<Settings>('/settings', { method: 'PATCH', body: JSON.stringify(updates) }),
   resetAll: () => apiFetch<{ success: boolean; balance: number }>('/settings/reset', { method: 'POST' }),
+  getConfig: () => apiFetch<{ wsUrl: string | null }>('/config'),
 };
 
 // WebSocket with auto-reconnect
 type WSHandler = (msg: { type: string; data: unknown }) => void;
 
-export function createWS(onMessage: WSHandler): WebSocket {
-  // Use the current host to go through Vite proxy → API server
+// Cache the resolved WS URL so we only fetch /api/config once
+let cachedWsUrl: string | null = null;
+
+async function resolveWsUrl(): Promise<string> {
+  if (cachedWsUrl) return cachedWsUrl;
+
+  try {
+    const cfg = await api.getConfig();
+    if (cfg?.wsUrl) {
+      cachedWsUrl = cfg.wsUrl;
+      return cachedWsUrl;
+    }
+  } catch {
+    // Fall through to default
+  }
+
+  // Fallback: derive from current page host (works when served directly from Render)
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const host = window.location.host;
-  const ws = new WebSocket(`${protocol}//${host}/ws`);
+  cachedWsUrl = `${protocol}//${window.location.host}/ws`;
+  return cachedWsUrl;
+}
+
+export async function createWS(onMessage: WSHandler): Promise<WebSocket> {
+  const wsUrl = await resolveWsUrl();
+  const ws = new WebSocket(wsUrl);
 
   ws.onmessage = (evt) => {
     try {

@@ -71,6 +71,12 @@ export async function openPosition(params: {
     return null;
   }
 
+  // Prevent duplicate open positions for the same mint
+  if (open.some((p) => p.mint === params.mint)) {
+    logger.info({ mint: params.mint }, 'Already have open position for this mint, skipping');
+    return null;
+  }
+
   // Check daily loss limit
   const today = new Date();
   today.setHours(0, 0, 0, 0);
@@ -112,6 +118,9 @@ export async function openPosition(params: {
   await notifyBought({ name: params.name, symbol: params.symbol, price: params.price, mc: params.mc, score: params.score, sizeSol });
   await broadcastPositions();
   await broadcastBalance();
+  // Immediately update token status to ENTERED on the scan page
+  const { broadcastTokens } = await import('../websocket/server.js');
+  await broadcastTokens();
 
   logger.info({ mint: params.mint, sizeSol, score: params.score }, 'Position opened');
   return position;

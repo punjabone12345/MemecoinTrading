@@ -90,9 +90,9 @@ export default function App() {
     let reconnectDelay = 1500;
     let destroyed = false;
 
-    const connect = () => {
+    const connect = async () => {
       if (destroyed) return;
-      const ws = createWS((msg) => {
+      const ws = await createWS((msg) => {
         if (msg.type === 'positions') {
           const p = msg.data as Position[];
           setOpenPositions(p.filter((x) => x.status === 'OPEN'));
@@ -105,6 +105,7 @@ export default function App() {
         if (msg.type === 'analytics') setAnalytics(msg.data as Analytics);
         if (msg.type === 'balance') setBalance((msg.data as { balance: number }).balance);
       });
+      if (destroyed) { ws.close(); return; }
       ws.onopen = () => { setWsConnected(true); reconnectDelay = 1500; };
       ws.onclose = () => {
         setWsConnected(false);
