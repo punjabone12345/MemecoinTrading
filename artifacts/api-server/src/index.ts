@@ -46,13 +46,6 @@ async function main(): Promise<void> {
     }, 24 * 60 * 60 * 1000);
   }, msToMidnight);
 
-  // Heartbeat every 15 min
-  setInterval(async () => {
-    try {
-      const [open, balance] = await Promise.all([getOpenPositions(), getBalance()]);
-      await notifyHeartbeat({ openPositions: open.length, balance });
-    } catch {}
-  }, 15 * 60 * 1000);
 
   process.on('SIGTERM', () => {
     logger.info('SIGTERM received, shutting down');
