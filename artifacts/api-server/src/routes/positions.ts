@@ -34,10 +34,10 @@ router.get('/analytics', async (_req, res) => {
 router.post('/:id/close', async (req, res) => {
   const { id } = req.params;
   const { currentPrice } = req.body as { currentPrice?: number };
-  if (!currentPrice) return res.status(400).json({ error: 'currentPrice required' });
+  if (!currentPrice) { res.status(400).json({ error: 'currentPrice required' }); return; }
 
   const position = await closePosition(id, currentPrice, 'Manual close');
-  if (!position) return res.status(404).json({ error: 'Position not found or already closed' });
+  if (!position) { res.status(404).json({ error: 'Position not found or already closed' }); return; }
   res.json(position);
 });
 
@@ -48,7 +48,7 @@ router.patch('/:id', async (req, res) => {
     tp1Hit?: boolean; tp2Hit?: boolean; tp3Hit?: boolean; notes?: string;
   };
   const position = await editPosition(id, updates);
-  if (!position) return res.status(404).json({ error: 'Position not found' });
+  if (!position) { res.status(404).json({ error: 'Position not found' }); return; }
   res.json(position);
 });
 

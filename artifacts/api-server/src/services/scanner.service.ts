@@ -139,7 +139,7 @@ async function fetchDexPairs(): Promise<DexPair[]> {
     const profileRes = await axios.get<Array<{ tokenAddress: string; chainId: string }>>(
       `${DEXSCREENER_BASE}/token-profiles/latest/v1`,
       { timeout: 10000 }
-    ).catch(() => ({ data: [] }));
+    ).catch(() => ({ data: [] as Array<{ tokenAddress: string; chainId: string }> }));
 
     if (Array.isArray(profileRes.data)) {
       const mints = profileRes.data
@@ -153,7 +153,7 @@ async function fetchDexPairs(): Promise<DexPair[]> {
           const r = await axios.get<{ pairs: DexPair[] }>(
             `${DEXSCREENER_BASE}/latest/dex/tokens/${chunk.join(',')}`,
             { timeout: 10000 }
-          ).catch(() => ({ data: { pairs: [] } }));
+          ).catch(() => ({ data: { pairs: [] as DexPair[] } }));
           if (r.data?.pairs) allPairs.push(...r.data.pairs.filter((p) => p.chainId === 'solana'));
         }
       }
@@ -168,7 +168,7 @@ async function fetchDexPairs(): Promise<DexPair[]> {
 
     const searchResults = await Promise.all(
       searches.map((url) =>
-        axios.get<{ pairs: DexPair[] }>(url, { timeout: 10000 }).catch(() => ({ data: { pairs: [] } }))
+        axios.get<{ pairs: DexPair[] }>(url, { timeout: 10000 }).catch(() => ({ data: { pairs: [] as DexPair[] } }))
       )
     );
 
@@ -180,7 +180,7 @@ async function fetchDexPairs(): Promise<DexPair[]> {
     const boostRes = await axios.get<Array<{ tokenAddress: string; chainId: string }>>(
       `${DEXSCREENER_BASE}/token-boosts/top/v1`,
       { timeout: 10000 }
-    ).catch(() => ({ data: [] }));
+    ).catch(() => ({ data: [] as Array<{ tokenAddress: string; chainId: string }> }));
 
     if (Array.isArray(boostRes.data)) {
       const boostedMints = boostRes.data
@@ -194,7 +194,7 @@ async function fetchDexPairs(): Promise<DexPair[]> {
           const r = await axios.get<{ pairs: DexPair[] }>(
             `${DEXSCREENER_BASE}/latest/dex/tokens/${chunk.join(',')}`,
             { timeout: 10000 }
-          ).catch(() => ({ data: { pairs: [] } }));
+          ).catch(() => ({ data: { pairs: [] as DexPair[] } }));
           if (r.data?.pairs) allPairs.push(...r.data.pairs.filter((p) => p.chainId === 'solana'));
         }
       }

@@ -78,6 +78,7 @@ export interface Position {
 export interface Settings {
   // Scanning
   minMc: number;
+  maxMc: number;
   minVolume24h: number;
   minAgeHours: number;
   maxAgeHours: number;
