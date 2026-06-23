@@ -16,10 +16,16 @@ function PnlDisplay({ pnl, pct }: { pnl?: number; pct?: number }) {
   const [anim, setAnim] = useState('');
   useEffect(() => {
     if (pnl !== undefined && prevPnl.current !== undefined) {
-      setAnim(pnl > prevPnl.current ? 'animate-up' : pnl < prevPnl.current ? 'animate-down' : '');
-      const t = setTimeout(() => setAnim(''), 300);
-      prevPnl.current = pnl;
-      return () => clearTimeout(t);
+      const prev = prevPnl.current;
+      // Only animate on meaningful changes (≥0.5% of position or ≥0.0001 SOL)
+      const change = Math.abs(pnl - prev);
+      const threshold = Math.max(0.0001, Math.abs(prev) * 0.005);
+      if (change >= threshold) {
+        setAnim(pnl > prev ? 'animate-up' : 'animate-down');
+        const t = setTimeout(() => setAnim(''), 600);
+        prevPnl.current = pnl;
+        return () => clearTimeout(t);
+      }
     }
     prevPnl.current = pnl;
     return undefined;

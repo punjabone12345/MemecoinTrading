@@ -74,8 +74,20 @@ async function checkEntries(): Promise<void> {
   const openPositions = await getOpenPositions();
   const openMints = new Set(openPositions.map((p) => p.mint));
 
+  // Block re-entry for any token already traded today (IST 00:00–24:00).
+  // IST is UTC+5:30 — compute today's IST midnight as a UTC timestamp.
+  const nowMs = Date.now();
+  const istOffsetMs = 5.5 * 60 * 60 * 1000;
+  const istMidnightMs = Math.floor((nowMs + istOffsetMs) / 86_400_000) * 86_400_000 - istOffsetMs;
+  const istMidnightISO = new Date(istMidnightMs).toISOString();
+  const tradedTodayRows = await query<{ mint: string }>(`
+    SELECT DISTINCT mint FROM positions WHERE entry_time >= $1
+  `, [istMidnightISO]);
+  const tradedTodayMints = new Set(tradedTodayRows.map((r) => r.mint));
+
   let attempted = 0;
   let skippedDuplicate = 0;
+  let skippedTradedToday = 0;
   let skippedNotEligible = 0;
   let skippedNoPrice = 0;
 
@@ -85,6 +97,7 @@ async function checkEntries(): Promise<void> {
       break;
     }
     if (openMints.has(token.mint)) { skippedDuplicate++; continue; }
+    if (tradedTodayMints.has(token.mint)) { skippedTradedToday++; continue; }
 
     // ELIGIBLE is already a full gate: scanner sets it only when ALL filter checks pass
     // AND score >= minEntryScore. Do NOT re-check those same conditions here — a
@@ -123,7 +136,7 @@ async function checkEntries(): Promise<void> {
     }
   }
 
-  logger.info({ attempted, skippedDuplicate, skippedNotEligible, skippedNoPrice }, 'checkEntries complete');
+  logger.info({ attempted, skippedDuplicate, skippedTradedToday, skippedNotEligible, skippedNoPrice }, 'checkEntries complete');
 }
 
 export function stopAutoTrader(): void {

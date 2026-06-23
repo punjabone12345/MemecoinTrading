@@ -34,20 +34,25 @@ async function fetchByMints(mints: string[]): Promise<Map<string, PriceData>> {
         `https://api.dexscreener.com/latest/dex/tokens/${chunk.join(',')}`,
         { timeout: 6000 }
       );
+      // Track txn activity count per mint to pick the most active pair.
+      const activity = new Map<string, number>();
       for (const pair of res.data?.pairs ?? []) {
         const mint = pair.baseToken?.address;
         if (!mint) continue;
         const price = parseFloat(pair.priceUsd ?? '0');
+        if (price <= 0) continue;
         const mc = pair.marketCap ?? pair.fdv ?? 0;
         const h1 = pair.txns?.h1 ?? { buys: 0, sells: 0 };
         const bsr = h1.sells > 0 ? h1.buys / h1.sells : h1.buys > 0 ? 99 : 1;
 
-        // Keep the entry with the HIGHEST price (most liquid pair is usually primary).
-        // Using highest avoids false SL triggers from stale low-liq pools.
-        // SL guard is conservative enough (25%) that a real dump clears it anyway.
-        const existing = result.get(mint);
-        if (!existing || price > existing.price) {
+        // Pick the pair with the most h1 activity (highest buys+sells).
+        // This is the actively traded pool → most accurate real-time price.
+        // Avoids stale low-liquidity pairs showing inflated prices post-dump.
+        const h1Count = h1.buys + h1.sells;
+        const prevActivity = activity.get(mint) ?? -1;
+        if (h1Count > prevActivity) {
           result.set(mint, { price, mc, bsr });
+          activity.set(mint, h1Count);
         }
       }
     }
