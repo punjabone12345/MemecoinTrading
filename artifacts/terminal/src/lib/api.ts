@@ -1,6 +1,10 @@
 import { Position, Analytics, Settings, Token, ScanStats } from './types.js';
 
-const API_BASE = '/api';
+// In local dev VITE_API_URL is empty — Vite proxy forwards /api → :8080.
+// On Vercel set VITE_API_URL=https://your-app.onrender.com so the static
+// build can reach the Render backend directly.
+const BACKEND = (import.meta.env.VITE_API_URL as string | undefined)?.replace(/\/$/, '') ?? '';
+const API_BASE = BACKEND ? `${BACKEND}/api` : '/api';
 
 async function apiFetch<T>(path: string, opts?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
@@ -34,30 +38,18 @@ export const api = {
 // WebSocket with auto-reconnect
 type WSHandler = (msg: { type: string; data: unknown }) => void;
 
-// Cache the resolved WS URL so we only fetch /api/config once
-let cachedWsUrl: string | null = null;
-
-async function resolveWsUrl(): Promise<string> {
-  if (cachedWsUrl) return cachedWsUrl;
-
-  try {
-    const cfg = await api.getConfig();
-    if (cfg?.wsUrl) {
-      cachedWsUrl = cfg.wsUrl;
-      return cachedWsUrl;
-    }
-  } catch {
-    // Fall through to default
+function buildWsUrl(): string {
+  if (BACKEND) {
+    // Absolute backend URL provided — derive wss:// from it directly.
+    return BACKEND.replace(/^https:/, 'wss:').replace(/^http:/, 'ws:') + '/ws';
   }
-
-  // Fallback: derive from current page host (works when served directly from Render)
+  // Local dev: derive from the current page host (Vite proxy handles it).
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  cachedWsUrl = `${protocol}//${window.location.host}/ws`;
-  return cachedWsUrl;
+  return `${protocol}//${window.location.host}/ws`;
 }
 
 export async function createWS(onMessage: WSHandler): Promise<WebSocket> {
-  const wsUrl = await resolveWsUrl();
+  const wsUrl = buildWsUrl();
   const ws = new WebSocket(wsUrl);
 
   ws.onmessage = (evt) => {
