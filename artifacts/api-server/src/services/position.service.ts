@@ -140,10 +140,46 @@ export async function openPosition(params: {
 
   logger.info({ colNames }, 'openPosition: inserting with columns');
 
-  const rows = await query<Record<string, unknown>>(
-    `INSERT INTO positions (${colNames.join(', ')}) VALUES (${placeholders}) RETURNING *`,
-    colValues
-  );
+  const buildAndInsert = () =>
+    query<Record<string, unknown>>(
+      `INSERT INTO positions (${colNames.join(', ')}) VALUES (${placeholders}) RETURNING *`,
+      colValues
+    );
+
+  let rows: Record<string, unknown>[];
+  try {
+    rows = await buildAndInsert();
+  } catch (err: any) {
+    // 23502 = NOT NULL violation on a column we don't own (e.g. legacy position_id).
+    // Drop NOT NULL from every column not in our known schema, then retry once.
+    if (err.code === '23502') {
+      logger.warn({ err: err.message }, 'openPosition: NOT NULL constraint hit — healing schema');
+      const knownCols = new Set([
+        'id','mint','name','symbol','entry_price','entry_mc','entry_time',
+        'size_sol','score_at_entry','peak_price','sl_current','status','mode',
+        'exit_price','exit_mc','exit_time','pnl_sol','pnl_pct','tp1_hit',
+        'tp2_hit','tp3_hit','close_reason','tx_signature','dex_url','notes','created_at',
+      ]);
+      const badCols = await query<{ column_name: string }>(`
+        SELECT column_name FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'positions'
+          AND is_nullable = 'NO'
+      `);
+      for (const { column_name } of badCols) {
+        if (!knownCols.has(column_name)) {
+          try {
+            await query(`ALTER TABLE positions ALTER COLUMN "${column_name}" DROP NOT NULL`);
+            logger.info({ column_name }, 'openPosition: dropped NOT NULL from legacy column');
+          } catch (alterErr: any) {
+            logger.warn({ column_name, err: alterErr.message }, 'openPosition: could not drop NOT NULL');
+          }
+        }
+      }
+      rows = await buildAndInsert();
+    } else {
+      throw err;
+    }
+  }
 
   const position = rowToPosition(rows[0]);
   await setBalance(balance - sizeSol);
