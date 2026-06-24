@@ -83,8 +83,12 @@ export function calcScore(token: Partial<Token>): ScoreBreakdown {
 
   let volumeMomentum = 0;
   const v1h = token.volume1hCurrent ?? 0;
-  const v1hPrev = token.volume1hPrev ?? 1;
-  const vRatio = v1hPrev > 0 ? v1h / v1hPrev : 1;
+  const v1hPrev = token.volume1hPrev ?? 0;
+  // Fall back to 24h average hourly rate when no prior h1 window exists.
+  // This gives meaningful momentum on first-scan tokens instead of always 0.
+  const avgHourly = (token.volume24h ?? 0) / 24;
+  const baseline = v1hPrev > 0 ? v1hPrev : (avgHourly > 0 ? avgHourly : 0);
+  const vRatio = baseline > 0 ? v1h / baseline : (v1h > 0 ? 2 : 0);
   if (vRatio > 2) volumeMomentum = 25;
   else if (vRatio > 1.5) volumeMomentum = 18;
   else if (vRatio > 1.2) volumeMomentum = 10;
@@ -433,6 +437,7 @@ export async function scanTokens(): Promise<void> {
       priceChange5m: change5m,
       volume1hCurrent: v1h,
       volume1hPrev: v1hPrev,
+      volume24h: vol24,
       buySellRatio: bsr,
       marketCap: mc,
     };
