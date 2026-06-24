@@ -36,14 +36,18 @@ export async function notifyBought(params: {
 }
 
 export async function notifyTPHit(params: {
-  name: string; symbol: string; level: number; gainPct: number; profitSol: number; newSL: number;
+  name: string; symbol: string; level: number; gainPct: number; profitSol: number; newSLPct: number;
+  entryPrice: number; currentPrice: number; soldSol: number; remainingSol: number; initialSol: number;
 }): Promise<void> {
-  const { name, symbol, level, gainPct, profitSol, newSL } = params;
+  const { name, symbol, level, gainPct, profitSol, newSLPct, entryPrice, currentPrice, soldSol, remainingSol, initialSol } = params;
+  const newSLPrice = newSLPct === 0 ? entryPrice : entryPrice * (1 + newSLPct / 100);
   await sendMessage(
     `🎯 <b>TP${level} HIT — ${symbol}</b> (${name})\n` +
     `Gain: +${gainPct.toFixed(1)}%\n` +
-    `Profit: +${profitSol.toFixed(4)} SOL\n` +
-    `New SL: ${newSL.toFixed(1)}% from entry\n` +
+    `Entry: $${entryPrice.toFixed(8)}  →  Now: $${currentPrice.toFixed(8)}\n` +
+    `Sold: ${soldSol.toFixed(4)} SOL  (+${profitSol.toFixed(4)} SOL profit)\n` +
+    `Remaining: ${remainingSol.toFixed(4)} SOL (of ${initialSol.toFixed(4)} SOL)\n` +
+    `New SL: $${newSLPrice.toFixed(8)} (${newSLPct === 0 ? 'breakeven' : `+${newSLPct}% from entry`})\n` +
     `Time: ${toIST(new Date())}`
   );
 }

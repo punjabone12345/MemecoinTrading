@@ -10,6 +10,26 @@ import { broadcastPositions, broadcastBalance } from '../websocket/server.js';
 // Captured on first price update after entry; cleared on close.
 const positionBaselines = new Map<string, { liquidity: number; topHolder: number }>();
 
+// Per-position mutex: prevents concurrent updatePositionPrice calls from
+// racing on TP/SL checks. Without this, two rapid price ticks both read
+// tp1Hit=false and fire TP1 twice, closing 30% of position twice.
+const positionLocks = new Map<string, Promise<void>>();
+
+async function withPositionLock<T>(id: string, fn: () => Promise<T>): Promise<T> {
+  const prev = positionLocks.get(id) ?? Promise.resolve();
+  let releaseLock!: () => void;
+  const next = new Promise<void>((res) => { releaseLock = res; });
+  positionLocks.set(id, prev.then(() => next));
+  await prev;
+  try {
+    return await fn();
+  } finally {
+    releaseLock();
+    // Clean up if no more waiters
+    if (positionLocks.get(id) === next) positionLocks.delete(id);
+  }
+}
+
 // Consecutive-tick confirmation counters per position per signal key.
 // A signal must be true for EMERGENCY_CONFIRM_TICKS straight before the exit fires.
 // Prevents momentary DexScreener data glitches (BSR h1 window reset, liquidity blip)
@@ -247,6 +267,10 @@ export async function closePosition(id: string, currentPrice: number, reason: st
 }
 
 export async function updatePositionPrice(id: string, currentPrice: number, freshBsr?: number, freshLiquidity?: number): Promise<void> {
+  return withPositionLock(id, () => _updatePositionPrice(id, currentPrice, freshBsr, freshLiquidity));
+}
+
+async function _updatePositionPrice(id: string, currentPrice: number, freshBsr?: number, freshLiquidity?: number): Promise<void> {
   const pos = await getPositionById(id);
   if (!pos || pos.status !== 'OPEN') return;
 
@@ -278,26 +302,32 @@ export async function updatePositionPrice(id: string, currentPrice: number, fres
   if (!tp1Hit && pnlPct >= settings.tp1Pct) {
     tp1Hit = true;
     newSL = pos.entryPrice;
+    const sizeBeforeClose = currentSizeSol;
     const partialPnl = await partialClose(settings.tp1ClosePct);
-    await notifyTPHit({ name: pos.name, symbol: pos.symbol, level: 1, gainPct: pnlPct, profitSol: partialPnl, newSL: 0 });
-    logger.info({ id, symbol: pos.symbol, closePct: settings.tp1ClosePct, partialPnl, remainingSizeSol: currentSizeSol }, 'TP1 partial close');
+    const soldSol = sizeBeforeClose - currentSizeSol;
+    await notifyTPHit({ name: pos.name, symbol: pos.symbol, level: 1, gainPct: pnlPct, profitSol: partialPnl, newSLPct: 0, entryPrice: pos.entryPrice, currentPrice, soldSol, remainingSol: currentSizeSol, initialSol: pos.sizeSol });
+    logger.info({ id, symbol: pos.symbol, closePct: settings.tp1ClosePct, partialPnl, soldSol, remainingSizeSol: currentSizeSol }, 'TP1 partial close');
   }
 
   // TP2 — sell tp2ClosePct% of remaining; move SL to TP1 level
   if (!tp2Hit && pnlPct >= settings.tp2Pct) {
     tp2Hit = true;
     newSL = pos.entryPrice * (1 + settings.tp1Pct / 100);
+    const sizeBeforeClose = currentSizeSol;
     const partialPnl = await partialClose(settings.tp2ClosePct);
-    await notifyTPHit({ name: pos.name, symbol: pos.symbol, level: 2, gainPct: pnlPct, profitSol: partialPnl, newSL: settings.tp1Pct });
-    logger.info({ id, symbol: pos.symbol, closePct: settings.tp2ClosePct, partialPnl, remainingSizeSol: currentSizeSol }, 'TP2 partial close');
+    const soldSol = sizeBeforeClose - currentSizeSol;
+    await notifyTPHit({ name: pos.name, symbol: pos.symbol, level: 2, gainPct: pnlPct, profitSol: partialPnl, newSLPct: settings.tp1Pct, entryPrice: pos.entryPrice, currentPrice, soldSol, remainingSol: currentSizeSol, initialSol: pos.sizeSol });
+    logger.info({ id, symbol: pos.symbol, closePct: settings.tp2ClosePct, partialPnl, soldSol, remainingSizeSol: currentSizeSol }, 'TP2 partial close');
   }
 
   // TP3 — sell tp3ClosePct% of remaining; trailing SL takes over the runner
   if (!tp3Hit && pnlPct >= settings.tp3Pct) {
     tp3Hit = true;
+    const sizeBeforeClose = currentSizeSol;
     const partialPnl = await partialClose(settings.tp3ClosePct);
-    await notifyTPHit({ name: pos.name, symbol: pos.symbol, level: 3, gainPct: pnlPct, profitSol: partialPnl, newSL: settings.tp1Pct });
-    logger.info({ id, symbol: pos.symbol, closePct: settings.tp3ClosePct, partialPnl, remainingSizeSol: currentSizeSol }, 'TP3 partial close');
+    const soldSol = sizeBeforeClose - currentSizeSol;
+    await notifyTPHit({ name: pos.name, symbol: pos.symbol, level: 3, gainPct: pnlPct, profitSol: partialPnl, newSLPct: settings.tp2Pct, entryPrice: pos.entryPrice, currentPrice, soldSol, remainingSol: currentSizeSol, initialSol: pos.sizeSol });
+    logger.info({ id, symbol: pos.symbol, closePct: settings.tp3ClosePct, partialPnl, soldSol, remainingSizeSol: currentSizeSol }, 'TP3 partial close');
   }
 
   // Trailing SL after TP3 — protects the runner portion
