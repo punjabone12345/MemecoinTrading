@@ -6,87 +6,133 @@ import { getBalance } from './settings.service.js';
 import { query } from '../lib/db.js';
 import { broadcastTokens } from '../websocket/server.js';
 
-let scanInterval: ReturnType<typeof setInterval> | null = null;
-let isRunning = false;
+// ── Two independent loops ────────────────────────────────────────────────────
+//
+// FETCH loop  (slow, ~15s):  Calls scanTokens() → hits DexScreener/GeckoTerminal
+//                             APIs and refreshes the in-memory tokenCache.
+//
+// CHECK loop  (fast, 1s):    Calls checkEntries() → reads from tokenCache only,
+//                             no external API calls. Evaluates every cached token
+//                             for entry every second so we never miss a brief
+//                             momentum window between data fetches.
+//
+// Decoupling these means we can watch 500–1000+ tokens for entry conditions
+// every single second without hammering external APIs.
+// ────────────────────────────────────────────────────────────────────────────
+
+let fetchInterval: ReturnType<typeof setInterval> | null = null;
+let checkInterval: ReturnType<typeof setInterval> | null = null;
+let isFetching = false;
+let isChecking = false;
+
+// Cached daily-loss state — refreshed every 10s inside the check loop
+// so we don't hammer the DB on every 1s tick.
+let cachedDailyPnl = 0;
+let cachedDailyLossLimit = 0;
+let cachedLimitHit = false;
+let lastDailyLossCheck = 0;
+const DAILY_LOSS_CACHE_MS = 10_000;
+
+// Cached traded-today mints — refreshed every 30s (mints don't change often)
+let lastTradedTodayCheck = 0;
+const TRADED_TODAY_CACHE_MS = 30_000;
+let cachedTradedTodayMints = new Set<string>();
 
 export function startAutoTrader(): void {
-  if (scanInterval) return;
+  if (fetchInterval) return;
 
-  // Run immediately
-  runScanCycle();
+  // ── FETCH loop ──────────────────────────────────────────────────────────
+  // Run immediately then on a slower interval driven by settings.scanFrequency.
+  // Uses a dynamic interval so settings changes take effect on next restart.
+  const DEFAULT_FETCH_MS = 15_000;
 
-  scanInterval = setInterval(async () => {
-    await runScanCycle();
-  }, 10_000);
+  async function runFetch(): Promise<void> {
+    if (isFetching) return;
+    isFetching = true;
+    try {
+      // CRITICAL: Sync DB open positions into in-memory cache BEFORE scanning.
+      // On server restart the cache is empty — syncing first ensures scanTokens()
+      // sees the correct ENTERED status and never re-marks open positions ELIGIBLE.
+      const openPositionsPre = await getOpenPositions();
+      for (const pos of openPositionsPre) {
+        markTokenEntered(pos.mint);
+      }
+      await scanTokens();
+      await broadcastTokens();
+    } catch (err) {
+      logger.error({ err }, 'Fetch cycle error');
+    } finally {
+      isFetching = false;
+    }
+  }
+
+  runFetch(); // immediate first run
+
+  // Use a wrapper that re-reads scanFrequency each cycle so it stays current
+  fetchInterval = setInterval(async () => {
+    const settings = await getSettings().catch(() => ({ scanFrequency: DEFAULT_FETCH_MS } as ReturnType<typeof getSettings> extends Promise<infer T> ? T : never));
+    if (isFetching) return;
+    await runFetch();
+  }, DEFAULT_FETCH_MS);
+
+  // ── CHECK loop (1s) ─────────────────────────────────────────────────────
+  // Reads from the already-populated tokenCache — no API calls.
+  // Checks every cached token for entry conditions every second.
+  checkInterval = setInterval(async () => {
+    if (isChecking) return;
+    isChecking = true;
+    try {
+      await checkEntries();
+      await broadcastTokens();
+    } catch (err) {
+      logger.error({ err }, 'Check cycle error');
+    } finally {
+      isChecking = false;
+    }
+  }, 1_000);
 
   logger.info('Auto-trader started');
-}
-
-async function runScanCycle(): Promise<void> {
-  if (isRunning) return;
-  isRunning = true;
-  try {
-    // CRITICAL: Sync DB open positions into in-memory cache BEFORE scanning.
-    // On a server restart the cache is empty — if we scan first, opened tokens
-    // get re-evaluated as ELIGIBLE for that cycle. Syncing first ensures
-    // scanTokens() sees the correct ENTERED status and never re-marks them
-    // ELIGIBLE, so the UI and checkEntries() are always in sync.
-    const openPositionsPre = await getOpenPositions();
-    for (const pos of openPositionsPre) {
-      markTokenEntered(pos.mint);
-    }
-
-    await scanTokens();
-    await broadcastTokens();
-    await checkEntries();
-    // Re-broadcast after entries so the UI immediately reflects ENTERED status
-    await broadcastTokens();
-  } catch (err) {
-    logger.error({ err }, 'Scan cycle error');
-  } finally {
-    isRunning = false;
-  }
 }
 
 async function checkEntries(): Promise<void> {
   const settings = await getSettings();
   const balance = await getBalance();
+  const nowMs = Date.now();
 
-  // Check daily loss limit upfront so we can surface it in the UI
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  const todayRows = await query<{ pnl_sol: string }>(`
-    SELECT pnl_sol FROM positions WHERE status = 'CLOSED' AND exit_time >= $1
-  `, [today.toISOString()]);
-  const dailyPnl = todayRows.reduce((s, r) => s + parseFloat(r.pnl_sol ?? '0'), 0);
-  const dailyLossLimit = -(balance * settings.maxDailyLossPct / 100);
-  const limitHit = dailyPnl <= dailyLossLimit;
+  // ── Daily loss limit — cached, refreshed every 10s ──────────────────────
+  if (nowMs - lastDailyLossCheck > DAILY_LOSS_CACHE_MS) {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const todayRows = await query<{ pnl_sol: string }>(`
+      SELECT pnl_sol FROM positions WHERE status = 'CLOSED' AND exit_time >= $1
+    `, [today.toISOString()]);
+    cachedDailyPnl = todayRows.reduce((s, r) => s + parseFloat(r.pnl_sol ?? '0'), 0);
+    cachedDailyLossLimit = -(balance * settings.maxDailyLossPct / 100);
+    cachedLimitHit = cachedDailyPnl <= cachedDailyLossLimit;
+    setDailyLossStatus(cachedLimitHit, cachedDailyPnl, cachedDailyLossLimit);
+    lastDailyLossCheck = nowMs;
+  }
 
-  // Publish the daily loss status so the scanner stats and UI can show it
-  setDailyLossStatus(limitHit, dailyPnl, dailyLossLimit);
-
-  if (limitHit) {
-    logger.info({ dailyPnl, dailyLossLimit }, 'Daily loss limit hit, no new entries');
+  if (cachedLimitHit) {
+    logger.debug({ dailyPnl: cachedDailyPnl, dailyLossLimit: cachedDailyLossLimit }, 'Daily loss limit hit, no new entries');
     return;
+  }
+
+  // ── Traded-today mints — cached, refreshed every 30s ────────────────────
+  if (nowMs - lastTradedTodayCheck > TRADED_TODAY_CACHE_MS) {
+    const istOffsetMs = 5.5 * 60 * 60 * 1000;
+    const istMidnightMs = Math.floor((nowMs + istOffsetMs) / 86_400_000) * 86_400_000 - istOffsetMs;
+    const tradedTodayRows = await query<{ mint: string }>(`
+      SELECT DISTINCT mint FROM positions WHERE entry_time >= $1
+    `, [new Date(istMidnightMs).toISOString()]);
+    cachedTradedTodayMints = new Set(tradedTodayRows.map((r) => r.mint));
+    setTradedTodayMints(cachedTradedTodayMints);
+    lastTradedTodayCheck = nowMs;
   }
 
   const tokens = getAllTokens();
   const openPositions = await getOpenPositions();
   const openMints = new Set(openPositions.map((p) => p.mint));
-
-  // Block re-entry for any token already traded today (IST 00:00–24:00).
-  // IST is UTC+5:30 — compute today's IST midnight as a UTC timestamp.
-  const nowMs = Date.now();
-  const istOffsetMs = 5.5 * 60 * 60 * 1000;
-  const istMidnightMs = Math.floor((nowMs + istOffsetMs) / 86_400_000) * 86_400_000 - istOffsetMs;
-  const istMidnightISO = new Date(istMidnightMs).toISOString();
-  const tradedTodayRows = await query<{ mint: string }>(`
-    SELECT DISTINCT mint FROM positions WHERE entry_time >= $1
-  `, [istMidnightISO]);
-  const tradedTodayMints = new Set(tradedTodayRows.map((r) => r.mint));
-
-  // Share with scanner so tokens get tradedToday=true flag for the UI
-  setTradedTodayMints(tradedTodayMints);
 
   let attempted = 0;
   let skippedDuplicate = 0;
@@ -96,29 +142,24 @@ async function checkEntries(): Promise<void> {
 
   for (const token of tokens) {
     if (openPositions.length + attempted >= settings.maxOpenPositions) {
-      logger.info({ openCount: openPositions.length, attempted, max: settings.maxOpenPositions }, 'Max open positions reached — stopping entry loop');
+      logger.debug({ openCount: openPositions.length, attempted, max: settings.maxOpenPositions }, 'Max open positions reached — stopping entry loop');
       break;
     }
     if (openMints.has(token.mint)) {
-      logger.debug({ mint: token.mint, symbol: token.symbol }, 'SKIP: already has open position');
       skippedDuplicate++; continue;
     }
-    if (tradedTodayMints.has(token.mint)) {
+    if (cachedTradedTodayMints.has(token.mint)) {
       logger.info({ mint: token.mint, symbol: token.symbol }, 'SKIP: already traded today (no re-entry until IST midnight)');
       skippedTradedToday++; continue;
     }
 
     // ELIGIBLE is already a full gate: scanner sets it only when ALL filter checks pass
-    // AND score >= minEntryScore. Do NOT re-check those same conditions here — a
-    // settings read race between scanTokens() and checkEntries() can cause valid
-    // ELIGIBLE tokens to be blocked by a stale/different minEntryScore value.
+    // AND score >= minEntryScore. Do NOT re-check those conditions here.
     if (token.status !== 'ELIGIBLE') {
-      logger.debug({ mint: token.mint, symbol: token.symbol, status: token.status, score: token.score, threshold: settings.minEntryScore, rejectReason: token.rejectReason }, 'SKIP: not ELIGIBLE');
       skippedNotEligible++; continue;
     }
 
     // Guard: skip if scanner returned price=0 (DexScreener missing priceUsd)
-    // We can't open a position without an entry price.
     if (!token.price || token.price <= 0) {
       logger.warn({ mint: token.mint, symbol: token.symbol }, 'ELIGIBLE token has price=0 — skipping until price is available');
       skippedNoPrice++;
@@ -150,12 +191,12 @@ async function checkEntries(): Promise<void> {
     }
   }
 
-  logger.info({ attempted, skippedDuplicate, skippedTradedToday, skippedNotEligible, skippedNoPrice }, 'checkEntries complete');
+  if (attempted > 0 || skippedTradedToday > 0) {
+    logger.info({ attempted, skippedDuplicate, skippedTradedToday, skippedNotEligible, skippedNoPrice }, 'checkEntries complete');
+  }
 }
 
 export function stopAutoTrader(): void {
-  if (scanInterval) {
-    clearInterval(scanInterval);
-    scanInterval = null;
-  }
+  if (fetchInterval) { clearInterval(fetchInterval); fetchInterval = null; }
+  if (checkInterval) { clearInterval(checkInterval); checkInterval = null; }
 }

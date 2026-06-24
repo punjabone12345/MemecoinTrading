@@ -156,24 +156,41 @@ interface GeckoPool {
 
 async function fetchGeckoMints(): Promise<string[]> {
   try {
-    const [trendingRes, topRes] = await Promise.all([
-      axios.get<{ data: GeckoPool[] }>(
-        `${GECKO_BASE}/networks/solana/trending_pools?include=base_token&page=1`,
-        { timeout: 10000, headers: { Accept: 'application/json;version=20230302' } }
-      ).catch(() => ({ data: { data: [] as GeckoPool[] } })),
-      axios.get<{ data: GeckoPool[] }>(
-        `${GECKO_BASE}/networks/solana/pools?sort=h24_volume_desc&page=1`,
-        { timeout: 10000, headers: { Accept: 'application/json;version=20230302' } }
-      ).catch(() => ({ data: { data: [] as GeckoPool[] } })),
-    ]);
+    // Fetch 5 pages of trending, 5 pages of top-volume, and 3 pages of new pools in parallel.
+    // Each page returns ~20 pools → up to 260 mints from GeckoTerminal alone.
+    const pages = [1, 2, 3, 4, 5];
+    const newPages = [1, 2, 3];
 
+    const geckoRequests = [
+      ...pages.map((p) =>
+        axios.get<{ data: GeckoPool[] }>(
+          `${GECKO_BASE}/networks/solana/trending_pools?include=base_token&page=${p}`,
+          { timeout: 10000, headers: { Accept: 'application/json;version=20230302' } }
+        ).catch(() => ({ data: { data: [] as GeckoPool[] } }))
+      ),
+      ...pages.map((p) =>
+        axios.get<{ data: GeckoPool[] }>(
+          `${GECKO_BASE}/networks/solana/pools?sort=h24_volume_desc&page=${p}`,
+          { timeout: 10000, headers: { Accept: 'application/json;version=20230302' } }
+        ).catch(() => ({ data: { data: [] as GeckoPool[] } }))
+      ),
+      ...newPages.map((p) =>
+        axios.get<{ data: GeckoPool[] }>(
+          `${GECKO_BASE}/networks/solana/new_pools?include=base_token&page=${p}`,
+          { timeout: 10000, headers: { Accept: 'application/json;version=20230302' } }
+        ).catch(() => ({ data: { data: [] as GeckoPool[] } }))
+      ),
+    ];
+
+    const allResults = await Promise.all(geckoRequests);
     const mints = new Set<string>();
-    for (const pool of [...(trendingRes.data?.data ?? []), ...(topRes.data?.data ?? [])]) {
-      const tokenId = pool.relationships?.base_token?.data?.id;
-      if (tokenId) {
-        // format is "solana_MINT_ADDRESS"
-        const mint = tokenId.replace(/^solana_/, '');
-        if (mint && mint.length > 10) mints.add(mint);
+    for (const res of allResults) {
+      for (const pool of res.data?.data ?? []) {
+        const tokenId = pool.relationships?.base_token?.data?.id;
+        if (tokenId) {
+          const mint = tokenId.replace(/^solana_/, '');
+          if (mint && mint.length > 10) mints.add(mint);
+        }
       }
     }
     logger.info({ count: mints.size }, 'GeckoTerminal: fetched Solana token mints');
@@ -189,6 +206,15 @@ async function fetchDexPairs(): Promise<DexPair[]> {
     const allPairs: DexPair[] = [];
 
     // ── Run all independent fetches in parallel ──────────────────────
+    // Keyword list: broad terms to surface meme coins across all popular niches.
+    // Each search returns up to 30 Solana pairs — 20 terms × 30 = up to 600 extra pairs.
+    const SEARCH_TERMS = [
+      'raydium', 'pump', 'pumpswap', 'orca', 'meteora',
+      'solana meme', 'meme sol', 'cat sol', 'dog sol', 'pepe sol',
+      'ai sol', 'bonk', 'wif', 'trump sol', 'frog sol',
+      'moon sol', 'bull sol', 'sol token', 'based sol', 'degen sol',
+    ];
+
     const [profileRes, boostRes, geckoMints, searchResults] = await Promise.all([
       // 1. DexScreener: latest token profiles (boosted/trending)
       axios.get<Array<{ tokenAddress: string; chainId: string }>>(
@@ -202,20 +228,18 @@ async function fetchDexPairs(): Promise<DexPair[]> {
         { timeout: 10000 }
       ).catch(() => ({ data: [] as Array<{ tokenAddress: string; chainId: string }> })),
 
-      // 3. GeckoTerminal: trending + top-volume Solana pools
+      // 3. GeckoTerminal: 5-page trending + 5-page top-volume + 3-page new_pools
       fetchGeckoMints(),
 
-      // 4. DexScreener keyword searches — broader terms to surface established tokens
-      Promise.all([
-        `${DEXSCREENER_BASE}/latest/dex/search?q=raydium`,
-        `${DEXSCREENER_BASE}/latest/dex/search?q=solana+meme`,
-        `${DEXSCREENER_BASE}/latest/dex/search?q=pump`,
-        `${DEXSCREENER_BASE}/latest/dex/search?q=pumpswap`,
-        `${DEXSCREENER_BASE}/latest/dex/search?q=meme+sol`,
-        `${DEXSCREENER_BASE}/latest/dex/search?q=orca+sol`,
-      ].map((url) =>
-        axios.get<{ pairs: DexPair[] }>(url, { timeout: 10000 }).catch(() => ({ data: { pairs: [] as DexPair[] } }))
-      )),
+      // 4. DexScreener keyword searches — 20 diverse terms
+      Promise.all(
+        SEARCH_TERMS.map((term) =>
+          axios.get<{ pairs: DexPair[] }>(
+            `${DEXSCREENER_BASE}/latest/dex/search?q=${encodeURIComponent(term)}`,
+            { timeout: 10000 }
+          ).catch(() => ({ data: { pairs: [] as DexPair[] } }))
+        )
+      ),
     ]);
 
     // Collect all mint addresses to batch-lookup on DexScreener
@@ -228,8 +252,14 @@ async function fetchDexPairs(): Promise<DexPair[]> {
       boostRes.data.filter((t) => t.chainId === 'solana').forEach((t) => extraMints.add(t.tokenAddress));
     }
 
-    // Batch-lookup all collected mints on DexScreener (30 per request)
-    const mintList = Array.from(extraMints).slice(0, 150);
+    // Add keyword search results directly (they already have full pair data)
+    for (const res of searchResults) {
+      if (res.data?.pairs) allPairs.push(...res.data.pairs.filter((p) => p.chainId === 'solana'));
+    }
+
+    // Batch-lookup all remaining mints on DexScreener (30 per request, no cap).
+    // Previously this was sliced to 150 — now we process all collected mints.
+    const mintList = Array.from(extraMints);
     const mintChunks: string[][] = [];
     for (let i = 0; i < mintList.length; i += 30) mintChunks.push(mintList.slice(i, i + 30));
 
@@ -243,11 +273,6 @@ async function fetchDexPairs(): Promise<DexPair[]> {
     );
     for (const r of mintResults) {
       if (r.data?.pairs) allPairs.push(...r.data.pairs.filter((p) => p.chainId === 'solana'));
-    }
-
-    // Add keyword search results
-    for (const res of searchResults) {
-      if (res.data?.pairs) allPairs.push(...res.data.pairs.filter((p) => p.chainId === 'solana'));
     }
 
     // Deduplicate by pairAddress
