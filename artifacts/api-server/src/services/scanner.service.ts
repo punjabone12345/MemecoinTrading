@@ -106,7 +106,7 @@ export function calcScore(token: Partial<Token>): ScoreBreakdown {
 
 const ALLOWED_DEXES = ['raydium', 'pump-fun', 'pumpfun', 'pumpswap', 'orca', 'meteora'];
 
-function buildFilterResults(pair: DexPair, settings: Awaited<ReturnType<typeof getSettings>>, rugOk: boolean): FilterResult[] {
+function buildFilterResults(pair: DexPair, settings: Awaited<ReturnType<typeof getSettings>>, rugOk: boolean, topHolder: number, creatorPct: number): FilterResult[] {
   const mc = pair.marketCap ?? pair.fdv ?? 0;
   const vol24 = pair.volume?.h24 ?? 0;
   const liq = pair.liquidity?.usd ?? 0;
@@ -117,18 +117,78 @@ function buildFilterResults(pair: DexPair, settings: Awaited<ReturnType<typeof g
   const change24 = pair.priceChange?.h24 ?? 0;
   const dexOk = ALLOWED_DEXES.includes(pair.dexId?.toLowerCase() ?? '');
 
+  // Labels dynamically reflect the actual threshold from settings (not hardcoded defaults)
   return [
-    { name: 'Market Cap ≥$500K', passed: mc >= settings.minMc, value: `$${(mc/1000).toFixed(0)}K`, required: `≥$${(settings.minMc/1000).toFixed(0)}K` },
-    { name: 'Market Cap ≤$7M', passed: mc <= settings.maxMc, value: `$${(mc/1_000_000).toFixed(2)}M`, required: `≤$${(settings.maxMc/1_000_000).toFixed(0)}M` },
-    { name: '24h Volume ≥$100K', passed: vol24 >= settings.minVolume24h, value: `$${(vol24/1000).toFixed(0)}K`, required: `≥$${(settings.minVolume24h/1000).toFixed(0)}K` },
-    { name: 'Age in range', passed: ageH >= settings.minAgeHours && ageH <= settings.maxAgeHours, value: `${ageH.toFixed(1)}h`, required: `${settings.minAgeHours}h–${settings.maxAgeHours}h` },
-    { name: 'Liquidity ≥$50K', passed: liq >= settings.minLiquidity, value: `$${(liq/1000).toFixed(0)}K`, required: `≥$${(settings.minLiquidity/1000).toFixed(0)}K` },
-    { name: 'Buy/Sell ≥1.2x', passed: bsr >= settings.minBuySellRatio, value: `${bsr.toFixed(2)}x`, required: `≥${settings.minBuySellRatio}x` },
+    { name: `MC ≥$${(settings.minMc/1000).toFixed(0)}K`, passed: mc >= settings.minMc, value: `$${(mc/1000).toFixed(0)}K`, required: `≥$${(settings.minMc/1000).toFixed(0)}K` },
+    { name: `MC ≤$${(settings.maxMc/1_000_000).toFixed(1)}M`, passed: mc <= settings.maxMc, value: `$${(mc/1_000_000).toFixed(2)}M`, required: `≤$${(settings.maxMc/1_000_000).toFixed(1)}M` },
+    { name: `Vol24h ≥$${(settings.minVolume24h/1000).toFixed(0)}K`, passed: vol24 >= settings.minVolume24h, value: `$${(vol24/1000).toFixed(0)}K`, required: `≥$${(settings.minVolume24h/1000).toFixed(0)}K` },
+    { name: `Age ${settings.minAgeHours}h–${settings.maxAgeHours}h`, passed: ageH >= settings.minAgeHours && ageH <= settings.maxAgeHours, value: `${ageH.toFixed(1)}h`, required: `${settings.minAgeHours}h–${settings.maxAgeHours}h` },
+    { name: `Liquidity ≥$${(settings.minLiquidity/1000).toFixed(0)}K`, passed: liq >= settings.minLiquidity, value: `$${(liq/1000).toFixed(0)}K`, required: `≥$${(settings.minLiquidity/1000).toFixed(0)}K` },
+    { name: `BSR ≥${settings.minBuySellRatio}x`, passed: bsr >= settings.minBuySellRatio, value: `${bsr.toFixed(2)}x`, required: `≥${settings.minBuySellRatio}x` },
     { name: 'No 5m FOMO >50%', passed: change5m <= 50, value: `${change5m.toFixed(1)}%`, required: '≤50% in 5m' },
     { name: 'Not pumped >500%', passed: change24 <= 500, value: `${change24.toFixed(0)}%`, required: '≤500% in 24h' },
     { name: 'Rugcheck pass', passed: rugOk || !settings.rugcheckEnabled, value: rugOk ? 'PASS' : 'FAIL', required: 'PASS' },
     { name: 'DEX supported', passed: dexOk, value: pair.dexId ?? 'unknown', required: 'Raydium/Pump/Orca' },
+    // maxTopHolder and maxCreatorPct: only enforce when rugcheck has supplied real data (>0)
+    { name: `Top holder ≤${settings.maxTopHolder}%`, passed: topHolder === 0 || topHolder <= settings.maxTopHolder, value: `${topHolder.toFixed(1)}%`, required: `≤${settings.maxTopHolder}%` },
+    { name: `Creator ≤${settings.maxCreatorPct}%`, passed: creatorPct === 0 || creatorPct <= settings.maxCreatorPct, value: `${creatorPct.toFixed(1)}%`, required: `≤${settings.maxCreatorPct}%` },
   ];
+}
+
+// ── Raydium on-chain pool API ────────────────────────────────────────────────
+// Fetches all Raydium AMM/CPMM pools sorted by 24h volume directly from their
+// official API — no keyword guessing, just every real trading pair on-chain.
+// Quote tokens (SOL, USDC, USDT) are stripped so only base meme-coin mints remain.
+const RAYDIUM_QUOTE_MINTS = new Set([
+  'So11111111111111111111111111111111111111112',  // SOL (wrapped)
+  'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', // USDC
+  'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB',  // USDT
+]);
+
+interface RaydiumPool {
+  id?: string;
+  mintA?: { address?: string };
+  mintB?: { address?: string };
+  tvl?: number;
+  day?: { volume?: number };
+}
+
+interface RaydiumResponse {
+  success?: boolean;
+  data?: { count?: number; data?: RaydiumPool[] };
+}
+
+async function fetchRaydiumMints(): Promise<string[]> {
+  try {
+    // Pages 1–10 × 100 pools/page = up to 1000 Raydium pools sorted by 24h volume
+    const pages = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+    const requests = pages.map((p) =>
+      axios.get<RaydiumResponse>(
+        `https://api-v3.raydium.io/pools/info/list?poolType=all&poolSortField=volume24h&sortType=desc&pageSize=100&page=${p}`,
+        { timeout: 12000 }
+      ).catch(() => ({ data: { data: { data: [] as RaydiumPool[] } } }))
+    );
+
+    const results = await Promise.all(requests);
+    const mints = new Set<string>();
+
+    for (const res of results) {
+      const pools = res.data?.data?.data ?? [];
+      for (const pool of pools) {
+        // Pick the non-quote side as the token we care about
+        const mintA = pool.mintA?.address ?? '';
+        const mintB = pool.mintB?.address ?? '';
+        if (mintA && !RAYDIUM_QUOTE_MINTS.has(mintA)) mints.add(mintA);
+        if (mintB && !RAYDIUM_QUOTE_MINTS.has(mintB)) mints.add(mintB);
+      }
+    }
+
+    logger.info({ count: mints.size }, 'Raydium on-chain: fetched pool mints');
+    return Array.from(mints);
+  } catch (err) {
+    logger.warn({ err }, 'Raydium API fetch error');
+    return [];
+  }
 }
 
 const GECKO_BASE = 'https://api.geckoterminal.com/api/v2';
@@ -206,44 +266,34 @@ async function fetchDexPairs(): Promise<DexPair[]> {
     const allPairs: DexPair[] = [];
 
     // ── Run all independent fetches in parallel ──────────────────────
-    // Keyword list: broad terms to surface meme coins across all popular niches.
-    // Each search returns up to 30 Solana pairs — 20 terms × 30 = up to 600 extra pairs.
-    const SEARCH_TERMS = [
-      'raydium', 'pump', 'pumpswap', 'orca', 'meteora',
-      'solana meme', 'meme sol', 'cat sol', 'dog sol', 'pepe sol',
-      'ai sol', 'bonk', 'wif', 'trump sol', 'frog sol',
-      'moon sol', 'bull sol', 'sol token', 'based sol', 'degen sol',
-    ];
+    // Sources:
+    //   1. Raydium on-chain API   — all real AMM/CPMM pools sorted by 24h volume
+    //   2. GeckoTerminal          — trending + top-volume + new_pools (13 pages)
+    //   3. DexScreener profiles   — boosted/trending tokens
+    //   4. DexScreener boosts     — top paid promotions (often early movers)
+    // No keyword guessing — every mint comes from actual on-chain activity.
+    const [raydiumMints, geckoMints, profileRes, boostRes] = await Promise.all([
+      // 1. Raydium: 10 pages × 100 pools = up to 1000 on-chain pools
+      fetchRaydiumMints(),
 
-    const [profileRes, boostRes, geckoMints, searchResults] = await Promise.all([
-      // 1. DexScreener: latest token profiles (boosted/trending)
+      // 2. GeckoTerminal: 13-page deep scan
+      fetchGeckoMints(),
+
+      // 3. DexScreener: latest token profiles (boosted/trending)
       axios.get<Array<{ tokenAddress: string; chainId: string }>>(
         `${DEXSCREENER_BASE}/token-profiles/latest/v1`,
         { timeout: 10000 }
       ).catch(() => ({ data: [] as Array<{ tokenAddress: string; chainId: string }> })),
 
-      // 2. DexScreener: top boosted tokens
+      // 4. DexScreener: top boosted tokens
       axios.get<Array<{ tokenAddress: string; chainId: string }>>(
         `${DEXSCREENER_BASE}/token-boosts/top/v1`,
         { timeout: 10000 }
       ).catch(() => ({ data: [] as Array<{ tokenAddress: string; chainId: string }> })),
-
-      // 3. GeckoTerminal: 5-page trending + 5-page top-volume + 3-page new_pools
-      fetchGeckoMints(),
-
-      // 4. DexScreener keyword searches — 20 diverse terms
-      Promise.all(
-        SEARCH_TERMS.map((term) =>
-          axios.get<{ pairs: DexPair[] }>(
-            `${DEXSCREENER_BASE}/latest/dex/search?q=${encodeURIComponent(term)}`,
-            { timeout: 10000 }
-          ).catch(() => ({ data: { pairs: [] as DexPair[] } }))
-        )
-      ),
     ]);
 
-    // Collect all mint addresses to batch-lookup on DexScreener
-    const extraMints = new Set<string>([...geckoMints]);
+    // Collect all mints for DexScreener batch-lookup
+    const extraMints = new Set<string>([...raydiumMints, ...geckoMints]);
 
     if (Array.isArray(profileRes.data)) {
       profileRes.data.filter((t) => t.chainId === 'solana').forEach((t) => extraMints.add(t.tokenAddress));
@@ -252,13 +302,7 @@ async function fetchDexPairs(): Promise<DexPair[]> {
       boostRes.data.filter((t) => t.chainId === 'solana').forEach((t) => extraMints.add(t.tokenAddress));
     }
 
-    // Add keyword search results directly (they already have full pair data)
-    for (const res of searchResults) {
-      if (res.data?.pairs) allPairs.push(...res.data.pairs.filter((p) => p.chainId === 'solana'));
-    }
-
-    // Batch-lookup all remaining mints on DexScreener (30 per request, no cap).
-    // Previously this was sliced to 150 — now we process all collected mints.
+    // Batch-lookup all collected mints on DexScreener (30 per request, no cap)
     const mintList = Array.from(extraMints);
     const mintChunks: string[][] = [];
     for (let i = 0; i < mintList.length; i += 30) mintChunks.push(mintList.slice(i, i + 30));
@@ -342,6 +386,7 @@ export async function scanTokens(): Promise<void> {
     if (mc < settings.minMc) preReject = `MC too low ($${(mc/1000).toFixed(0)}K < $${(settings.minMc/1000).toFixed(0)}K min)`;
     else if (mc > settings.maxMc) preReject = `MC too high ($${(mc/1e6).toFixed(1)}M > $${(settings.maxMc/1e6).toFixed(1)}M max)`;
     else if (vol24 < settings.minVolume24h) preReject = `Vol24h too low ($${(vol24/1000).toFixed(0)}K < $${(settings.minVolume24h/1000).toFixed(0)}K min)`;
+    else if (settings.minAgeHours > 0 && ageH < settings.minAgeHours) preReject = `Too new (${ageH.toFixed(1)}h < ${settings.minAgeHours}h min)`;
     else if (ageH > settings.maxAgeHours) preReject = `Age ${ageH.toFixed(1)}h > ${settings.maxAgeHours}h max`;
     else if (change24 > 500) preReject = `Already pumped ${change24.toFixed(0)}% in 24h (>500% blocks entry)`;
 
@@ -380,8 +425,11 @@ export async function scanTokens(): Promise<void> {
       buySellRatio: bsr,
       marketCap: mc,
     };
+    const topHolder = existing?.topHolder ?? 0;
+    const creatorPct = existing?.creatorPct ?? 0;
+
     const scoreBreakdown = calcScore(partial);
-    const filterResults = buildFilterResults(pair, settings, rugOk);
+    const filterResults = buildFilterResults(pair, settings, rugOk, topHolder, creatorPct);
     const allPassed = filterResults.every((f) => f.passed);
 
     if (allPassed) passedFilters++;
@@ -392,9 +440,14 @@ export async function scanTokens(): Promise<void> {
     const isUp = change5m > 0 && (scoreBreakdown.total >= (existing?.score ?? 0));
     const consecutive = isUp ? prevConsecutive + 1 : 0;
 
+    // trendChecksRequired: token must pass all filters AND maintain positive momentum
+    // for N consecutive fetch cycles before becoming ELIGIBLE.
+    // Prevents entering on a single spike that immediately reverses.
+    const trendOk = settings.trendChecksRequired <= 1 || consecutive >= settings.trendChecksRequired;
+
     const status: Token['status'] = enteredMints.has(mint)
       ? 'ENTERED'
-      : allPassed && scoreBreakdown.total >= settings.minEntryScore
+      : allPassed && scoreBreakdown.total >= settings.minEntryScore && trendOk
       ? 'ELIGIBLE'
       : !allPassed
       ? 'REJECTED'
@@ -403,7 +456,7 @@ export async function scanTokens(): Promise<void> {
     // Audit log every token decision
     if (status === 'ELIGIBLE') {
       logger.info(
-        { mint, symbol: pair.baseToken.symbol, score: scoreBreakdown.total, threshold: settings.minEntryScore, breakdown: scoreBreakdown },
+        { mint, symbol: pair.baseToken.symbol, score: scoreBreakdown.total, threshold: settings.minEntryScore, consecutive, trendRequired: settings.trendChecksRequired, breakdown: scoreBreakdown },
         'AUDIT ACCEPTED: token meets all requirements — status=ELIGIBLE'
       );
       eligibleCount++;
