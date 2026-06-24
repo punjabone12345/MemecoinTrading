@@ -333,8 +333,13 @@ export async function updatePositionPrice(id: string, currentPrice: number): Pro
 }
 
 export async function editPosition(id: string, updates: {
+  // Open-position fields
   entryPrice?: number; sizeSol?: number; slCurrent?: number;
   tp1Hit?: boolean; tp2Hit?: boolean; tp3Hit?: boolean; notes?: string;
+  // Closed-position correction fields
+  exitPrice?: number; exitTime?: string;
+  pnlSol?: number; pnlPct?: number;
+  closeReason?: string; status?: 'OPEN' | 'CLOSED';
 }): Promise<Position | null> {
   const sets: string[] = [];
   const vals: unknown[] = [];
@@ -347,6 +352,12 @@ export async function editPosition(id: string, updates: {
   if (updates.tp2Hit !== undefined) { sets.push(`tp2_hit = $${i++}`); vals.push(updates.tp2Hit); }
   if (updates.tp3Hit !== undefined) { sets.push(`tp3_hit = $${i++}`); vals.push(updates.tp3Hit); }
   if (updates.notes !== undefined) { sets.push(`notes = $${i++}`); vals.push(updates.notes); }
+  if (updates.exitPrice !== undefined) { sets.push(`exit_price = $${i++}`); vals.push(updates.exitPrice); }
+  if (updates.exitTime !== undefined) { sets.push(`exit_time = $${i++}`); vals.push(updates.exitTime); }
+  if (updates.pnlSol !== undefined) { sets.push(`pnl_sol = $${i++}`); vals.push(updates.pnlSol); }
+  if (updates.pnlPct !== undefined) { sets.push(`pnl_pct = $${i++}`); vals.push(updates.pnlPct); }
+  if (updates.closeReason !== undefined) { sets.push(`close_reason = $${i++}`); vals.push(updates.closeReason); }
+  if (updates.status !== undefined) { sets.push(`status = $${i++}`); vals.push(updates.status); }
 
   if (sets.length === 0) return getPositionById(id);
 

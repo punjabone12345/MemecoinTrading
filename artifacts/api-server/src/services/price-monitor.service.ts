@@ -5,6 +5,10 @@ import { broadcast } from '../websocket/server.js';
 
 let monitorInterval: ReturnType<typeof setInterval> | null = null;
 
+// Last confirmed good price per position ID.
+// Used to reject DexScreener ticks that look like bad data (>60% drop in 1s).
+const lastKnownPrice = new Map<string, number>();
+
 interface DexPair {
   baseToken?: { address: string };
   pairAddress?: string;
@@ -131,9 +135,23 @@ export function startPriceMonitor(): void {
       for (const pos of positions) {
         const data = prices.get(pos.mint);
         if (data && data.price > 0) {
-          updatePositionPrice(pos.id, data.price).catch((err) =>
-            logger.warn({ err, id: pos.id }, 'Price update error')
-          );
+          const prev = lastKnownPrice.get(pos.id);
+
+          // Sanity gate: reject a tick that is >60% below the last known price.
+          // DexScreener occasionally serves stale/wrong prices from a de-listed pair,
+          // which would fire a false Stop Loss. We skip the SL check for that tick
+          // and keep the last known price until a plausible value returns.
+          if (prev && data.price < prev * 0.40) {
+            logger.warn(
+              { id: pos.id, symbol: pos.symbol, prevPrice: prev, newPrice: data.price, dropPct: (((prev - data.price) / prev) * 100).toFixed(1) },
+              'Price sanity gate: >60% single-tick drop rejected — skipping SL check this cycle'
+            );
+          } else {
+            lastKnownPrice.set(pos.id, data.price);
+            updatePositionPrice(pos.id, data.price).catch((err) =>
+              logger.warn({ err, id: pos.id }, 'Price update error')
+            );
+          }
         } else {
           logger.warn({ mint: pos.mint, id: pos.id }, 'No price for open position — SL check skipped');
         }

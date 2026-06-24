@@ -7,6 +7,13 @@ interface Props { analytics: Analytics | null; closedPositions: Position[]; bala
 type Sort = 'exitTime' | 'pnlSol' | 'pnlPct' | 'entryTime' | 'scoreAtEntry';
 type Dir = 'asc' | 'desc';
 
+interface EditDraft {
+  exitPrice: string;
+  exitTime: string;
+  closeReason: string;
+  notes: string;
+}
+
 function StatCard({ label, value, color, sub }: { label: string; value: string; color?: string; sub?: string }) {
   return (
     <div className="card" style={{ padding: '14px 16px' }}>
@@ -50,10 +57,21 @@ function PnlChart({ positions }: { positions: Position[] }) {
   );
 }
 
+function isoToLocalInput(isoStr: string): string {
+  try {
+    const d = new Date(isoStr);
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  } catch { return ''; }
+}
+
 export default function AnalyticsPage({ analytics: a, closedPositions, balance, onRefresh }: Props) {
   const [sortKey, setSortKey] = useState<Sort>('exitTime');
   const [sortDir, setSortDir] = useState<Dir>('desc');
   const [deleting, setDeleting] = useState<string | null>(null);
+  const [editingPos, setEditingPos] = useState<Position | null>(null);
+  const [draft, setDraft] = useState<EditDraft>({ exitPrice: '', exitTime: '', closeReason: '', notes: '' });
+  const [saving, setSaving] = useState(false);
 
   const sorted = useMemo(() => {
     const arr = [...closedPositions];
@@ -89,12 +107,150 @@ export default function AnalyticsPage({ analytics: a, closedPositions, balance, 
     try { await api.deletePosition(id); await onRefresh(); } finally { setDeleting(null); }
   }
 
+  function openEdit(p: Position) {
+    setEditingPos(p);
+    setDraft({
+      exitPrice: p.exitPrice != null ? String(p.exitPrice) : '',
+      exitTime: p.exitTime ? isoToLocalInput(p.exitTime) : '',
+      closeReason: p.closeReason ?? '',
+      notes: p.notes ?? '',
+    });
+  }
+
+  async function handleSave() {
+    if (!editingPos) return;
+    setSaving(true);
+    try {
+      const exitPrice = parseFloat(draft.exitPrice);
+      const entryPrice = editingPos.entryPrice;
+      const sizeSol = editingPos.sizeSol;
+
+      const updates: Record<string, unknown> = {};
+      if (!isNaN(exitPrice) && exitPrice > 0) {
+        updates.exitPrice = exitPrice;
+        const pnlPct = ((exitPrice - entryPrice) / entryPrice) * 100;
+        const pnlSol = sizeSol * (pnlPct / 100);
+        updates.pnlPct = pnlPct;
+        updates.pnlSol = pnlSol;
+      }
+      if (draft.exitTime) {
+        updates.exitTime = new Date(draft.exitTime).toISOString();
+      }
+      if (draft.closeReason !== editingPos.closeReason) {
+        updates.closeReason = draft.closeReason;
+      }
+      if (draft.notes !== (editingPos.notes ?? '')) {
+        updates.notes = draft.notes;
+      }
+
+      await api.editPosition(editingPos.id, updates as Partial<Position>);
+      await onRefresh();
+      setEditingPos(null);
+    } finally {
+      setSaving(false);
+    }
+  }
+
   const winRate = a?.winRate ?? 0;
   const totalPnl = a?.totalPnlSol ?? 0;
   const pf = a?.profitFactor ?? 0;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+
+      {/* Edit modal */}
+      {editingPos && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}>
+          <div className="card" style={{ width: 340, padding: 24, display: 'flex', flexDirection: 'column', gap: 16 }}>
+            <div style={{ fontWeight: 900, color: '#d4e0f0', fontSize: 15 }}>
+              Edit Trade — <span style={{ color: '#00d4ff' }}>{editingPos.symbol}</span>
+            </div>
+
+            <div style={{ fontSize: 11, color: '#3a5070', background: 'rgba(255,255,255,0.03)', borderRadius: 6, padding: '8px 10px', lineHeight: 1.7 }}>
+              Entry: <strong style={{ color: '#d4e0f0' }}>${formatPrice(editingPos.entryPrice)}</strong>
+              {' · '}Size: <strong style={{ color: '#d4e0f0' }}>{editingPos.sizeSol} SOL</strong>
+              <br />
+              Entry time: <strong style={{ color: '#d4e0f0' }}>{toIST(editingPos.entryTime)}</strong>
+            </div>
+
+            <label style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+              <span style={{ fontSize: 10, color: '#3a5070', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+                Exit Price (USD) <span style={{ color: '#00ff88' }}>← PNL recalculated automatically</span>
+              </span>
+              <input
+                type="number"
+                step="any"
+                value={draft.exitPrice}
+                onChange={(e) => setDraft({ ...draft, exitPrice: e.target.value })}
+                placeholder={String(editingPos.exitPrice ?? '')}
+                style={{ background: '#0d1f35', border: '1px solid rgba(255,255,255,0.12)', borderRadius: 6, color: '#d4e0f0', padding: '8px 10px', fontSize: 13, outline: 'none', width: '100%', boxSizing: 'border-box' }}
+              />
+              {draft.exitPrice && !isNaN(parseFloat(draft.exitPrice)) && (() => {
+                const ep = parseFloat(draft.exitPrice);
+                const pct = ((ep - editingPos.entryPrice) / editingPos.entryPrice) * 100;
+                const sol = editingPos.sizeSol * (pct / 100);
+                const pos = pct >= 0;
+                return (
+                  <div style={{ fontSize: 11, color: pos ? '#00ff88' : '#ff4466', fontWeight: 700 }}>
+                    {pos ? '+' : ''}{pct.toFixed(2)}% · {pos ? '+' : ''}{sol.toFixed(5)} SOL
+                  </div>
+                );
+              })()}
+            </label>
+
+            <label style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+              <span style={{ fontSize: 10, color: '#3a5070', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em' }}>Exit Time (local time)</span>
+              <input
+                type="datetime-local"
+                value={draft.exitTime}
+                onChange={(e) => setDraft({ ...draft, exitTime: e.target.value })}
+                style={{ background: '#0d1f35', border: '1px solid rgba(255,255,255,0.12)', borderRadius: 6, color: '#d4e0f0', padding: '8px 10px', fontSize: 13, outline: 'none', width: '100%', boxSizing: 'border-box', colorScheme: 'dark' }}
+              />
+            </label>
+
+            <label style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+              <span style={{ fontSize: 10, color: '#3a5070', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em' }}>Close Reason</span>
+              <input
+                type="text"
+                value={draft.closeReason}
+                onChange={(e) => setDraft({ ...draft, closeReason: e.target.value })}
+                placeholder="e.g. Manual close — corrected false SL"
+                style={{ background: '#0d1f35', border: '1px solid rgba(255,255,255,0.12)', borderRadius: 6, color: '#d4e0f0', padding: '8px 10px', fontSize: 12, outline: 'none', width: '100%', boxSizing: 'border-box' }}
+              />
+            </label>
+
+            <label style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+              <span style={{ fontSize: 10, color: '#3a5070', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em' }}>Notes</span>
+              <input
+                type="text"
+                value={draft.notes}
+                onChange={(e) => setDraft({ ...draft, notes: e.target.value })}
+                placeholder="Optional notes"
+                style={{ background: '#0d1f35', border: '1px solid rgba(255,255,255,0.12)', borderRadius: 6, color: '#d4e0f0', padding: '8px 10px', fontSize: 12, outline: 'none', width: '100%', boxSizing: 'border-box' }}
+              />
+            </label>
+
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button
+                onClick={handleSave}
+                disabled={saving}
+                className="btn-primary"
+                style={{ flex: 1, padding: '9px 0', fontSize: 12, fontWeight: 800 }}
+              >
+                {saving ? 'Saving…' : 'Save Correction'}
+              </button>
+              <button
+                onClick={() => setEditingPos(null)}
+                className="btn-red"
+                style={{ padding: '9px 14px', fontSize: 12 }}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Stats grid */}
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
         <StatCard label="Total Trades" value={String(a?.totalTrades ?? 0)} color="#00d4ff" />
@@ -126,7 +282,7 @@ export default function AnalyticsPage({ analytics: a, closedPositions, balance, 
           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
             <thead>
               <tr style={{ background: 'rgba(255,255,255,0.02)' }}>
-                {[['Token', null], ['Exit (IST)', 'exitTime'], ['Hold', null], ['Entry $', null], ['Exit $', null], ['PNL SOL', 'pnlSol'], ['PNL %', 'pnlPct'], ['Score', 'scoreAtEntry'], ['Close Reason', null], ['', null]].map(([l, k]) => (
+                {[['Token', null], ['Entry (IST)', 'entryTime'], ['Exit (IST)', 'exitTime'], ['Hold', null], ['Entry $', null], ['Exit $', null], ['PNL SOL', 'pnlSol'], ['PNL %', 'pnlPct'], ['Score', 'scoreAtEntry'], ['Close Reason', null], ['', null]].map(([l, k]) => (
                   <th key={String(l)} onClick={() => k && toggleSort(k as Sort)}
                     style={{ padding: '10px 12px', textAlign: 'left', color: '#3a5070', whiteSpace: 'nowrap', fontWeight: 700, cursor: k ? 'pointer' : 'default', letterSpacing: '0.05em', fontSize: 10 }}>
                     {l}{k && sortKey === k ? (sortDir === 'desc' ? ' ↓' : ' ↑') : ''}
@@ -136,7 +292,7 @@ export default function AnalyticsPage({ analytics: a, closedPositions, balance, 
             </thead>
             <tbody>
               {sorted.length === 0 ? (
-                <tr><td colSpan={10} style={{ textAlign: 'center', padding: '32px', color: '#3a5070' }}>No closed trades yet</td></tr>
+                <tr><td colSpan={11} style={{ textAlign: 'center', padding: '32px', color: '#3a5070' }}>No closed trades yet</td></tr>
               ) : sorted.map((p) => {
                 const pos = (p.pnlSol ?? 0) >= 0;
                 const isEmergency = p.closeReason?.startsWith('EMERGENCY');
@@ -147,6 +303,7 @@ export default function AnalyticsPage({ analytics: a, closedPositions, balance, 
                       <div style={{ fontWeight: 800, color: '#d4e0f0' }}>{p.symbol}</div>
                       <div style={{ color: '#3a5070', fontSize: 10 }}>{p.name.slice(0, 10)}</div>
                     </td>
+                    <td style={{ padding: '10px 12px', color: '#3a5070', whiteSpace: 'nowrap' }}>{toIST(p.entryTime)}</td>
                     <td style={{ padding: '10px 12px', color: '#3a5070', whiteSpace: 'nowrap' }}>{p.exitTime ? toIST(p.exitTime) : '—'}</td>
                     <td style={{ padding: '10px 12px', color: '#3a5070' }}>{holdTime(p.entryTime, p.exitTime)}</td>
                     <td style={{ padding: '10px 12px', color: '#d4e0f0' }}>${formatPrice(p.entryPrice)}</td>
@@ -154,12 +311,19 @@ export default function AnalyticsPage({ analytics: a, closedPositions, balance, 
                     <td style={{ padding: '10px 12px', fontWeight: 800, color: pos ? '#00ff88' : '#ff4466' }}>{p.pnlSol !== undefined ? formatSOL(p.pnlSol) : '—'}</td>
                     <td style={{ padding: '10px 12px', fontWeight: 800, color: pos ? '#00ff88' : '#ff4466' }}>{p.pnlPct !== undefined ? formatPct(p.pnlPct) : '—'}</td>
                     <td style={{ padding: '10px 12px', color: '#00d4ff' }}>{p.scoreAtEntry}</td>
-                    <td style={{ padding: '10px 12px', maxWidth: 160, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                    <td style={{ padding: '10px 12px', maxWidth: 140, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                       <span style={{ fontSize: 10, color: reasonColor, fontWeight: 600 }} title={p.closeReason ?? ''}>{p.closeReason ?? '—'}</span>
                     </td>
                     <td style={{ padding: '10px 12px' }}>
                       <div style={{ display: 'flex', gap: 4 }}>
                         {p.dexUrl && <a href={p.dexUrl} target="_blank" rel="noopener noreferrer" className="btn-primary" style={{ padding: '4px 8px', fontSize: 10, textDecoration: 'none' }}>DEX</a>}
+                        <button
+                          onClick={() => openEdit(p)}
+                          className="btn-primary"
+                          style={{ padding: '4px 8px', fontSize: 10, background: 'rgba(0,212,255,0.15)', borderColor: 'rgba(0,212,255,0.3)' }}
+                        >
+                          Edit
+                        </button>
                         <button onClick={() => handleDelete(p.id)} disabled={deleting === p.id} className="btn-red" style={{ padding: '4px 8px', fontSize: 10 }}>
                           {deleting === p.id ? '…' : 'Del'}
                         </button>
