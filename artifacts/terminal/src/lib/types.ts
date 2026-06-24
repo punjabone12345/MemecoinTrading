@@ -133,4 +133,5 @@ export interface ScanStats {
   dailyLossLimitHit?: boolean;
   dailyPnl?: number;
   dailyLossLimit?: number;
+  rejectionCounts?: Record<string, number>;
 }

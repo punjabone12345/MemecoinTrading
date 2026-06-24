@@ -221,6 +221,39 @@ export default function DiscoverPage({ tokens, scanStats, settings }: Props) {
         ))}
       </div>
 
+      {/* Rejection breakdown — shows why tokens are being filtered out */}
+      {scanStats.rejectionCounts && Object.keys(scanStats.rejectionCounts).length > 0 && (
+        <div className="card" style={{ padding: '12px 14px' }}>
+          <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: '0.1em', color: '#3a5070', marginBottom: 10 }}>
+            REJECTION BREAKDOWN <span style={{ color: '#1a3050', fontWeight: 600 }}>({Object.values(scanStats.rejectionCounts).reduce((a, b) => a + b, 0)} filtered out)</span>
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+            {Object.entries(scanStats.rejectionCounts).map(([reason, count]) => {
+              const total = Object.values(scanStats.rejectionCounts!).reduce((a, b) => a + b, 0);
+              const pct = total > 0 ? (count / total) * 100 : 0;
+              const isPreReject = ['MC too low', 'MC too high', 'Vol24h too low', 'Age too new', 'Age too old', 'Already pumped >500%'].includes(reason);
+              return (
+                <div key={reason} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 3 }}>
+                      <span style={{ fontSize: 10, color: isPreReject ? '#7090b0' : '#ff6688', fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {reason}
+                      </span>
+                      <span style={{ fontSize: 10, color: '#3a5070', marginLeft: 8, flexShrink: 0 }}>
+                        <b style={{ color: '#7090b0' }}>{count}</b>
+                      </span>
+                    </div>
+                    <div style={{ height: 3, borderRadius: 2, background: 'rgba(255,255,255,0.05)', overflow: 'hidden' }}>
+                      <div style={{ height: '100%', width: `${pct}%`, borderRadius: 2, background: isPreReject ? 'rgba(0,212,255,0.4)' : 'rgba(255,68,102,0.5)', transition: 'width 0.4s ease' }} />
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       <div style={{ display: 'flex', gap: 8 }}>
         <input type="text" placeholder="Search token..." value={search} onChange={(e) => setSearch(e.target.value)}
           className="input-premium" style={{ flex: 1, padding: '9px 12px', fontSize: 13 }} />

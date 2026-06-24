@@ -34,6 +34,10 @@ let scanCount = 0;
 let passedFilters = 0;
 let eligibleCount = 0;
 
+// Rejection reason counters — reset each scan, read by getScanStats()
+const rejectionCounts = new Map<string, number>();
+function bumpReject(reason: string) { rejectionCounts.set(reason, (rejectionCounts.get(reason) ?? 0) + 1); }
+
 // Exposed so auto-trader can update this after entry checks
 let dailyLossLimitHit = false;
 let dailyPnlSnapshot = 0;
@@ -56,6 +60,9 @@ export function getScanStats() {
     dailyLossLimitHit,
     dailyPnl: dailyPnlSnapshot,
     dailyLossLimit: dailyLossLimitSnapshot,
+    rejectionCounts: Object.fromEntries(
+      [...rejectionCounts.entries()].sort((a, b) => b[1] - a[1])
+    ),
   };
 }
 
@@ -345,6 +352,7 @@ export async function scanTokens(): Promise<void> {
   scanCount = allPairs.length;
   passedFilters = 0;
   eligibleCount = 0;
+  rejectionCounts.clear(); // reset counters each scan cycle
 
   // ── Best-pair deduplication ──────────────────────────────────────────────
   // When a token has multiple pools (e.g. Raydium CPMM + old dead Raydium v1),
@@ -383,16 +391,18 @@ export async function scanTokens(): Promise<void> {
 
     // Quick pre-filter — still store in cache as REJECTED so UI shows all tokens
     let preReject: string | undefined;
-    if (mc < settings.minMc) preReject = `MC too low ($${(mc/1000).toFixed(0)}K < $${(settings.minMc/1000).toFixed(0)}K min)`;
-    else if (mc > settings.maxMc) preReject = `MC too high ($${(mc/1e6).toFixed(1)}M > $${(settings.maxMc/1e6).toFixed(1)}M max)`;
-    else if (vol24 < settings.minVolume24h) preReject = `Vol24h too low ($${(vol24/1000).toFixed(0)}K < $${(settings.minVolume24h/1000).toFixed(0)}K min)`;
-    else if (settings.minAgeHours > 0 && ageH < settings.minAgeHours) preReject = `Too new (${ageH.toFixed(1)}h < ${settings.minAgeHours}h min)`;
-    else if (ageH > settings.maxAgeHours) preReject = `Age ${ageH.toFixed(1)}h > ${settings.maxAgeHours}h max`;
-    else if (change24 > 500) preReject = `Already pumped ${change24.toFixed(0)}% in 24h (>500% blocks entry)`;
+    let preRejectKey: string | undefined;
+    if (mc < settings.minMc)       { preReject = `MC too low ($${(mc/1000).toFixed(0)}K < $${(settings.minMc/1000).toFixed(0)}K min)`;          preRejectKey = 'MC too low'; }
+    else if (mc > settings.maxMc)  { preReject = `MC too high ($${(mc/1e6).toFixed(1)}M > $${(settings.maxMc/1e6).toFixed(1)}M max)`;            preRejectKey = 'MC too high'; }
+    else if (vol24 < settings.minVolume24h) { preReject = `Vol24h too low ($${(vol24/1000).toFixed(0)}K < $${(settings.minVolume24h/1000).toFixed(0)}K min)`; preRejectKey = 'Vol24h too low'; }
+    else if (settings.minAgeHours > 0 && ageH < settings.minAgeHours) { preReject = `Too new (${ageH.toFixed(1)}h < ${settings.minAgeHours}h min)`;       preRejectKey = 'Age too new'; }
+    else if (ageH > settings.maxAgeHours)   { preReject = `Age ${ageH.toFixed(1)}h > ${settings.maxAgeHours}h max`;                               preRejectKey = 'Age too old'; }
+    else if (change24 > 500)                { preReject = `Already pumped ${change24.toFixed(0)}% in 24h (>500% blocks entry)`;                   preRejectKey = 'Already pumped >500%'; }
 
     const existing = tokenCache.get(mint);
 
     if (preReject) {
+      if (preRejectKey) bumpReject(preRejectKey);
       if (enteredMints.has(mint)) continue; // Never downgrade entered tokens
       tokenCache.set(mint, {
         mint, name: pair.baseToken.name || 'Unknown', symbol: pair.baseToken.symbol || '???',
@@ -435,6 +445,7 @@ export async function scanTokens(): Promise<void> {
     if (allPassed) passedFilters++;
 
     const rejectReason = !allPassed ? filterResults.find((f) => !f.passed)?.name : undefined;
+    if (rejectReason) bumpReject(rejectReason);
 
     const prevConsecutive = existing?.consecutiveTrending ?? 0;
     const isUp = change5m > 0 && (scoreBreakdown.total >= (existing?.score ?? 0));
