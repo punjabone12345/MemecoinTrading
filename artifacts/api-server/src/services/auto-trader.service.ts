@@ -20,10 +20,11 @@ import { broadcastTokens } from '../websocket/server.js';
 // every single second without hammering external APIs.
 // ────────────────────────────────────────────────────────────────────────────
 
-let fetchInterval: ReturnType<typeof setInterval> | null = null;
+let fetchTimeout: ReturnType<typeof setTimeout> | null = null;
 let checkInterval: ReturnType<typeof setInterval> | null = null;
 let isFetching = false;
 let isChecking = false;
+let traderStarted = false;
 
 // Cached daily-loss state — refreshed every 10s inside the check loop
 // so we don't hammer the DB on every 1s tick.
@@ -39,11 +40,13 @@ const TRADED_TODAY_CACHE_MS = 30_000;
 let cachedTradedTodayMints = new Set<string>();
 
 export function startAutoTrader(): void {
-  if (fetchInterval) return;
+  if (traderStarted) return;
+  traderStarted = true;
 
   // ── FETCH loop ──────────────────────────────────────────────────────────
-  // Run immediately then on a slower interval driven by settings.scanFrequency.
-  // Uses a dynamic interval so settings changes take effect on next restart.
+  // Self-scheduling setTimeout loop — re-reads scanFrequencyMs from settings
+  // on every cycle, so changing it in the UI takes effect on the NEXT fetch
+  // without restarting the server.
   const DEFAULT_FETCH_MS = 15_000;
 
   async function runFetch(): Promise<void> {
@@ -66,14 +69,17 @@ export function startAutoTrader(): void {
     }
   }
 
-  runFetch(); // immediate first run
+  async function scheduleFetch(): Promise<void> {
+    const settings = await getSettings().catch(() => null);
+    const delay = Math.max(5_000, settings?.scanFrequencyMs ?? DEFAULT_FETCH_MS);
+    fetchTimeout = setTimeout(async () => {
+      await runFetch();
+      scheduleFetch(); // reschedule — picks up any scanFrequencyMs change
+    }, delay);
+  }
 
-  // Use a wrapper that re-reads scanFrequency each cycle so it stays current
-  fetchInterval = setInterval(async () => {
-    const settings = await getSettings().catch(() => ({ scanFrequency: DEFAULT_FETCH_MS } as ReturnType<typeof getSettings> extends Promise<infer T> ? T : never));
-    if (isFetching) return;
-    await runFetch();
-  }, DEFAULT_FETCH_MS);
+  runFetch();     // immediate first run
+  scheduleFetch(); // start the self-rescheduling timer
 
   // ── CHECK loop (1s) ─────────────────────────────────────────────────────
   // Reads from the already-populated tokenCache — no API calls.
@@ -197,6 +203,7 @@ async function checkEntries(): Promise<void> {
 }
 
 export function stopAutoTrader(): void {
-  if (fetchInterval) { clearInterval(fetchInterval); fetchInterval = null; }
+  if (fetchTimeout) { clearTimeout(fetchTimeout); fetchTimeout = null; }
+  traderStarted = false;
   if (checkInterval) { clearInterval(checkInterval); checkInterval = null; }
 }

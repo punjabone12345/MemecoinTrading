@@ -258,30 +258,49 @@ export async function updatePositionPrice(id: string, currentPrice: number, fres
   let tp3Hit = pos.tp3Hit;
   const pnlPct = ((currentPrice - pos.entryPrice) / pos.entryPrice) * 100;
 
-  // TP1
-  if (!tp1Hit && pnlPct >= settings.tp1Pct) {
-    tp1Hit = true;
-    newSL = pos.entryPrice; // breakeven
-    const partialPnl = pos.sizeSol * (settings.tp1ClosePct / 100) * (pnlPct / 100);
-    await notifyTPHit({ name: pos.name, symbol: pos.symbol, level: 1, gainPct: pnlPct, profitSol: partialPnl, newSL: 0 });
+  // Track running position size — reduced by each partial close so later TPs
+  // and the final SL/close only operate on the remaining portion.
+  let currentSizeSol = pos.sizeSol;
+
+  // Helper: close a % slice of the current size, bank the freed capital + profit,
+  // and update size_sol in DB.  Returns the profit on the closed slice.
+  async function partialClose(closePct: number): Promise<number> {
+    const closeSize = currentSizeSol * (closePct / 100);
+    const profit = closeSize * (pnlPct / 100);
+    currentSizeSol -= closeSize;
+    const bal = await getBalance();
+    await setBalance(bal + closeSize + profit);
+    await query(`UPDATE positions SET size_sol = $1 WHERE id = $2`, [currentSizeSol, id]);
+    return profit;
   }
 
-  // TP2
+  // TP1 — sell tp1ClosePct% of position; move SL to breakeven
+  if (!tp1Hit && pnlPct >= settings.tp1Pct) {
+    tp1Hit = true;
+    newSL = pos.entryPrice;
+    const partialPnl = await partialClose(settings.tp1ClosePct);
+    await notifyTPHit({ name: pos.name, symbol: pos.symbol, level: 1, gainPct: pnlPct, profitSol: partialPnl, newSL: 0 });
+    logger.info({ id, symbol: pos.symbol, closePct: settings.tp1ClosePct, partialPnl, remainingSizeSol: currentSizeSol }, 'TP1 partial close');
+  }
+
+  // TP2 — sell tp2ClosePct% of remaining; move SL to TP1 level
   if (!tp2Hit && pnlPct >= settings.tp2Pct) {
     tp2Hit = true;
     newSL = pos.entryPrice * (1 + settings.tp1Pct / 100);
-    const partialPnl = pos.sizeSol * (settings.tp2ClosePct / 100) * (pnlPct / 100);
+    const partialPnl = await partialClose(settings.tp2ClosePct);
     await notifyTPHit({ name: pos.name, symbol: pos.symbol, level: 2, gainPct: pnlPct, profitSol: partialPnl, newSL: settings.tp1Pct });
+    logger.info({ id, symbol: pos.symbol, closePct: settings.tp2ClosePct, partialPnl, remainingSizeSol: currentSizeSol }, 'TP2 partial close');
   }
 
-  // TP3
+  // TP3 — sell tp3ClosePct% of remaining; trailing SL takes over the runner
   if (!tp3Hit && pnlPct >= settings.tp3Pct) {
     tp3Hit = true;
-    const partialPnl = pos.sizeSol * (settings.tp3ClosePct / 100) * (pnlPct / 100);
+    const partialPnl = await partialClose(settings.tp3ClosePct);
     await notifyTPHit({ name: pos.name, symbol: pos.symbol, level: 3, gainPct: pnlPct, profitSol: partialPnl, newSL: settings.tp1Pct });
+    logger.info({ id, symbol: pos.symbol, closePct: settings.tp3ClosePct, partialPnl, remainingSizeSol: currentSizeSol }, 'TP3 partial close');
   }
 
-  // Trailing SL after TP3
+  // Trailing SL after TP3 — protects the runner portion
   if (tp3Hit) {
     const trailSL = newPeak * (1 - settings.trailingSLPct / 100);
     newSL = Math.max(newSL, trailSL);
