@@ -431,7 +431,12 @@ export async function scanTokens(): Promise<void> {
     }
 
     const v1h = pair.volume?.h1 ?? 0;
-    const v1hPrev = existing?.volume1hPrev ?? v1h * 0.8;
+    // Use the ACTUAL h1 volume from the previous scan as the baseline.
+    // volume1hCurrent from the last cycle is the true previous-hour volume.
+    // Falls back to v1h*0.8 on first sight so new tokens get a mild boost, not 0.
+    const v1hPrev = (existing && existing.volume1hCurrent > 0)
+      ? existing.volume1hCurrent
+      : v1h * 0.8;
 
     const partial: Partial<Token> = {
       priceChange5m: change5m,
@@ -454,7 +459,9 @@ export async function scanTokens(): Promise<void> {
     if (rejectReason) bumpReject(rejectReason);
 
     const prevConsecutive = existing?.consecutiveTrending ?? 0;
-    const isUp = change5m > 0 && (scoreBreakdown.total >= (existing?.score ?? 0));
+    // Require non-negative 5m change (>= 0 instead of > 0) so a flat candle doesn't
+    // reset the trend counter — only actual red candles (decline) should break the streak.
+    const isUp = change5m >= 0 && (scoreBreakdown.total >= (existing?.score ?? 0));
     const consecutive = isUp ? prevConsecutive + 1 : 0;
 
     // trendChecksRequired: token must pass all filters AND maintain positive momentum
