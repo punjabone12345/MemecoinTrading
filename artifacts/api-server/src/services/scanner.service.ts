@@ -98,9 +98,10 @@ export function calcScore(token: Partial<Token>): ScoreBreakdown {
 
   let mcQuality = 0;
   const mc = token.marketCap ?? 0;
-  if (mc >= 500_000 && mc < 5_000_000) mcQuality = 25;
-  else if (mc >= 5_000_000 && mc < 20_000_000) mcQuality = 15;
-  else if (mc >= 20_000_000 && mc < 100_000_000) mcQuality = 8;
+  if (mc >= 250_000 && mc < 1_000_000) mcQuality = 25;
+  else if (mc >= 100_000 && mc < 250_000) mcQuality = 18;
+  else if (mc >= 1_000_000 && mc < 5_000_000) mcQuality = 15;
+  else if (mc >= 5_000_000 && mc < 20_000_000) mcQuality = 8;
 
   return {
     priceMomentum,
