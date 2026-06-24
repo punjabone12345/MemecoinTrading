@@ -10,6 +10,13 @@ import { broadcastPositions, broadcastBalance } from '../websocket/server.js';
 // Captured on first price update after entry; cleared on close.
 const positionBaselines = new Map<string, { liquidity: number; topHolder: number }>();
 
+// Consecutive-tick confirmation counters per position per signal key.
+// A signal must be true for EMERGENCY_CONFIRM_TICKS straight before the exit fires.
+// Prevents momentary DexScreener data glitches (BSR h1 window reset, liquidity blip)
+// from causing false emergency exits.
+const EMERGENCY_CONFIRM_TICKS = 3;
+const emergencyConfirmCounts = new Map<string, Map<string, number>>();
+
 function toIST(date: Date): string {
   return date.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', hour12: false });
 }
@@ -219,8 +226,9 @@ export async function closePosition(id: string, currentPrice: number, reason: st
   await setBalance(balance + pos.sizeSol + pnlSol);
   markTokenAvailable(pos.mint);
 
-  // Clean up the emergency-exit baseline so it doesn't persist after close
+  // Clean up per-position emergency-exit state so it doesn't persist after close
   positionBaselines.delete(id);
+  emergencyConfirmCounts.delete(id);
 
   // Only send the close notification if not suppressed (e.g. emergency exit sends its own)
   if (!options?.silent) {
@@ -287,6 +295,11 @@ export async function updatePositionPrice(id: string, currentPrice: number): Pro
   // ── Emergency exit checks ────────────────────────────────────────────────
   // Score is an ENTRY filter only — do NOT exit on score alone.
   // Only exit on structural integrity failures: rug, liquidity drain, creator dump.
+  //
+  // Every signal uses a CONFIRMATION COUNTER: it must be true for
+  // EMERGENCY_CONFIRM_TICKS consecutive price ticks before the exit fires.
+  // This prevents momentary DexScreener glitches (h1 BSR window reset,
+  // temporary liquidity blips) from causing false emergency exits.
   const token = getTokenByMint(pos.mint);
   if (token) {
     // Establish baseline on first observation after entry
@@ -299,26 +312,47 @@ export async function updatePositionPrice(id: string, currentPrice: number): Pro
     }
     const baseline = positionBaselines.get(id)!;
 
+    // Ensure per-position confirmation map exists
+    if (!emergencyConfirmCounts.has(id)) {
+      emergencyConfirmCounts.set(id, new Map());
+    }
+    const counts = emergencyConfirmCounts.get(id)!;
+
+    // Helper: increment counter for a signal key; return true when threshold met
+    function confirm(key: string, active: boolean): boolean {
+      if (!active) { counts.set(key, 0); return false; }
+      const n = (counts.get(key) ?? 0) + 1;
+      counts.set(key, n);
+      if (n < EMERGENCY_CONFIRM_TICKS) {
+        logger.info({ positionId: id, symbol: pos.symbol, signal: key, tick: n, required: EMERGENCY_CONFIRM_TICKS }, 'Emergency signal building — not yet confirmed');
+        return false;
+      }
+      return true;
+    }
+
     const emergencyReasons: string[] = [];
 
-    // 1. Rugcheck failure (on-chain freeze/mint authority restored, etc.)
-    if (!token.rugcheck) {
+    // 1. Rugcheck failure — confirmed immediately (on-chain, not DexScreener noise)
+    if (confirm('rugcheck', !token.rugcheck)) {
       emergencyReasons.push('Rugcheck failed (on-chain risk detected)');
     }
 
-    // 2. Creator / whale sell dump — extreme buy/sell ratio inversion
-    if (token.buySellRatio < 0.5) {
-      emergencyReasons.push(`Extreme sell pressure (BSR ${token.buySellRatio.toFixed(2)}x) — likely creator/whale dump`);
+    // 2. Creator / whale sell dump — extreme BSR inversion
+    //    Threshold tightened to 0.3x (was 0.5x) since DexScreener h1 resets can
+    //    briefly hit 0.0x; requiring 3 ticks also guards against brief windows.
+    if (confirm('bsr', token.buySellRatio < 0.3)) {
+      emergencyReasons.push(`Extreme sell pressure (BSR ${token.buySellRatio.toFixed(2)}x) for ${EMERGENCY_CONFIRM_TICKS}s — likely creator/whale dump`);
     }
 
-    // 3. Liquidity drained >30% from entry baseline
-    if (baseline.liquidity > 1000 && token.liquidity < baseline.liquidity * 0.70) {
+    // 3. Liquidity drained >40% from entry baseline (raised from 30% to reduce noise)
+    const liqActive = baseline.liquidity > 1000 && token.liquidity < baseline.liquidity * 0.60;
+    if (confirm('liquidity', liqActive)) {
       const dropPct = (((baseline.liquidity - token.liquidity) / baseline.liquidity) * 100).toFixed(0);
-      emergencyReasons.push(`Liquidity drained ${dropPct}% ($${(baseline.liquidity / 1000).toFixed(0)}K → $${(token.liquidity / 1000).toFixed(0)}K)`);
+      emergencyReasons.push(`Liquidity drained ${dropPct}% ($${(baseline.liquidity / 1000).toFixed(0)}K → $${(token.liquidity / 1000).toFixed(0)}K) for ${EMERGENCY_CONFIRM_TICKS}s`);
     }
 
     // 4. Top-holder concentration surged >15pp (coordinated accumulation before dump)
-    if (baseline.topHolder > 0 && token.topHolder > baseline.topHolder + 15) {
+    if (confirm('topHolder', baseline.topHolder > 0 && token.topHolder > baseline.topHolder + 15)) {
       emergencyReasons.push(`Top-holder concentration surged ${baseline.topHolder.toFixed(1)}% → ${token.topHolder.toFixed(1)}%`);
     }
 
