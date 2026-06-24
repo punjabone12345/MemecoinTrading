@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import { Position, Analytics } from '../lib/types.js';
+import { Position, Analytics, Settings } from '../lib/types.js';
 import { api } from '../lib/api.js';
 import { formatSOL, formatPct, formatPrice, toIST } from '../lib/utils.js';
 
@@ -8,6 +8,7 @@ interface Props {
   closedPositions: Position[];
   balance: number;
   analytics: Analytics | null;
+  settings: Settings | null;
   onRefresh: () => Promise<void>;
 }
 
@@ -39,12 +40,15 @@ function PnlDisplay({ pnl, pct }: { pnl?: number; pct?: number }) {
   );
 }
 
-function TPBar({ pos }: { pos: Position }) {
+function TPBar({ pos, settings }: { pos: Position; settings: Settings | null }) {
+  const tp1 = settings?.tp1Pct ?? 70;
+  const tp2 = settings?.tp2Pct ?? 150;
+  const tp3 = settings?.tp3Pct ?? 300;
+  const tps = [tp1, tp2, tp3];
+  const maxPct = tp3 * 1.15;
   const pnlPct = pos.pnlPct ?? (((pos.currentPrice ?? pos.entryPrice) - pos.entryPrice) / pos.entryPrice * 100);
-  const tps = [70, 150, 300];
-  const maxPct = 350;
   const progress = Math.min(100, Math.max(0, (pnlPct / maxPct) * 100));
-  const trackColor = pnlPct >= 300 ? '#ffd700' : pnlPct >= 150 ? '#00d4ff' : pnlPct >= 70 ? '#00ff88' : pnlPct < 0 ? '#ff4466' : '#3a5070';
+  const trackColor = pnlPct >= tp3 ? '#ffd700' : pnlPct >= tp2 ? '#00d4ff' : pnlPct >= tp1 ? '#00ff88' : pnlPct < 0 ? '#ff4466' : '#3a5070';
   return (
     <div style={{ marginTop: 10 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, marginBottom: 6, color: '#3a5070' }}>
@@ -68,7 +72,7 @@ function TPBar({ pos }: { pos: Position }) {
         })}
       </div>
       <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 9, marginTop: 4, color: '#3a5070', fontWeight: 700 }}>
-        <span>+70%</span><span>+150%</span><span>+300%</span>
+        <span>+{tp1}%</span><span>+{tp2}%</span><span>+{tp3}%</span>
       </div>
     </div>
   );
@@ -144,7 +148,7 @@ function CloseModal({ pos, onClose, onConfirm }: { pos: Position; onClose: () =>
   );
 }
 
-function PositionCard({ pos, onRefresh }: { pos: Position; onRefresh: () => Promise<void> }) {
+function PositionCard({ pos, settings, onRefresh }: { pos: Position; settings: Settings | null; onRefresh: () => Promise<void> }) {
   const [showEdit, setShowEdit] = useState(false);
   const [showClose, setShowClose] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -191,7 +195,7 @@ function PositionCard({ pos, onRefresh }: { pos: Position; onRefresh: () => Prom
           ) : null)}
         </div>
 
-        <TPBar pos={pos} />
+        <TPBar pos={pos} settings={settings} />
 
         <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
           {pos.dexUrl && (
@@ -213,7 +217,7 @@ function PositionCard({ pos, onRefresh }: { pos: Position; onRefresh: () => Prom
   );
 }
 
-export default function PositionsPage({ openPositions, closedPositions, balance, analytics, onRefresh }: Props) {
+export default function PositionsPage({ openPositions, closedPositions, balance, analytics, settings, onRefresh }: Props) {
   const unrealized = openPositions.reduce((s, p) => s + (p.pnlSol ?? 0), 0);
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
@@ -241,7 +245,7 @@ export default function PositionsPage({ openPositions, closedPositions, balance,
         </div>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-          {openPositions.map((p) => <PositionCard key={p.id} pos={p} onRefresh={onRefresh} />)}
+          {openPositions.map((p) => <PositionCard key={p.id} pos={p} settings={settings} onRefresh={onRefresh} />)}
         </div>
       )}
     </div>

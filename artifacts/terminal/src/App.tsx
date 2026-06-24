@@ -230,6 +230,7 @@ export default function App() {
               <PositionsPage
                 openPositions={openPositions} closedPositions={closedPositions}
                 balance={balance} analytics={analytics}
+                settings={settings}
                 onRefresh={async () => { await loadInitial(); await refreshClosed(); }}
               />
             )}
