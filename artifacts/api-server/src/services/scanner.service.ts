@@ -266,12 +266,36 @@ async function fetchDexPairs(): Promise<DexPair[]> {
   }
 }
 
+// DEX quality ranking: higher = preferred when multiple pools exist for same mint.
+// Raydium is the primary graduation target; Orca/Meteora are established AMMs.
+const DEX_RANK: Record<string, number> = { raydium: 100, orca: 80, meteora: 70, pumpswap: 50, 'pump-fun': 40, pumpfun: 40 };
+
 export async function scanTokens(): Promise<void> {
   const settings = await getSettings();
-  const pairs = await fetchDexPairs();
-  scanCount = pairs.length;
+  const allPairs = await fetchDexPairs();
+  scanCount = allPairs.length;
   passedFilters = 0;
   eligibleCount = 0;
+
+  // ── Best-pair deduplication ──────────────────────────────────────────────
+  // When a token has multiple pools (e.g. Raydium CPMM + old dead Raydium v1),
+  // pick the best pair per mint: prefer highest h1 volume, break ties by DEX rank.
+  // This prevents stale low-activity pools from overriding live pool data.
+  const bestPairMap = new Map<string, DexPair>();
+  for (const pair of allPairs) {
+    const mint = pair.baseToken?.address;
+    if (!mint) continue;
+    const h1Vol = pair.volume?.h1 ?? 0;
+    const dexRank = DEX_RANK[pair.dexId?.toLowerCase() ?? ''] ?? 0;
+    const score = h1Vol + dexRank * 1000; // weight DEX rank heavily as tiebreaker
+    const existing = bestPairMap.get(mint);
+    if (!existing) { bestPairMap.set(mint, pair); continue; }
+    const existH1Vol = existing.volume?.h1 ?? 0;
+    const existRank = DEX_RANK[existing.dexId?.toLowerCase() ?? ''] ?? 0;
+    const existScore = existH1Vol + existRank * 1000;
+    if (score > existScore) bestPairMap.set(mint, pair);
+  }
+  const pairs = Array.from(bestPairMap.values());
 
   for (const pair of pairs) {
     const mint = pair.baseToken?.address;

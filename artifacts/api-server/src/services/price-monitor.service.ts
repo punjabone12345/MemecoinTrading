@@ -16,6 +16,7 @@ interface DexPair {
   marketCap?: number;
   fdv?: number;
   txns?: { h1?: { buys: number; sells: number } };
+  liquidity?: { usd?: number };
 }
 
 interface DexPriceResult {
@@ -23,7 +24,7 @@ interface DexPriceResult {
   pair?: DexPair;
 }
 
-type PriceData = { price: number; mc: number; bsr: number };
+type PriceData = { price: number; mc: number; bsr: number; liquidity: number };
 
 async function fetchByMints(mints: string[]): Promise<Map<string, PriceData>> {
   const result = new Map<string, PriceData>();
@@ -55,7 +56,8 @@ async function fetchByMints(mints: string[]): Promise<Map<string, PriceData>> {
         const h1Count = h1.buys + h1.sells;
         const prevActivity = activity.get(mint) ?? -1;
         if (h1Count > prevActivity) {
-          result.set(mint, { price, mc, bsr });
+          const liquidity = pair.liquidity?.usd ?? 0;
+          result.set(mint, { price, mc, bsr, liquidity });
           activity.set(mint, h1Count);
         }
       }
@@ -148,7 +150,9 @@ export function startPriceMonitor(): void {
             );
           } else {
             lastKnownPrice.set(pos.id, data.price);
-            updatePositionPrice(pos.id, data.price).catch((err) =>
+            // Pass fresh BSR and liquidity so emergency exit uses real-time data,
+            // not the stale scanner cache (which is only updated every 10s).
+            updatePositionPrice(pos.id, data.price, data.bsr, data.liquidity).catch((err) =>
               logger.warn({ err, id: pos.id }, 'Price update error')
             );
           }

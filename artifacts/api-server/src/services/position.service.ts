@@ -17,6 +17,11 @@ const positionBaselines = new Map<string, { liquidity: number; topHolder: number
 const EMERGENCY_CONFIRM_TICKS = 3;
 const emergencyConfirmCounts = new Map<string, Map<string, number>>();
 
+// SL must breach for SL_CONFIRM_TICKS consecutive ticks before closing.
+// Prevents a single bad DexScreener tick firing a false Stop Loss.
+const SL_CONFIRM_TICKS = 2;
+const slConfirmCounts = new Map<string, number>();
+
 function toIST(date: Date): string {
   return date.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', hour12: false });
 }
@@ -226,9 +231,10 @@ export async function closePosition(id: string, currentPrice: number, reason: st
   await setBalance(balance + pos.sizeSol + pnlSol);
   markTokenAvailable(pos.mint);
 
-  // Clean up per-position emergency-exit state so it doesn't persist after close
+  // Clean up per-position exit state so it doesn't persist after close
   positionBaselines.delete(id);
   emergencyConfirmCounts.delete(id);
+  slConfirmCounts.delete(id);
 
   // Only send the close notification if not suppressed (e.g. emergency exit sends its own)
   if (!options?.silent) {
@@ -240,7 +246,7 @@ export async function closePosition(id: string, currentPrice: number, reason: st
   return rowToPosition(rows[0]);
 }
 
-export async function updatePositionPrice(id: string, currentPrice: number): Promise<void> {
+export async function updatePositionPrice(id: string, currentPrice: number, freshBsr?: number, freshLiquidity?: number): Promise<void> {
   const pos = await getPositionById(id);
   if (!pos || pos.status !== 'OPEN') return;
 
@@ -286,10 +292,28 @@ export async function updatePositionPrice(id: string, currentPrice: number): Pro
     WHERE id = $6
   `, [newPeak, newSL, tp1Hit, tp2Hit, tp3Hit, id]);
 
-  // Check SL hit
+  // ── SL check with 2-tick confirmation ───────────────────────────────────
+  // Require currentPrice to be below SL for SL_CONFIRM_TICKS consecutive ticks
+  // before closing. A single bad DexScreener tick cannot fire a Stop Loss alone.
   if (currentPrice <= newSL) {
-    await closePosition(id, currentPrice, tp1Hit ? 'SL (moved to breakeven/TP)' : 'Stop Loss');
-    return;
+    const slCount = (slConfirmCounts.get(id) ?? 0) + 1;
+    slConfirmCounts.set(id, slCount);
+    if (slCount < SL_CONFIRM_TICKS) {
+      logger.info(
+        { id, symbol: pos.symbol, currentPrice, slPrice: newSL, tick: slCount, required: SL_CONFIRM_TICKS },
+        'SL breach tick — waiting for confirmation'
+      );
+    } else {
+      slConfirmCounts.delete(id);
+      await closePosition(id, currentPrice, tp1Hit ? 'SL (moved to breakeven/TP)' : 'Stop Loss');
+      return;
+    }
+  } else {
+    // Price recovered — reset SL confirmation counter
+    if (slConfirmCounts.has(id)) {
+      logger.info({ id, symbol: pos.symbol, currentPrice, slPrice: newSL }, 'SL breach cleared — price recovered, resetting counter');
+      slConfirmCounts.delete(id);
+    }
   }
 
   // ── Emergency exit checks ────────────────────────────────────────────────
@@ -302,13 +326,18 @@ export async function updatePositionPrice(id: string, currentPrice: number): Pro
   // temporary liquidity blips) from causing false emergency exits.
   const token = getTokenByMint(pos.mint);
   if (token) {
+    // Use fresh real-time values from price monitor when available;
+    // fall back to scanner's cached token data if not provided.
+    const liveBsr = freshBsr ?? token.buySellRatio;
+    const liveLiquidity = freshLiquidity ?? token.liquidity;
+
     // Establish baseline on first observation after entry
     if (!positionBaselines.has(id)) {
       positionBaselines.set(id, {
-        liquidity: token.liquidity,
+        liquidity: liveLiquidity,
         topHolder: token.topHolder,
       });
-      logger.info({ positionId: id, mint: pos.mint, baseLiquidity: token.liquidity, baseTopHolder: token.topHolder }, 'Emergency-exit baseline captured');
+      logger.info({ positionId: id, mint: pos.mint, baseLiquidity: liveLiquidity, baseTopHolder: token.topHolder, source: freshLiquidity != null ? 'fresh' : 'scanner' }, 'Emergency-exit baseline captured');
     }
     const baseline = positionBaselines.get(id)!;
 
@@ -337,18 +366,17 @@ export async function updatePositionPrice(id: string, currentPrice: number): Pro
       emergencyReasons.push('Rugcheck failed (on-chain risk detected)');
     }
 
-    // 2. Creator / whale sell dump — extreme BSR inversion
-    //    Threshold tightened to 0.3x (was 0.5x) since DexScreener h1 resets can
-    //    briefly hit 0.0x; requiring 3 ticks also guards against brief windows.
-    if (confirm('bsr', token.buySellRatio < 0.3)) {
-      emergencyReasons.push(`Extreme sell pressure (BSR ${token.buySellRatio.toFixed(2)}x) for ${EMERGENCY_CONFIRM_TICKS}s — likely creator/whale dump`);
+    // 2. Creator / whale sell dump — uses fresh per-tick BSR from price monitor
+    //    Threshold: 0.3x (3 sells per 10 buys) for 3 consecutive seconds
+    if (confirm('bsr', liveBsr < 0.3)) {
+      emergencyReasons.push(`Extreme sell pressure (BSR ${liveBsr.toFixed(2)}x) for ${EMERGENCY_CONFIRM_TICKS}s — likely creator/whale dump`);
     }
 
-    // 3. Liquidity drained >40% from entry baseline (raised from 30% to reduce noise)
-    const liqActive = baseline.liquidity > 1000 && token.liquidity < baseline.liquidity * 0.60;
+    // 3. Liquidity drained >40% from entry baseline — uses fresh liquidity from price monitor
+    const liqActive = baseline.liquidity > 1000 && liveLiquidity < baseline.liquidity * 0.60;
     if (confirm('liquidity', liqActive)) {
-      const dropPct = (((baseline.liquidity - token.liquidity) / baseline.liquidity) * 100).toFixed(0);
-      emergencyReasons.push(`Liquidity drained ${dropPct}% ($${(baseline.liquidity / 1000).toFixed(0)}K → $${(token.liquidity / 1000).toFixed(0)}K) for ${EMERGENCY_CONFIRM_TICKS}s`);
+      const dropPct = (((baseline.liquidity - liveLiquidity) / baseline.liquidity) * 100).toFixed(0);
+      emergencyReasons.push(`Liquidity drained ${dropPct}% ($${(baseline.liquidity / 1000).toFixed(0)}K → $${(liveLiquidity / 1000).toFixed(0)}K) for ${EMERGENCY_CONFIRM_TICKS}s`);
     }
 
     // 4. Top-holder concentration surged >15pp (coordinated accumulation before dump)

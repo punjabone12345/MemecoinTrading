@@ -125,7 +125,9 @@ async function checkEntries(): Promise<void> {
       continue;
     }
 
-    const dexUrl = `https://dexscreener.com/solana/${token.mint}`;
+    // Use pair-specific URL so the price monitor fallback fetcher can resolve
+    // the correct pool, and the DEX button links to the right pair page.
+    const dexUrl = `https://dexscreener.com/solana/${token.pairAddress || token.mint}`;
     logger.info(
       { mint: token.mint, symbol: token.symbol, score: token.score, price: token.price, mc: token.marketCap, bsr: token.buySellRatio },
       'ELIGIBLE token found — attempting to open position'
