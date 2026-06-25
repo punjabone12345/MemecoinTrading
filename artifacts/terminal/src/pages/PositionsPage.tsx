@@ -218,7 +218,11 @@ function PositionCard({ pos, settings, onRefresh }: { pos: Position; settings: S
 }
 
 export default function PositionsPage({ openPositions, closedPositions, balance, analytics, settings, onRefresh }: Props) {
-  const unrealized = openPositions.reduce((s, p) => s + (p.pnlSol ?? 0), 0);
+  const unrealized = openPositions.reduce((s, p) => {
+    const current = p.currentPrice ?? p.entryPrice;
+    const pct = (current - p.entryPrice) / p.entryPrice;
+    return s + p.sizeSol * pct;
+  }, 0);
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>

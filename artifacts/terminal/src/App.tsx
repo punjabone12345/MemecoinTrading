@@ -176,16 +176,23 @@ export default function App() {
   const eligibleCount = tokens.filter((t) => t.status === 'ELIGIBLE').length;
   const effectiveSettings = settings ?? DEFAULT_SETTINGS;
 
-  // Portfolio value = free balance + current market value of all open positions.
-  // currentPrice comes from the price monitor's WS tick (enriched on every 1s update).
-  // Falls back to entryPrice (at-cost value) when no live price has arrived yet.
-  const portfolioValue = openPositions.reduce((sum, p) => {
-    const currentVal = p.sizeSol * ((p.currentPrice ?? p.entryPrice) / p.entryPrice);
-    return sum + currentVal;
-  }, balance);
+  // Unrealized PnL across all open positions — uses live currentPrice from price monitor WS ticks.
+  // Falls back to entryPrice (zero gain) only when no live price has arrived yet.
+  const unrealizedPnl = openPositions.reduce((sum, p) => {
+    const current = p.currentPrice ?? p.entryPrice;
+    const pct = (current - p.entryPrice) / p.entryPrice;
+    return sum + p.sizeSol * pct;
+  }, 0);
 
-  // Unrealized PnL across all open positions
-  const unrealizedPnl = portfolioValue - balance - openPositions.reduce((s, p) => s + p.sizeSol, 0);
+  // Portfolio value = starting balance + all realised P&L from closed trades + live unrealised P&L.
+  // This formula is always correct regardless of any free-cash tracking drift in the DB.
+  const startingBalance = effectiveSettings.startingBalanceSol;
+  const realizedPnl = analytics?.totalPnlSol ?? 0;
+  const portfolioValue = startingBalance + realizedPnl + unrealizedPnl;
+
+  // Free balance = total equity minus capital currently deployed in open positions
+  const deployedCapital = openPositions.reduce((s, p) => s + p.sizeSol, 0);
+  const freeBalance = startingBalance + realizedPnl - deployedCapital;
 
   return (
     <div style={{ height: '100dvh', display: 'flex', flexDirection: 'column', background: '#080d1a', overflow: 'hidden' }}>
@@ -233,7 +240,7 @@ export default function App() {
               {portfolioValue.toFixed(3)}<span style={{ fontSize: 9, opacity: 0.6, marginLeft: 3 }}>SOL</span>
             </div>
             {openPositions.length > 0 && (
-              <div style={{ fontSize: 8, color: '#3a5070', marginTop: 1 }}>{balance.toFixed(3)} free</div>
+              <div style={{ fontSize: 8, color: '#3a5070', marginTop: 1 }}>{freeBalance.toFixed(3)} free</div>
             )}
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
