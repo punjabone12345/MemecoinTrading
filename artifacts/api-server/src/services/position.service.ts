@@ -92,6 +92,8 @@ function rowToPosition(r: Record<string, unknown>): Position {
     txSignature: r.tx_signature != null ? String(r.tx_signature) : undefined,
     dexUrl: r.dex_url != null ? String(r.dex_url) : undefined,
     notes: r.notes != null ? String(r.notes) : undefined,
+    initialSizeSol: r.initial_size_sol != null ? parseFloat(String(r.initial_size_sol)) : undefined,
+    bankdProfitSol: r.banked_profit_sol != null ? parseFloat(String(r.banked_profit_sol)) : undefined,
   };
 }
 
@@ -162,6 +164,8 @@ export async function openPosition(params: {
     entry_price: params.price,
     entry_mc: params.mc,
     size_sol: sizeSol,
+    initial_size_sol: sizeSol,
+    banked_profit_sol: 0,
     score_at_entry: params.score,
     peak_price: params.price,
     sl_current: slPrice,
@@ -192,7 +196,7 @@ export async function openPosition(params: {
       logger.warn({ err: err.message }, 'openPosition: NOT NULL constraint hit — healing schema');
       const knownCols = new Set([
         'id','mint','name','symbol','entry_price','entry_mc','entry_time',
-        'size_sol','score_at_entry','peak_price','sl_current','status','mode',
+        'size_sol','initial_size_sol','banked_profit_sol','score_at_entry','peak_price','sl_current','status','mode',
         'exit_price','exit_mc','exit_time','pnl_sol','pnl_pct','tp1_hit',
         'tp2_hit','tp3_hit','close_reason','tx_signature','dex_url','notes','created_at',
       ]);
@@ -236,8 +240,19 @@ export async function closePosition(id: string, currentPrice: number, reason: st
   const pos = await getPositionById(id);
   if (!pos || pos.status !== 'OPEN') return null;
 
-  const pnlPct = ((currentPrice - pos.entryPrice) / pos.entryPrice) * 100;
-  const pnlSol = pos.sizeSol * (pnlPct / 100);
+  // Runner PnL — on the remaining position size after any partial closes
+  const pricePnlPct = ((currentPrice - pos.entryPrice) / pos.entryPrice) * 100;
+  const runnerPnl = pos.sizeSol * (pricePnlPct / 100);
+
+  // TP profits already banked to balance during partial closes — add them so
+  // pnl_sol represents the TRUE total realised profit for the entire trade.
+  const bankdProfit = pos.bankdProfitSol ?? 0;
+  const initialSizeSol = pos.initialSizeSol ?? pos.sizeSol;
+
+  const totalPnlSol = runnerPnl + bankdProfit;
+  // pnl_pct = total profit as % of original capital invested
+  const totalPnlPct = initialSizeSol > 0 ? (totalPnlSol / initialSizeSol) * 100 : pricePnlPct;
+
   const currentMc = pos.entryMc * (currentPrice / pos.entryPrice);
 
   const rows = await query<Record<string, unknown>>(`
@@ -245,10 +260,12 @@ export async function closePosition(id: string, currentPrice: number, reason: st
       exit_price = $1, exit_mc = $2, exit_time = NOW(),
       pnl_sol = $3, pnl_pct = $4, close_reason = $5, status = 'CLOSED'
     WHERE id = $6 RETURNING *
-  `, [currentPrice, currentMc, pnlSol, pnlPct, reason, id]);
+  `, [currentPrice, currentMc, totalPnlSol, totalPnlPct, reason, id]);
 
+  // Return only runner capital + runner PnL — TP profits were already credited
+  // to the balance during each partialClose() call.
   const balance = await getBalance();
-  await setBalance(balance + pos.sizeSol + pnlSol);
+  await setBalance(balance + pos.sizeSol + runnerPnl);
   markTokenAvailable(pos.mint);
 
   // Clean up per-position exit state so it doesn't persist after close
@@ -258,7 +275,7 @@ export async function closePosition(id: string, currentPrice: number, reason: st
 
   // Only send the close notification if not suppressed (e.g. emergency exit sends its own)
   if (!options?.silent) {
-    await notifyClosed({ name: pos.name, symbol: pos.symbol, pnlSol, pnlPct, reason });
+    await notifyClosed({ name: pos.name, symbol: pos.symbol, pnlSol: totalPnlSol, pnlPct: totalPnlPct, reason });
   }
   await broadcastPositions();
   await broadcastBalance();
@@ -287,14 +304,19 @@ async function _updatePositionPrice(id: string, currentPrice: number, freshBsr?:
   let currentSizeSol = pos.sizeSol;
 
   // Helper: close a % slice of the current size, bank the freed capital + profit,
-  // and update size_sol in DB.  Returns the profit on the closed slice.
+  // and update size_sol + banked_profit_sol in DB.  Returns the profit on the closed slice.
   async function partialClose(closePct: number): Promise<number> {
     const closeSize = currentSizeSol * (closePct / 100);
     const profit = closeSize * (pnlPct / 100);
     currentSizeSol -= closeSize;
     const bal = await getBalance();
     await setBalance(bal + closeSize + profit);
-    await query(`UPDATE positions SET size_sol = $1 WHERE id = $2`, [currentSizeSol, id]);
+    // Accumulate profit in banked_profit_sol so closePosition can include it
+    // in the final pnl_sol (without double-counting balance credits).
+    await query(
+      `UPDATE positions SET size_sol = $1, banked_profit_sol = COALESCE(banked_profit_sol, 0) + $2 WHERE id = $3`,
+      [currentSizeSol, profit, id]
+    );
     return profit;
   }
 

@@ -71,6 +71,8 @@ export interface Position {
   buySellRatio?: number;
   dexUrl?: string;
   notes?: string;
+  initialSizeSol?: number;
+  bankdProfitSol?: number;
 }
 
 export interface Analytics {

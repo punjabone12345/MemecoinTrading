@@ -121,8 +121,10 @@ export async function initDB(): Promise<void> {
     `ALTER TABLE positions ADD COLUMN IF NOT EXISTS mode         TEXT         NOT NULL DEFAULT 'paper'`,
     `ALTER TABLE positions ADD COLUMN IF NOT EXISTS tx_signature TEXT`,
     `ALTER TABLE positions ADD COLUMN IF NOT EXISTS dex_url      TEXT`,
-    `ALTER TABLE positions ADD COLUMN IF NOT EXISTS notes        TEXT`,
-    `ALTER TABLE positions ADD COLUMN IF NOT EXISTS created_at   TIMESTAMPTZ   DEFAULT NOW()`,
+    `ALTER TABLE positions ADD COLUMN IF NOT EXISTS notes              TEXT`,
+    `ALTER TABLE positions ADD COLUMN IF NOT EXISTS created_at         TIMESTAMPTZ   DEFAULT NOW()`,
+    `ALTER TABLE positions ADD COLUMN IF NOT EXISTS initial_size_sol   NUMERIC`,
+    `ALTER TABLE positions ADD COLUMN IF NOT EXISTS banked_profit_sol  NUMERIC       DEFAULT 0`,
     // ── Legacy schema heal (whitelist approach) ──────────────────────────────
     // Drop NOT NULL from ANY column not in our known required set.
     // This catches 'position_id' (and any other legacy columns) regardless of

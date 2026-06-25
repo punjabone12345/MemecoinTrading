@@ -176,6 +176,17 @@ export default function App() {
   const eligibleCount = tokens.filter((t) => t.status === 'ELIGIBLE').length;
   const effectiveSettings = settings ?? DEFAULT_SETTINGS;
 
+  // Portfolio value = free balance + current market value of all open positions.
+  // currentPrice comes from the price monitor's WS tick (enriched on every 1s update).
+  // Falls back to entryPrice (at-cost value) when no live price has arrived yet.
+  const portfolioValue = openPositions.reduce((sum, p) => {
+    const currentVal = p.sizeSol * ((p.currentPrice ?? p.entryPrice) / p.entryPrice);
+    return sum + currentVal;
+  }, balance);
+
+  // Unrealized PnL across all open positions
+  const unrealizedPnl = portfolioValue - balance - openPositions.reduce((s, p) => s + p.sizeSol, 0);
+
   return (
     <div style={{ height: '100dvh', display: 'flex', flexDirection: 'column', background: '#080d1a', overflow: 'hidden' }}>
 
@@ -211,10 +222,19 @@ export default function App() {
 
         <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
           <div style={{ textAlign: 'right' }}>
-            <div style={{ fontSize: 8, color: '#4a6080', letterSpacing: '0.1em', fontWeight: 700 }}>BALANCE</div>
-            <div style={{ fontSize: 16, fontWeight: 900, color: '#00d4ff', letterSpacing: '-0.01em', fontVariantNumeric: 'tabular-nums' }}>
-              {balance.toFixed(3)}<span style={{ fontSize: 9, opacity: 0.6, marginLeft: 3 }}>SOL</span>
+            <div style={{ fontSize: 8, color: '#4a6080', letterSpacing: '0.1em', fontWeight: 700 }}>
+              PORTFOLIO{openPositions.length > 0 && (
+                <span style={{ marginLeft: 4, color: unrealizedPnl >= 0 ? '#00ff88' : '#ff4466' }}>
+                  {unrealizedPnl >= 0 ? '▲' : '▼'}{Math.abs(unrealizedPnl).toFixed(3)}
+                </span>
+              )}
             </div>
+            <div style={{ fontSize: 16, fontWeight: 900, color: '#00d4ff', letterSpacing: '-0.01em', fontVariantNumeric: 'tabular-nums' }}>
+              {portfolioValue.toFixed(3)}<span style={{ fontSize: 9, opacity: 0.6, marginLeft: 3 }}>SOL</span>
+            </div>
+            {openPositions.length > 0 && (
+              <div style={{ fontSize: 8, color: '#3a5070', marginTop: 1 }}>{balance.toFixed(3)} free</div>
+            )}
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
             <div style={{
@@ -246,13 +266,13 @@ export default function App() {
             {tab === 'positions' && (
               <MemoPositions
                 openPositions={openPositions} closedPositions={closedPositions}
-                balance={balance} analytics={analytics}
+                balance={portfolioValue} analytics={analytics}
                 settings={settings}
                 onRefresh={async () => { await loadInitial(); await refreshClosed(); }}
               />
             )}
             {tab === 'analytics' && (
-              <MemoAnalytics analytics={analytics} closedPositions={closedPositions} balance={balance} onRefresh={refreshClosed} />
+              <MemoAnalytics analytics={analytics} closedPositions={closedPositions} balance={portfolioValue} onRefresh={refreshClosed} />
             )}
             {tab === 'settings' && (
               <MemoSettings settings={effectiveSettings} onUpdate={(s) => setSettings(s)} />
