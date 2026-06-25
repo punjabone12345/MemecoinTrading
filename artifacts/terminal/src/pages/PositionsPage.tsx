@@ -41,28 +41,32 @@ function PnlDisplay({ pnl, pct }: { pnl?: number; pct?: number }) {
 }
 
 function RunnerBar({ pos, settings }: { pos: Position; settings: Settings | null }) {
-  const trailPct = settings?.trailingSLPct ?? 20;
   const slPct = settings?.slPct ?? 20;
-  const trailActivatePct = settings?.trailActivatePct ?? 70;
   const pnlPct = pos.pnlPct ?? (((pos.currentPrice ?? pos.entryPrice) - pos.entryPrice) / pos.entryPrice * 100);
   const peakGain = ((pos.peakPrice - pos.entryPrice) / pos.entryPrice) * 100;
   const windowPct = Math.max(100, peakGain * 1.2);
   const progress = Math.min(100, Math.max(0, ((pnlPct + windowPct * 0.2) / (windowPct * 1.2)) * 100));
   const color = pnlPct > 0 ? '#00ff88' : '#ff4466';
 
-  // Trail active only once peak crosses the activation threshold
-  const trailActive = peakGain >= trailActivatePct;
-  const slFromEntry = trailActive
-    ? peakGain * (1 - trailPct / 100)
-    : -slPct;
-  const statusLabel = trailActive
-    ? <span style={{ color: '#00ff88', fontWeight: 800 }}>Trail active</span>
-    : <span style={{ color: '#ffd700', fontWeight: 800 }}>Hard SL until +{trailActivatePct}%</span>;
+  // Mirror the backend tiered giveback logic
+  function givebackPct(peak: number): number | null {
+    if (peak >= 400) return 10;
+    if (peak >= 300) return 15;
+    if (peak >= 200) return 20;
+    if (peak >= 100) return 30;
+    if (peak >= 50)  return 40;
+    return null;
+  }
+  const giveback = givebackPct(peakGain);
+  const slFromEntry = giveback !== null ? peakGain * (1 - giveback / 100) : -slPct;
+  const tierLabel = giveback !== null
+    ? <span style={{ color: '#00ff88', fontWeight: 800 }}>Trail {giveback}% giveback</span>
+    : <span style={{ color: '#ffd700', fontWeight: 800 }}>Hard SL (trail at +50%)</span>;
 
   return (
     <div style={{ marginTop: 10 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, marginBottom: 6 }}>
-        <span style={{ color: '#3a5070' }}>Runner · {statusLabel}</span>
+        <span style={{ color: '#3a5070' }}>Runner · {tierLabel}</span>
         <span style={{ color, fontWeight: 800 }}>{pnlPct >= 0 ? '+' : ''}{pnlPct.toFixed(1)}%</span>
       </div>
       <div style={{ position: 'relative', height: 6, borderRadius: 6, background: 'rgba(255,255,255,0.06)' }}>

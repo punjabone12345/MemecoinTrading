@@ -144,8 +144,14 @@ export default function SettingsPage({ settings: init, onUpdate }: Props) {
 
       <Section title="Stop Loss / Runner" color="#ff4466">
         <NumberInput label="Hard Stop Loss %" value={n('slPct')} onChange={(v) => update('slPct', v)} min={5} max={50} step={5} suffix="%" />
-        <NumberInput label="Trail Activates After %" value={n('trailActivatePct')} onChange={(v) => update('trailActivatePct', v)} min={10} max={500} step={10} suffix="% gain" />
-        <NumberInput label="Trailing SL (% of peak gain to give back)" value={n('trailingSLPct')} onChange={(v) => update('trailingSLPct', v)} min={5} max={50} step={5} suffix="%" />
+        <div style={{ fontSize: 11, color: '#3a5070', lineHeight: 1.7, padding: '8px 0' }}>
+          <div style={{ fontWeight: 700, color: '#ffd700', marginBottom: 4 }}>Tiered Trailing SL (auto)</div>
+          <div>+50%  → give back 40% of gain (SL at +30%)</div>
+          <div>+100% → give back 30% of gain (SL at +70%)</div>
+          <div>+200% → give back 20% of gain (SL at +160%)</div>
+          <div>+300% → give back 15% of gain (SL at +255%)</div>
+          <div>+400% → give back 10% of gain (SL at +360%)</div>
+        </div>
       </Section>
 
       <Section title="Risk Management" color="#ffd700">

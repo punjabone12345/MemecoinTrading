@@ -42,6 +42,24 @@ const emergencyConfirmCounts = new Map<string, Map<string, number>>();
 const SL_CONFIRM_TICKS = 2;
 const slConfirmCounts = new Map<string, number>();
 
+/**
+ * Returns how many % of the peak gain the trail "gives back" at each tier.
+ * Returns null when peak is below +50% — hard SL floor applies instead.
+ *   +50%  → 40% giveback (keep 60%)
+ *   +100% → 30% giveback (keep 70%)
+ *   +200% → 20% giveback (keep 80%)
+ *   +300% → 15% giveback (keep 85%)
+ *   +400% → 10% giveback (keep 90%)
+ */
+function trailGivebackPct(peakGainPct: number): number | null {
+  if (peakGainPct >= 400) return 10;
+  if (peakGainPct >= 300) return 15;
+  if (peakGainPct >= 200) return 20;
+  if (peakGainPct >= 100) return 30;
+  if (peakGainPct >= 50)  return 40;
+  return null;
+}
+
 function toIST(date: Date): string {
   return date.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', hour12: false });
 }
@@ -295,14 +313,19 @@ async function _updatePositionPrice(id: string, currentPrice: number, freshBsr?:
   const newPeak = Math.max(pos.peakPrice, currentPrice);
   const pnlPct = ((currentPrice - pos.entryPrice) / pos.entryPrice) * 100;
 
-  // Trailing SL — only activates once peak gain >= trailActivatePct (default 70%).
-  // Below that threshold the hard SL floor (-slPct% from entry) protects the position.
-  // Once active: SL = entry × (1 + peakGain% × (1 - trailingSLPct/100))
-  // Example: peak +200%, trailPct 20% → SL at entry × 2.60 = +160% from entry.
+  // Tiered trailing SL — tightens as profit grows.
+  // Below +50%: hard SL floor only (-slPct% from entry).
+  // At/above each tier: SL = entry × (1 + peakGain% × (1 - giveback/100))
+  //   +50%  → give back 40% of gain  (keep 60%)
+  //   +100% → give back 30% of gain  (keep 70%)
+  //   +200% → give back 20% of gain  (keep 80%)
+  //   +300% → give back 15% of gain  (keep 85%)
+  //   +400% → give back 10% of gain  (keep 90%)
   const peakGainPct = ((newPeak - pos.entryPrice) / pos.entryPrice) * 100;
+  const givebackPct = trailGivebackPct(peakGainPct);
   let trailSL: number;
-  if (peakGainPct >= settings.trailActivatePct) {
-    trailSL = pos.entryPrice * (1 + (peakGainPct * (1 - settings.trailingSLPct / 100)) / 100);
+  if (givebackPct !== null) {
+    trailSL = pos.entryPrice * (1 + (peakGainPct * (1 - givebackPct / 100)) / 100);
   } else {
     trailSL = pos.entryPrice * (1 - settings.slPct / 100);
   }
