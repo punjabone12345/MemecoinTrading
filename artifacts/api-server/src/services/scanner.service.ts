@@ -354,7 +354,6 @@ const DEX_RANK: Record<string, number> = { raydium: 100, orca: 80, meteora: 70, 
 export async function scanTokens(): Promise<void> {
   const settings = await getSettings();
   const allPairs = await fetchDexPairs();
-  scanCount = allPairs.length;
   passedFilters = 0;
   eligibleCount = 0;
   rejectionCounts.clear(); // reset counters each scan cycle
@@ -378,6 +377,11 @@ export async function scanTokens(): Promise<void> {
     if (score > existScore) bestPairMap.set(mint, pair);
   }
   const pairs = Array.from(bestPairMap.values());
+
+  // scanCount = unique mints in THIS cycle (after dedup). This keeps the number
+  // consistent with rejectionCounts so the UI breakdown adds up correctly.
+  // (Using tokenCache.size inflates the count with stale entries from past cycles.)
+  scanCount = pairs.length;
 
   for (const pair of pairs) {
     const mint = pair.baseToken?.address;
@@ -538,8 +542,10 @@ export async function scanTokens(): Promise<void> {
     }
   }
 
-  // Recalculate from full cache so stats match what the UI token list shows
-  scanCount = tokenCache.size;
+  // Recount eligible/scanning from current cycle only (mints processed above).
+  // scanCount was already set to pairs.length after dedup — do NOT override with
+  // tokenCache.size, which includes stale entries from past cycles and makes the
+  // rejection breakdown look like it's missing tokens.
   eligibleCount = Array.from(tokenCache.values()).filter((t) => t.status === 'ELIGIBLE').length;
   passedFilters = Array.from(tokenCache.values()).filter((t) => t.status === 'ELIGIBLE' || t.status === 'SCANNING').length;
   logger.info({ scanCount, passedFilters, eligibleCount }, 'Scan complete');
