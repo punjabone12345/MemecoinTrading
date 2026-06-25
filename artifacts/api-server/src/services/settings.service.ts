@@ -33,6 +33,7 @@ export async function getSettings(): Promise<Settings> {
     tp1ClosePct: num('tp1ClosePct', 30),
     tp2Pct: num('tp2Pct', 150),
     tp2ClosePct: num('tp2ClosePct', 30),
+    tp2TrailPct: num('tp2TrailPct', 30),
     tp3Pct: num('tp3Pct', 300),
     tp3ClosePct: num('tp3ClosePct', 20),
     trailingSLPct: num('trailingSLPct', 20),

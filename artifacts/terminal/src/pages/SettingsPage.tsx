@@ -80,7 +80,7 @@ export default function SettingsPage({ settings: init, onUpdate }: Props) {
   const [resetInput, setResetInput] = useState('');
 
   function update(key: keyof Settings, value: string) {
-    const numKeys = ['minMc','maxMc','minVolume24h','minAgeHours','maxAgeHours','scanFrequencyMs','minBuySellRatio','maxTopHolder','maxCreatorPct','minLiquidity','minEntryScore','trendChecksRequired','maxOpenPositions','sizeScore90','sizeScore80','sizeScore70','slPct','tp1Pct','tp1ClosePct','tp2Pct','tp2ClosePct','tp3Pct','tp3ClosePct','trailingSLPct','maxDailyLossPct','startingBalanceSol','currentBalanceSol','slippagePct','priorityFeeSol'];
+    const numKeys = ['minMc','maxMc','minVolume24h','minAgeHours','maxAgeHours','scanFrequencyMs','minBuySellRatio','maxTopHolder','maxCreatorPct','minLiquidity','minEntryScore','trendChecksRequired','maxOpenPositions','sizeScore90','sizeScore80','sizeScore70','slPct','tp1Pct','tp1ClosePct','tp2Pct','tp2ClosePct','tp2TrailPct','tp3Pct','tp3ClosePct','trailingSLPct','maxDailyLossPct','startingBalanceSol','currentBalanceSol','slippagePct','priorityFeeSol'];
     const boolKeys = ['rugcheckEnabled'];
     const updated = { ...settings } as Record<string, unknown>;
     if (numKeys.includes(key)) updated[key] = parseFloat(value) || 0;
@@ -148,9 +148,10 @@ export default function SettingsPage({ settings: init, onUpdate }: Props) {
         <NumberInput label="TP1 Close %" value={n('tp1ClosePct')} onChange={(v) => update('tp1ClosePct', v)} min={10} max={100} step={5} suffix="%" />
         <NumberInput label="TP2 Gain %" value={n('tp2Pct')} onChange={(v) => update('tp2Pct', v)} min={50} max={1000} step={25} suffix="%" />
         <NumberInput label="TP2 Close %" value={n('tp2ClosePct')} onChange={(v) => update('tp2ClosePct', v)} min={10} max={100} step={5} suffix="%" />
+        <NumberInput label="TP2 Trail SL % (below peak)" value={n('tp2TrailPct')} onChange={(v) => update('tp2TrailPct', v)} min={5} max={80} step={5} suffix="%" />
         <NumberInput label="TP3 Gain %" value={n('tp3Pct')} onChange={(v) => update('tp3Pct', v)} min={100} max={2000} step={50} suffix="%" />
         <NumberInput label="TP3 Close %" value={n('tp3ClosePct')} onChange={(v) => update('tp3ClosePct', v)} min={10} max={100} step={5} suffix="%" />
-        <NumberInput label="Trailing SL %" value={n('trailingSLPct')} onChange={(v) => update('trailingSLPct', v)} min={5} max={50} step={5} suffix="%" />
+        <NumberInput label="TP3 Trail SL % (below peak)" value={n('trailingSLPct')} onChange={(v) => update('trailingSLPct', v)} min={5} max={50} step={5} suffix="%" />
       </Section>
 
       <Section title="Risk Management" color="#ffd700">

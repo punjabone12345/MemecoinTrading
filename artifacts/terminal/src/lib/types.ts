@@ -114,6 +114,7 @@ export interface Settings {
   tp1ClosePct: number;
   tp2Pct: number;
   tp2ClosePct: number;
+  tp2TrailPct: number;
   tp3Pct: number;
   tp3ClosePct: number;
   trailingSLPct: number;

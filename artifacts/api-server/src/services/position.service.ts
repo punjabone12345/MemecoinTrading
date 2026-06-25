@@ -305,18 +305,18 @@ async function _updatePositionPrice(id: string, currentPrice: number, freshBsr?:
     const sizeBeforeClose = currentSizeSol;
     const partialPnl = await partialClose(settings.tp1ClosePct);
     const soldSol = sizeBeforeClose - currentSizeSol;
-    await notifyTPHit({ name: pos.name, symbol: pos.symbol, level: 1, gainPct: pnlPct, profitSol: partialPnl, newSLPct: 0, entryPrice: pos.entryPrice, currentPrice, soldSol, remainingSol: currentSizeSol, initialSol: pos.sizeSol });
+    await notifyTPHit({ name: pos.name, symbol: pos.symbol, level: 1, gainPct: pnlPct, profitSol: partialPnl, newSLPct: 0, entryPrice: pos.entryPrice, currentPrice, soldSol, remainingSol: currentSizeSol, initialSol: pos.sizeSol, peakPrice: newPeak });
     logger.info({ id, symbol: pos.symbol, closePct: settings.tp1ClosePct, partialPnl, soldSol, remainingSizeSol: currentSizeSol }, 'TP1 partial close');
   }
 
-  // TP2 — sell tp2ClosePct% of remaining; move SL to TP1 level
+  // TP2 — sell tp2ClosePct% of remaining; start trailing SL at tp2TrailPct% below peak
   if (!tp2Hit && pnlPct >= settings.tp2Pct) {
     tp2Hit = true;
-    newSL = pos.entryPrice * (1 + settings.tp1Pct / 100);
+    // SL will be managed by the trailing block below (tp2TrailPct% below peak)
     const sizeBeforeClose = currentSizeSol;
     const partialPnl = await partialClose(settings.tp2ClosePct);
     const soldSol = sizeBeforeClose - currentSizeSol;
-    await notifyTPHit({ name: pos.name, symbol: pos.symbol, level: 2, gainPct: pnlPct, profitSol: partialPnl, newSLPct: settings.tp1Pct, entryPrice: pos.entryPrice, currentPrice, soldSol, remainingSol: currentSizeSol, initialSol: pos.sizeSol });
+    await notifyTPHit({ name: pos.name, symbol: pos.symbol, level: 2, gainPct: pnlPct, profitSol: partialPnl, newSLPct: -settings.tp2TrailPct, entryPrice: pos.entryPrice, currentPrice, soldSol, remainingSol: currentSizeSol, initialSol: pos.sizeSol, peakPrice: newPeak });
     logger.info({ id, symbol: pos.symbol, closePct: settings.tp2ClosePct, partialPnl, soldSol, remainingSizeSol: currentSizeSol }, 'TP2 partial close');
   }
 
@@ -326,13 +326,16 @@ async function _updatePositionPrice(id: string, currentPrice: number, freshBsr?:
     const sizeBeforeClose = currentSizeSol;
     const partialPnl = await partialClose(settings.tp3ClosePct);
     const soldSol = sizeBeforeClose - currentSizeSol;
-    await notifyTPHit({ name: pos.name, symbol: pos.symbol, level: 3, gainPct: pnlPct, profitSol: partialPnl, newSLPct: settings.tp2Pct, entryPrice: pos.entryPrice, currentPrice, soldSol, remainingSol: currentSizeSol, initialSol: pos.sizeSol });
+    await notifyTPHit({ name: pos.name, symbol: pos.symbol, level: 3, gainPct: pnlPct, profitSol: partialPnl, newSLPct: -settings.trailingSLPct, entryPrice: pos.entryPrice, currentPrice, soldSol, remainingSol: currentSizeSol, initialSol: pos.sizeSol, peakPrice: newPeak });
     logger.info({ id, symbol: pos.symbol, closePct: settings.tp3ClosePct, partialPnl, soldSol, remainingSizeSol: currentSizeSol }, 'TP3 partial close');
   }
 
-  // Trailing SL after TP3 — protects the runner portion
-  if (tp3Hit) {
-    const trailSL = newPeak * (1 - settings.trailingSLPct / 100);
+  // Trailing SL — activates after TP2, tightens after TP3
+  // After TP2: trail at tp2TrailPct% (default 30%) below peak high
+  // After TP3: tighten to trailingSLPct% (default 20%) below peak high
+  if (tp2Hit) {
+    const trailPct = tp3Hit ? settings.trailingSLPct : settings.tp2TrailPct;
+    const trailSL = newPeak * (1 - trailPct / 100);
     newSL = Math.max(newSL, trailSL);
   }
 
