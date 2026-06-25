@@ -42,23 +42,27 @@ function PnlDisplay({ pnl, pct }: { pnl?: number; pct?: number }) {
 
 function RunnerBar({ pos, settings }: { pos: Position; settings: Settings | null }) {
   const trailPct = settings?.trailingSLPct ?? 20;
+  const slPct = settings?.slPct ?? 20;
+  const trailActivatePct = settings?.trailActivatePct ?? 70;
   const pnlPct = pos.pnlPct ?? (((pos.currentPrice ?? pos.entryPrice) - pos.entryPrice) / pos.entryPrice * 100);
   const peakGain = ((pos.peakPrice - pos.entryPrice) / pos.entryPrice) * 100;
-  // Show a symmetric ±100% window so gains and SL are both visible
   const windowPct = Math.max(100, peakGain * 1.2);
   const progress = Math.min(100, Math.max(0, ((pnlPct + windowPct * 0.2) / (windowPct * 1.2)) * 100));
   const color = pnlPct > 0 ? '#00ff88' : '#ff4466';
-  // SL is at (1 - trailPct/100) × peakGain from entry (locks in 80% of peak gain).
-  // Before going green, show the hard SL floor.
-  const slPct = settings?.slPct ?? 20;
-  const slFromEntry = peakGain > 0
+
+  // Trail active only once peak crosses the activation threshold
+  const trailActive = peakGain >= trailActivatePct;
+  const slFromEntry = trailActive
     ? peakGain * (1 - trailPct / 100)
     : -slPct;
+  const statusLabel = trailActive
+    ? <span style={{ color: '#00ff88', fontWeight: 800 }}>Trail active</span>
+    : <span style={{ color: '#ffd700', fontWeight: 800 }}>Hard SL until +{trailActivatePct}%</span>;
 
   return (
     <div style={{ marginTop: 10 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, marginBottom: 6 }}>
-        <span style={{ color: '#3a5070' }}>Runner · Trail SL <span style={{ color: '#ff4466', fontWeight: 800 }}>{trailPct}% of peak gain</span></span>
+        <span style={{ color: '#3a5070' }}>Runner · {statusLabel}</span>
         <span style={{ color, fontWeight: 800 }}>{pnlPct >= 0 ? '+' : ''}{pnlPct.toFixed(1)}%</span>
       </div>
       <div style={{ position: 'relative', height: 6, borderRadius: 6, background: 'rgba(255,255,255,0.06)' }}>

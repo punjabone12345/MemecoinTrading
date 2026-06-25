@@ -37,6 +37,7 @@ export async function getSettings(): Promise<Settings> {
     tp3Pct: num('tp3Pct', 300),
     tp3ClosePct: num('tp3ClosePct', 20),
     trailingSLPct: num('trailingSLPct', 20),
+    trailActivatePct: num('trailActivatePct', 70),
     maxDailyLossPct: num('maxDailyLossPct', 3),
     startingBalanceSol: num('startingBalanceSol', 10),
     currentBalanceSol: num('currentBalanceSol', 10),

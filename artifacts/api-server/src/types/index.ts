@@ -110,6 +110,7 @@ export interface Settings {
   tp3Pct: number;
   tp3ClosePct: number;
   trailingSLPct: number;
+  trailActivatePct: number;
   // Daily limit
   maxDailyLossPct: number;
   // Paper

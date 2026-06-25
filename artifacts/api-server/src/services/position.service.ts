@@ -295,13 +295,13 @@ async function _updatePositionPrice(id: string, currentPrice: number, freshBsr?:
   const newPeak = Math.max(pos.peakPrice, currentPrice);
   const pnlPct = ((currentPrice - pos.entryPrice) / pos.entryPrice) * 100;
 
-  // Trailing SL — trails (trailingSLPct)% of the PEAK GAIN from entry.
-  // Example: peak = +200%, trailPct = 20% → trail locks 80% of gain → SL at +160% from entry.
-  // Formula: SL = entry * (1 + peakGainPct * (1 - trailPct/100) / 100)
-  // While in loss / no gain: fall back to hard SL floor (-slPct% from entry).
+  // Trailing SL — only activates once peak gain >= trailActivatePct (default 70%).
+  // Below that threshold the hard SL floor (-slPct% from entry) protects the position.
+  // Once active: SL = entry × (1 + peakGain% × (1 - trailingSLPct/100))
+  // Example: peak +200%, trailPct 20% → SL at entry × 2.60 = +160% from entry.
   const peakGainPct = ((newPeak - pos.entryPrice) / pos.entryPrice) * 100;
   let trailSL: number;
-  if (peakGainPct > 0) {
+  if (peakGainPct >= settings.trailActivatePct) {
     trailSL = pos.entryPrice * (1 + (peakGainPct * (1 - settings.trailingSLPct / 100)) / 100);
   } else {
     trailSL = pos.entryPrice * (1 - settings.slPct / 100);

@@ -80,7 +80,7 @@ export default function SettingsPage({ settings: init, onUpdate }: Props) {
   const [resetInput, setResetInput] = useState('');
 
   function update(key: keyof Settings, value: string) {
-    const numKeys = ['minMc','maxMc','minVolume24h','minAgeHours','maxAgeHours','scanFrequencyMs','minBuySellRatio','maxTopHolder','maxCreatorPct','minLiquidity','minEntryScore','trendChecksRequired','maxOpenPositions','sizeScore90','sizeScore80','sizeScore70','slPct','tp1Pct','tp1ClosePct','tp2Pct','tp2ClosePct','tp2TrailPct','tp3Pct','tp3ClosePct','trailingSLPct','maxDailyLossPct','startingBalanceSol','currentBalanceSol','slippagePct','priorityFeeSol'];
+    const numKeys = ['minMc','maxMc','minVolume24h','minAgeHours','maxAgeHours','scanFrequencyMs','minBuySellRatio','maxTopHolder','maxCreatorPct','minLiquidity','minEntryScore','trendChecksRequired','maxOpenPositions','sizeScore90','sizeScore80','sizeScore70','slPct','tp1Pct','tp1ClosePct','tp2Pct','tp2ClosePct','tp2TrailPct','tp3Pct','tp3ClosePct','trailingSLPct','trailActivatePct','maxDailyLossPct','startingBalanceSol','currentBalanceSol','slippagePct','priorityFeeSol'];
     const boolKeys = ['rugcheckEnabled'];
     const updated = { ...settings } as Record<string, unknown>;
     if (numKeys.includes(key)) updated[key] = parseFloat(value) || 0;
@@ -144,7 +144,8 @@ export default function SettingsPage({ settings: init, onUpdate }: Props) {
 
       <Section title="Stop Loss / Runner" color="#ff4466">
         <NumberInput label="Hard Stop Loss %" value={n('slPct')} onChange={(v) => update('slPct', v)} min={5} max={50} step={5} suffix="%" />
-        <NumberInput label="Trailing SL % (below peak)" value={n('trailingSLPct')} onChange={(v) => update('trailingSLPct', v)} min={5} max={50} step={5} suffix="%" />
+        <NumberInput label="Trail Activates After %" value={n('trailActivatePct')} onChange={(v) => update('trailActivatePct', v)} min={10} max={500} step={10} suffix="% gain" />
+        <NumberInput label="Trailing SL (% of peak gain to give back)" value={n('trailingSLPct')} onChange={(v) => update('trailingSLPct', v)} min={5} max={50} step={5} suffix="%" />
       </Section>
 
       <Section title="Risk Management" color="#ffd700">

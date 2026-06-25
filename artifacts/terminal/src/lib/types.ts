@@ -120,6 +120,7 @@ export interface Settings {
   tp3Pct: number;
   tp3ClosePct: number;
   trailingSLPct: number;
+  trailActivatePct: number;
   maxDailyLossPct: number;
   startingBalanceSol: number;
   currentBalanceSol: number;
