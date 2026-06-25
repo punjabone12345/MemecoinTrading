@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useTransition, memo } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { Position, Token, Analytics, Settings, ScanStats } from './lib/types.js';
 import { api, createWS } from './lib/api.js';
@@ -21,7 +21,7 @@ const DEFAULT_SETTINGS: Settings = {
   trendChecksRequired: 2, maxOpenPositions: 5,
   sizeScore90: 1, sizeScore80: 0.75, sizeScore70: 0.5,
   slPct: 25, tp1Pct: 70, tp1ClosePct: 30, tp2Pct: 150,
-  tp2ClosePct: 30, tp3Pct: 300, tp3ClosePct: 20, trailingSLPct: 20,
+  tp2ClosePct: 30, tp2TrailPct: 30, tp3Pct: 300, tp3ClosePct: 20, trailingSLPct: 20,
   maxDailyLossPct: 5, startingBalanceSol: 10, currentBalanceSol: 10,
   rpcEndpoint: 'https://api.mainnet-beta.solana.com',
   slippagePct: 1, priorityFeeSol: 0.001, walletPublicKey: '',
@@ -37,16 +37,23 @@ const NAV: NavTab[] = [
   { id: 'settings', label: 'Setup', color: '#8099bb', icon: <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round"><circle cx="12" cy="12" r="3"/><path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"/></svg> },
 ];
 
-const slide = {
-  enter: (d: number) => ({ x: d > 0 ? '55%' : '-55%', opacity: 0, scale: 0.97 }),
-  center: { x: 0, opacity: 1, scale: 1 },
-  exit: (d: number) => ({ x: d < 0 ? '55%' : '-55%', opacity: 0, scale: 0.97 }),
+// Lightweight fade + tiny upward slide — much cheaper than 55% horizontal
+const pageVariants = {
+  enter: { opacity: 0, y: 10 },
+  center: { opacity: 1, y: 0 },
+  exit: { opacity: 0, y: -6 },
 };
-const spring = { type: 'spring' as const, stiffness: 420, damping: 40, mass: 0.85 };
+const pageTrans = { duration: 0.14, ease: 'easeOut' };
+
+// Memoized pages — only re-render when their own props change
+const MemoDiscover = memo(DiscoverPage);
+const MemoWatchlist = memo(WatchlistPage);
+const MemoPositions = memo(PositionsPage);
+const MemoAnalytics = memo(AnalyticsPage);
+const MemoSettings = memo(SettingsPage);
 
 export default function App() {
   const [tab, setTab] = useState<Tab>('discover');
-  const [prevTab, setPrevTab] = useState<Tab>('discover');
   const [tokens, setTokens] = useState<Token[]>([]);
   const [scanStats, setScanStats] = useState<ScanStats>({ scanning: 0, passed: 0, eligible: 0 });
   const [openPositions, setOpenPositions] = useState<Position[]>([]);
@@ -56,8 +63,12 @@ export default function App() {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [wsConnected, setWsConnected] = useState(false);
   const [dataLoaded, setDataLoaded] = useState(false);
-  const wsRef = useRef<WebSocket | null>(null);
+  const [, startTransition] = useTransition();
+
+  // Use a ref so polling closure always sees latest WS state without re-creating interval
+  const wsConnectedRef = useRef(false);
   const retryRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const wsRef = useRef<WebSocket | null>(null);
 
   const loadInitial = useCallback(async () => {
     try {
@@ -76,8 +87,7 @@ export default function App() {
       setAnalytics(analyticsData);
       setDataLoaded(true);
     } catch {
-      // Retry every 4 seconds until API is reachable
-      retryRef.current = setTimeout(loadInitial, 4000);
+      retryRef.current = setTimeout(loadInitial, 3000);
     }
   }, []);
 
@@ -86,16 +96,22 @@ export default function App() {
     return () => { if (retryRef.current) clearTimeout(retryRef.current); };
   }, [loadInitial]);
 
+  // WebSocket — reconnects fast, feeds all real-time data
   useEffect(() => {
-    let reconnectDelay = 1500;
+    let reconnectDelay = 500;
     let destroyed = false;
 
     const connect = async () => {
       if (destroyed) return;
       const ws = await createWS((msg) => {
         if (msg.type === 'positions') {
-          const p = msg.data as Position[];
-          setOpenPositions(p.filter((x) => x.status === 'OPEN'));
+          const p = msg.data as { open: Position[]; closed: Position[] } | Position[];
+          if (Array.isArray(p)) {
+            setOpenPositions(p.filter((x) => x.status === 'OPEN'));
+          } else {
+            setOpenPositions(p.open);
+            setClosedPositions(p.closed);
+          }
         }
         if (msg.type === 'tokens') {
           const d = msg.data as { tokens: Token[]; stats: ScanStats };
@@ -106,11 +122,16 @@ export default function App() {
         if (msg.type === 'balance') setBalance((msg.data as { balance: number }).balance);
       });
       if (destroyed) { ws.close(); return; }
-      ws.onopen = () => { setWsConnected(true); reconnectDelay = 1500; };
+      ws.onopen = () => {
+        setWsConnected(true);
+        wsConnectedRef.current = true;
+        reconnectDelay = 500;
+      };
       ws.onclose = () => {
         setWsConnected(false);
+        wsConnectedRef.current = false;
         if (!destroyed) setTimeout(connect, reconnectDelay);
-        reconnectDelay = Math.min(reconnectDelay * 1.5, 10000);
+        reconnectDelay = Math.min(reconnectDelay * 1.5, 8000);
       };
       ws.onerror = () => { ws.close(); };
       wsRef.current = ws;
@@ -120,27 +141,25 @@ export default function App() {
     return () => { destroyed = true; wsRef.current?.close(); };
   }, []);
 
-  // Polling fallback: refresh positions, balance and tokens every 5s
-  // This keeps the UI accurate even when the WebSocket is disconnected.
+  // Fallback poll — only fires when WebSocket is disconnected.
+  // Fetches only positions + balance (cheapest, most important).
+  // Scanner tokens and settings update rarely — skip them in the fallback.
   useEffect(() => {
     const poll = async () => {
+      if (wsConnectedRef.current) return; // WS is live — skip
       try {
-        const [posData, scanData, settingsData] = await Promise.all([
+        const [posData, settingsData] = await Promise.all([
           api.getPositions(),
-          api.getScanner(),
           api.getSettings(),
         ]);
         setOpenPositions(posData.open);
         setClosedPositions(posData.closed);
-        setTokens(scanData.tokens);
-        setScanStats(scanData.stats);
         setBalance(settingsData.currentBalanceSol);
-        setSettings(settingsData);
       } catch {
-        // Silently ignore poll errors
+        // Silently ignore
       }
     };
-    const id = setInterval(poll, 5000);
+    const id = setInterval(poll, 3000);
     return () => clearInterval(id);
   }, []);
 
@@ -148,12 +167,13 @@ export default function App() {
     try { setClosedPositions(await api.getClosedPositions()); } catch {}
   }, []);
 
-  const handleTab = (t: Tab) => { if (t === tab) return; setPrevTab(tab); setTab(t); };
-  const dir = TAB_ORDER.indexOf(tab) > TAB_ORDER.indexOf(prevTab) ? 1 : -1;
+  const handleTab = useCallback((t: Tab) => {
+    if (t === tab) return;
+    startTransition(() => setTab(t));
+  }, [tab]);
 
   const openCount = openPositions.length;
   const eligibleCount = tokens.filter((t) => t.status === 'ELIGIBLE').length;
-
   const effectiveSettings = settings ?? DEFAULT_SETTINGS;
 
   return (
@@ -167,7 +187,6 @@ export default function App() {
         borderBottom: '1px solid rgba(0,212,255,0.1)',
         backdropFilter: 'blur(20px)',
       }}>
-        {/* Logo */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
           <div style={{
             width: 36, height: 36, borderRadius: 12,
@@ -190,7 +209,6 @@ export default function App() {
           </div>
         </div>
 
-        {/* Right */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
           <div style={{ textAlign: 'right' }}>
             <div style={{ fontSize: 8, color: '#4a6080', letterSpacing: '0.1em', fontWeight: 700 }}>BALANCE</div>
@@ -213,21 +231,20 @@ export default function App() {
 
       {/* ── Pages ── */}
       <div style={{ flex: 1, position: 'relative', overflow: 'hidden' }}>
-        <AnimatePresence initial={false} custom={dir} mode="popLayout">
+        <AnimatePresence initial={false} mode="wait">
           <motion.div
             key={tab}
-            custom={dir}
-            variants={slide}
+            variants={pageVariants}
             initial="enter"
             animate="center"
             exit="exit"
-            transition={spring}
+            transition={pageTrans}
             style={{ position: 'absolute', inset: 0, overflowY: 'auto', overflowX: 'hidden', WebkitOverflowScrolling: 'touch', padding: '16px 16px 12px' }}
           >
-            {tab === 'discover' && <DiscoverPage tokens={tokens} scanStats={scanStats} settings={settings} />}
-            {tab === 'watchlist' && <WatchlistPage tokens={tokens} />}
+            {tab === 'discover' && <MemoDiscover tokens={tokens} scanStats={scanStats} settings={settings} />}
+            {tab === 'watchlist' && <MemoWatchlist tokens={tokens} />}
             {tab === 'positions' && (
-              <PositionsPage
+              <MemoPositions
                 openPositions={openPositions} closedPositions={closedPositions}
                 balance={balance} analytics={analytics}
                 settings={settings}
@@ -235,10 +252,10 @@ export default function App() {
               />
             )}
             {tab === 'analytics' && (
-              <AnalyticsPage analytics={analytics} closedPositions={closedPositions} balance={balance} onRefresh={refreshClosed} />
+              <MemoAnalytics analytics={analytics} closedPositions={closedPositions} balance={balance} onRefresh={refreshClosed} />
             )}
             {tab === 'settings' && (
-              <SettingsPage settings={effectiveSettings} onUpdate={(s) => setSettings(s)} />
+              <MemoSettings settings={effectiveSettings} onUpdate={(s) => setSettings(s)} />
             )}
           </motion.div>
         </AnimatePresence>
@@ -275,7 +292,6 @@ export default function App() {
                   boxShadow: `0 0 12px ${t.color}99`,
                 }} transition={{ type: 'spring', stiffness: 500, damping: 42 }} />
               )}
-
               <div style={{ position: 'relative', color: active ? t.color : '#3a5070', transition: 'color 0.2s, transform 0.2s', transform: active ? 'scale(1.12)' : 'scale(1)' }}>
                 {t.icon}
                 {badge > 0 && (

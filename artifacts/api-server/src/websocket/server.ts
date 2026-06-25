@@ -39,9 +39,10 @@ export function broadcast(msg: WSMessage): void {
 
 export async function broadcastPositions(): Promise<void> {
   // Imported lazily to avoid circular deps
-  const { getOpenPositions, getAnalytics } = await import('../services/position.service.js');
-  const [positions, analytics] = await Promise.all([getOpenPositions(), getAnalytics()]);
-  broadcast({ type: 'positions', data: positions });
+  const { getOpenPositions, getClosedPositions, getAnalytics } = await import('../services/position.service.js');
+  const [open, closed, analytics] = await Promise.all([getOpenPositions(), getClosedPositions(), getAnalytics()]);
+  // Send both open + closed so the frontend never needs to poll for closed trades
+  broadcast({ type: 'positions', data: { open, closed } });
   broadcast({ type: 'analytics', data: analytics });
 }
 
