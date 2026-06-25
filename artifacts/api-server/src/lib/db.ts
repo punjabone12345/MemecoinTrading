@@ -213,5 +213,80 @@ export async function initDB(): Promise<void> {
     );
   }
 
+  // ── One-time backfill: fix historical positions that predate banked_profit_sol ──
+  // Detects by banked_profit_sol IS NULL. Runs once; afterwards every row has the column set.
+  // For positions with TP hits: reconstructs initial_size_sol from runner + TP fractions,
+  // approximates banked profit using the TP threshold prices, then corrects pnl_sol / pnl_pct.
+  try {
+    // Use initial_size_sol IS NULL as the sentinel — it has no DEFAULT so existing
+    // rows are NULL until this backfill runs. banked_profit_sol had DEFAULT 0 so
+    // it is already 0 for old rows (not NULL), making it an unreliable sentinel.
+    const unpatched = await query<{
+      id: string; size_sol: string; tp1_hit: boolean; tp2_hit: boolean; tp3_hit: boolean;
+      pnl_sol: string | null; pnl_pct: string | null; status: string;
+    }>(`SELECT id, size_sol, tp1_hit, tp2_hit, tp3_hit, pnl_sol, pnl_pct, status
+        FROM positions WHERE initial_size_sol IS NULL`);
+
+    if (unpatched.length > 0) {
+      // Read TP settings from DB (avoids circular dep with settings.service)
+      const sRows = await query<{ key: string; value: string }>(
+        `SELECT key, value FROM settings WHERE key IN ('tp1Pct','tp1ClosePct','tp2Pct','tp2ClosePct','tp3Pct','tp3ClosePct')`
+      );
+      const s: Record<string, number> = {};
+      for (const r of sRows) s[r.key] = parseFloat(r.value);
+      const tp1Pct     = s['tp1Pct']     ?? 70;
+      const tp1Close   = (s['tp1ClosePct'] ?? 30) / 100;
+      const tp2Pct     = s['tp2Pct']     ?? 150;
+      const tp2Close   = (s['tp2ClosePct'] ?? 30) / 100;
+      const tp3Pct     = s['tp3Pct']     ?? 300;
+      const tp3Close   = (s['tp3ClosePct'] ?? 20) / 100;
+
+      for (const row of unpatched) {
+        const runnerSize = parseFloat(row.size_sol);
+        const tp1Hit = Boolean(row.tp1_hit);
+        const tp2Hit = Boolean(row.tp2_hit);
+        const tp3Hit = Boolean(row.tp3_hit);
+
+        // Reverse the partial-close reductions to recover initial_size_sol.
+        // e.g. if TP1 (30%) hit: runner = initial × 0.70  → initial = runner / 0.70
+        let remainFactor = 1.0;
+        if (tp1Hit) remainFactor *= (1 - tp1Close);
+        if (tp2Hit) remainFactor *= (1 - tp2Close);
+        if (tp3Hit) remainFactor *= (1 - tp3Close);
+        const initialSizeSol = remainFactor > 0.001 ? runnerSize / remainFactor : runnerSize;
+
+        // Estimate banked profit at each TP using the threshold price as trigger price.
+        // Real trigger price ≥ threshold, so this is a conservative (lower-bound) estimate.
+        let bankdProfit = 0;
+        let stageSize = initialSizeSol;
+        if (tp1Hit) { const sold = stageSize * tp1Close; bankdProfit += sold * (tp1Pct / 100); stageSize -= sold; }
+        if (tp2Hit) { const sold = stageSize * tp2Close; bankdProfit += sold * (tp2Pct / 100); stageSize -= sold; }
+        if (tp3Hit) { const sold = stageSize * tp3Close; bankdProfit += sold * (tp3Pct / 100); stageSize -= sold; }
+
+        if (row.status === 'CLOSED' && row.pnl_sol !== null) {
+          // Correct pnl_sol to include the previously-missing TP profits
+          const correctedPnlSol = parseFloat(row.pnl_sol) + bankdProfit;
+          const correctedPnlPct = initialSizeSol > 0.0001
+            ? (correctedPnlSol / initialSizeSol) * 100
+            : (row.pnl_pct !== null ? parseFloat(row.pnl_pct) : 0);
+          await query(
+            `UPDATE positions SET initial_size_sol=$1, banked_profit_sol=$2, pnl_sol=$3, pnl_pct=$4 WHERE id=$5`,
+            [initialSizeSol, bankdProfit, correctedPnlSol, correctedPnlPct, row.id]
+          );
+        } else {
+          // Open positions or positions with no stored pnl: set columns but don't touch pnl_sol
+          await query(
+            `UPDATE positions SET initial_size_sol=$1, banked_profit_sol=$2 WHERE id=$3`,
+            [initialSizeSol, bankdProfit, row.id]
+          );
+        }
+      }
+
+      logger.info({ count: unpatched.length }, 'Historical positions backfilled: initial_size_sol + banked_profit_sol corrected');
+    }
+  } catch (err) {
+    logger.warn({ err }, 'Historical backfill skipped (non-fatal)');
+  }
+
   logger.info('Database initialized');
 }
