@@ -48,19 +48,24 @@ function RunnerBar({ pos, settings }: { pos: Position; settings: Settings | null
   const windowPct = Math.max(100, peakGain * 1.2);
   const progress = Math.min(100, Math.max(0, ((pnlPct + windowPct * 0.2) / (windowPct * 1.2)) * 100));
   const color = pnlPct > 0 ? '#00ff88' : '#ff4466';
-  const slFromPeak = peakGain > 0 ? peakGain - trailPct : -trailPct;
+  // SL is at (1 - trailPct/100) × peakGain from entry (locks in 80% of peak gain).
+  // Before going green, show the hard SL floor.
+  const slPct = settings?.slPct ?? 20;
+  const slFromEntry = peakGain > 0
+    ? peakGain * (1 - trailPct / 100)
+    : -slPct;
 
   return (
     <div style={{ marginTop: 10 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, marginBottom: 6 }}>
-        <span style={{ color: '#3a5070' }}>Runner · Trail SL <span style={{ color: '#ff4466', fontWeight: 800 }}>-{trailPct}% from peak</span></span>
+        <span style={{ color: '#3a5070' }}>Runner · Trail SL <span style={{ color: '#ff4466', fontWeight: 800 }}>{trailPct}% of peak gain</span></span>
         <span style={{ color, fontWeight: 800 }}>{pnlPct >= 0 ? '+' : ''}{pnlPct.toFixed(1)}%</span>
       </div>
       <div style={{ position: 'relative', height: 6, borderRadius: 6, background: 'rgba(255,255,255,0.06)' }}>
         <div style={{ height: '100%', borderRadius: 6, width: `${progress}%`, background: color, boxShadow: `0 0 8px ${color}55`, transition: 'width 0.5s ease' }} />
       </div>
       <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 9, marginTop: 4, color: '#3a5070', fontWeight: 700 }}>
-        <span>SL {slFromPeak >= 0 ? '+' : ''}{slFromPeak.toFixed(0)}%</span>
+        <span>SL {slFromEntry >= 0 ? '+' : ''}{slFromEntry.toFixed(0)}%</span>
         <span>Peak +{peakGain.toFixed(1)}%</span>
       </div>
     </div>
