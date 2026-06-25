@@ -40,39 +40,28 @@ function PnlDisplay({ pnl, pct }: { pnl?: number; pct?: number }) {
   );
 }
 
-function TPBar({ pos, settings }: { pos: Position; settings: Settings | null }) {
-  const tp1 = settings?.tp1Pct ?? 70;
-  const tp2 = settings?.tp2Pct ?? 150;
-  const tp3 = settings?.tp3Pct ?? 300;
-  const tps = [tp1, tp2, tp3];
-  const maxPct = tp3 * 1.15;
+function RunnerBar({ pos, settings }: { pos: Position; settings: Settings | null }) {
+  const trailPct = settings?.trailingSLPct ?? 20;
   const pnlPct = pos.pnlPct ?? (((pos.currentPrice ?? pos.entryPrice) - pos.entryPrice) / pos.entryPrice * 100);
-  const progress = Math.min(100, Math.max(0, (pnlPct / maxPct) * 100));
-  const trackColor = pnlPct >= tp3 ? '#ffd700' : pnlPct >= tp2 ? '#00d4ff' : pnlPct >= tp1 ? '#00ff88' : pnlPct < 0 ? '#ff4466' : '#3a5070';
+  const peakGain = ((pos.peakPrice - pos.entryPrice) / pos.entryPrice) * 100;
+  // Show a symmetric ±100% window so gains and SL are both visible
+  const windowPct = Math.max(100, peakGain * 1.2);
+  const progress = Math.min(100, Math.max(0, ((pnlPct + windowPct * 0.2) / (windowPct * 1.2)) * 100));
+  const color = pnlPct > 0 ? '#00ff88' : '#ff4466';
+  const slFromPeak = peakGain > 0 ? peakGain - trailPct : -trailPct;
+
   return (
     <div style={{ marginTop: 10 }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, marginBottom: 6, color: '#3a5070' }}>
-        <span>TP Progress</span>
-        <span style={{ color: trackColor, fontWeight: 800 }}>{pnlPct.toFixed(1)}%</span>
+      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, marginBottom: 6 }}>
+        <span style={{ color: '#3a5070' }}>Runner · Trail SL <span style={{ color: '#ff4466', fontWeight: 800 }}>-{trailPct}% from peak</span></span>
+        <span style={{ color, fontWeight: 800 }}>{pnlPct >= 0 ? '+' : ''}{pnlPct.toFixed(1)}%</span>
       </div>
       <div style={{ position: 'relative', height: 6, borderRadius: 6, background: 'rgba(255,255,255,0.06)' }}>
-        <div style={{ height: '100%', borderRadius: 6, width: `${progress}%`, background: trackColor, boxShadow: `0 0 8px ${trackColor}55`, transition: 'width 0.5s ease' }} />
-        {tps.map((tp, i) => {
-          const hit = [pos.tp1Hit, pos.tp2Hit, pos.tp3Hit][i];
-          return (
-            <div key={tp} style={{
-              position: 'absolute', top: '50%', transform: 'translate(-50%, -50%)',
-              left: `${Math.min(100, (tp / maxPct) * 100)}%`,
-              width: 10, height: 10, borderRadius: '50%',
-              background: hit ? '#ffd700' : '#080d1a',
-              border: `2px solid ${hit ? '#ffd700' : 'rgba(255,255,255,0.15)'}`,
-              boxShadow: hit ? '0 0 6px #ffd700' : 'none',
-            }} />
-          );
-        })}
+        <div style={{ height: '100%', borderRadius: 6, width: `${progress}%`, background: color, boxShadow: `0 0 8px ${color}55`, transition: 'width 0.5s ease' }} />
       </div>
       <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 9, marginTop: 4, color: '#3a5070', fontWeight: 700 }}>
-        <span>+{tp1}%</span><span>+{tp2}%</span><span>+{tp3}%</span>
+        <span>SL {slFromPeak >= 0 ? '+' : ''}{slFromPeak.toFixed(0)}%</span>
+        <span>Peak +{peakGain.toFixed(1)}%</span>
       </div>
     </div>
   );
@@ -195,7 +184,7 @@ function PositionCard({ pos, settings, onRefresh }: { pos: Position; settings: S
           ) : null)}
         </div>
 
-        <TPBar pos={pos} settings={settings} />
+        <RunnerBar pos={pos} settings={settings} />
 
         <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
           {pos.dexUrl && (

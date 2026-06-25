@@ -28,7 +28,7 @@ export async function getSettings(): Promise<Settings> {
     sizeScore90: num('sizeScore90', 1),
     sizeScore80: num('sizeScore80', 0.75),
     sizeScore70: num('sizeScore70', 0.5),
-    slPct: num('slPct', 25),
+    slPct: num('slPct', 20),
     tp1Pct: num('tp1Pct', 70),
     tp1ClosePct: num('tp1ClosePct', 30),
     tp2Pct: num('tp2Pct', 150),

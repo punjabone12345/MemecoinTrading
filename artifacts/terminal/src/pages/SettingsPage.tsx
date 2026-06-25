@@ -142,16 +142,9 @@ export default function SettingsPage({ settings: init, onUpdate }: Props) {
         <NumberInput label="Size @ Score 70–79" value={n('sizeScore70')} onChange={(v) => update('sizeScore70', v)} min={0.1} max={10} step={0.1} suffix="%" />
       </Section>
 
-      <Section title="Take Profit / Stop Loss" color="#ff4466">
-        <NumberInput label="Stop Loss %" value={n('slPct')} onChange={(v) => update('slPct', v)} min={5} max={50} step={5} suffix="%" />
-        <NumberInput label="TP1 Gain %" value={n('tp1Pct')} onChange={(v) => update('tp1Pct', v)} min={20} max={500} step={10} suffix="%" />
-        <NumberInput label="TP1 Close %" value={n('tp1ClosePct')} onChange={(v) => update('tp1ClosePct', v)} min={10} max={100} step={5} suffix="%" />
-        <NumberInput label="TP2 Gain %" value={n('tp2Pct')} onChange={(v) => update('tp2Pct', v)} min={50} max={1000} step={25} suffix="%" />
-        <NumberInput label="TP2 Close %" value={n('tp2ClosePct')} onChange={(v) => update('tp2ClosePct', v)} min={10} max={100} step={5} suffix="%" />
-        <NumberInput label="TP2 Trail SL % (below peak)" value={n('tp2TrailPct')} onChange={(v) => update('tp2TrailPct', v)} min={5} max={80} step={5} suffix="%" />
-        <NumberInput label="TP3 Gain %" value={n('tp3Pct')} onChange={(v) => update('tp3Pct', v)} min={100} max={2000} step={50} suffix="%" />
-        <NumberInput label="TP3 Close %" value={n('tp3ClosePct')} onChange={(v) => update('tp3ClosePct', v)} min={10} max={100} step={5} suffix="%" />
-        <NumberInput label="TP3 Trail SL % (below peak)" value={n('trailingSLPct')} onChange={(v) => update('trailingSLPct', v)} min={5} max={50} step={5} suffix="%" />
+      <Section title="Stop Loss / Runner" color="#ff4466">
+        <NumberInput label="Hard Stop Loss %" value={n('slPct')} onChange={(v) => update('slPct', v)} min={5} max={50} step={5} suffix="%" />
+        <NumberInput label="Trailing SL % (below peak)" value={n('trailingSLPct')} onChange={(v) => update('trailingSLPct', v)} min={5} max={50} step={5} suffix="%" />
       </Section>
 
       <Section title="Risk Management" color="#ffd700">

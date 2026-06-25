@@ -2,7 +2,7 @@ import { query } from '../lib/db.js';
 import { Position } from '../types/index.js';
 import { getSettings, getBalance, setBalance } from './settings.service.js';
 import { markTokenEntered, markTokenAvailable, getTokenByMint } from './scanner.service.js';
-import { notifyBought, notifyClosed, notifyTPHit, notifyEmergencyExit } from '../lib/telegram.js';
+import { notifyBought, notifyClosed, notifyEmergencyExit } from '../lib/telegram.js';
 import { logger } from '../lib/logger.js';
 import { broadcastPositions, broadcastBalance } from '../websocket/server.js';
 
@@ -292,79 +292,19 @@ async function _updatePositionPrice(id: string, currentPrice: number, freshBsr?:
   if (!pos || pos.status !== 'OPEN') return;
 
   const settings = await getSettings();
-  let newPeak = Math.max(pos.peakPrice, currentPrice);
-  let newSL = pos.slCurrent;
-  let tp1Hit = pos.tp1Hit;
-  let tp2Hit = pos.tp2Hit;
-  let tp3Hit = pos.tp3Hit;
+  const newPeak = Math.max(pos.peakPrice, currentPrice);
   const pnlPct = ((currentPrice - pos.entryPrice) / pos.entryPrice) * 100;
 
-  // Track running position size — reduced by each partial close so later TPs
-  // and the final SL/close only operate on the remaining portion.
-  let currentSizeSol = pos.sizeSol;
-
-  // Helper: close a % slice of the current size, bank the freed capital + profit,
-  // and update size_sol + banked_profit_sol in DB.  Returns the profit on the closed slice.
-  async function partialClose(closePct: number): Promise<number> {
-    const closeSize = currentSizeSol * (closePct / 100);
-    const profit = closeSize * (pnlPct / 100);
-    currentSizeSol -= closeSize;
-    const bal = await getBalance();
-    await setBalance(bal + closeSize + profit);
-    // Accumulate profit in banked_profit_sol so closePosition can include it
-    // in the final pnl_sol (without double-counting balance credits).
-    await query(
-      `UPDATE positions SET size_sol = $1, banked_profit_sol = COALESCE(banked_profit_sol, 0) + $2 WHERE id = $3`,
-      [currentSizeSol, profit, id]
-    );
-    return profit;
-  }
-
-  // TP1 — sell tp1ClosePct% of position; move SL to breakeven
-  if (!tp1Hit && pnlPct >= settings.tp1Pct) {
-    tp1Hit = true;
-    newSL = pos.entryPrice;
-    const sizeBeforeClose = currentSizeSol;
-    const partialPnl = await partialClose(settings.tp1ClosePct);
-    const soldSol = sizeBeforeClose - currentSizeSol;
-    await notifyTPHit({ name: pos.name, symbol: pos.symbol, level: 1, gainPct: pnlPct, profitSol: partialPnl, newSLPct: 0, entryPrice: pos.entryPrice, currentPrice, soldSol, remainingSol: currentSizeSol, initialSol: pos.sizeSol, peakPrice: newPeak });
-    logger.info({ id, symbol: pos.symbol, closePct: settings.tp1ClosePct, partialPnl, soldSol, remainingSizeSol: currentSizeSol }, 'TP1 partial close');
-  }
-
-  // TP2 — sell tp2ClosePct% of remaining; start trailing SL at tp2TrailPct% below peak
-  if (!tp2Hit && pnlPct >= settings.tp2Pct) {
-    tp2Hit = true;
-    // SL will be managed by the trailing block below (tp2TrailPct% below peak)
-    const sizeBeforeClose = currentSizeSol;
-    const partialPnl = await partialClose(settings.tp2ClosePct);
-    const soldSol = sizeBeforeClose - currentSizeSol;
-    await notifyTPHit({ name: pos.name, symbol: pos.symbol, level: 2, gainPct: pnlPct, profitSol: partialPnl, newSLPct: -settings.tp2TrailPct, entryPrice: pos.entryPrice, currentPrice, soldSol, remainingSol: currentSizeSol, initialSol: pos.sizeSol, peakPrice: newPeak });
-    logger.info({ id, symbol: pos.symbol, closePct: settings.tp2ClosePct, partialPnl, soldSol, remainingSizeSol: currentSizeSol }, 'TP2 partial close');
-  }
-
-  // TP3 — sell tp3ClosePct% of remaining; trailing SL takes over the runner
-  if (!tp3Hit && pnlPct >= settings.tp3Pct) {
-    tp3Hit = true;
-    const sizeBeforeClose = currentSizeSol;
-    const partialPnl = await partialClose(settings.tp3ClosePct);
-    const soldSol = sizeBeforeClose - currentSizeSol;
-    await notifyTPHit({ name: pos.name, symbol: pos.symbol, level: 3, gainPct: pnlPct, profitSol: partialPnl, newSLPct: -settings.trailingSLPct, entryPrice: pos.entryPrice, currentPrice, soldSol, remainingSol: currentSizeSol, initialSol: pos.sizeSol, peakPrice: newPeak });
-    logger.info({ id, symbol: pos.symbol, closePct: settings.tp3ClosePct, partialPnl, soldSol, remainingSizeSol: currentSizeSol }, 'TP3 partial close');
-  }
-
-  // Trailing SL — activates after TP2, tightens after TP3
-  // After TP2: trail at tp2TrailPct% (default 30%) below peak high
-  // After TP3: tighten to trailingSLPct% (default 20%) below peak high
-  if (tp2Hit) {
-    const trailPct = tp3Hit ? settings.trailingSLPct : settings.tp2TrailPct;
-    const trailSL = newPeak * (1 - trailPct / 100);
-    newSL = Math.max(newSL, trailSL);
-  }
+  // Trailing SL — always active from entry, trails trailingSLPct% below peak.
+  // Since peak starts at entryPrice, trailing SL = entry * (1 - trailingSLPct/100)
+  // which equals the initial hard SL. As price rises, peak rises and trailing SL ratchets up.
+  const trailSL = newPeak * (1 - settings.trailingSLPct / 100);
+  const newSL = Math.max(pos.slCurrent, trailSL);
 
   await query(`
-    UPDATE positions SET peak_price = $1, sl_current = $2, tp1_hit = $3, tp2_hit = $4, tp3_hit = $5
-    WHERE id = $6
-  `, [newPeak, newSL, tp1Hit, tp2Hit, tp3Hit, id]);
+    UPDATE positions SET peak_price = $1, sl_current = $2
+    WHERE id = $3
+  `, [newPeak, newSL, id]);
 
   // ── SL check with 2-tick confirmation ───────────────────────────────────
   // Require currentPrice to be below SL for SL_CONFIRM_TICKS consecutive ticks
@@ -379,7 +319,7 @@ async function _updatePositionPrice(id: string, currentPrice: number, freshBsr?:
       );
     } else {
       slConfirmCounts.delete(id);
-      await closePosition(id, currentPrice, tp1Hit ? 'SL (moved to breakeven/TP)' : 'Stop Loss');
+      await closePosition(id, currentPrice, 'Stop Loss (-20%)');
       return;
     }
   } else {
