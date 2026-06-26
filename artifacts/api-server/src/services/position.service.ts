@@ -349,7 +349,22 @@ async function _updatePositionPrice(id: string, currentPrice: number, freshBsr?:
       );
     } else {
       slConfirmCounts.delete(id);
-      await closePosition(id, currentPrice, 'Stop Loss (-20%)');
+      // Build a close reason that reflects exactly which mechanism fired.
+      // givebackPct is null  → hard SL (peak never reached +50%)
+      // givebackPct 40/30/20/15/10 → trailing SL tier 1–5
+      let closeReason: string;
+      if (givebackPct === null) {
+        closeReason = `Hard SL (-${settings.slPct}%)`;
+      } else {
+        const tier =
+          givebackPct === 10 ? 5 :
+          givebackPct === 15 ? 4 :
+          givebackPct === 20 ? 3 :
+          givebackPct === 30 ? 2 : 1;
+        const lockedPct = (peakGainPct * (1 - givebackPct / 100)).toFixed(0);
+        closeReason = `Trailing SL T${tier} (peak +${peakGainPct.toFixed(0)}%, locked +${lockedPct}%)`;
+      }
+      await closePosition(id, currentPrice, closeReason);
       return;
     }
   } else {

@@ -296,7 +296,9 @@ export default function AnalyticsPage({ analytics: a, closedPositions, balance, 
               ) : sorted.map((p) => {
                 const pos = (p.pnlSol ?? 0) >= 0;
                 const isEmergency = p.closeReason?.startsWith('EMERGENCY');
-                const reasonColor = isEmergency ? '#ff4466' : p.closeReason?.includes('Stop Loss') ? '#ffd700' : '#3a5070';
+                const isHardSL = p.closeReason?.startsWith('Hard SL');
+                const isTrailSL = p.closeReason?.startsWith('Trailing SL');
+                const reasonColor = isEmergency ? '#ff4466' : isHardSL ? '#ff6b35' : isTrailSL ? '#ffd700' : '#3a5070';
                 return (
                   <tr key={p.id} style={{ borderTop: '1px solid rgba(255,255,255,0.04)' }}>
                     <td style={{ padding: '10px 12px', whiteSpace: 'nowrap' }}>
