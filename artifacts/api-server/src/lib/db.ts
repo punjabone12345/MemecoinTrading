@@ -288,5 +288,40 @@ export async function initDB(): Promise<void> {
     logger.warn({ err }, 'Historical backfill skipped (non-fatal)');
   }
 
+  // ── Close-reason backfill ────────────────────────────────────────────────
+  // Rewrites the old generic 'Stop Loss (-20%)' label to the accurate reason:
+  //   • Hard SL (-N%)      — peak never reached +50%
+  //   • Trailing SL T1–T5  — peaked past a tier threshold, locked in gain
+  // Safe to run on every boot: only touches rows with the old generic label.
+  try {
+    const backfillResult = await query<{ count: string }>(`
+      WITH updated AS (
+        UPDATE positions
+        SET close_reason = CASE
+          WHEN peak_price IS NULL OR entry_price IS NULL OR entry_price = 0
+            THEN 'Hard SL (-20%)'
+          WHEN ((peak_price - entry_price) / entry_price * 100) >= 400
+            THEN 'Trailing SL T5 (peak +' || ROUND((peak_price - entry_price) / entry_price * 100) || '%, locked +' || ROUND((peak_price - entry_price) / entry_price * 100 * 0.90) || '%)'
+          WHEN ((peak_price - entry_price) / entry_price * 100) >= 300
+            THEN 'Trailing SL T4 (peak +' || ROUND((peak_price - entry_price) / entry_price * 100) || '%, locked +' || ROUND((peak_price - entry_price) / entry_price * 100 * 0.85) || '%)'
+          WHEN ((peak_price - entry_price) / entry_price * 100) >= 200
+            THEN 'Trailing SL T3 (peak +' || ROUND((peak_price - entry_price) / entry_price * 100) || '%, locked +' || ROUND((peak_price - entry_price) / entry_price * 100 * 0.80) || '%)'
+          WHEN ((peak_price - entry_price) / entry_price * 100) >= 100
+            THEN 'Trailing SL T2 (peak +' || ROUND((peak_price - entry_price) / entry_price * 100) || '%, locked +' || ROUND((peak_price - entry_price) / entry_price * 100 * 0.70) || '%)'
+          WHEN ((peak_price - entry_price) / entry_price * 100) >= 50
+            THEN 'Trailing SL T1 (peak +' || ROUND((peak_price - entry_price) / entry_price * 100) || '%, locked +' || ROUND((peak_price - entry_price) / entry_price * 100 * 0.60) || '%)'
+          ELSE 'Hard SL (-20%)'
+        END
+        WHERE close_reason = 'Stop Loss (-20%)' AND status = 'CLOSED'
+        RETURNING 1
+      )
+      SELECT COUNT(*)::text AS count FROM updated
+    `);
+    const n = parseInt(backfillResult[0]?.count ?? '0', 10);
+    if (n > 0) logger.info({ count: n }, 'Close-reason backfill: rewrote legacy Stop Loss labels');
+  } catch (err) {
+    logger.warn({ err }, 'Close-reason backfill skipped (non-fatal)');
+  }
+
   logger.info('Database initialized');
 }
