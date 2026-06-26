@@ -33,10 +33,11 @@ router.get('/analytics', async (_req, res) => {
 
 router.post('/:id/close', async (req, res) => {
   const { id } = req.params;
-  const { currentPrice } = req.body as { currentPrice?: number };
+  const { currentPrice, reason } = req.body as { currentPrice?: number; reason?: string };
   if (!currentPrice) { res.status(400).json({ error: 'currentPrice required' }); return; }
 
-  const position = await closePosition(id, currentPrice, 'Manual close');
+  const closeReason = reason?.trim() || 'Manual close';
+  const position = await closePosition(id, currentPrice, closeReason);
   if (!position) { res.status(404).json({ error: 'Position not found or already closed' }); return; }
   res.json(position);
 });

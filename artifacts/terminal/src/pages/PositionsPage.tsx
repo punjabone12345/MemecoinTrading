@@ -121,26 +121,48 @@ function EditModal({ pos, onClose, onSave }: { pos: Position; onClose: () => voi
   );
 }
 
+const CLOSE_REASONS = [
+  'Manual close',
+  'Filter change',
+  'Strategy change',
+  'Risk management',
+  'Taking profit',
+];
+
 function CloseModal({ pos, onClose, onConfirm }: { pos: Position; onClose: () => void; onConfirm: () => void }) {
   const [loading, setLoading] = useState(false);
+  const [reason, setReason] = useState('Manual close');
   const price = pos.currentPrice ?? pos.entryPrice;
   const pnlPct = ((price - pos.entryPrice) / pos.entryPrice) * 100;
   const pnlSol = pos.sizeSol * (pnlPct / 100);
   async function close() {
     setLoading(true);
-    try { await api.closePosition(pos.id, price); onConfirm(); onClose(); }
+    try { await api.closePosition(pos.id, price, reason); onConfirm(); onClose(); }
     finally { setLoading(false); }
   }
   return (
     <Modal onClose={onClose}>
       <h3 style={{ fontWeight: 900, fontSize: 16, color: '#ff4466', marginBottom: 20 }}>Close — {pos.symbol}</h3>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 20 }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 16 }}>
         {[['Close Price', `$${formatPrice(price)}`, '#d4e0f0'], ['P&L', `${formatSOL(pnlSol)} (${formatPct(pnlPct)})`, pnlSol >= 0 ? '#00ff88' : '#ff4466']].map(([l, v, c]) => (
           <div key={String(l)} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13 }}>
             <span style={{ color: '#3a5070' }}>{l}</span>
             <span style={{ color: c as string, fontWeight: 800 }}>{v}</span>
           </div>
         ))}
+      </div>
+      <div style={{ marginBottom: 16 }}>
+        <div style={{ fontSize: 11, color: '#3a5070', marginBottom: 6, fontWeight: 700 }}>CLOSE REASON</div>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+          {CLOSE_REASONS.map((r) => (
+            <button key={r} onClick={() => setReason(r)} style={{
+              padding: '5px 10px', borderRadius: 8, fontSize: 11, fontWeight: 700, cursor: 'pointer',
+              background: reason === r ? 'rgba(255,68,102,0.18)' : 'rgba(255,255,255,0.04)',
+              border: reason === r ? '1px solid #ff4466' : '1px solid rgba(255,255,255,0.08)',
+              color: reason === r ? '#ff4466' : '#7090b0',
+            }}>{r}</button>
+          ))}
+        </div>
       </div>
       <div style={{ display: 'flex', gap: 10 }}>
         <button onClick={onClose} style={{ flex: 1, padding: 12, borderRadius: 12, background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.08)', color: '#7090b0', cursor: 'pointer', fontWeight: 700 }}>Cancel</button>

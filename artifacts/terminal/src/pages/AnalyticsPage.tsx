@@ -298,7 +298,9 @@ export default function AnalyticsPage({ analytics: a, closedPositions, balance, 
                 const isEmergency = p.closeReason?.startsWith('EMERGENCY');
                 const isHardSL = p.closeReason?.startsWith('Hard SL');
                 const isTrailSL = p.closeReason?.startsWith('Trailing SL');
-                const reasonColor = isEmergency ? '#ff4466' : isHardSL ? '#ff6b35' : isTrailSL ? '#ffd700' : '#3a5070';
+                const isFilterChange = p.closeReason === 'Filter change';
+                const isTakingProfit = p.closeReason === 'Taking profit';
+                const reasonColor = isEmergency ? '#ff4466' : isHardSL ? '#ff6b35' : isTrailSL ? '#ffd700' : isFilterChange ? '#9b59ff' : isTakingProfit ? '#00ff88' : '#3a5070';
                 return (
                   <tr key={p.id} style={{ borderTop: '1px solid rgba(255,255,255,0.04)' }}>
                     <td style={{ padding: '10px 12px', whiteSpace: 'nowrap' }}>

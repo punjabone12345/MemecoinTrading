@@ -21,8 +21,8 @@ export const api = {
   getOpenPositions: () => apiFetch<Position[]>('/positions/open'),
   getClosedPositions: () => apiFetch<Position[]>('/positions/closed'),
   getAnalytics: () => apiFetch<Analytics>('/positions/analytics'),
-  closePosition: (id: string, currentPrice: number) =>
-    apiFetch<Position>(`/positions/${id}/close`, { method: 'POST', body: JSON.stringify({ currentPrice }) }),
+  closePosition: (id: string, currentPrice: number, reason?: string) =>
+    apiFetch<Position>(`/positions/${id}/close`, { method: 'POST', body: JSON.stringify({ currentPrice, reason }) }),
   editPosition: (id: string, updates: Partial<Position>) =>
     apiFetch<Position>(`/positions/${id}`, { method: 'PATCH', body: JSON.stringify(updates) }),
   deletePosition: (id: string) =>
