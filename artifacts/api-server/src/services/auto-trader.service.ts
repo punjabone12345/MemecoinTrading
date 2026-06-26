@@ -179,6 +179,11 @@ async function checkEntries(): Promise<void> {
       { mint: token.mint, symbol: token.symbol, score: token.score, price: token.price, mc: token.marketCap, bsr: token.buySellRatio },
       'ELIGIBLE token found — attempting to open position'
     );
+    // Lock this mint immediately — before the async openPosition() call.
+    // Without this, if openPosition() is slow (DB write, RPC), the next 1s
+    // check tick could race in and see the mint as not-yet-open and enter again.
+    cachedTradedTodayMints.add(token.mint);
+
     const position = await openPosition({
       mint: token.mint,
       name: token.name,
@@ -191,8 +196,15 @@ async function checkEntries(): Promise<void> {
     if (position) {
       openMints.add(token.mint);
       attempted++;
+      // Keep the mint in cachedTradedTodayMints so it won't be re-entered even
+      // after the position closes (e.g. quick SL) within the 30s cache window.
+      // The DB query on next cache refresh will also confirm it.
+      setTradedTodayMints(cachedTradedTodayMints);
       logger.info({ mint: token.mint, symbol: token.symbol, positionId: position.id }, 'Position opened successfully');
     } else {
+      // openPosition() rejected for a non-entry reason (balance, max positions, etc.)
+      // Remove the optimistic lock so the token can be retried next tick.
+      cachedTradedTodayMints.delete(token.mint);
       logger.warn({ mint: token.mint, symbol: token.symbol, score: token.score, balance, maxOpen: settings.maxOpenPositions }, 'openPosition returned null — check balance/maxPositions/dailyLoss');
     }
   }
