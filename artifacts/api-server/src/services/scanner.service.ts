@@ -74,7 +74,10 @@ export function getTokenByMint(mint: string): Token | undefined {
   return tokenCache.get(mint);
 }
 
-export function calcScore(token: Partial<Token>): ScoreBreakdown {
+export function calcScore(
+  token: Partial<Token>,
+  mcRange?: { minMc: number; maxMc: number },
+): ScoreBreakdown {
   let priceMomentum = 0;
   const p5 = token.priceChange5m ?? 0;
   if (p5 > 3) priceMomentum = 25;
@@ -100,12 +103,26 @@ export function calcScore(token: Partial<Token>): ScoreBreakdown {
   else if (bsr > 1.5) buyPressure = 12;
   else if (bsr > 1.2) buyPressure = 6;
 
+  // MC Quality — scored relative to the user-configured MC filter range.
+  // Divides [minMc, maxMc] into 4 equal quartiles; lower MC = higher score
+  // because early/small tokens have more upside potential.
+  // Falls back to absolute thresholds when no range is provided.
   let mcQuality = 0;
   const mc = token.marketCap ?? 0;
-  if (mc >= 250_000 && mc < 1_000_000) mcQuality = 25;
-  else if (mc >= 100_000 && mc < 250_000) mcQuality = 18;
-  else if (mc >= 1_000_000 && mc < 5_000_000) mcQuality = 15;
-  else if (mc >= 5_000_000 && mc < 20_000_000) mcQuality = 8;
+  if (mcRange && mcRange.maxMc > mcRange.minMc && mc >= mcRange.minMc && mc <= mcRange.maxMc) {
+    const span = mcRange.maxMc - mcRange.minMc;
+    const pos = (mc - mcRange.minMc) / span; // 0 = at minMc, 1 = at maxMc
+    if (pos < 0.25) mcQuality = 25;       // Q1: freshest — most upside
+    else if (pos < 0.50) mcQuality = 18;  // Q2
+    else if (pos < 0.75) mcQuality = 12;  // Q3
+    else mcQuality = 6;                   // Q4: near maxMc — less upside
+  } else {
+    // Fallback: absolute ranges (used when no mcRange passed)
+    if (mc >= 250_000 && mc < 1_000_000) mcQuality = 25;
+    else if (mc >= 100_000 && mc < 250_000) mcQuality = 18;
+    else if (mc >= 1_000_000 && mc < 5_000_000) mcQuality = 15;
+    else if (mc >= 5_000_000 && mc < 20_000_000) mcQuality = 8;
+  }
 
   return {
     priceMomentum,
@@ -453,7 +470,7 @@ export async function scanTokens(): Promise<void> {
     const topHolder = existing?.topHolder ?? 0;
     const creatorPct = existing?.creatorPct ?? 0;
 
-    const scoreBreakdown = calcScore(partial);
+    const scoreBreakdown = calcScore(partial, { minMc: settings.minMc, maxMc: settings.maxMc });
     const filterResults = buildFilterResults(pair, settings, rugOk, topHolder, creatorPct);
     const allPassed = filterResults.every((f) => f.passed);
 
