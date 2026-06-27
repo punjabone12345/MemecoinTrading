@@ -135,16 +135,21 @@ export function calcScore(
 
 const ALLOWED_DEXES = ['raydium', 'pump-fun', 'pumpfun', 'pumpswap', 'orca', 'meteora'];
 
-function buildFilterResults(pair: DexPair, settings: Awaited<ReturnType<typeof getSettings>>, rugOk: boolean, topHolder: number, creatorPct: number): FilterResult[] {
+function buildFilterResults(pair: DexPair, settings: Awaited<ReturnType<typeof getSettings>>, rugOk: boolean, topHolder: number, creatorPct: number, qualityScore: number): FilterResult[] {
   const mc = pair.marketCap ?? pair.fdv ?? 0;
   const vol24 = pair.volume?.h24 ?? 0;
   const liq = pair.liquidity?.usd ?? 0;
   const ageH = pair.pairCreatedAt ? (Date.now() - pair.pairCreatedAt) / 3_600_000 : 0;
+  const ageMin = ageH * 60;
   const h1Txns = pair.txns?.h1 ?? { buys: 0, sells: 0 };
   const bsr = h1Txns.sells > 0 ? h1Txns.buys / h1Txns.sells : h1Txns.buys > 0 ? 99 : 1;
   const change5m = pair.priceChange?.m5 ?? 0;
   const change24 = pair.priceChange?.h24 ?? 0;
   const dexOk = ALLOWED_DEXES.includes(pair.dexId?.toLowerCase() ?? '');
+
+  // Tokens <30 min old require a stricter quality score (≥80) — young tokens rug more often.
+  const isYoung = ageMin < 30;
+  const youngScoreOk = !isYoung || qualityScore >= 80;
 
   // Labels dynamically reflect the actual threshold from settings (not hardcoded defaults)
   return [
@@ -161,6 +166,8 @@ function buildFilterResults(pair: DexPair, settings: Awaited<ReturnType<typeof g
     // maxTopHolder and maxCreatorPct: only enforce when rugcheck has supplied real data (>0)
     { name: `Top holder ≤${settings.maxTopHolder}%`, passed: topHolder === 0 || topHolder <= settings.maxTopHolder, value: `${topHolder.toFixed(1)}%`, required: `≤${settings.maxTopHolder}%` },
     { name: `Creator ≤${settings.maxCreatorPct}%`, passed: creatorPct === 0 || creatorPct <= settings.maxCreatorPct, value: `${creatorPct.toFixed(1)}%`, required: `≤${settings.maxCreatorPct}%` },
+    // Young token gate: tokens <30 min old must score ≥80 to reduce rug exposure
+    ...(isYoung ? [{ name: 'Young token score ≥80', passed: youngScoreOk, value: `score ${qualityScore}`, required: '≥80 (token <30m old)' }] : []),
   ];
 }
 
@@ -471,7 +478,7 @@ export async function scanTokens(): Promise<void> {
     const creatorPct = existing?.creatorPct ?? 0;
 
     const scoreBreakdown = calcScore(partial, { minMc: settings.minMc, maxMc: settings.maxMc });
-    const filterResults = buildFilterResults(pair, settings, rugOk, topHolder, creatorPct);
+    const filterResults = buildFilterResults(pair, settings, rugOk, topHolder, creatorPct, scoreBreakdown.total);
     const allPassed = filterResults.every((f) => f.passed);
 
     if (allPassed) passedFilters++;

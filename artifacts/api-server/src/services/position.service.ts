@@ -148,10 +148,9 @@ export async function openPosition(params: {
     return null;
   }
 
-  let sizePct: number;
-  if (params.score >= 90) sizePct = settings.sizeScore90;
-  else if (params.score >= 80) sizePct = settings.sizeScore80;
-  else sizePct = settings.sizeScore70;
+  // Flat 1% of balance for all trades — score-based scaling removed.
+  // Score 85 tokens rug as often as score 65; equal sizing until win rate improves.
+  const sizePct = 1;
 
   const sizeSol = balance * sizePct / 100;
   logger.info({ balance, sizePct, sizeSol, score: params.score }, 'openPosition: computed trade size');

@@ -20,7 +20,7 @@ export async function getSettings(): Promise<Settings> {
     minBuySellRatio: num('minBuySellRatio', 1.2),
     maxTopHolder: num('maxTopHolder', 20),
     maxCreatorPct: num('maxCreatorPct', 10),
-    minLiquidity: num('minLiquidity', 50000),
+    minLiquidity: num('minLiquidity', 25000),
     rugcheckEnabled: bool('rugcheckEnabled', true),
     minEntryScore: num('minEntryScore', 70),
     trendChecksRequired: num('trendChecksRequired', 3),
