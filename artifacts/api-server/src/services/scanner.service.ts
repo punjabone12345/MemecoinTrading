@@ -157,7 +157,7 @@ function buildFilterResults(pair: DexPair, settings: Awaited<ReturnType<typeof g
     { name: `Vol24h ≥$${(settings.minVolume24h/1000).toFixed(0)}K`, passed: vol24 >= settings.minVolume24h, value: `$${(vol24/1000).toFixed(0)}K`, required: `≥$${(settings.minVolume24h/1000).toFixed(0)}K` },
     { name: `Age ${settings.minAgeHours}h–${settings.maxAgeHours}h`, passed: ageH >= settings.minAgeHours && ageH <= settings.maxAgeHours, value: `${ageH.toFixed(1)}h`, required: `${settings.minAgeHours}h–${settings.maxAgeHours}h` },
     { name: `Liquidity ≥$${(settings.minLiquidity/1000).toFixed(0)}K`, passed: liq >= settings.minLiquidity, value: `$${(liq/1000).toFixed(0)}K`, required: `≥$${(settings.minLiquidity/1000).toFixed(0)}K` },
-    { name: `BSR ≥${settings.minBuySellRatio}x`, passed: bsr >= settings.minBuySellRatio, value: `${bsr.toFixed(2)}x`, required: `≥${settings.minBuySellRatio}x` },
+    { name: `BSR ≥${settings.minBuySellRatio}x (24h)`, passed: bsr >= settings.minBuySellRatio, value: `${bsr.toFixed(2)}x`, required: `≥${settings.minBuySellRatio}x` },
     { name: 'No 5m FOMO >50%', passed: change5m <= 50, value: `${change5m.toFixed(1)}%`, required: '≤50% in 5m' },
     { name: 'Not pumped >500%', passed: change24 <= 500, value: `${change24.toFixed(0)}%`, required: '≤500% in 24h' },
     { name: 'Rugcheck pass', passed: rugOk || !settings.rugcheckEnabled, value: rugOk ? 'PASS' : 'FAIL', required: 'PASS' },
@@ -427,9 +427,11 @@ export async function scanTokens(): Promise<void> {
     // Aggregate volumes and transaction counts across ALL pools
     const aggVol24h = group.reduce((sum, p) => sum + (p.volume?.h24 ?? 0), 0);
     const aggVol1h  = group.reduce((sum, p) => sum + (p.volume?.h1  ?? 0), 0);
-    const totalBuys1h  = group.reduce((sum, p) => sum + (p.txns?.h1?.buys  ?? 0), 0);
-    const totalSells1h = group.reduce((sum, p) => sum + (p.txns?.h1?.sells ?? 0), 0);
-    const aggBsr = totalSells1h > 0 ? totalBuys1h / totalSells1h : totalBuys1h > 0 ? 99 : 1;
+    // Use h24 buys/sells — matches what DexScreener displays and is far more stable
+    // than h1 which is too noisy (one weak hour tanks a genuinely bullish token)
+    const totalBuys24h  = group.reduce((sum, p) => sum + (p.txns?.h24?.buys  ?? 0), 0);
+    const totalSells24h = group.reduce((sum, p) => sum + (p.txns?.h24?.sells ?? 0), 0);
+    const aggBsr = totalSells24h > 0 ? totalBuys24h / totalSells24h : totalBuys24h > 0 ? 99 : 1;
     pairs.push({ ...best, aggVol24h, aggVol1h, aggBsr });
   }
 
