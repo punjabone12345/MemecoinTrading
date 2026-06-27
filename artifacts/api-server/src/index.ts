@@ -5,6 +5,7 @@ import { initWebSocket } from './websocket/server.js';
 import { startAutoTrader } from './services/auto-trader.service.js';
 import { startPriceMonitor } from './services/price-monitor.service.js';
 import { notifyHeartbeat } from './lib/telegram.js';
+import { startTelegramCommands, stopTelegramCommands } from './lib/telegram-commands.js';
 import { getOpenPositions, getAnalytics } from './services/position.service.js';
 import { getBalance } from './services/settings.service.js';
 import { logger } from './lib/logger.js';
@@ -23,6 +24,7 @@ async function main(): Promise<void> {
 
   startAutoTrader();
   startPriceMonitor();
+  startTelegramCommands();
 
   // Daily summary at midnight IST (18:30 UTC)
   const now = new Date();
@@ -49,6 +51,7 @@ async function main(): Promise<void> {
 
   process.on('SIGTERM', () => {
     logger.info('SIGTERM received, shutting down');
+    stopTelegramCommands();
     server.close(() => process.exit(0));
   });
 }

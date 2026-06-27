@@ -1,0 +1,247 @@
+import axios from 'axios';
+import { logger } from './logger.js';
+import { getOpenPositions, getAnalytics } from '../services/position.service.js';
+import { getSettings, getBalance } from '../services/settings.service.js';
+import { getScanStats } from '../services/scanner.service.js';
+
+const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+
+const BASE_URL = () => `https://api.telegram.org/bot${BOT_TOKEN}`;
+
+let updateOffset = 0;
+let pollTimeout: ReturnType<typeof setTimeout> | null = null;
+const startedAt = Date.now();
+
+function toIST(date: Date): string {
+  return date.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', hour12: false });
+}
+
+async function sendReply(chatId: number | string, text: string): Promise<void> {
+  try {
+    await axios.post(`${BASE_URL()}/sendMessage`, {
+      chat_id: chatId,
+      text,
+      parse_mode: 'HTML',
+    });
+  } catch (err) {
+    logger.warn({ err }, 'Telegram command reply failed');
+  }
+}
+
+// ── /command1 — Check your positions ────────────────────────────────────────
+async function handlePositions(chatId: number | string): Promise<void> {
+  const positions = await getOpenPositions();
+  const balance = await getBalance();
+
+  if (positions.length === 0) {
+    await sendReply(chatId,
+      `📭 <b>No Open Positions</b>\n` +
+      `Balance: ${balance.toFixed(3)} SOL\n` +
+      `Time: ${toIST(new Date())}`
+    );
+    return;
+  }
+
+  const lines: string[] = [
+    `📊 <b>Open Positions (${positions.length})</b>`,
+    `Balance: ${balance.toFixed(3)} SOL\n`,
+  ];
+
+  for (const pos of positions) {
+    const pnlPct = pos.pnlPct ?? 0;
+    const pnlSol = pos.pnlSol ?? 0;
+    const pnlEmoji = pnlPct >= 0 ? '🟢' : '🔴';
+    const tpHits = [pos.tp1Hit && 'TP1', pos.tp2Hit && 'TP2', pos.tp3Hit && 'TP3']
+      .filter(Boolean).join(' ') || '—';
+    lines.push(
+      `${pnlEmoji} <b>${pos.symbol}</b> (${pos.name})\n` +
+      `  Entry: $${Number(pos.entryPrice).toFixed(8)}\n` +
+      `  Size: ${Number(pos.sizeSol).toFixed(3)} SOL\n` +
+      `  PNL: ${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(1)}% / ${pnlSol >= 0 ? '+' : ''}${pnlSol.toFixed(4)} SOL\n` +
+      `  TPs hit: ${tpHits}\n` +
+      `  Mode: ${pos.mode.toUpperCase()}`
+    );
+  }
+
+  lines.push(`\n🕐 ${toIST(new Date())}`);
+  await sendReply(chatId, lines.join('\n'));
+}
+
+// ── /command2 — Analyse Auto Trader ─────────────────────────────────────────
+async function handleAnalyse(chatId: number | string): Promise<void> {
+  const [analytics, settings, stats] = await Promise.all([
+    getAnalytics(),
+    getSettings(),
+    Promise.resolve(getScanStats()),
+  ]);
+
+  const profitFactorStr = isFinite(analytics.profitFactor)
+    ? analytics.profitFactor.toFixed(2)
+    : '∞';
+
+  const text =
+    `🤖 <b>Auto Trader Analysis</b>\n\n` +
+
+    `<b>📈 Performance</b>\n` +
+    `Trades: ${analytics.totalTrades}\n` +
+    `Win Rate: ${analytics.winRate.toFixed(1)}%\n` +
+    `Profit Factor: ${profitFactorStr}\n` +
+    `Total PNL: ${analytics.totalPnlSol >= 0 ? '+' : ''}${analytics.totalPnlSol.toFixed(4)} SOL\n` +
+    `Today PNL: ${analytics.dailyPnl >= 0 ? '+' : ''}${analytics.dailyPnl.toFixed(4)} SOL\n` +
+    `Best Trade: +${analytics.bestTrade.toFixed(4)} SOL\n` +
+    `Worst Trade: ${analytics.worstTrade.toFixed(4)} SOL\n` +
+    `Avg Hold: ${analytics.avgHoldTimeMinutes.toFixed(0)} min\n` +
+    `Max Drawdown: ${analytics.maxDrawdown.toFixed(1)}%\n\n` +
+
+    `<b>🔍 Scanner</b>\n` +
+    `Scanning: ${stats.scanning} tokens\n` +
+    `Passed filters: ${stats.passed}\n` +
+    `Eligible: ${stats.eligible}\n` +
+    `Open positions: ${analytics.openPositionsCount} / ${settings.maxOpenPositions}\n\n` +
+
+    `<b>⚙️ Key Settings</b>\n` +
+    `MC range: $${(settings.minMc / 1000).toFixed(0)}K – $${(settings.maxMc / 1_000_000).toFixed(1)}M\n` +
+    `Min score: ${settings.minEntryScore}/100\n` +
+    `SL: ${settings.slPct}%  TP1/2/3: ${settings.tp1Pct}/${settings.tp2Pct}/${settings.tp3Pct}%\n` +
+    `Daily loss limit: ${settings.maxDailyLossPct}%\n` +
+    `Mode: ${settings.walletPublicKey ? 'LIVE' : 'PAPER'}\n\n` +
+
+    `🕐 ${toIST(new Date())}`;
+
+  await sendReply(chatId, text);
+}
+
+// ── /command3 — Check the bot working or not ────────────────────────────────
+async function handleStatus(chatId: number | string): Promise<void> {
+  const [positions, balance] = await Promise.all([
+    getOpenPositions(),
+    getBalance(),
+  ]);
+  const stats = getScanStats();
+
+  const uptimeSec = Math.floor((Date.now() - startedAt) / 1000);
+  const uptimeStr = uptimeSec < 60
+    ? `${uptimeSec}s`
+    : uptimeSec < 3600
+    ? `${Math.floor(uptimeSec / 60)}m ${uptimeSec % 60}s`
+    : `${Math.floor(uptimeSec / 3600)}h ${Math.floor((uptimeSec % 3600) / 60)}m`;
+
+  const text =
+    `✅ <b>Bot Status — ONLINE</b>\n\n` +
+    `Uptime: ${uptimeStr}\n` +
+    `Scanner: 🟢 Active (${stats.scanning} tokens)\n` +
+    `Price monitor: 🟢 Running (3s interval)\n` +
+    `Open positions: ${positions.length}\n` +
+    `Balance: ${balance.toFixed(3)} SOL\n` +
+    `Daily loss limit: ${stats.dailyLossLimitHit ? '🔴 HIT' : '🟢 OK'}\n\n` +
+    `🕐 ${toIST(new Date())}`;
+
+  await sendReply(chatId, text);
+}
+
+// ── Update dispatcher ────────────────────────────────────────────────────────
+interface TelegramUpdate {
+  update_id: number;
+  message?: {
+    chat: { id: number };
+    from?: { id: number };
+    text?: string;
+  };
+}
+
+async function processUpdate(update: TelegramUpdate): Promise<void> {
+  const msg = update.message;
+  if (!msg?.text) return;
+
+  const chatId = msg.chat.id;
+  const text = msg.text.trim();
+  const cmd = text.split(' ')[0].toLowerCase();
+
+  // Security: only respond to the configured chat
+  if (CHAT_ID && String(chatId) !== String(CHAT_ID)) {
+    logger.warn({ chatId }, 'Telegram command from unknown chat — ignored');
+    return;
+  }
+
+  logger.info({ cmd, chatId }, 'Telegram command received');
+
+  try {
+    if (cmd === '/command1' || cmd === '/positions') {
+      await handlePositions(chatId);
+    } else if (cmd === '/command2' || cmd === '/analyse' || cmd === '/analyze') {
+      await handleAnalyse(chatId);
+    } else if (cmd === '/command3' || cmd === '/status') {
+      await handleStatus(chatId);
+    } else if (cmd === '/start' || cmd === '/help') {
+      await sendReply(chatId,
+        `👋 <b>Apex Meme Trader Bot</b>\n\n` +
+        `/command1 — Check your positions\n` +
+        `/command2 — Analyse Auto Trader\n` +
+        `/command3 — Check the bot working or not`
+      );
+    }
+  } catch (err) {
+    logger.warn({ err, cmd }, 'Telegram command handler error');
+    await sendReply(chatId, '⚠️ Error processing command. The bot is still running.');
+  }
+}
+
+// ── Long-poll loop ───────────────────────────────────────────────────────────
+async function pollOnce(): Promise<void> {
+  try {
+    const res = await axios.get<{ ok: boolean; result: TelegramUpdate[] }>(
+      `${BASE_URL()}/getUpdates`,
+      {
+        params: { offset: updateOffset, timeout: 25, allowed_updates: ['message'] },
+        timeout: 30_000,
+      }
+    );
+
+    if (res.data.ok) {
+      for (const update of res.data.result) {
+        await processUpdate(update);
+        updateOffset = update.update_id + 1;
+      }
+    }
+  } catch (err) {
+    const axErr = err as { code?: string; response?: { status?: number } };
+    if (axErr.code !== 'ECONNABORTED' && axErr.response?.status !== 409) {
+      logger.warn({ err }, 'Telegram poll error');
+    }
+  }
+}
+
+async function pollLoop(): Promise<void> {
+  await pollOnce();
+  pollTimeout = setTimeout(() => { void pollLoop(); }, 100);
+}
+
+export function startTelegramCommands(): void {
+  if (!BOT_TOKEN) {
+    logger.info('TELEGRAM_BOT_TOKEN not set — command polling disabled');
+    return;
+  }
+
+  // Drop any pending updates that accumulated while the bot was offline
+  // by fetching with offset=-1 and a zero timeout on startup.
+  axios.get(`${BASE_URL()}/getUpdates`, {
+    params: { offset: -1, timeout: 0 },
+    timeout: 5_000,
+  }).then((res: { data: { result?: TelegramUpdate[] } }) => {
+    const updates = res.data?.result ?? [];
+    if (updates.length > 0) {
+      updateOffset = updates[updates.length - 1].update_id + 1;
+    }
+    void pollLoop();
+  }).catch(() => { void pollLoop(); });
+
+  logger.info('Telegram command polling started (/command1 /command2 /command3)');
+}
+
+export function stopTelegramCommands(): void {
+  if (pollTimeout) {
+    clearTimeout(pollTimeout);
+    pollTimeout = null;
+  }
+}
