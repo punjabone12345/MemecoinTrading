@@ -135,14 +135,14 @@ export function calcScore(
 
 const ALLOWED_DEXES = ['raydium', 'pump-fun', 'pumpfun', 'pumpswap', 'orca', 'meteora'];
 
-function buildFilterResults(pair: DexPair, settings: Awaited<ReturnType<typeof getSettings>>, rugOk: boolean, topHolder: number, creatorPct: number, qualityScore: number, aggVol24h: number, aggBsr: number): FilterResult[] {
+function buildFilterResults(pair: DexPair, settings: Awaited<ReturnType<typeof getSettings>>, rugOk: boolean, topHolder: number, creatorPct: number, qualityScore: number, aggVol24h: number, aggBsr: number, freshChange5m: number): FilterResult[] {
   const mc = pair.marketCap ?? pair.fdv ?? 0;
   const vol24 = aggVol24h;
   const liq = pair.liquidity?.usd ?? 0;
   const ageH = pair.pairCreatedAt ? (Date.now() - pair.pairCreatedAt) / 3_600_000 : 0;
   const ageMin = ageH * 60;
   const bsr = aggBsr;
-  const change5m = pair.priceChange?.m5 ?? 0;
+  const change5m = freshChange5m;
   const change24 = pair.priceChange?.h24 ?? 0;
   const dexOk = ALLOWED_DEXES.includes(pair.dexId?.toLowerCase() ?? '');
 
@@ -438,37 +438,41 @@ export async function scanTokens(): Promise<void> {
   // (Using tokenCache.size inflates the count with stale entries from past cycles.)
   scanCount = pairs.length;
 
+  // ── PASS 1: Pre-filter using bulk data ──────────────────────────────────
+  // Eliminates 95%+ of tokens (wrong MC/vol/age) without expensive API calls.
+  // Candidates (those passing pre-filter) go to Pass 2 for real-time data.
+  type CandidateEntry = { pair: AggregatedPair; mc: number; vol24: number; bsr: number; v1h: number; liq: number; ageH: number; change24: number; change1h: number; change5m: number; price: number };
+  const candidates: CandidateEntry[] = [];
+
   for (const pair of pairs) {
     const mint = pair.baseToken?.address;
     if (!mint) continue;
 
-    const mc = pair.marketCap ?? pair.fdv ?? 0;
-    // Use aggregated totals across ALL pools — matches what DexScreener website shows
-    const vol24 = pair.aggVol24h;
-    const bsr   = pair.aggBsr;
-    const v1h   = pair.aggVol1h;
-    const liq = pair.liquidity?.usd ?? 0;
-    const ageH = pair.pairCreatedAt ? (Date.now() - pair.pairCreatedAt) / 3_600_000 : 0;
+    const mc     = pair.marketCap ?? pair.fdv ?? 0;
+    const vol24  = pair.aggVol24h;
+    const bsr    = pair.aggBsr;
+    const v1h    = pair.aggVol1h;
+    const liq    = pair.liquidity?.usd ?? 0;
+    const ageH   = pair.pairCreatedAt ? (Date.now() - pair.pairCreatedAt) / 3_600_000 : 0;
     const change24 = pair.priceChange?.h24 ?? 0;
     const change1h = pair.priceChange?.h1 ?? 0;
     const change5m = pair.priceChange?.m5 ?? 0;
-    const price = parseFloat(pair.priceUsd ?? '0');
+    const price    = parseFloat(pair.priceUsd ?? '0');
 
-    // Quick pre-filter — still store in cache as REJECTED so UI shows all tokens
     let preReject: string | undefined;
     let preRejectKey: string | undefined;
-    if (mc < settings.minMc)       { preReject = `MC too low ($${(mc/1000).toFixed(0)}K < $${(settings.minMc/1000).toFixed(0)}K min)`;          preRejectKey = 'MC too low'; }
-    else if (mc > settings.maxMc)  { preReject = `MC too high ($${(mc/1e6).toFixed(1)}M > $${(settings.maxMc/1e6).toFixed(1)}M max)`;            preRejectKey = 'MC too high'; }
+    if      (mc < settings.minMc)           { preReject = `MC too low ($${(mc/1000).toFixed(0)}K < $${(settings.minMc/1000).toFixed(0)}K min)`;             preRejectKey = 'MC too low'; }
+    else if (mc > settings.maxMc)           { preReject = `MC too high ($${(mc/1e6).toFixed(1)}M > $${(settings.maxMc/1e6).toFixed(1)}M max)`;              preRejectKey = 'MC too high'; }
     else if (vol24 < settings.minVolume24h) { preReject = `Vol24h too low ($${(vol24/1000).toFixed(0)}K < $${(settings.minVolume24h/1000).toFixed(0)}K min)`; preRejectKey = 'Vol24h too low'; }
-    else if (settings.minAgeHours > 0 && ageH < settings.minAgeHours) { preReject = `Too new (${ageH.toFixed(1)}h < ${settings.minAgeHours}h min)`;       preRejectKey = 'Age too new'; }
-    else if (ageH > settings.maxAgeHours)   { preReject = `Age ${ageH.toFixed(1)}h > ${settings.maxAgeHours}h max`;                               preRejectKey = 'Age too old'; }
-    else if (change24 > 500)                { preReject = `Already pumped ${change24.toFixed(0)}% in 24h (>500% blocks entry)`;                   preRejectKey = 'Already pumped >500%'; }
+    else if (settings.minAgeHours > 0 && ageH < settings.minAgeHours) { preReject = `Too new (${ageH.toFixed(1)}h < ${settings.minAgeHours}h min)`;          preRejectKey = 'Age too new'; }
+    else if (ageH > settings.maxAgeHours)   { preReject = `Age ${ageH.toFixed(1)}h > ${settings.maxAgeHours}h max`;                                          preRejectKey = 'Age too old'; }
+    else if (change24 > 500)                { preReject = `Already pumped ${change24.toFixed(0)}% in 24h (>500% blocks entry)`;                              preRejectKey = 'Already pumped >500%'; }
 
     const existing = tokenCache.get(mint);
 
     if (preReject) {
       if (preRejectKey) bumpReject(preRejectKey);
-      if (enteredMints.has(mint)) continue; // Never downgrade entered tokens
+      if (enteredMints.has(mint)) continue;
       tokenCache.set(mint, {
         mint, name: pair.baseToken.name || 'Unknown', symbol: pair.baseToken.symbol || '???',
         score: 0, marketCap: mc, volume24h: vol24, priceChange1h: change1h, priceChange5m: change5m,
@@ -482,7 +486,53 @@ export async function scanTokens(): Promise<void> {
       continue;
     }
 
-    // Rugcheck (with cache)
+    candidates.push({ pair, mc, vol24, bsr, v1h, liq, ageH, change24, change1h, change5m, price });
+  }
+
+  // ── PASS 2: Targeted fresh-data fetch for candidates ────────────────────
+  // Candidates passed MC/vol/age pre-filter — now we need REAL-TIME 5m/1h
+  // data before applying the full filter. The bulk batch endpoint can return
+  // 5m data that is 15-60s stale, causing valid tokens to be falsely rejected
+  // (or worse, FOMO-pumped tokens to be wrongly accepted).
+  // DexScreener's /pairs endpoint returns live data for specific pair addresses.
+  const freshPairMap = new Map<string, DexPair>(); // pairAddress → live pair
+  if (candidates.length > 0) {
+    const pairAddrs = candidates.map((c) => c.pair.pairAddress).filter(Boolean) as string[];
+    const freshChunks: string[][] = [];
+    for (let i = 0; i < pairAddrs.length; i += 30) freshChunks.push(pairAddrs.slice(i, i + 30));
+
+    const freshResults = await Promise.all(
+      freshChunks.map((chunk) =>
+        axios.get<{ pairs: DexPair[] }>(
+          `${DEXSCREENER_BASE}/latest/dex/pairs/solana/${chunk.join(',')}`,
+          { timeout: 8000 }
+        ).catch(() => ({ data: { pairs: [] as DexPair[] } }))
+      )
+    );
+    for (const res of freshResults) {
+      for (const p of res.data?.pairs ?? []) {
+        if (p.pairAddress) freshPairMap.set(p.pairAddress, p);
+      }
+    }
+    logger.info({ candidates: candidates.length, freshFetched: freshPairMap.size }, 'Fresh pair data fetched for candidates');
+  }
+
+  // ── PASS 2 continued: full filter evaluation with real-time data ─────────
+  for (const { pair, mc, vol24, bsr, v1h, liq, ageH, change24, change1h, change5m: bulkChange5m, price } of candidates) {
+    const mint = pair.baseToken?.address;
+    if (!mint) continue;
+
+    // Use live data from targeted fetch; fall back to bulk data if not returned
+    const fresh = freshPairMap.get(pair.pairAddress ?? '');
+    // 5m and 1h price change: use freshest available — these are the most time-sensitive
+    const change5m = fresh?.priceChange?.m5  ?? bulkChange5m;
+    const freshChange1h = fresh?.priceChange?.h1 ?? change1h;
+    // Price: prefer fresh (more accurate for entry price calculations)
+    const freshPrice = fresh ? parseFloat(fresh.priceUsd ?? '0') || price : price;
+
+    const existing = tokenCache.get(mint);
+
+    // Rugcheck (with cache — 5-min TTL so we don't hammer rugcheck API)
     let rugOk = true;
     if (existing && Date.now() - existing.lastChecked < 5 * 60_000) {
       rugOk = existing.rugcheck;
@@ -490,10 +540,7 @@ export async function scanTokens(): Promise<void> {
       rugOk = await checkRugcheck(mint).catch(() => true);
     }
 
-    // v1h is already set above to pair.aggVol1h (aggregated across all pools)
-    // Use the ACTUAL h1 volume from the previous scan as the baseline.
-    // volume1hCurrent from the last cycle is the true previous-hour volume.
-    // Falls back to v1h*0.8 on first sight so new tokens get a mild boost, not 0.
+    // Volume momentum: use aggregated h1 as current, previous scan's h1 as baseline
     const v1hPrev = (existing && existing.volume1hCurrent > 0)
       ? existing.volume1hCurrent
       : v1h * 0.8;
@@ -510,7 +557,8 @@ export async function scanTokens(): Promise<void> {
     const creatorPct = existing?.creatorPct ?? 0;
 
     const scoreBreakdown = calcScore(partial, { minMc: settings.minMc, maxMc: settings.maxMc });
-    const filterResults = buildFilterResults(pair, settings, rugOk, topHolder, creatorPct, scoreBreakdown.total, vol24, bsr);
+    // Pass real-time change5m so the FOMO filter uses live data, not stale batch data
+    const filterResults = buildFilterResults(pair, settings, rugOk, topHolder, creatorPct, scoreBreakdown.total, vol24, bsr, change5m);
     const allPassed = filterResults.every((f) => f.passed);
 
     if (allPassed) passedFilters++;
@@ -519,14 +567,9 @@ export async function scanTokens(): Promise<void> {
     if (rejectReason) bumpReject(rejectReason);
 
     const prevConsecutive = existing?.consecutiveTrending ?? 0;
-    // Require non-negative 5m change (>= 0 instead of > 0) so a flat candle doesn't
-    // reset the trend counter — only actual red candles (decline) should break the streak.
     const isUp = change5m >= 0 && (scoreBreakdown.total >= (existing?.score ?? 0));
     const consecutive = isUp ? prevConsecutive + 1 : 0;
 
-    // trendChecksRequired: token must pass all filters AND maintain positive momentum
-    // for N consecutive fetch cycles before becoming ELIGIBLE.
-    // Prevents entering on a single spike that immediately reverses.
     const trendOk = settings.trendChecksRequired <= 1 || consecutive >= settings.trendChecksRequired;
 
     const status: Token['status'] = enteredMints.has(mint)
@@ -537,33 +580,26 @@ export async function scanTokens(): Promise<void> {
       ? 'REJECTED'
       : 'SCANNING';
 
-    // Audit log every token decision
     if (status === 'ELIGIBLE') {
       logger.info(
-        { mint, symbol: pair.baseToken.symbol, score: scoreBreakdown.total, threshold: settings.minEntryScore, consecutive, trendRequired: settings.trendChecksRequired, breakdown: scoreBreakdown },
+        { mint, symbol: pair.baseToken.symbol, score: scoreBreakdown.total, threshold: settings.minEntryScore, consecutive, trendRequired: settings.trendChecksRequired, change5m, breakdown: scoreBreakdown },
         'AUDIT ACCEPTED: token meets all requirements — status=ELIGIBLE'
       );
       eligibleCount++;
     } else if (status === 'SCANNING') {
-      logger.debug(
-        { mint, symbol: pair.baseToken.symbol, score: scoreBreakdown.total, threshold: settings.minEntryScore },
-        'AUDIT SCANNING: passed filters but score below threshold'
-      );
+      logger.debug({ mint, symbol: pair.baseToken.symbol, score: scoreBreakdown.total, threshold: settings.minEntryScore }, 'AUDIT SCANNING');
     } else if (status === 'REJECTED') {
-      logger.debug(
-        { mint, symbol: pair.baseToken.symbol, score: scoreBreakdown.total, reason: rejectReason },
-        'AUDIT REJECTED: failed filter check'
-      );
+      logger.debug({ mint, symbol: pair.baseToken.symbol, score: scoreBreakdown.total, reason: rejectReason }, 'AUDIT REJECTED');
     }
 
-    const token: Token = {
+    tokenCache.set(mint, {
       mint,
       name: pair.baseToken.name || 'Unknown',
       symbol: pair.baseToken.symbol || '???',
       score: scoreBreakdown.total,
       marketCap: mc,
       volume24h: vol24,
-      priceChange1h: change1h,
+      priceChange1h: freshChange1h,
       priceChange5m: change5m,
       priceChange24h: change24,
       buySellRatio: bsr,
@@ -571,12 +607,12 @@ export async function scanTokens(): Promise<void> {
       age: ageH,
       dexId: pair.dexId ?? '',
       pairAddress: pair.pairAddress,
-      price,
+      price: freshPrice,
       rugcheck: rugOk,
       freezeAuthority: false,
       mintAuthority: false,
-      topHolder: existing?.topHolder ?? 0,
-      creatorPct: existing?.creatorPct ?? 0,
+      topHolder,
+      creatorPct,
       status,
       rejectReason,
       tradedToday: tradedTodaySet.has(mint),
@@ -586,9 +622,7 @@ export async function scanTokens(): Promise<void> {
       volume1hPrev: v1hPrev,
       volume1hCurrent: v1h,
       lastChecked: Date.now(),
-    };
-
-    tokenCache.set(mint, token);
+    });
   }
 
   // Clean old tokens (not seen in last 30 min, not entered)

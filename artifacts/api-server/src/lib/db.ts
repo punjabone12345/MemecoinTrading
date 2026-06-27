@@ -177,7 +177,7 @@ export async function initDB(): Promise<void> {
     ['minVolume24h', '100000'],
     ['minAgeHours', '0'],
     ['maxAgeHours', '720'],
-    ['scanFrequencyMs', '30000'],
+    ['scanFrequencyMs', '15000'],
     ['minBuySellRatio', '1.1'],
     ['maxTopHolder', '25'],
     ['maxCreatorPct', '15'],
