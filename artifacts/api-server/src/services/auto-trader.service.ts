@@ -112,8 +112,10 @@ export function startAutoTrader(): void {
     isHotRefreshing = true;
     try {
       const anyChanged = await hotRefreshScanningTokens();
+      // Always broadcast — keeps the frontend live even when no status changes.
+      // Hot refresh already runs every 3s so the payload is pre-computed in memory.
+      await broadcastTokens();
       if (anyChanged) {
-        await broadcastTokens();
         await checkEntries(); // immediately check entries if status changed
       }
     } catch (err) {

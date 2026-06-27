@@ -141,12 +141,12 @@ export default function App() {
     return () => { destroyed = true; wsRef.current?.close(); };
   }, []);
 
-  // Fallback poll — only fires when WebSocket is disconnected.
-  // Fetches only positions + balance (cheapest, most important).
-  // Scanner tokens and settings update rarely — skip them in the fallback.
+  // Fallback poll — fires when WebSocket is disconnected.
+  // Also refreshes scanner + analytics every 5s even when WS is live,
+  // as a safety net in case a broadcast was dropped.
   useEffect(() => {
+    let scannerTick = 0;
     const poll = async () => {
-      if (wsConnectedRef.current) return; // WS is live — skip
       try {
         const [posData, settingsData] = await Promise.all([
           api.getPositions(),
@@ -155,6 +155,21 @@ export default function App() {
         setOpenPositions(posData.open);
         setClosedPositions(posData.closed);
         setBalance(settingsData.currentBalanceSol);
+
+        // Refresh scanner + analytics every 5th tick (~15s) even when WS live,
+        // and every tick when WS is offline.
+        scannerTick++;
+        if (!wsConnectedRef.current || scannerTick % 5 === 0) {
+          const [scanData, analyticsData] = await Promise.all([
+            api.getScanner(),
+            api.getAnalytics(),
+          ]);
+          startTransition(() => {
+            setTokens(scanData.tokens);
+            setScanStats(scanData.stats);
+            setAnalytics(analyticsData);
+          });
+        }
       } catch {
         // Silently ignore
       }

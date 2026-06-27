@@ -8,15 +8,50 @@ let wss: WebSocketServer | null = null;
 export function initWebSocket(server: Server): void {
   wss = new WebSocketServer({ server, path: '/ws' });
 
-  wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
+  wss.on('connection', async (ws: WebSocket, req: IncomingMessage) => {
     logger.info({ ip: req.socket.remoteAddress }, 'WS client connected');
 
     ws.on('error', (err) => logger.warn({ err }, 'WS error'));
     ws.on('close', () => logger.debug('WS client disconnected'));
+    ws.on('pong', () => { (ws as WebSocket & { isAlive?: boolean }).isAlive = true; });
 
-    // Send initial ping
-    safeSend(ws, { type: 'alert', data: { message: 'Connected to Apex Meme Trader' } });
+    // Push current state immediately so the UI doesn't wait for the next broadcast cycle
+    try {
+      const { getOpenPositions, getClosedPositions, getAnalytics } = await import('../services/position.service.js');
+      const { getAllTokens, getScanStats } = await import('../services/scanner.service.js');
+      const { getBalance } = await import('../services/settings.service.js');
+
+      const [open, closed, analytics, balance] = await Promise.all([
+        getOpenPositions(),
+        getClosedPositions(),
+        getAnalytics(),
+        getBalance(),
+      ]);
+      const tokens = getAllTokens();
+      const stats = getScanStats();
+
+      safeSend(ws, { type: 'positions', data: { open, closed } });
+      safeSend(ws, { type: 'analytics', data: analytics });
+      safeSend(ws, { type: 'balance', data: { balance } });
+      safeSend(ws, { type: 'tokens', data: { tokens, stats } });
+    } catch (err) {
+      logger.warn({ err }, 'WS initial state push failed');
+    }
   });
+
+  // Keepalive ping every 30s — prevents Replit proxy from dropping idle connections
+  setInterval(() => {
+    if (!wss) return;
+    for (const ws of wss.clients) {
+      const client = ws as WebSocket & { isAlive?: boolean };
+      if (client.isAlive === false) {
+        client.terminate();
+        continue;
+      }
+      client.isAlive = false;
+      client.ping();
+    }
+  }, 30_000);
 
   logger.info('WebSocket server initialized on /ws');
 }
