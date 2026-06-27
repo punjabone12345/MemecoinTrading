@@ -250,21 +250,23 @@ function PositionCard({ pos, settings, onRefresh }: { pos: Position; settings: S
         style={{ padding: '16px', borderColor: isPos ? 'rgba(0,255,136,0.18)' : 'rgba(255,68,102,0.18)' }}>
 
         {/* Header: symbol + P&L */}
-        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 10 }}>
-          <div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
-              <span style={{ fontWeight: 900, fontSize: 15, color: '#d4e0f0' }}>{pos.symbol}</span>
-              <span style={{ fontSize: 11, color: '#3a5070' }}>{pos.name}</span>
-              <span style={{ padding: '2px 7px', borderRadius: 6, fontSize: 10, fontWeight: 700, background: 'rgba(0,212,255,0.1)', color: '#00d4ff', border: '1px solid rgba(0,212,255,0.2)' }}>Score: {pos.scoreAtEntry}</span>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8, marginBottom: 10 }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4, flexWrap: 'wrap' }}>
+              <span style={{ fontWeight: 900, fontSize: 15, color: '#d4e0f0', flexShrink: 0 }}>{pos.symbol}</span>
+              <span style={{ fontSize: 11, color: '#3a5070', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 80 }}>{pos.name}</span>
+              <span style={{ padding: '2px 7px', borderRadius: 6, fontSize: 10, fontWeight: 700, background: 'rgba(0,212,255,0.1)', color: '#00d4ff', border: '1px solid rgba(0,212,255,0.2)', flexShrink: 0 }}>Score: {pos.scoreAtEntry}</span>
               {/* Live 500ms indicator */}
-              <span title="Price updating every 500ms" style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 9, color: '#00ff88', fontWeight: 800 }}>
+              <span title="Price updating every 500ms" style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 9, color: '#00ff88', fontWeight: 800, flexShrink: 0 }}>
                 <span style={{ display: 'inline-block', width: 5, height: 5, borderRadius: '50%', background: '#00ff88', boxShadow: '0 0 5px #00ff88', animation: 'pulse-dot 0.8s ease-in-out infinite' }} />
                 LIVE
               </span>
             </div>
             <div style={{ fontSize: 11, color: '#3a5070' }}>{toIST(pos.entryTime)}</div>
           </div>
-          <PnlDisplay pnl={pnlSol} pct={pnlPct} />
+          <div style={{ flexShrink: 0 }}>
+            <PnlDisplay pnl={pnlSol} pct={pnlPct} />
+          </div>
         </div>
 
         {/* Key metrics grid */}
