@@ -1,5 +1,5 @@
 import { logger } from '../lib/logger.js';
-import { scanTokens, getAllTokens, setDailyLossStatus, markTokenEntered, setTradedTodayMints } from './scanner.service.js';
+import { scanTokens, getAllTokens, setDailyLossStatus, markTokenEntered, setTradedTodayMints, hotRefreshScanningTokens } from './scanner.service.js';
 import { getSettings } from './settings.service.js';
 import { openPosition, getOpenPositions } from './position.service.js';
 import { getBalance } from './settings.service.js';
@@ -22,8 +22,10 @@ import { broadcastTokens } from '../websocket/server.js';
 
 let fetchTimeout: ReturnType<typeof setTimeout> | null = null;
 let checkInterval: ReturnType<typeof setInterval> | null = null;
+let hotRefreshInterval: ReturnType<typeof setInterval> | null = null;
 let isFetching = false;
 let isChecking = false;
+let isHotRefreshing = false;
 let traderStarted = false;
 
 // Cached daily-loss state — refreshed every 10s inside the check loop
@@ -98,6 +100,28 @@ export function startAutoTrader(): void {
       isChecking = false;
     }
   }, 1_000);
+
+  // ── HOT REFRESH loop (3s) ───────────────────────────────────────────────
+  // Re-fetches live DexScreener pair data specifically for SCANNING tokens
+  // and recently-rejected tokens (last 90s). These are the tokens closest to
+  // eligibility — a stale 5m candle or BSR reading could be the only thing
+  // blocking entry. Broadcasts immediately when any status changes so the UI
+  // reflects the update within seconds, not at the next 15s full scan.
+  hotRefreshInterval = setInterval(async () => {
+    if (isHotRefreshing || isFetching) return; // skip if full scan running
+    isHotRefreshing = true;
+    try {
+      const anyChanged = await hotRefreshScanningTokens();
+      if (anyChanged) {
+        await broadcastTokens();
+        await checkEntries(); // immediately check entries if status changed
+      }
+    } catch (err) {
+      logger.error({ err }, 'Hot refresh cycle error');
+    } finally {
+      isHotRefreshing = false;
+    }
+  }, 3_000);
 
   logger.info('Auto-trader started');
 }
@@ -220,4 +244,5 @@ export function stopAutoTrader(): void {
   if (fetchTimeout) { clearTimeout(fetchTimeout); fetchTimeout = null; }
   traderStarted = false;
   if (checkInterval) { clearInterval(checkInterval); checkInterval = null; }
+  if (hotRefreshInterval) { clearInterval(hotRefreshInterval); hotRefreshInterval = null; }
 }

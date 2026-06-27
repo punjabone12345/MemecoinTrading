@@ -641,6 +641,140 @@ export async function scanTokens(): Promise<void> {
   logger.info({ scanCount, passedFilters, eligibleCount }, 'Scan complete');
 }
 
+// ── HOT REFRESH ─────────────────────────────────────────────────────────────
+// Runs every 3 seconds (separate from the full 15s scan cycle).
+// Targets only SCANNING, recently-REJECTED, and brand-new tokens so they
+// flip to ELIGIBLE the moment real-world data corrects — not 15s later.
+// Returns true when at least one token changed status (caller broadcasts).
+export async function hotRefreshScanningTokens(): Promise<boolean> {
+  const settings = await getSettings().catch(() => null);
+  if (!settings) return false;
+
+  const now = Date.now();
+
+  // Collect mints worth refreshing:
+  //  • SCANNING — close to eligible, any filter could flip any second
+  //  • REJECTED in last 90s — might have just been rejected due to stale 5m data
+  //  • Any token not refreshed in last 10s that isn't already ENTERED/ELIGIBLE
+  const targets: { mint: string; pairAddress: string; token: Token }[] = [];
+  for (const [mint, token] of tokenCache.entries()) {
+    if (token.status === 'ENTERED') continue;
+    if (token.status === 'ELIGIBLE') continue;
+    const isScanning  = token.status === 'SCANNING';
+    const recentReject = token.status === 'REJECTED' && (now - token.lastChecked) < 90_000;
+    const stale       = (now - token.lastChecked) > 10_000;
+    if ((isScanning || recentReject) && stale && token.pairAddress) {
+      targets.push({ mint, pairAddress: token.pairAddress, token });
+    }
+  }
+  if (targets.length === 0) return false;
+
+  // Fetch fresh pair data for all targets in parallel chunks of 30
+  const pairAddrs = targets.map((t) => t.pairAddress);
+  const chunks: string[][] = [];
+  for (let i = 0; i < pairAddrs.length; i += 30) chunks.push(pairAddrs.slice(i, i + 30));
+
+  const freshMap = new Map<string, DexPair>();
+  const results = await Promise.all(
+    chunks.map((chunk) =>
+      axios.get<{ pairs: DexPair[] }>(
+        `${DEXSCREENER_BASE}/latest/dex/pairs/solana/${chunk.join(',')}`,
+        { timeout: 6000 }
+      ).catch(() => ({ data: { pairs: [] as DexPair[] } }))
+    )
+  );
+  for (const res of results) {
+    for (const p of res.data?.pairs ?? []) {
+      if (p.pairAddress) freshMap.set(p.pairAddress, p);
+    }
+  }
+
+  let anyChanged = false;
+
+  for (const { mint, pairAddress, token } of targets) {
+    const fresh = freshMap.get(pairAddress);
+    if (!fresh) continue; // pair not returned — leave as-is
+
+    // Pull the freshest values — these are what was stale before
+    const change5m  = fresh.priceChange?.m5  ?? token.priceChange5m;
+    const change1h  = fresh.priceChange?.h1  ?? token.priceChange1h;
+    const change24  = fresh.priceChange?.h24 ?? token.priceChange24h;
+    const mc        = fresh.marketCap ?? fresh.fdv ?? token.marketCap;
+    const liq       = fresh.liquidity?.usd ?? token.liquidity;
+    const price     = parseFloat(fresh.priceUsd ?? '0') || token.price;
+    const vol24     = token.volume24h;  // aggregated value — keep as-is (not in single pair fetch)
+    const bsr       = token.buySellRatio;
+    const v1h       = token.volume1hCurrent;
+    const v1hPrev   = token.volume1hPrev;
+    const ageH      = fresh.pairCreatedAt ? (now - fresh.pairCreatedAt) / 3_600_000 : token.age;
+
+    // Quick pre-filter disqualifier — skip re-eval if clearly still wrong
+    if (mc < settings.minMc || mc > settings.maxMc) continue;
+    if (vol24 < settings.minVolume24h) continue;
+    if (ageH > settings.maxAgeHours) continue;
+    if (change24 > 500) continue;
+
+    const partial: Partial<Token> = {
+      priceChange5m: change5m,
+      volume1hCurrent: v1h,
+      volume1hPrev: v1hPrev,
+      volume24h: vol24,
+      buySellRatio: bsr,
+      marketCap: mc,
+    };
+    const scoreBreakdown = calcScore(partial, { minMc: settings.minMc, maxMc: settings.maxMc });
+    const filterResults  = buildFilterResults(fresh, settings, token.rugcheck, token.topHolder, token.creatorPct, scoreBreakdown.total, vol24, bsr, change5m);
+    const allPassed = filterResults.every((f) => f.passed);
+    const rejectReason = !allPassed ? filterResults.find((f) => !f.passed)?.name : undefined;
+
+    const prevConsecutive = token.consecutiveTrending ?? 0;
+    const isUp = change5m >= 0 && (scoreBreakdown.total >= (token.score ?? 0));
+    const consecutive = isUp ? prevConsecutive + 1 : 0;
+    const trendOk = settings.trendChecksRequired <= 1 || consecutive >= settings.trendChecksRequired;
+
+    const newStatus: Token['status'] = enteredMints.has(mint)
+      ? 'ENTERED'
+      : allPassed && scoreBreakdown.total >= settings.minEntryScore && trendOk
+      ? 'ELIGIBLE'
+      : !allPassed
+      ? 'REJECTED'
+      : 'SCANNING';
+
+    if (newStatus !== token.status) {
+      anyChanged = true;
+      if (newStatus === 'ELIGIBLE') {
+        logger.info(
+          { mint, symbol: token.symbol, score: scoreBreakdown.total, change5m, source: 'hot-refresh' },
+          'HOT REFRESH → ELIGIBLE'
+        );
+      }
+    }
+
+    tokenCache.set(mint, {
+      ...token,
+      marketCap: mc,
+      liquidity: liq,
+      price,
+      priceChange5m: change5m,
+      priceChange1h: change1h,
+      priceChange24h: change24,
+      age: ageH,
+      score: scoreBreakdown.total,
+      scoreBreakdown,
+      filterResults,
+      consecutiveTrending: consecutive,
+      status: newStatus,
+      rejectReason,
+      lastChecked: now,
+    });
+  }
+
+  if (targets.length > 0) {
+    logger.debug({ targets: targets.length, freshFetched: freshMap.size, anyChanged }, 'Hot refresh complete');
+  }
+  return anyChanged;
+}
+
 export function markTokenEntered(mint: string): void {
   enteredMints.add(mint);
   const t = tokenCache.get(mint);
