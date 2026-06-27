@@ -338,10 +338,10 @@ async function fetchDexPairs(): Promise<DexPair[]> {
       boostRes.data.filter((t) => t.chainId === 'solana').forEach((t) => extraMints.add(t.tokenAddress));
     }
 
-    // Batch-lookup all collected mints on DexScreener (30 per request, no cap)
+    // Batch-lookup all collected mints on DexScreener (50 per request — max allowed, fewer parallel requests)
     const mintList = Array.from(extraMints);
     const mintChunks: string[][] = [];
-    for (let i = 0; i < mintList.length; i += 30) mintChunks.push(mintList.slice(i, i + 30));
+    for (let i = 0; i < mintList.length; i += 50) mintChunks.push(mintList.slice(i, i + 50));
 
     const mintResults = await Promise.all(
       mintChunks.map((chunk) =>

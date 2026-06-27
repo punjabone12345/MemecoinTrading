@@ -84,12 +84,14 @@ export function startAutoTrader(): void {
   // ── CHECK loop (1s) ─────────────────────────────────────────────────────
   // Reads from the already-populated tokenCache — no API calls.
   // Checks every cached token for entry conditions every second.
+  // NOTE: broadcastTokens() is NOT called here — only after a FETCH cycle
+  // or when a trade fires. Broadcasting 1000+ tokens every second was the
+  // single biggest performance killer.
   checkInterval = setInterval(async () => {
     if (isChecking) return;
     isChecking = true;
     try {
       await checkEntries();
-      await broadcastTokens();
     } catch (err) {
       logger.error({ err }, 'Check cycle error');
     } finally {

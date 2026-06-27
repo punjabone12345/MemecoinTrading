@@ -1,7 +1,30 @@
 import { query } from '../lib/db.js';
 import { Settings } from '../types/index.js';
 
+// In-memory settings cache — avoids a DB round-trip on every 1s check tick.
+// Invalidated immediately on any write (updateSetting/updateSettings).
+let settingsCache: Settings | null = null;
+let settingsCacheAt = 0;
+const SETTINGS_CACHE_TTL = 8_000; // 8 seconds
+
+// Balance cache — refreshed every 5s instead of every 1s tick
+let balanceCache: number | null = null;
+let balanceCacheAt = 0;
+const BALANCE_CACHE_TTL = 5_000;
+
+export function invalidateSettingsCache(): void {
+  settingsCache = null;
+  settingsCacheAt = 0;
+  balanceCache = null;
+  balanceCacheAt = 0;
+}
+
 export async function getSettings(): Promise<Settings> {
+  const now = Date.now();
+  if (settingsCache && now - settingsCacheAt < SETTINGS_CACHE_TTL) {
+    return settingsCache;
+  }
+
   const rows = await query<{ key: string; value: string }>('SELECT key, value FROM settings');
   const map: Record<string, string> = {};
   for (const r of rows) map[r.key] = r.value;
@@ -10,13 +33,13 @@ export async function getSettings(): Promise<Settings> {
   const bool = (k: string, def: boolean) => (map[k] ?? String(def)) === 'true';
   const str = (k: string, def: string) => map[k] ?? def;
 
-  return {
+  const settings: Settings = {
     minMc: num('minMc', 500000),
     maxMc: num('maxMc', 7000000),
     minVolume24h: num('minVolume24h', 100000),
     minAgeHours: num('minAgeHours', 1),
     maxAgeHours: num('maxAgeHours', 168),
-    scanFrequencyMs: num('scanFrequencyMs', 30000),
+    scanFrequencyMs: num('scanFrequencyMs', 8000),
     minBuySellRatio: num('minBuySellRatio', 1.2),
     maxTopHolder: num('maxTopHolder', 20),
     maxCreatorPct: num('maxCreatorPct', 10),
@@ -46,6 +69,10 @@ export async function getSettings(): Promise<Settings> {
     priorityFeeSol: num('priorityFeeSol', 0.001),
     walletPublicKey: str('walletPublicKey', ''),
   };
+
+  settingsCache = settings;
+  settingsCacheAt = Date.now();
+  return settings;
 }
 
 export async function updateSetting(key: string, value: string): Promise<void> {
@@ -54,20 +81,31 @@ export async function updateSetting(key: string, value: string): Promise<void> {
      ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = NOW()`,
     [key, value]
   );
+  invalidateSettingsCache();
 }
 
 export async function updateSettings(updates: Partial<Record<string, string>>): Promise<void> {
   for (const [key, value] of Object.entries(updates)) {
     if (value !== undefined) await updateSetting(key, value);
   }
+  invalidateSettingsCache();
 }
 
 export async function getBalance(): Promise<number> {
+  const now = Date.now();
+  if (balanceCache !== null && now - balanceCacheAt < BALANCE_CACHE_TTL) {
+    return balanceCache;
+  }
   const rows = await query<{ value: string }>(`SELECT value FROM settings WHERE key = 'currentBalanceSol'`);
-  return parseFloat(rows[0]?.value ?? '10');
+  const balance = parseFloat(rows[0]?.value ?? '10');
+  balanceCache = balance;
+  balanceCacheAt = now;
+  return balance;
 }
 
 export async function setBalance(sol: number): Promise<void> {
+  balanceCache = sol;
+  balanceCacheAt = Date.now();
   await updateSetting('currentBalanceSol', String(sol));
 }
 
@@ -75,5 +113,7 @@ export async function resetAllData(): Promise<void> {
   await query(`DELETE FROM positions`);
   const rows = await query<{ value: string }>(`SELECT value FROM settings WHERE key = 'startingBalanceSol'`);
   const start = parseFloat(rows[0]?.value ?? '10');
+  balanceCache = start;
+  balanceCacheAt = Date.now();
   await updateSetting('currentBalanceSol', String(start));
 }
