@@ -37,9 +37,12 @@ async function withPositionLock<T>(id: string, fn: () => Promise<T>): Promise<T>
 const EMERGENCY_CONFIRM_TICKS = 3;
 const emergencyConfirmCounts = new Map<string, Map<string, number>>();
 
-// SL must breach for SL_CONFIRM_TICKS consecutive ticks before closing.
-// Prevents a single bad DexScreener tick firing a false Stop Loss.
-const SL_CONFIRM_TICKS = 2;
+// SL confirmation ticks:
+//  • Hard SL (below entry, givebackPct=null): 2 ticks — noisy zone, bad ticks happen
+//  • Trailing SL (in profit, givebackPct set): 1 tick — already in profit, built-in
+//    40% giveback buffer makes false trigger near-impossible; speed matters more
+const SL_HARD_CONFIRM_TICKS = 2;
+const SL_TRAIL_CONFIRM_TICKS = 1;
 const slConfirmCounts = new Map<string, number>();
 
 /**
@@ -335,15 +338,17 @@ async function _updatePositionPrice(id: string, currentPrice: number, freshBsr?:
     WHERE id = $3
   `, [newPeak, newSL, id]);
 
-  // ── SL check with 2-tick confirmation ───────────────────────────────────
-  // Require currentPrice to be below SL for SL_CONFIRM_TICKS consecutive ticks
-  // before closing. A single bad DexScreener tick cannot fire a Stop Loss alone.
+  // ── SL check ────────────────────────────────────────────────────────────
+  // Trailing SL (in profit): 1-tick confirmation — speed matters; 40% giveback
+  //   already provides a large buffer against noise.
+  // Hard SL (below entry): 2-tick confirmation — noisier zone, prevent false fires.
+  const slConfirmRequired = givebackPct !== null ? SL_TRAIL_CONFIRM_TICKS : SL_HARD_CONFIRM_TICKS;
   if (currentPrice <= newSL) {
     const slCount = (slConfirmCounts.get(id) ?? 0) + 1;
     slConfirmCounts.set(id, slCount);
-    if (slCount < SL_CONFIRM_TICKS) {
+    if (slCount < slConfirmRequired) {
       logger.info(
-        { id, symbol: pos.symbol, currentPrice, slPrice: newSL, tick: slCount, required: SL_CONFIRM_TICKS },
+        { id, symbol: pos.symbol, currentPrice, slPrice: newSL, tick: slCount, required: slConfirmRequired, type: givebackPct !== null ? 'trailing' : 'hard' },
         'SL breach tick — waiting for confirmation'
       );
     } else {

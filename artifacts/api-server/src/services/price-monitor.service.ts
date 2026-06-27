@@ -26,6 +26,45 @@ interface DexPriceResult {
 
 type PriceData = { price: number; mc: number; bsr: number; liquidity: number };
 
+// PRIMARY: fetch by pair address — targeted, real-time, no multi-pool aggregation lag.
+// Used for all open positions that have a dexUrl (pair address known at entry time).
+// Much faster than mint-based fetch during volatile dumps because DexScreener serves
+// a single specific pool rather than aggregating across all pools for the token.
+async function fetchByPairAddresses(pairAddresses: string[]): Promise<Map<string, PriceData>> {
+  const result = new Map<string, PriceData>();
+  if (pairAddresses.length === 0) return result;
+
+  try {
+    const chunks: string[][] = [];
+    for (let i = 0; i < pairAddresses.length; i += 30) chunks.push(pairAddresses.slice(i, i + 30));
+
+    await Promise.all(
+      chunks.map(async (chunk) => {
+        const res = await axios.get<DexPriceResult>(
+          `https://api.dexscreener.com/latest/dex/pairs/solana/${chunk.join(',')}`,
+          { timeout: 4000 }
+        );
+        for (const pair of res.data?.pairs ?? []) {
+          const pairAddr = pair.pairAddress;
+          if (!pairAddr) continue;
+          const price = parseFloat(pair.priceUsd ?? '0');
+          if (price <= 0) continue;
+          const mc = pair.marketCap ?? pair.fdv ?? 0;
+          const h1 = pair.txns?.h1 ?? { buys: 0, sells: 0 };
+          const bsr = h1.sells > 0 ? h1.buys / h1.sells : h1.buys > 0 ? 99 : 1;
+          const liquidity = pair.liquidity?.usd ?? 0;
+          result.set(pairAddr, { price, mc, bsr, liquidity });
+        }
+      })
+    );
+  } catch (err) {
+    logger.warn({ err }, 'Price fetch (by pair address) error');
+  }
+
+  return result;
+}
+
+// FALLBACK: fetch by mint — used when position has no dexUrl / pair address unknown.
 async function fetchByMints(mints: string[]): Promise<Map<string, PriceData>> {
   const result = new Map<string, PriceData>();
   if (mints.length === 0) return result;
@@ -37,7 +76,7 @@ async function fetchByMints(mints: string[]): Promise<Map<string, PriceData>> {
     for (const chunk of chunks) {
       const res = await axios.get<DexPriceResult>(
         `https://api.dexscreener.com/latest/dex/tokens/${chunk.join(',')}`,
-        { timeout: 6000 }
+        { timeout: 4000 }
       );
       // Track txn activity count per mint to pick the most active pair.
       const activity = new Map<string, number>();
@@ -49,10 +88,6 @@ async function fetchByMints(mints: string[]): Promise<Map<string, PriceData>> {
         const mc = pair.marketCap ?? pair.fdv ?? 0;
         const h1 = pair.txns?.h1 ?? { buys: 0, sells: 0 };
         const bsr = h1.sells > 0 ? h1.buys / h1.sells : h1.buys > 0 ? 99 : 1;
-
-        // Pick the pair with the most h1 activity (highest buys+sells).
-        // This is the actively traded pool → most accurate real-time price.
-        // Avoids stale low-liquidity pairs showing inflated prices post-dump.
         const h1Count = h1.buys + h1.sells;
         const prevActivity = activity.get(mint) ?? -1;
         if (h1Count > prevActivity) {
@@ -69,20 +104,6 @@ async function fetchByMints(mints: string[]): Promise<Map<string, PriceData>> {
   return result;
 }
 
-// Fallback: fetch by pair address for positions whose mint returned price=0
-async function fetchByPairAddress(pairAddress: string): Promise<number> {
-  try {
-    const res = await axios.get<DexPriceResult>(
-      `https://api.dexscreener.com/latest/dex/pairs/solana/${pairAddress}`,
-      { timeout: 6000 }
-    );
-    const pair = res.data?.pair ?? res.data?.pairs?.[0];
-    return parseFloat(pair?.priceUsd ?? '0');
-  } catch {
-    return 0;
-  }
-}
-
 // Extract pair address from DexScreener URL like https://dexscreener.com/solana/<pair>
 function pairAddressFromDexUrl(dexUrl?: string): string | undefined {
   if (!dexUrl) return undefined;
@@ -93,65 +114,79 @@ function pairAddressFromDexUrl(dexUrl?: string): string | undefined {
 export function startPriceMonitor(): void {
   if (monitorInterval) return;
 
+  // 500ms interval — halves reaction time vs 1s for trailing SL / hard SL.
+  // Fast memecoins can dump 30%+ in 2 seconds; every 500ms saved matters.
   monitorInterval = setInterval(async () => {
     try {
       const positions = await getOpenPositions();
       if (positions.length === 0) return;
 
-      const mints = positions.map((p) => p.mint);
-      const prices = await fetchByMints(mints);
+      // Split positions into: pair-address known (primary) vs mint-only (fallback)
+      const withPair: { pos: (typeof positions)[0]; pairAddr: string }[] = [];
+      const mintOnly: (typeof positions)[0][] = [];
 
-      // Fallback: for any open position with price=0, try fetching by pair address
-      const fallbackFetches = positions
-        .filter((p) => {
-          const d = prices.get(p.mint);
-          return !d || d.price === 0;
-        })
-        .map(async (p) => {
-          const pairAddr = pairAddressFromDexUrl(p.dexUrl);
-          if (!pairAddr) return;
-          const price = await fetchByPairAddress(pairAddr);
-          if (price > 0) {
-            prices.set(p.mint, { price, mc: p.entryMc, bsr: 1 });
-          }
-        });
-
-      if (fallbackFetches.length > 0) {
-        await Promise.all(fallbackFetches);
+      for (const pos of positions) {
+        const pairAddr = pairAddressFromDexUrl(pos.dexUrl);
+        if (pairAddr) {
+          withPair.push({ pos, pairAddr });
+        } else {
+          mintOnly.push(pos);
+        }
       }
 
+      // Fetch both in parallel
+      const [pairPrices, mintPrices] = await Promise.all([
+        fetchByPairAddresses(withPair.map((w) => w.pairAddr)),
+        fetchByMints(mintOnly.map((p) => p.mint)),
+      ]);
+
+      // Build unified price map keyed by position ID
+      const priceById = new Map<string, PriceData>();
+      for (const { pos, pairAddr } of withPair) {
+        const d = pairPrices.get(pairAddr);
+        if (d && d.price > 0) priceById.set(pos.id, d);
+      }
+      for (const pos of mintOnly) {
+        const d = mintPrices.get(pos.mint);
+        if (d && d.price > 0) priceById.set(pos.id, d);
+      }
+
+      // Build enriched list for UI broadcast
       const enriched = positions.map((p) => {
-        const data = prices.get(p.mint);
+        const data = priceById.get(p.id);
         const currentPrice = data && data.price > 0 ? data.price : p.entryPrice;
         const currentMc = data?.mc ?? p.entryMc;
         const bsr = data?.bsr ?? 1;
         const pnlPct = ((currentPrice - p.entryPrice) / p.entryPrice) * 100;
         const pnlSol = p.sizeSol * (pnlPct / 100);
-
         return { ...p, currentPrice, currentMc, buySellRatio: bsr, pnlPct, pnlSol };
       });
 
       broadcast({ type: 'positions', data: enriched });
 
-      // Run SL/TP checks for every position with a valid price
+      // SL/TP checks — run for every position with a valid price
       for (const pos of positions) {
-        const data = prices.get(pos.mint);
+        const data = priceById.get(pos.id);
         if (data && data.price > 0) {
           const prev = lastKnownPrice.get(pos.id);
 
           // Sanity gate: reject a tick that is >60% below the last known price.
-          // DexScreener occasionally serves stale/wrong prices from a de-listed pair,
-          // which would fire a false Stop Loss. We skip the SL check for that tick
-          // and keep the last known price until a plausible value returns.
-          if (prev && data.price < prev * 0.40) {
+          // DexScreener occasionally serves stale/wrong prices from a de-listed pair.
+          // Use a tighter 50% gate for the pair-address fetch (those are single-pool,
+          // less likely to be a pool-switch artifact) vs mint fetch.
+          const dropThreshold = pairAddressFromDexUrl(pos.dexUrl) ? 0.45 : 0.40;
+          if (prev && data.price < prev * dropThreshold) {
             logger.warn(
-              { id: pos.id, symbol: pos.symbol, prevPrice: prev, newPrice: data.price, dropPct: (((prev - data.price) / prev) * 100).toFixed(1) },
-              'Price sanity gate: >60% single-tick drop rejected — skipping SL check this cycle'
+              {
+                id: pos.id, symbol: pos.symbol,
+                prevPrice: prev, newPrice: data.price,
+                dropPct: (((prev - data.price) / prev) * 100).toFixed(1),
+                source: pairAddressFromDexUrl(pos.dexUrl) ? 'pair' : 'mint',
+              },
+              'Price sanity gate: >55% single-tick drop rejected — skipping SL check this cycle'
             );
           } else {
             lastKnownPrice.set(pos.id, data.price);
-            // Pass fresh BSR and liquidity so emergency exit uses real-time data,
-            // not the stale scanner cache (which is only updated every 10s).
             updatePositionPrice(pos.id, data.price, data.bsr, data.liquidity).catch((err) =>
               logger.warn({ err, id: pos.id }, 'Price update error')
             );
@@ -163,9 +198,9 @@ export function startPriceMonitor(): void {
     } catch (err) {
       logger.warn({ err }, 'Price monitor cycle error');
     }
-  }, 1000);
+  }, 500);
 
-  logger.info('Price monitor started (1s interval)');
+  logger.info('Price monitor started (500ms interval)');
 }
 
 export function stopPriceMonitor(): void {
