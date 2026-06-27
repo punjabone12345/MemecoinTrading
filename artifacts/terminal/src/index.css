@@ -180,4 +180,9 @@ body {
 }
 .glow-green { animation: glow-green 1s ease-in-out; }
 
+@keyframes pulse-dot {
+  0%,100% { opacity:1; transform:scale(1); }
+  50% { opacity:0.5; transform:scale(1.4); }
+}
+
 .score-ring { transform:rotate(-90deg); transform-origin:center; }

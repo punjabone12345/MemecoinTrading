@@ -1,9 +1,9 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect, useRef } from 'react';
 import { Token, ScanStats, Settings } from '../lib/types.js';
 import { formatMC, formatAge, formatPrice } from '../lib/utils.js';
 
 interface Props { tokens: Token[]; scanStats: ScanStats; settings: Settings | null }
-type Sort = 'score' | 'marketCap' | 'age' | 'priceChange24h';
+type Sort = 'score' | 'marketCap' | 'age' | 'priceChange24h' | 'priceChange5m';
 type Filter = 'ALL' | 'ELIGIBLE' | 'SCANNING' | 'ENTERED' | 'REJECTED';
 
 function ScoreRing({ score }: { score: number }) {
@@ -30,14 +30,36 @@ function StatusBadge({ status }: { status: Token['status'] }) {
   return <span className={`badge ${cls}`}>{status}</span>;
 }
 
+// Freshness dot — shows how recently this token's data was refreshed
+// Green pulse = hot refresh (<5s), blue = recent scan (<15s), grey = older
+function FreshnessDot({ lastChecked }: { lastChecked: number }) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+  const ageMs = now - lastChecked;
+  const ageSec = Math.floor(ageMs / 1000);
+  const isHot = ageMs < 5_000;
+  const isRecent = ageMs < 20_000;
+  const color = isHot ? '#00ff88' : isRecent ? '#00d4ff' : '#3a5070';
+  const label = ageSec < 60 ? `${ageSec}s ago` : `${Math.floor(ageSec / 60)}m ago`;
+  return (
+    <span title={`Data refreshed ${label}`} style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 10, color, fontWeight: isHot ? 800 : 600 }}>
+      <span style={{
+        display: 'inline-block', width: 6, height: 6, borderRadius: '50%', background: color,
+        boxShadow: isHot ? `0 0 6px ${color}` : 'none',
+        animation: isHot ? 'pulse-dot 1s ease-in-out infinite' : 'none',
+      }} />
+      {label}
+    </span>
+  );
+}
+
 function TradeBlockBanner({ token, settings, dailyLossLimitHit, dailyPnl, dailyLossLimit }: {
-  token: Token;
-  settings: Settings;
-  dailyLossLimitHit?: boolean;
-  dailyPnl?: number;
-  dailyLossLimit?: number;
+  token: Token; settings: Settings;
+  dailyLossLimitHit?: boolean; dailyPnl?: number; dailyLossLimit?: number;
 }) {
-  // Daily loss limit is a global block — show it first, no point checking other conditions
   if (dailyLossLimitHit) {
     const pnlStr = dailyPnl !== undefined ? dailyPnl.toFixed(4) : '?';
     const limitStr = dailyLossLimit !== undefined ? dailyLossLimit.toFixed(4) : '?';
@@ -51,7 +73,6 @@ function TradeBlockBanner({ token, settings, dailyLossLimitHit, dailyPnl, dailyL
   }
 
   const reasons: string[] = [];
-
   if (token.score < settings.minEntryScore)
     reasons.push(`Score ${token.score} below min ${settings.minEntryScore}`);
   if (token.buySellRatio < settings.minBuySellRatio)
@@ -66,13 +87,10 @@ function TradeBlockBanner({ token, settings, dailyLossLimitHit, dailyPnl, dailyL
       </div>
     );
   }
-
   return (
     <div style={{ marginTop: 8, padding: '8px 12px', borderRadius: 8, background: 'rgba(255,180,0,0.06)', border: '1px solid rgba(255,180,0,0.2)', fontSize: 11 }}>
       <div style={{ color: '#ffd700', fontWeight: 700, marginBottom: 5 }}>⏳ Waiting to trade — conditions not met:</div>
-      {reasons.map((r, i) => (
-        <div key={i} style={{ color: '#b08830', marginBottom: 2 }}>• {r}</div>
-      ))}
+      {reasons.map((r, i) => <div key={i} style={{ color: '#b08830', marginBottom: 2 }}>• {r}</div>)}
     </div>
   );
 }
@@ -81,6 +99,8 @@ function TokenCard({ token, settings, scanStats }: { token: Token; settings: Set
   const [open, setOpen] = useState(false);
   const isEligible = token.status === 'ELIGIBLE';
   const isEntered = token.status === 'ENTERED';
+  const c5m = token.priceChange5m;
+  const c1h = token.priceChange1h ?? 0;
 
   return (
     <div className={`card ${isEligible ? 'card-glow-green' : isEntered ? 'card-glow-gold' : ''}`}
@@ -93,13 +113,32 @@ function TokenCard({ token, settings, scanStats }: { token: Token; settings: Set
               <span style={{ fontWeight: 800, fontSize: 14, color: '#d4e0f0' }}>{token.symbol}</span>
               <span style={{ fontSize: 11, color: '#3a5070', maxWidth: 100, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{token.name}</span>
               <StatusBadge status={token.status} />
+              {token.lastChecked && <FreshnessDot lastChecked={token.lastChecked} />}
             </div>
+            {/* Row 1: MC / Vol / Age / 24h */}
             <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', fontSize: 11, color: '#3a5070' }}>
               <span>MC <b style={{ color: '#7090b0' }}>{formatMC(token.marketCap)}</b></span>
               <span>Vol <b style={{ color: '#7090b0' }}>{formatMC(token.volume24h)}</b></span>
               <span>Age <b style={{ color: '#7090b0' }}>{formatAge(token.age)}</b></span>
               <span style={{ color: token.priceChange24h >= 0 ? '#00ff88' : '#ff4466', fontWeight: 700 }}>
-                {token.priceChange24h >= 0 ? '+' : ''}{token.priceChange24h.toFixed(1)}%
+                {token.priceChange24h >= 0 ? '+' : ''}{token.priceChange24h.toFixed(1)}% 24h
+              </span>
+            </div>
+            {/* Row 2: live momentum — 5m, 1h, BSR always visible */}
+            <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', fontSize: 11, marginTop: 3 }}>
+              <span style={{ color: c5m >= 3 ? '#00ff88' : c5m >= 0 ? '#7090b0' : '#ff4466', fontWeight: 700 }}>
+                5m {c5m >= 0 ? '+' : ''}{c5m.toFixed(1)}%
+              </span>
+              <span style={{ color: c1h >= 0 ? '#7090b0' : '#ff4466' }}>
+                1h {c1h >= 0 ? '+' : ''}{c1h.toFixed(1)}%
+              </span>
+              <span style={{ color: token.buySellRatio >= 1.5 ? '#00ff88' : token.buySellRatio >= 1.1 ? '#7090b0' : '#ff4466' }}>
+                B/S {token.buySellRatio.toFixed(2)}x
+              </span>
+              <span style={{ color: '#3a5070' }}>
+                Trend <b style={{ color: token.consecutiveTrending >= (settings?.trendChecksRequired ?? 2) ? '#00ff88' : '#7090b0' }}>
+                  {token.consecutiveTrending}/{settings?.trendChecksRequired ?? 2}↑
+                </b>
               </span>
             </div>
           </div>
@@ -121,13 +160,7 @@ function TokenCard({ token, settings, scanStats }: { token: Token; settings: Set
           </div>
         )}
         {isEligible && settings && (
-          <TradeBlockBanner
-            token={token}
-            settings={settings}
-            dailyLossLimitHit={scanStats.dailyLossLimitHit}
-            dailyPnl={scanStats.dailyPnl}
-            dailyLossLimit={scanStats.dailyLossLimit}
-          />
+          <TradeBlockBanner token={token} settings={settings} dailyLossLimitHit={scanStats.dailyLossLimitHit} dailyPnl={scanStats.dailyPnl} dailyLossLimit={scanStats.dailyLossLimit} />
         )}
         {token.status === 'REJECTED' && token.rejectReason && (
           <div style={{ marginTop: 6, padding: '5px 10px', borderRadius: 6, background: 'rgba(255,68,102,0.06)', border: '1px solid rgba(255,68,102,0.15)', fontSize: 11, color: '#ff6680' }}>
@@ -157,6 +190,10 @@ function TokenCard({ token, settings, scanStats }: { token: Token; settings: Set
                   </div>
                 </div>
               ))}
+              <div style={{ marginTop: 10, paddingTop: 10, borderTop: '1px solid rgba(255,255,255,0.06)', fontSize: 11 }}>
+                <span style={{ color: '#3a5070' }}>Price </span>
+                <b style={{ color: '#7090b0' }}>${formatPrice(token.price)}</b>
+              </div>
             </div>
             <div>
               <div className="section-label" style={{ marginBottom: 10 }}>Filter Checks</div>
@@ -167,15 +204,9 @@ function TokenCard({ token, settings, scanStats }: { token: Token; settings: Set
                       <span>{f.passed ? '✅' : '❌'}</span>
                       <span style={{ color: f.passed ? '#7090b0' : '#ff4466' }}>{f.name}</span>
                     </div>
-                    <span style={{ color: '#3a5070' }}>{f.value}</span>
+                    <span style={{ color: f.passed ? '#3a5070' : '#ff6688', fontWeight: f.passed ? 400 : 700 }}>{f.value}</span>
                   </div>
                 ))}
-              </div>
-              <div style={{ marginTop: 10, paddingTop: 10, borderTop: '1px solid rgba(255,255,255,0.06)', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, fontSize: 11 }}>
-                <span style={{ color: '#3a5070' }}>Price <b style={{ color: '#7090b0' }}>${formatPrice(token.price)}</b></span>
-                <span style={{ color: '#3a5070' }}>B/S <b style={{ color: token.buySellRatio >= 1.5 ? '#00ff88' : '#7090b0' }}>{token.buySellRatio.toFixed(2)}x</b></span>
-                <span style={{ color: '#3a5070' }}>5m <b style={{ color: token.priceChange5m >= 0 ? '#00ff88' : '#ff4466' }}>{token.priceChange5m >= 0 ? '+' : ''}{token.priceChange5m.toFixed(2)}%</b></span>
-                <span style={{ color: '#3a5070' }}>Trend <b style={{ color: token.consecutiveTrending >= (settings?.trendChecksRequired ?? 2) ? '#00ff88' : '#7090b0' }}>{token.consecutiveTrending}/{settings?.trendChecksRequired ?? 2} ↑</b></span>
               </div>
             </div>
           </div>
@@ -187,6 +218,16 @@ function TokenCard({ token, settings, scanStats }: { token: Token; settings: Set
         </div>
       )}
     </div>
+  );
+}
+
+// Pulsing LIVE dot for the scan stats header
+function LiveDot() {
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 10, color: '#00ff88', fontWeight: 800, letterSpacing: '0.08em' }}>
+      <span style={{ display: 'inline-block', width: 7, height: 7, borderRadius: '50%', background: '#00ff88', boxShadow: '0 0 8px #00ff88', animation: 'pulse-dot 1.2s ease-in-out infinite' }} />
+      LIVE
+    </span>
   );
 }
 
@@ -202,12 +243,19 @@ export default function DiscoverPage({ tokens, scanStats, settings }: Props) {
     let arr = [...tokens];
     if (filter !== 'ALL') arr = arr.filter((t) => t.status === filter);
     if (search) { const q = search.toLowerCase(); arr = arr.filter((t) => t.symbol.toLowerCase().includes(q) || t.name.toLowerCase().includes(q)); }
-    arr.sort((a, b) => sort === 'score' ? b.score - a.score : sort === 'marketCap' ? b.marketCap - a.marketCap : sort === 'age' ? a.age - b.age : b.priceChange24h - a.priceChange24h);
+    arr.sort((a, b) =>
+      sort === 'score' ? b.score - a.score :
+      sort === 'marketCap' ? b.marketCap - a.marketCap :
+      sort === 'age' ? a.age - b.age :
+      sort === 'priceChange5m' ? b.priceChange5m - a.priceChange5m :
+      b.priceChange24h - a.priceChange24h
+    );
     return arr;
   }, [tokens, sort, filter, search]);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      {/* Scan stats */}
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8 }}>
         {[
           { label: 'Scanning', value: scanStats.scanning, color: '#00d4ff', glow: 'card-glow-cyan' },
@@ -221,7 +269,15 @@ export default function DiscoverPage({ tokens, scanStats, settings }: Props) {
         ))}
       </div>
 
-      {/* Rejection breakdown — shows why tokens are being filtered out */}
+      {/* Live status bar */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '8px 14px', borderRadius: 10, background: 'rgba(0,255,136,0.04)', border: '1px solid rgba(0,255,136,0.1)' }}>
+        <LiveDot />
+        <span style={{ fontSize: 10, color: '#3a5070' }}>
+          Full scan every <b style={{ color: '#7090b0' }}>15s</b> · Hot refresh every <b style={{ color: '#7090b0' }}>3s</b> for near-eligible tokens
+        </span>
+      </div>
+
+      {/* Rejection breakdown */}
       {scanStats.rejectionCounts && Object.keys(scanStats.rejectionCounts).length > 0 && (
         <div className="card" style={{ padding: '12px 14px' }}>
           <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: '0.1em', color: '#3a5070', marginBottom: 10 }}>
@@ -262,7 +318,8 @@ export default function DiscoverPage({ tokens, scanStats, settings }: Props) {
           <option value="score">Score</option>
           <option value="marketCap">Mkt Cap</option>
           <option value="age">Newest</option>
-          <option value="priceChange24h">24h %</option>
+          <option value="priceChange5m">5m Change</option>
+          <option value="priceChange24h">24h Change</option>
         </select>
       </div>
 
@@ -290,7 +347,7 @@ export default function DiscoverPage({ tokens, scanStats, settings }: Props) {
           <div style={{ fontWeight: 700, color: '#7090b0', marginBottom: 6 }}>
             {filter !== 'ALL' ? `No ${filter} tokens right now` : 'Scanning Solana...'}
           </div>
-          <div style={{ fontSize: 12 }}>Updates every 30 seconds</div>
+          <div style={{ fontSize: 12 }}>Full scan every 15s · hot refresh every 3s</div>
         </div>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
