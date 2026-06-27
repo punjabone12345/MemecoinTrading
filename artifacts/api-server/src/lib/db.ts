@@ -213,6 +213,23 @@ export async function initDB(): Promise<void> {
     );
   }
 
+  // ── Force-migrate specific settings that changed between versions ──────────
+  // Uses exact-old-value guards so user edits above the threshold are preserved.
+  const forceMigrations: [string, string, string][] = [
+    // [key, old-value, new-value]
+    ['minLiquidity', '20000', '25000'],  // raised liquidity floor
+    ['slPct',        '25',    '20'],     // reduced hard SL
+    ['sizeScore80',  '0.75',  '1'],      // flat sizing: remove score tiers
+    ['sizeScore70',  '0.5',   '1'],      // flat sizing: remove score tiers
+  ];
+  for (const [key, oldVal, newVal] of forceMigrations) {
+    await query(
+      `UPDATE settings SET value = $1 WHERE key = $2 AND value = $3`,
+      [newVal, key, oldVal]
+    );
+  }
+  logger.info('Settings migrations applied');
+
   // ── One-time backfill: fix historical positions that predate banked_profit_sol ──
   // Detects by banked_profit_sol IS NULL. Runs once; afterwards every row has the column set.
   // For positions with TP hits: reconstructs initial_size_sol from runner + TP fractions,

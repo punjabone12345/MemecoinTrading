@@ -137,9 +137,10 @@ export default function SettingsPage({ settings: init, onUpdate }: Props) {
 
       <Section title="Position Sizing" color="#00ff88">
         <NumberInput label="Max Open Positions" value={n('maxOpenPositions')} onChange={(v) => update('maxOpenPositions', v)} min={1} max={20} step={1} />
-        <NumberInput label="Size @ Score 90+ (% portfolio)" value={n('sizeScore90')} onChange={(v) => update('sizeScore90', v)} min={0.1} max={10} step={0.1} suffix="%" />
-        <NumberInput label="Size @ Score 80–89" value={n('sizeScore80')} onChange={(v) => update('sizeScore80', v)} min={0.1} max={10} step={0.1} suffix="%" />
-        <NumberInput label="Size @ Score 70–79" value={n('sizeScore70')} onChange={(v) => update('sizeScore70', v)} min={0.1} max={10} step={0.1} suffix="%" />
+        <NumberInput label="Flat Position Size (% of balance, all trades)" value={n('sizeScore70')} onChange={(v) => { update('sizeScore70', v); update('sizeScore80', v); update('sizeScore90', v); }} min={0.1} max={10} step={0.1} suffix="%" />
+        <div style={{ fontSize: 11, color: '#3a5070', lineHeight: 1.6, padding: '6px 0 2px' }}>
+          Flat sizing for all scores — score-based tiers removed. All trades use the same % until win rate improves.
+        </div>
       </Section>
 
       <Section title="Stop Loss / Runner" color="#ff4466">

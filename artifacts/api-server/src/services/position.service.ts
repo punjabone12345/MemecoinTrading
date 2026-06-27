@@ -148,9 +148,9 @@ export async function openPosition(params: {
     return null;
   }
 
-  // Flat 1% of balance for all trades — score-based scaling removed.
-  // Score 85 tokens rug as often as score 65; equal sizing until win rate improves.
-  const sizePct = 1;
+  // Flat sizing for all trades regardless of score — score-based tiers removed.
+  // sizeScore70 is the single configurable flat size (all three tiers are now equal).
+  const sizePct = settings.sizeScore70;
 
   const sizeSol = balance * sizePct / 100;
   logger.info({ balance, sizePct, sizeSol, score: params.score }, 'openPosition: computed trade size');
