@@ -104,6 +104,8 @@ export default function App() {
     const connect = async () => {
       if (destroyed) return;
       const ws = await createWS((msg) => {
+        // All setState calls inside a single WS message handler are auto-batched
+        // by React 18 — no extra work needed.
         if (msg.type === 'positions') {
           const p = msg.data as { open: Position[]; closed: Position[] } | Position[];
           if (Array.isArray(p)) {
@@ -115,8 +117,12 @@ export default function App() {
         }
         if (msg.type === 'tokens') {
           const d = msg.data as { tokens: Token[]; stats: ScanStats };
-          setTokens(d.tokens);
-          setScanStats(d.stats);
+          // Wrap in startTransition so heavy token list re-render doesn't
+          // block urgent input/animation frames
+          startTransition(() => {
+            setTokens(d.tokens);
+            setScanStats(d.stats);
+          });
         }
         if (msg.type === 'analytics') setAnalytics(msg.data as Analytics);
         if (msg.type === 'balance') setBalance((msg.data as { balance: number }).balance);

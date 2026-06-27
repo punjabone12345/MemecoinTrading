@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect, useRef } from 'react';
+import { useState, useMemo, useEffect, useRef, memo } from 'react';
 import { Token, ScanStats, Settings } from '../lib/types.js';
 import { formatMC, formatAge, formatPrice } from '../lib/utils.js';
 
@@ -6,7 +6,7 @@ interface Props { tokens: Token[]; scanStats: ScanStats; settings: Settings | nu
 type Sort = 'score' | 'marketCap' | 'age' | 'priceChange24h' | 'priceChange5m';
 type Filter = 'ALL' | 'ELIGIBLE' | 'SCANNING' | 'ENTERED' | 'REJECTED';
 
-function ScoreRing({ score }: { score: number }) {
+const ScoreRing = memo(function ScoreRing({ score }: { score: number }) {
   const size = 46, r = 18, circ = 2 * Math.PI * r;
   const filled = (score / 100) * circ;
   const color = score >= 70 ? '#00ff88' : score >= 50 ? '#ffd700' : '#ff4466';
@@ -23,21 +23,15 @@ function ScoreRing({ score }: { score: number }) {
       </div>
     </div>
   );
-}
+});
 
-function StatusBadge({ status }: { status: Token['status'] }) {
+const StatusBadge = memo(function StatusBadge({ status }: { status: Token['status'] }) {
   const cls = { ELIGIBLE: 'badge-eligible', SCANNING: 'badge-scanning', ENTERED: 'badge-entered', REJECTED: 'badge-rejected' }[status];
   return <span className={`badge ${cls}`}>{status}</span>;
-}
+});
 
-// Freshness dot — shows how recently this token's data was refreshed
-// Green pulse = hot refresh (<5s), blue = recent scan (<15s), grey = older
-function FreshnessDot({ lastChecked }: { lastChecked: number }) {
-  const [now, setNow] = useState(Date.now());
-  useEffect(() => {
-    const id = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(id);
-  }, []);
+// Single clock ticks in DiscoverPage — now is passed down; no per-card timers
+function FreshnessDot({ lastChecked, now }: { lastChecked: number; now: number }) {
   const ageMs = now - lastChecked;
   const ageSec = Math.floor(ageMs / 1000);
   const isHot = ageMs < 5_000;
@@ -95,7 +89,8 @@ function TradeBlockBanner({ token, settings, dailyLossLimitHit, dailyPnl, dailyL
   );
 }
 
-function TokenCard({ token, settings, scanStats }: { token: Token; settings: Settings | null; scanStats: ScanStats }) {
+// Memoized — only re-renders when token data or now-bucket (5s rounding) changes
+const TokenCard = memo(function TokenCard({ token, settings, scanStats, now }: { token: Token; settings: Settings | null; scanStats: ScanStats; now: number }) {
   const [open, setOpen] = useState(false);
   const isEligible = token.status === 'ELIGIBLE';
   const isEntered = token.status === 'ENTERED';
@@ -113,9 +108,8 @@ function TokenCard({ token, settings, scanStats }: { token: Token; settings: Set
               <span style={{ fontWeight: 800, fontSize: 14, color: '#d4e0f0' }}>{token.symbol}</span>
               <span style={{ fontSize: 11, color: '#3a5070', maxWidth: 100, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{token.name}</span>
               <StatusBadge status={token.status} />
-              {token.lastChecked && <FreshnessDot lastChecked={token.lastChecked} />}
+              {token.lastChecked && <FreshnessDot lastChecked={token.lastChecked} now={now} />}
             </div>
-            {/* Row 1: MC / Vol / Age / 24h */}
             <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', fontSize: 11, color: '#3a5070' }}>
               <span>MC <b style={{ color: '#7090b0' }}>{formatMC(token.marketCap)}</b></span>
               <span>Vol <b style={{ color: '#7090b0' }}>{formatMC(token.volume24h)}</b></span>
@@ -124,7 +118,6 @@ function TokenCard({ token, settings, scanStats }: { token: Token; settings: Set
                 {token.priceChange24h >= 0 ? '+' : ''}{token.priceChange24h.toFixed(1)}% 24h
               </span>
             </div>
-            {/* Row 2: live momentum — 5m, 1h, BSR always visible */}
             <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', fontSize: 11, marginTop: 3 }}>
               <span style={{ color: c5m >= 3 ? '#00ff88' : c5m >= 0 ? '#7090b0' : '#ff4466', fontWeight: 700 }}>
                 5m {c5m >= 0 ? '+' : ''}{c5m.toFixed(1)}%
@@ -219,9 +212,24 @@ function TokenCard({ token, settings, scanStats }: { token: Token; settings: Set
       )}
     </div>
   );
-}
+}, (prev, next) => {
+  // Custom comparator: skip re-render if only `now` changed but freshness bucket didn't
+  // FreshnessDot buckets: hot (<5s), recent (<20s), old (>=20s) → 5s resolution is fine
+  const prevBucket = prev.now - (prev.token.lastChecked ?? 0);
+  const nextBucket = next.now - (next.token.lastChecked ?? 0);
+  const bucketChanged =
+    (prevBucket < 5000) !== (nextBucket < 5000) ||
+    (prevBucket < 20000) !== (nextBucket < 20000) ||
+    Math.floor(prevBucket / 5000) !== Math.floor(nextBucket / 5000);
 
-// Pulsing LIVE dot for the scan stats header
+  return (
+    prev.token === next.token &&
+    prev.settings === next.settings &&
+    prev.scanStats === next.scanStats &&
+    !bucketChanged
+  );
+});
+
 function LiveDot() {
   return (
     <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 10, color: '#00ff88', fontWeight: 800, letterSpacing: '0.08em' }}>
@@ -239,6 +247,17 @@ export default function DiscoverPage({ tokens, scanStats, settings }: Props) {
   const [filter, setFilter] = useState<Filter>('ALL');
   const [search, setSearch] = useState('');
 
+  // Single shared clock — replaces N per-card setInterval timers
+  // Rounds to nearest 5s so TokenCard memo skips renders when bucket unchanged
+  const [now, setNow] = useState(() => Math.round(Date.now() / 5000) * 5000);
+  const clockRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  useEffect(() => {
+    clockRef.current = setInterval(() => {
+      setNow(Math.round(Date.now() / 5000) * 5000);
+    }, 5000);
+    return () => { if (clockRef.current) clearInterval(clockRef.current); };
+  }, []);
+
   const filtered = useMemo(() => {
     let arr = [...tokens];
     if (filter !== 'ALL') arr = arr.filter((t) => t.status === filter);
@@ -255,7 +274,6 @@ export default function DiscoverPage({ tokens, scanStats, settings }: Props) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-      {/* Scan stats */}
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8 }}>
         {[
           { label: 'Scanning', value: scanStats.scanning, color: '#00d4ff', glow: 'card-glow-cyan' },
@@ -269,7 +287,6 @@ export default function DiscoverPage({ tokens, scanStats, settings }: Props) {
         ))}
       </div>
 
-      {/* Live status bar */}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '8px 14px', borderRadius: 10, background: 'rgba(0,255,136,0.04)', border: '1px solid rgba(0,255,136,0.1)' }}>
         <LiveDot />
         <span style={{ fontSize: 10, color: '#3a5070' }}>
@@ -277,7 +294,6 @@ export default function DiscoverPage({ tokens, scanStats, settings }: Props) {
         </span>
       </div>
 
-      {/* Rejection breakdown */}
       {scanStats.rejectionCounts && Object.keys(scanStats.rejectionCounts).length > 0 && (
         <div className="card" style={{ padding: '12px 14px' }}>
           <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: '0.1em', color: '#3a5070', marginBottom: 10 }}>
@@ -351,7 +367,7 @@ export default function DiscoverPage({ tokens, scanStats, settings }: Props) {
         </div>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-          {filtered.map((t) => <TokenCard key={t.mint} token={t} settings={settings} scanStats={scanStats} />)}
+          {filtered.map((t) => <TokenCard key={t.mint} token={t} settings={settings} scanStats={scanStats} now={now} />)}
         </div>
       )}
     </div>
