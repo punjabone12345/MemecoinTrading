@@ -338,21 +338,34 @@ async function fetchDexPairs(): Promise<DexPair[]> {
       boostRes.data.filter((t) => t.chainId === 'solana').forEach((t) => extraMints.add(t.tokenAddress));
     }
 
-    // Batch-lookup all collected mints on DexScreener (50 per request — max allowed, fewer parallel requests)
+    // Batch-lookup all collected mints on DexScreener.
+    // DexScreener allows up to 30 addresses per request and rate-limits aggressive
+    // parallel bursts. We fire 5 chunks concurrently, wait 300 ms, then the next 5.
+    // This keeps throughput high (~300 pairs/s) without triggering rate-limits.
     const mintList = Array.from(extraMints);
     const mintChunks: string[][] = [];
-    for (let i = 0; i < mintList.length; i += 50) mintChunks.push(mintList.slice(i, i + 50));
+    for (let i = 0; i < mintList.length; i += 30) mintChunks.push(mintList.slice(i, i + 30));
 
-    const mintResults = await Promise.all(
-      mintChunks.map((chunk) =>
-        axios.get<{ pairs: DexPair[] }>(
-          `${DEXSCREENER_BASE}/latest/dex/tokens/${chunk.join(',')}`,
-          { timeout: 10000 }
-        ).catch(() => ({ data: { pairs: [] as DexPair[] } }))
-      )
-    );
-    for (const r of mintResults) {
-      if (r.data?.pairs) allPairs.push(...r.data.pairs.filter((p) => p.chainId === 'solana'));
+    const CONCURRENCY = 5;
+    const CHUNK_DELAY_MS = 300;
+
+    for (let i = 0; i < mintChunks.length; i += CONCURRENCY) {
+      const batch = mintChunks.slice(i, i + CONCURRENCY);
+      const batchResults = await Promise.all(
+        batch.map((chunk) =>
+          axios.get<{ pairs: DexPair[] }>(
+            `${DEXSCREENER_BASE}/latest/dex/tokens/${chunk.join(',')}`,
+            { timeout: 12000 }
+          ).catch(() => ({ data: { pairs: [] as DexPair[] } }))
+        )
+      );
+      for (const r of batchResults) {
+        if (r.data?.pairs) allPairs.push(...r.data.pairs.filter((p) => p.chainId === 'solana'));
+      }
+      // Brief pause between concurrency windows to avoid rate-limiting
+      if (i + CONCURRENCY < mintChunks.length) {
+        await new Promise((res) => setTimeout(res, CHUNK_DELAY_MS));
+      }
     }
 
     // Deduplicate by pairAddress
