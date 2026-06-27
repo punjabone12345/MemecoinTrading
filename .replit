@@ -45,7 +45,7 @@ outputType = "console"
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "pnpm --filter @workspace/api-server run dev"
+args = "pnpm install && pnpm --filter @workspace/api-server run dev"
 waitForPort = 8080
 
 [agent]
@@ -62,16 +62,16 @@ localPort = 5000
 externalPort = 80
 
 [[ports]]
+localPort = 8080
+externalPort = 8080
+
+[[ports]]
 localPort = 8082
 externalPort = 3002
 
 [[ports]]
 localPort = 25245
 externalPort = 3000
-
-[[ports]]
-localPort = 8080
-externalPort = 8080
 
 [nix]
 channel = "stable-25_05"

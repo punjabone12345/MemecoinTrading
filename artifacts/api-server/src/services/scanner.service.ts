@@ -135,14 +135,13 @@ export function calcScore(
 
 const ALLOWED_DEXES = ['raydium', 'pump-fun', 'pumpfun', 'pumpswap', 'orca', 'meteora'];
 
-function buildFilterResults(pair: DexPair, settings: Awaited<ReturnType<typeof getSettings>>, rugOk: boolean, topHolder: number, creatorPct: number, qualityScore: number): FilterResult[] {
+function buildFilterResults(pair: DexPair, settings: Awaited<ReturnType<typeof getSettings>>, rugOk: boolean, topHolder: number, creatorPct: number, qualityScore: number, aggVol24h: number, aggBsr: number): FilterResult[] {
   const mc = pair.marketCap ?? pair.fdv ?? 0;
-  const vol24 = pair.volume?.h24 ?? 0;
+  const vol24 = aggVol24h;
   const liq = pair.liquidity?.usd ?? 0;
   const ageH = pair.pairCreatedAt ? (Date.now() - pair.pairCreatedAt) / 3_600_000 : 0;
   const ageMin = ageH * 60;
-  const h1Txns = pair.txns?.h1 ?? { buys: 0, sells: 0 };
-  const bsr = h1Txns.sells > 0 ? h1Txns.buys / h1Txns.sells : h1Txns.buys > 0 ? 99 : 1;
+  const bsr = aggBsr;
   const change5m = pair.priceChange?.m5 ?? 0;
   const change24 = pair.priceChange?.h24 ?? 0;
   const dexOk = ALLOWED_DEXES.includes(pair.dexId?.toLowerCase() ?? '');
@@ -346,8 +345,8 @@ async function fetchDexPairs(): Promise<DexPair[]> {
     const mintChunks: string[][] = [];
     for (let i = 0; i < mintList.length; i += 30) mintChunks.push(mintList.slice(i, i + 30));
 
-    const CONCURRENCY = 5;
-    const CHUNK_DELAY_MS = 300;
+    const CONCURRENCY = 8;
+    const CHUNK_DELAY_MS = 100;
 
     for (let i = 0; i < mintChunks.length; i += CONCURRENCY) {
       const batch = mintChunks.slice(i, i + CONCURRENCY);
@@ -395,25 +394,44 @@ export async function scanTokens(): Promise<void> {
   eligibleCount = 0;
   rejectionCounts.clear(); // reset counters each scan cycle
 
-  // ── Best-pair deduplication ──────────────────────────────────────────────
-  // When a token has multiple pools (e.g. Raydium CPMM + old dead Raydium v1),
-  // pick the best pair per mint: prefer highest h1 volume, break ties by DEX rank.
-  // This prevents stale low-activity pools from overriding live pool data.
-  const bestPairMap = new Map<string, DexPair>();
+  // ── Multi-pool aggregation ───────────────────────────────────────────────
+  // A token can trade across multiple pools (e.g. Raydium + PumpSwap).
+  // DexScreener's website shows TOTAL volume across all pools; we must do
+  // the same or we'll see a fraction of the real volume and miss valid trades.
+  //
+  // Strategy:
+  //   • Group all pairs by mint
+  //   • Pick the BEST pair (highest h1 vol + DEX rank) for price/MC/liq/age
+  //   • SUM vol24h, vol1h across all pools → true total market volume
+  //   • SUM h1 buys/sells across all pools → true BSR
+  type AggregatedPair = DexPair & { aggVol24h: number; aggVol1h: number; aggBsr: number };
+
+  const mintGroupMap = new Map<string, DexPair[]>();
   for (const pair of allPairs) {
     const mint = pair.baseToken?.address;
     if (!mint) continue;
-    const h1Vol = pair.volume?.h1 ?? 0;
-    const dexRank = DEX_RANK[pair.dexId?.toLowerCase() ?? ''] ?? 0;
-    const score = h1Vol + dexRank * 1000; // weight DEX rank heavily as tiebreaker
-    const existing = bestPairMap.get(mint);
-    if (!existing) { bestPairMap.set(mint, pair); continue; }
-    const existH1Vol = existing.volume?.h1 ?? 0;
-    const existRank = DEX_RANK[existing.dexId?.toLowerCase() ?? ''] ?? 0;
-    const existScore = existH1Vol + existRank * 1000;
-    if (score > existScore) bestPairMap.set(mint, pair);
+    const group = mintGroupMap.get(mint) ?? [];
+    group.push(pair);
+    mintGroupMap.set(mint, group);
   }
-  const pairs = Array.from(bestPairMap.values());
+
+  const pairs: AggregatedPair[] = [];
+  for (const [, group] of mintGroupMap) {
+    // Pick best pair by h1 volume + DEX rank (most liquid, preferred pool)
+    let best = group[0];
+    let bestScore = 0;
+    for (const p of group) {
+      const s = (p.volume?.h1 ?? 0) + (DEX_RANK[p.dexId?.toLowerCase() ?? ''] ?? 0) * 1000;
+      if (s > bestScore) { bestScore = s; best = p; }
+    }
+    // Aggregate volumes and transaction counts across ALL pools
+    const aggVol24h = group.reduce((sum, p) => sum + (p.volume?.h24 ?? 0), 0);
+    const aggVol1h  = group.reduce((sum, p) => sum + (p.volume?.h1  ?? 0), 0);
+    const totalBuys1h  = group.reduce((sum, p) => sum + (p.txns?.h1?.buys  ?? 0), 0);
+    const totalSells1h = group.reduce((sum, p) => sum + (p.txns?.h1?.sells ?? 0), 0);
+    const aggBsr = totalSells1h > 0 ? totalBuys1h / totalSells1h : totalBuys1h > 0 ? 99 : 1;
+    pairs.push({ ...best, aggVol24h, aggVol1h, aggBsr });
+  }
 
   // scanCount = unique mints in THIS cycle (after dedup). This keeps the number
   // consistent with rejectionCounts so the UI breakdown adds up correctly.
@@ -425,11 +443,12 @@ export async function scanTokens(): Promise<void> {
     if (!mint) continue;
 
     const mc = pair.marketCap ?? pair.fdv ?? 0;
-    const vol24 = pair.volume?.h24 ?? 0;
+    // Use aggregated totals across ALL pools — matches what DexScreener website shows
+    const vol24 = pair.aggVol24h;
+    const bsr   = pair.aggBsr;
+    const v1h   = pair.aggVol1h;
     const liq = pair.liquidity?.usd ?? 0;
     const ageH = pair.pairCreatedAt ? (Date.now() - pair.pairCreatedAt) / 3_600_000 : 0;
-    const h1Txns = pair.txns?.h1 ?? { buys: 0, sells: 0 };
-    const bsr = h1Txns.sells > 0 ? h1Txns.buys / h1Txns.sells : h1Txns.buys > 0 ? 99 : 1;
     const change24 = pair.priceChange?.h24 ?? 0;
     const change1h = pair.priceChange?.h1 ?? 0;
     const change5m = pair.priceChange?.m5 ?? 0;
@@ -471,7 +490,7 @@ export async function scanTokens(): Promise<void> {
       rugOk = await checkRugcheck(mint).catch(() => true);
     }
 
-    const v1h = pair.volume?.h1 ?? 0;
+    // v1h is already set above to pair.aggVol1h (aggregated across all pools)
     // Use the ACTUAL h1 volume from the previous scan as the baseline.
     // volume1hCurrent from the last cycle is the true previous-hour volume.
     // Falls back to v1h*0.8 on first sight so new tokens get a mild boost, not 0.
@@ -491,7 +510,7 @@ export async function scanTokens(): Promise<void> {
     const creatorPct = existing?.creatorPct ?? 0;
 
     const scoreBreakdown = calcScore(partial, { minMc: settings.minMc, maxMc: settings.maxMc });
-    const filterResults = buildFilterResults(pair, settings, rugOk, topHolder, creatorPct, scoreBreakdown.total);
+    const filterResults = buildFilterResults(pair, settings, rugOk, topHolder, creatorPct, scoreBreakdown.total, vol24, bsr);
     const allPassed = filterResults.every((f) => f.passed);
 
     if (allPassed) passedFilters++;
