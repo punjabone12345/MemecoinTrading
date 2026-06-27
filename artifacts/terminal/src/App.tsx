@@ -141,25 +141,31 @@ export default function App() {
     return () => { destroyed = true; wsRef.current?.close(); };
   }, []);
 
-  // Fallback poll — fires when WebSocket is disconnected.
-  // Also refreshes scanner + analytics every 5s even when WS is live,
-  // as a safety net in case a broadcast was dropped.
+  // Fallback poll — two responsibilities:
+  // 1. When WS is OFFLINE: keep positions + balance fresh via HTTP every 3s.
+  //    (Never overwrite positions when WS is live — WS sends price-enriched data
+  //     with real currentPrice/pnlPct; the HTTP API returns raw DB rows with pnlPct=null)
+  // 2. Always: refresh scanner + analytics every 15s as a safety net.
   useEffect(() => {
     let scannerTick = 0;
     const poll = async () => {
       try {
-        const [posData, settingsData] = await Promise.all([
-          api.getPositions(),
-          api.getSettings(),
-        ]);
-        setOpenPositions(posData.open);
-        setClosedPositions(posData.closed);
-        setBalance(settingsData.currentBalanceSol);
-
-        // Refresh scanner + analytics every 5th tick (~15s) even when WS live,
-        // and every tick when WS is offline.
         scannerTick++;
-        if (!wsConnectedRef.current || scannerTick % 5 === 0) {
+        const wsLive = wsConnectedRef.current;
+
+        if (!wsLive) {
+          // WS offline — pull positions + balance from HTTP
+          const [posData, settingsData] = await Promise.all([
+            api.getPositions(),
+            api.getSettings(),
+          ]);
+          setOpenPositions(posData.open);
+          setClosedPositions(posData.closed);
+          setBalance(settingsData.currentBalanceSol);
+        }
+
+        // Scanner + analytics: refresh every 15s regardless of WS state
+        if (scannerTick % 5 === 0) {
           const [scanData, analyticsData] = await Promise.all([
             api.getScanner(),
             api.getAnalytics(),

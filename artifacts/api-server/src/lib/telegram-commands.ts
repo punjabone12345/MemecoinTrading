@@ -3,6 +3,76 @@ import { logger } from './logger.js';
 import { getOpenPositions, getAnalytics } from '../services/position.service.js';
 import { getSettings, getBalance } from '../services/settings.service.js';
 import { getScanStats } from '../services/scanner.service.js';
+import type { Position } from '../types/index.js';
+
+// ── Live price fetch for Telegram (mirrors price-monitor logic) ──────────────
+function pairAddrFromDexUrl(dexUrl?: string): string | undefined {
+  if (!dexUrl) return undefined;
+  const m = dexUrl.match(/dexscreener\.com\/solana\/([A-Za-z0-9]{32,44})/);
+  return m?.[1];
+}
+
+interface LivePrice { price: number; mc: number }
+
+async function fetchLivePrices(positions: Position[]): Promise<Map<string, LivePrice>> {
+  const result = new Map<string, LivePrice>();
+  if (positions.length === 0) return result;
+
+  // Prefer pair-address lookup (fastest, single-pool, real-time)
+  const withPair: { id: string; addr: string }[] = [];
+  const mintOnly: { id: string; mint: string }[] = [];
+  for (const p of positions) {
+    const addr = pairAddrFromDexUrl(p.dexUrl);
+    if (addr) withPair.push({ id: p.id, addr });
+    else mintOnly.push({ id: p.id, mint: p.mint });
+  }
+
+  try {
+    if (withPair.length > 0) {
+      const addrs = withPair.map((w) => w.addr).join(',');
+      const res = await axios.get<{ pairs?: Array<{ pairAddress?: string; priceUsd?: string; marketCap?: number; fdv?: number }> }>(
+        `https://api.dexscreener.com/latest/dex/pairs/solana/${addrs}`,
+        { timeout: 6000 }
+      );
+      const pairMap = new Map((res.data?.pairs ?? []).map((p) => [p.pairAddress, p]));
+      for (const { id, addr } of withPair) {
+        const pair = pairMap.get(addr);
+        if (!pair) continue;
+        const price = parseFloat(pair.priceUsd ?? '0');
+        if (price > 0) result.set(id, { price, mc: pair.marketCap ?? pair.fdv ?? 0 });
+      }
+    }
+
+    if (mintOnly.length > 0) {
+      const mints = mintOnly.map((m) => m.mint).join(',');
+      const res = await axios.get<{ pairs?: Array<{ baseToken?: { address: string }; priceUsd?: string; marketCap?: number; fdv?: number; txns?: { h1?: { buys: number; sells: number } } }> }>(
+        `https://api.dexscreener.com/latest/dex/tokens/${mints}`,
+        { timeout: 6000 }
+      );
+      const mintMap = new Map<string, { price: number; mc: number; activity: number }>();
+      for (const pair of res.data?.pairs ?? []) {
+        const mint = pair.baseToken?.address;
+        if (!mint) continue;
+        const price = parseFloat(pair.priceUsd ?? '0');
+        if (price <= 0) continue;
+        const h1 = pair.txns?.h1 ?? { buys: 0, sells: 0 };
+        const activity = h1.buys + h1.sells;
+        const prev = mintMap.get(mint);
+        if (!prev || activity > prev.activity) {
+          mintMap.set(mint, { price, mc: pair.marketCap ?? pair.fdv ?? 0, activity });
+        }
+      }
+      for (const { id, mint } of mintOnly) {
+        const data = mintMap.get(mint);
+        if (data) result.set(id, { price: data.price, mc: data.mc });
+      }
+    }
+  } catch (err) {
+    logger.warn({ err }, 'Telegram: live price fetch failed');
+  }
+
+  return result;
+}
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
@@ -31,8 +101,7 @@ async function sendReply(chatId: number | string, text: string): Promise<void> {
 
 // ── /command1 — Check your positions ────────────────────────────────────────
 async function handlePositions(chatId: number | string): Promise<void> {
-  const positions = await getOpenPositions();
-  const balance = await getBalance();
+  const [positions, balance] = await Promise.all([getOpenPositions(), getBalance()]);
 
   if (positions.length === 0) {
     await sendReply(chatId,
@@ -43,24 +112,31 @@ async function handlePositions(chatId: number | string): Promise<void> {
     return;
   }
 
+  // Fetch live prices from DexScreener — DB pnl_sol/pnl_pct are null for open positions
+  const livePrices = await fetchLivePrices(positions);
+
   const lines: string[] = [
     `📊 <b>Open Positions (${positions.length})</b>`,
     `Balance: ${balance.toFixed(3)} SOL\n`,
   ];
 
   for (const pos of positions) {
-    const pnlPct = pos.pnlPct ?? 0;
-    const pnlSol = pos.pnlSol ?? 0;
+    const live = livePrices.get(pos.id);
+    const currentPrice = live?.price ?? pos.entryPrice;
+    const pnlPct = ((currentPrice - pos.entryPrice) / pos.entryPrice) * 100;
+    const pnlSol = pos.sizeSol * (pnlPct / 100);
+    const currentMc = live?.mc ?? pos.entryMc;
     const pnlEmoji = pnlPct >= 0 ? '🟢' : '🔴';
+    const priceTag = live ? '' : ' ⚠️no live price';
     const tpHits = [pos.tp1Hit && 'TP1', pos.tp2Hit && 'TP2', pos.tp3Hit && 'TP3']
       .filter(Boolean).join(' ') || '—';
     lines.push(
-      `${pnlEmoji} <b>${pos.symbol}</b> (${pos.name})\n` +
-      `  Entry: $${Number(pos.entryPrice).toFixed(8)}\n` +
-      `  Size: ${Number(pos.sizeSol).toFixed(3)} SOL\n` +
+      `${pnlEmoji} <b>${pos.symbol}</b> (${pos.name})${priceTag}\n` +
+      `  Entry: $${pos.entryPrice.toFixed(8)}\n` +
+      `  Now:   $${currentPrice.toFixed(8)}  (MC: $${(currentMc / 1000).toFixed(0)}K)\n` +
+      `  Size: ${pos.sizeSol.toFixed(3)} SOL\n` +
       `  PNL: ${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(1)}% / ${pnlSol >= 0 ? '+' : ''}${pnlSol.toFixed(4)} SOL\n` +
-      `  TPs hit: ${tpHits}\n` +
-      `  Mode: ${pos.mode.toUpperCase()}`
+      `  TPs hit: ${tpHits}  |  Mode: ${pos.mode.toUpperCase()}`
     );
   }
 
