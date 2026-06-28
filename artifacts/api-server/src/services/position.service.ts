@@ -46,15 +46,22 @@ const SL_TRAIL_CONFIRM_TICKS = 1;
 const slConfirmCounts = new Map<string, number>();
 
 /**
- * Returns how many % of the peak gain the trail "gives back" at each tier.
- * Returns null when peak is below +50% — hard SL floor applies instead.
+ * Returns the trailing giveback config for each tier.
+ *   null → below +50%:  hard SL floor only
+ *   > 0  → % of peak gain to give back (tiered %-of-peak trailing)
+ *   === 0 → sentinel: ≥+500% — use ABSOLUTE 100-point drawdown from peak
+ *              (SL = entry × (1 + (peakGain% - 100) / 100))
+ *              e.g. peak +500% → SL at +400% | peak +3000% → SL at +2900%
+ *
  *   +50%  → 40% giveback (keep 60%)
  *   +100% → 30% giveback (keep 70%)
  *   +200% → 20% giveback (keep 80%)
  *   +300% → 15% giveback (keep 85%)
  *   +400% → 10% giveback (keep 90%)
+ *   +500% → absolute: SL trails 100 pts below peak gain (rug-pull guard)
  */
 function trailGivebackPct(peakGainPct: number): number | null {
+  if (peakGainPct >= 500) return 0;   // sentinel: absolute 100pt trailing
   if (peakGainPct >= 400) return 10;
   if (peakGainPct >= 300) return 15;
   if (peakGainPct >= 200) return 20;
@@ -317,16 +324,21 @@ async function _updatePositionPrice(id: string, currentPrice: number, freshBsr?:
 
   // Tiered trailing SL — tightens as profit grows.
   // Below +50%: hard SL floor only (-slPct% from entry).
-  // At/above each tier: SL = entry × (1 + peakGain% × (1 - giveback/100))
+  // +50%–+499%: SL = entry × (1 + peakGain% × (1 - giveback/100))  [%-of-peak]
   //   +50%  → give back 40% of gain  (keep 60%)
   //   +100% → give back 30% of gain  (keep 70%)
   //   +200% → give back 20% of gain  (keep 80%)
   //   +300% → give back 15% of gain  (keep 85%)
   //   +400% → give back 10% of gain  (keep 90%)
+  // ≥+500%:  SL = entry × (1 + (peakGain% - 100) / 100)  [absolute 100pt drawdown]
+  //   e.g. peak +500% → SL at +400% | peak +3000% → SL at +2900%
   const peakGainPct = ((newPeak - pos.entryPrice) / pos.entryPrice) * 100;
   const givebackPct = trailGivebackPct(peakGainPct);
   let trailSL: number;
-  if (givebackPct !== null) {
+  if (givebackPct === 0) {
+    // ≥500%: absolute 100-point drawdown from peak — rug-pull guard
+    trailSL = pos.entryPrice * (1 + (peakGainPct - 100) / 100);
+  } else if (givebackPct !== null) {
     trailSL = pos.entryPrice * (1 + (peakGainPct * (1 - givebackPct / 100)) / 100);
   } else {
     trailSL = pos.entryPrice * (1 - settings.slPct / 100);
@@ -354,11 +366,15 @@ async function _updatePositionPrice(id: string, currentPrice: number, freshBsr?:
     } else {
       slConfirmCounts.delete(id);
       // Build a close reason that reflects exactly which mechanism fired.
-      // givebackPct is null  → hard SL (peak never reached +50%)
+      // givebackPct null → hard SL (peak never reached +50%)
+      // givebackPct 0   → rug-pull guard T6: absolute 100pt drawdown (≥+500%)
       // givebackPct 40/30/20/15/10 → trailing SL tier 1–5
       let closeReason: string;
       if (givebackPct === null) {
         closeReason = `Hard SL (-${settings.slPct}%)`;
+      } else if (givebackPct === 0) {
+        const lockedPct = (peakGainPct - 100).toFixed(0);
+        closeReason = `Trailing SL T6 — rug guard (peak +${peakGainPct.toFixed(0)}%, locked +${lockedPct}%)`;
       } else {
         const tier =
           givebackPct === 10 ? 5 :
