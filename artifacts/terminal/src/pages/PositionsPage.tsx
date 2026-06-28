@@ -39,10 +39,8 @@ function PnlDisplay({ pnl, pct }: { pnl?: number; pct?: number }) {
   );
 }
 
-// Mirrors backend trailGivebackPct logic.
-// Returns 0 for ≥500% tier (sentinel: absolute 100pt drawdown)
+// Mirrors backend trailGivebackPct logic
 function givebackPct(peakGain: number): number | null {
-  if (peakGain >= 500) return 0;   // T6: SL trails 100pts below peak
   if (peakGain >= 400) return 10;
   if (peakGain >= 300) return 15;
   if (peakGain >= 200) return 20;
@@ -72,11 +70,9 @@ function RunnerBar({ pos, settings }: { pos: Position; settings: Settings | null
   const slProgress = Math.min(100, Math.max(0, ((slFromEntry + windowPct * 0.2) / (windowPct * 1.2)) * 100));
   const color = pnlPct > 0 ? '#00ff88' : '#ff4466';
 
-  const tierLabel = !isTrailing
-    ? <span style={{ color: '#ffd700', fontWeight: 800 }}>Hard SL · trailing kicks in at +50%</span>
-    : giveback === 0
-      ? <span style={{ color: '#ff4466', fontWeight: 800 }}>🛡 Rug Guard T6 · SL trails 100pts below peak</span>
-      : <span style={{ color: '#00ff88', fontWeight: 800 }}>Trailing SL · {giveback}% giveback</span>;
+  const tierLabel = isTrailing
+    ? <span style={{ color: '#00ff88', fontWeight: 800 }}>Trailing SL · {giveback}% giveback</span>
+    : <span style={{ color: '#ffd700', fontWeight: 800 }}>Hard SL · trailing kicks in at +50%</span>;
 
   return (
     <div style={{ marginTop: 10 }}>
