@@ -135,10 +135,12 @@ export function calcScore(
 
 const ALLOWED_DEXES = ['raydium', 'pump-fun', 'pumpfun', 'pumpswap', 'orca', 'meteora'];
 
-function buildFilterResults(pair: DexPair, settings: Awaited<ReturnType<typeof getSettings>>, rugOk: boolean, topHolder: number, creatorPct: number, qualityScore: number, aggVol24h: number, aggBsr: number, freshChange5m: number): FilterResult[] {
+function buildFilterResults(pair: DexPair, settings: Awaited<ReturnType<typeof getSettings>>, rugOk: boolean, topHolder: number, creatorPct: number, qualityScore: number, aggVol24h: number, aggBsr: number, freshChange5m: number, freshLiq?: number): FilterResult[] {
   const mc = pair.marketCap ?? pair.fdv ?? 0;
   const vol24 = aggVol24h;
-  const liq = pair.liquidity?.usd ?? 0;
+  // Use explicitly-passed fresh liquidity when available; bulk endpoint often returns 0 for
+  // Meteora/Orca DLMM pools even though real liquidity exists (per-pair endpoint is accurate).
+  const liq = freshLiq !== undefined ? freshLiq : (pair.liquidity?.usd ?? 0);
   const ageH = pair.pairCreatedAt ? (Date.now() - pair.pairCreatedAt) / 3_600_000 : 0;
   const ageMin = ageH * 60;
   const bsr = aggBsr;
@@ -531,6 +533,16 @@ export async function scanTokens(): Promise<void> {
     const freshChange1h = fresh?.priceChange?.h1 ?? change1h;
     // Price: prefer fresh (more accurate for entry price calculations)
     const freshPrice = fresh ? parseFloat(fresh.priceUsd ?? '0') || price : price;
+    // Liquidity: bulk endpoint frequently returns 0 for Meteora/Orca DLMM pools;
+    // per-pair endpoint is authoritative — always prefer it when available.
+    const freshLiq = (fresh?.liquidity?.usd !== undefined && fresh.liquidity.usd > 0)
+      ? fresh.liquidity.usd
+      : liq > 0 ? liq : (fresh?.liquidity?.usd ?? 0);
+    // h1 volume: bulk /tokens/ endpoint sometimes omits or zeroes h1;
+    // per-pair endpoint returns accurate real-time volume — use it for scoring.
+    const freshV1h = (fresh?.volume?.h1 !== undefined && fresh.volume.h1 > 0)
+      ? fresh.volume.h1
+      : v1h;
 
     const existing = tokenCache.get(mint);
 
@@ -542,14 +554,14 @@ export async function scanTokens(): Promise<void> {
       rugOk = await checkRugcheck(mint).catch(() => true);
     }
 
-    // Volume momentum: use aggregated h1 as current, previous scan's h1 as baseline
+    // Volume momentum: use fresh h1 as current, previous scan's h1 as baseline
     const v1hPrev = (existing && existing.volume1hCurrent > 0)
       ? existing.volume1hCurrent
-      : v1h * 0.8;
+      : freshV1h * 0.8;
 
     const partial: Partial<Token> = {
       priceChange5m: change5m,
-      volume1hCurrent: v1h,
+      volume1hCurrent: freshV1h,
       volume1hPrev: v1hPrev,
       volume24h: vol24,
       buySellRatio: bsr,
@@ -559,8 +571,8 @@ export async function scanTokens(): Promise<void> {
     const creatorPct = existing?.creatorPct ?? 0;
 
     const scoreBreakdown = calcScore(partial, { minMc: settings.minMc, maxMc: settings.maxMc });
-    // Pass real-time change5m so the FOMO filter uses live data, not stale batch data
-    const filterResults = buildFilterResults(pair, settings, rugOk, topHolder, creatorPct, scoreBreakdown.total, vol24, bsr, change5m);
+    // Pass real-time change5m and fresh liquidity so filters use accurate data
+    const filterResults = buildFilterResults(pair, settings, rugOk, topHolder, creatorPct, scoreBreakdown.total, vol24, bsr, change5m, freshLiq);
     const allPassed = filterResults.every((f) => f.passed);
 
     if (allPassed) passedFilters++;
@@ -605,7 +617,7 @@ export async function scanTokens(): Promise<void> {
       priceChange5m: change5m,
       priceChange24h: change24,
       buySellRatio: bsr,
-      liquidity: liq,
+      liquidity: freshLiq,
       age: ageH,
       dexId: pair.dexId ?? '',
       pairAddress: pair.pairAddress,
@@ -622,7 +634,7 @@ export async function scanTokens(): Promise<void> {
       filterResults,
       consecutiveTrending: consecutive,
       volume1hPrev: v1hPrev,
-      volume1hCurrent: v1h,
+      volume1hCurrent: freshV1h,
       lastChecked: Date.now(),
     });
   }
@@ -702,12 +714,18 @@ export async function hotRefreshScanningTokens(): Promise<boolean> {
     const change1h  = fresh.priceChange?.h1  ?? token.priceChange1h;
     const change24  = fresh.priceChange?.h24 ?? token.priceChange24h;
     const mc        = fresh.marketCap ?? fresh.fdv ?? token.marketCap;
-    const liq       = fresh.liquidity?.usd ?? token.liquidity;
+    // Prefer fresh per-pair liquidity; fall back to stored value (already corrected by Pass 2)
+    const liq       = (fresh.liquidity?.usd !== undefined && fresh.liquidity.usd > 0)
+      ? fresh.liquidity.usd
+      : token.liquidity;
     const price     = parseFloat(fresh.priceUsd ?? '0') || token.price;
     const vol24     = token.volume24h;  // aggregated value — keep as-is (not in single pair fetch)
     const bsr       = token.buySellRatio;
-    const v1h       = token.volume1hCurrent;
-    const v1hPrev   = token.volume1hPrev;
+    // Prefer fresh h1 volume; fall back to stored value
+    const v1h       = (fresh.volume?.h1 !== undefined && fresh.volume.h1 > 0)
+      ? fresh.volume.h1
+      : token.volume1hCurrent;
+    const v1hPrev   = token.volume1hPrev > 0 ? token.volume1hPrev : v1h * 0.8;
     const ageH      = fresh.pairCreatedAt ? (now - fresh.pairCreatedAt) / 3_600_000 : token.age;
 
     // Quick pre-filter disqualifier — skip re-eval if clearly still wrong
@@ -725,7 +743,8 @@ export async function hotRefreshScanningTokens(): Promise<boolean> {
       marketCap: mc,
     };
     const scoreBreakdown = calcScore(partial, { minMc: settings.minMc, maxMc: settings.maxMc });
-    const filterResults  = buildFilterResults(fresh, settings, token.rugcheck, token.topHolder, token.creatorPct, scoreBreakdown.total, vol24, bsr, change5m);
+    // Pass liq explicitly so the filter label shows the real value (per-pair endpoint)
+    const filterResults  = buildFilterResults(fresh, settings, token.rugcheck, token.topHolder, token.creatorPct, scoreBreakdown.total, vol24, bsr, change5m, liq);
     const allPassed = filterResults.every((f) => f.passed);
     const rejectReason = !allPassed ? filterResults.find((f) => !f.passed)?.name : undefined;
 
@@ -767,6 +786,8 @@ export async function hotRefreshScanningTokens(): Promise<boolean> {
       consecutiveTrending: consecutive,
       status: newStatus,
       rejectReason,
+      volume1hCurrent: v1h,
+      volume1hPrev: v1hPrev,
       lastChecked: now,
     });
   }
