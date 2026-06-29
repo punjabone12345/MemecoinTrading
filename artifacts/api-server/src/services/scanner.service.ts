@@ -548,10 +548,19 @@ export async function scanTokens(): Promise<void> {
 
     // Rugcheck (with cache — 5-min TTL so we don't hammer rugcheck API)
     let rugOk = true;
+    let topHolder = existing?.topHolder ?? 0;
+    let creatorPct = existing?.creatorPct ?? 0;
     if (existing && Date.now() - existing.lastChecked < 5 * 60_000) {
       rugOk = existing.rugcheck;
+      // Use cached percentages from previous rugcheck call if available
+      topHolder = existing.topHolder > 0 ? existing.topHolder : topHolder;
+      creatorPct = existing.creatorPct > 0 ? existing.creatorPct : creatorPct;
     } else if (settings.rugcheckEnabled) {
-      rugOk = await checkRugcheck(mint).catch(() => true);
+      const rugResult = await checkRugcheck(mint, settings.maxCreatorPct).catch(() => ({ ok: true, topHolder: 0, creatorPct: 0 }));
+      rugOk = rugResult.ok;
+      // Only update from rugcheck when it returned real data
+      if (rugResult.topHolder > 0) topHolder = rugResult.topHolder;
+      if (rugResult.creatorPct > 0) creatorPct = rugResult.creatorPct;
     }
 
     // Volume momentum: use fresh h1 as current, previous scan's h1 as baseline
@@ -567,8 +576,6 @@ export async function scanTokens(): Promise<void> {
       buySellRatio: bsr,
       marketCap: mc,
     };
-    const topHolder = existing?.topHolder ?? 0;
-    const creatorPct = existing?.creatorPct ?? 0;
 
     const scoreBreakdown = calcScore(partial, { minMc: settings.minMc, maxMc: settings.maxMc });
     // Pass real-time change5m and fresh liquidity so filters use accurate data

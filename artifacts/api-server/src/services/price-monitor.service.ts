@@ -1,11 +1,16 @@
 import axios, { AxiosError } from 'axios';
 import { logger } from '../lib/logger.js';
-import { getOpenPositions, updatePositionPrice } from './position.service.js';
+import { getOpenPositions, updatePositionPrice, closePosition } from './position.service.js';
 import { broadcast } from '../websocket/server.js';
 
 let monitorInterval: ReturnType<typeof setInterval> | null = null;
 
 const lastKnownPrice = new Map<string, number>();
+
+// Track how many consecutive 3s ticks each position has had no price.
+// After NO_PRICE_AUTO_CLOSE_TICKS (20 ticks = 60s), auto-close at last known price.
+const noPriceTicks = new Map<string, number>();
+const NO_PRICE_AUTO_CLOSE_TICKS = 20; // 20 × 3s = 60s
 
 interface DexPair {
   baseToken?: { address: string };
@@ -309,6 +314,8 @@ export function startPriceMonitor(): void {
       for (const pos of positions) {
         const data = priceById.get(pos.id);
         if (data && data.price > 0) {
+          // Price found — reset no-price counter
+          noPriceTicks.delete(pos.id);
           const prev = lastKnownPrice.get(pos.id);
           const dropThreshold = pairAddressFromDexUrl(pos.dexUrl) ? 0.45 : 0.40;
           if (prev && data.price < prev * dropThreshold) {
@@ -328,7 +335,22 @@ export function startPriceMonitor(): void {
             );
           }
         } else {
-          logger.warn({ mint: pos.mint, id: pos.id }, 'No price for open position — SL check skipped');
+          // No price from any source — increment staleness counter
+          const ticks = (noPriceTicks.get(pos.id) ?? 0) + 1;
+          noPriceTicks.set(pos.id, ticks);
+          logger.warn({ mint: pos.mint, id: pos.id, symbol: pos.symbol, noPriceTicks: ticks, threshold: NO_PRICE_AUTO_CLOSE_TICKS }, 'No price for open position — SL check skipped');
+
+          if (ticks >= NO_PRICE_AUTO_CLOSE_TICKS) {
+            // Token has had no price for 60+ seconds — likely dead/rugged/delisted.
+            // Close at last known price so PnL is as accurate as possible.
+            const closePrice = lastKnownPrice.get(pos.id) ?? pos.entryPrice;
+            logger.warn({ id: pos.id, symbol: pos.symbol, closePrice, ticks }, 'Auto-closing position: no price data for 60s — token likely dead or rugged');
+            noPriceTicks.delete(pos.id);
+            lastKnownPrice.delete(pos.id);
+            closePosition(pos.id, closePrice, 'Auto-closed: no price data for 60s — token dead or rugged').catch((err) =>
+              logger.warn({ err, id: pos.id }, 'Auto-close error')
+            );
+          }
         }
       }
     } catch (err) {

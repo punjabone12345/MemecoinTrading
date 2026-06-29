@@ -1,12 +1,18 @@
 import axios from 'axios';
 import { logger } from '../lib/logger.js';
 
-const cache = new Map<string, { ok: boolean; ts: number }>();
+export interface RugcheckResult {
+  ok: boolean;
+  topHolder: number;
+  creatorPct: number;
+}
+
+const cache = new Map<string, { result: RugcheckResult; ts: number }>();
 const CACHE_TTL = 10 * 60_000;
 
-export async function checkRugcheck(mint: string): Promise<boolean> {
+export async function checkRugcheck(mint: string, maxCreatorPct = 10): Promise<RugcheckResult> {
   const cached = cache.get(mint);
-  if (cached && Date.now() - cached.ts < CACHE_TTL) return cached.ok;
+  if (cached && Date.now() - cached.ts < CACHE_TTL) return cached.result;
 
   try {
     const res = await axios.get<{
@@ -28,7 +34,7 @@ export async function checkRugcheck(mint: string): Promise<boolean> {
     const hasMintAuth = !!data?.mintAuthority;
 
     const topHolders = data?.topHolders ?? [];
-    const topHolderPct = topHolders[0]?.pct ?? 0;
+    const topHolder = topHolders[0]?.pct ?? 0;
     const creatorPct = topHolders.filter((h) => h.insider).reduce((s, h) => s + h.pct, 0);
 
     const ok =
@@ -36,14 +42,16 @@ export async function checkRugcheck(mint: string): Promise<boolean> {
       !hasCritical &&
       !hasFreezeAuth &&
       !hasMintAuth &&
-      topHolderPct < 20 &&
-      creatorPct < 10;
+      topHolder < 20 &&
+      creatorPct < maxCreatorPct;
 
-    cache.set(mint, { ok, ts: Date.now() });
-    return ok;
+    const result: RugcheckResult = { ok, topHolder, creatorPct };
+    cache.set(mint, { result, ts: Date.now() });
+    return result;
   } catch (err) {
     logger.debug({ err, mint }, 'Rugcheck API error — defaulting to pass');
-    cache.set(mint, { ok: true, ts: Date.now() });
-    return true;
+    const result: RugcheckResult = { ok: true, topHolder: 0, creatorPct: 0 };
+    cache.set(mint, { result, ts: Date.now() });
+    return result;
   }
 }
