@@ -385,9 +385,9 @@ async function fetchDexPairs(): Promise<DexPair[]> {
   }
 }
 
-// DEX quality ranking: higher = preferred when multiple pools exist for same mint.
-// Raydium is the primary graduation target; Orca/Meteora are established AMMs.
-const DEX_RANK: Record<string, number> = { raydium: 100, orca: 80, meteora: 70, pumpswap: 50, 'pump-fun': 40, pumpfun: 40 };
+// DEX quality ranking: tiebreaker only — used AFTER liquidity to pick between
+// equally-liquid pairs. Higher = preferred.
+const DEX_RANK: Record<string, number> = { raydium: 100, orca: 80, meteora: 70, pumpswap: 60, 'pump-fun': 50, pumpfun: 50 };
 
 export async function scanTokens(): Promise<void> {
   const settings = await getSettings();
@@ -403,7 +403,14 @@ export async function scanTokens(): Promise<void> {
   //
   // Strategy:
   //   • Group all pairs by mint
-  //   • Pick the BEST pair (highest h1 vol + DEX rank) for price/MC/liq/age
+  //   • Pick the BEST pair for price/MC/liq/priceChange data:
+  //       PRIMARY   — highest liquidity.usd  (most liquid pool = most reliable data)
+  //       SECONDARY — highest h1 volume      (most active pool this hour)
+  //       TERTIARY  — DEX rank               (tiebreaker: established AMMs preferred)
+  //     NOTE: DEX rank must NOT override liquidity. The old formula multiplied rank
+  //     by 1000, letting a low-liquidity Meteora pair beat a $52K PumpSwap pair
+  //     simply because Meteora rank(70) > PumpSwap rank(50). This caused all data
+  //     (price changes, liquidity, DEX label) to reflect the wrong/empty pair.
   //   • SUM vol24h, vol1h across all pools → true total market volume
   //   • SUM h1 buys/sells across all pools → true BSR
   type AggregatedPair = DexPair & { aggVol24h: number; aggVol1h: number; aggBsr: number };
@@ -419,11 +426,19 @@ export async function scanTokens(): Promise<void> {
 
   const pairs: AggregatedPair[] = [];
   for (const [, group] of mintGroupMap) {
-    // Pick best pair by h1 volume + DEX rank (most liquid, preferred pool)
+    // Liquidity-first pair selection:
+    //   liq (USD)  × 100  → primary key  (1 dollar of liquidity = 100 score points)
+    //   h1 vol     × 1    → secondary    (activity this hour)
+    //   DEX rank   × 1    → tertiary     (tiebreaker between equal-liquidity pools)
+    // With this formula a pool needs ZERO liquidity and ZERO h1 vol for DEX rank
+    // alone to decide — i.e. rank only matters when pools are equally illiquid.
     let best = group[0];
     let bestScore = 0;
     for (const p of group) {
-      const s = (p.volume?.h1 ?? 0) + (DEX_RANK[p.dexId?.toLowerCase() ?? ''] ?? 0) * 1000;
+      const liq  = p.liquidity?.usd ?? 0;
+      const h1vol = p.volume?.h1 ?? 0;
+      const rank  = DEX_RANK[p.dexId?.toLowerCase() ?? ''] ?? 0;
+      const s = liq * 100 + h1vol + rank;
       if (s > bestScore) { bestScore = s; best = p; }
     }
     // Aggregate volumes and transaction counts across ALL pools
