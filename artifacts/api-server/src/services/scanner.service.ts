@@ -185,6 +185,23 @@ export function calcScore(
 
 const ALLOWED_DEXES = ['raydium', 'pump-fun', 'pumpfun', 'pumpswap', 'orca', 'meteora'];
 
+/**
+ * Age-adjusted minimum score gate.
+ * Younger tokens face higher score bars to compensate for thinner history.
+ *   0 – 30 min  → 90
+ *   30 – 60 min → 85
+ *   ≥ 1 h       → 80
+ * The user's configured minEntryScore is respected as an additional floor.
+ */
+function getAgeAdjustedMinScore(ageH: number, settingsMin: number): number {
+  const ageMin = ageH * 60;
+  let required: number;
+  if (ageMin < 30) required = 90;
+  else if (ageMin < 60) required = 85;
+  else required = 80;
+  return Math.max(settingsMin, required);
+}
+
 function buildFilterResults(
   pair: DexPair,
   settings: Awaited<ReturnType<typeof getSettings>>,
@@ -204,15 +221,17 @@ function buildFilterResults(
   // Meteora/Orca DLMM pools even though real liquidity exists (per-pair endpoint is accurate).
   const liq = freshLiq !== undefined ? freshLiq : (pair.liquidity?.usd ?? 0);
   const ageH = pair.pairCreatedAt ? (Date.now() - pair.pairCreatedAt) / 3_600_000 : 0;
-  const ageMin = ageH * 60;
   const bsr = aggBsr;
   const change5m = freshChange5m;
   const change24 = pair.priceChange?.h24 ?? 0;
   const dexOk = ALLOWED_DEXES.includes(pair.dexId?.toLowerCase() ?? '');
 
-  // Tokens <30 min old require a stricter quality score (≥80) — young tokens rug more often.
-  const isYoung = ageMin < 30;
-  const youngScoreOk = !isYoung || qualityScore >= 80;
+  // Age-adjusted score gate — replaces both the hard minAge lower bound and the
+  // old "young token ≥80" check. Each age bucket gets a tighter requirement.
+  const effectiveMinScore = getAgeAdjustedMinScore(ageH, settings.minEntryScore);
+  const ageScoreOk = qualityScore >= effectiveMinScore;
+  const ageMin = ageH * 60;
+  const ageBucket = ageMin < 30 ? '0–30m' : ageMin < 60 ? '30–60m' : '≥1h';
 
   // Liquidity stability: passes when stable OR when we have no history yet
   const liqStable = liqStability?.stable ?? true;
@@ -224,7 +243,7 @@ function buildFilterResults(
     { name: `MC ≥$${(settings.minMc/1000).toFixed(0)}K`, passed: mc >= settings.minMc, value: `$${(mc/1000).toFixed(0)}K`, required: `≥$${(settings.minMc/1000).toFixed(0)}K` },
     { name: `MC ≤$${(settings.maxMc/1_000_000).toFixed(1)}M`, passed: mc <= settings.maxMc, value: `$${(mc/1_000_000).toFixed(2)}M`, required: `≤$${(settings.maxMc/1_000_000).toFixed(1)}M` },
     { name: `Vol24h ≥$${(settings.minVolume24h/1000).toFixed(0)}K`, passed: vol24 >= settings.minVolume24h, value: `$${(vol24/1000).toFixed(0)}K`, required: `≥$${(settings.minVolume24h/1000).toFixed(0)}K` },
-    { name: `Age ${settings.minAgeHours}h–${settings.maxAgeHours}h`, passed: ageH >= settings.minAgeHours && ageH <= settings.maxAgeHours, value: `${ageH.toFixed(1)}h`, required: `${settings.minAgeHours}h–${settings.maxAgeHours}h` },
+    { name: `Age ≤${settings.maxAgeHours}h`, passed: ageH <= settings.maxAgeHours, value: `${ageH.toFixed(1)}h`, required: `≤${settings.maxAgeHours}h` },
     { name: `Liquidity ≥$${(settings.minLiquidity/1000).toFixed(0)}K`, passed: liq >= settings.minLiquidity, value: `$${(liq/1000).toFixed(0)}K`, required: `≥$${(settings.minLiquidity/1000).toFixed(0)}K` },
     { name: `BSR ≥${settings.minBuySellRatio}x (24h)`, passed: bsr >= settings.minBuySellRatio, value: `${bsr.toFixed(2)}x`, required: `≥${settings.minBuySellRatio}x` },
     { name: 'No 5m FOMO >50%', passed: change5m <= 50, value: `${change5m.toFixed(1)}%`, required: '≤50% in 5m' },
@@ -236,8 +255,8 @@ function buildFilterResults(
     { name: `Creator ≤${settings.maxCreatorPct}%`, passed: creatorPct === 0 || creatorPct <= settings.maxCreatorPct, value: `${creatorPct.toFixed(1)}%`, required: `≤${settings.maxCreatorPct}%` },
     // Liquidity stability: block tokens already being drained (>15% drop in last 5 min)
     { name: 'Liq stable (<15% drop/5m)', passed: liqStable, value: liqStabilityLabel, required: '<15% drop in 5m' },
-    // Young token gate: tokens <30 min old must score ≥80 to reduce rug exposure
-    ...(isYoung ? [{ name: 'Young token score ≥80', passed: youngScoreOk, value: `score ${qualityScore}`, required: '≥80 (token <30m old)' }] : []),
+    // Age-adjusted score gate: younger tokens need higher scores to account for thin history
+    { name: `Score ≥${effectiveMinScore} (${ageBucket})`, passed: ageScoreOk, value: `score ${qualityScore}`, required: `≥${effectiveMinScore}` },
   ];
 }
 
@@ -552,7 +571,6 @@ export async function scanTokens(): Promise<void> {
     if      (mc < settings.minMc)           { preReject = `MC too low ($${(mc/1000).toFixed(0)}K < $${(settings.minMc/1000).toFixed(0)}K min)`;             preRejectKey = 'MC too low'; }
     else if (mc > settings.maxMc)           { preReject = `MC too high ($${(mc/1e6).toFixed(1)}M > $${(settings.maxMc/1e6).toFixed(1)}M max)`;              preRejectKey = 'MC too high'; }
     else if (vol24 < settings.minVolume24h) { preReject = `Vol24h too low ($${(vol24/1000).toFixed(0)}K < $${(settings.minVolume24h/1000).toFixed(0)}K min)`; preRejectKey = 'Vol24h too low'; }
-    else if (settings.minAgeHours > 0 && ageH < settings.minAgeHours) { preReject = `Too new (${ageH.toFixed(1)}h < ${settings.minAgeHours}h min)`;          preRejectKey = 'Age too new'; }
     else if (ageH > settings.maxAgeHours)   { preReject = `Age ${ageH.toFixed(1)}h > ${settings.maxAgeHours}h max`;                                          preRejectKey = 'Age too old'; }
     else if (change24 > 500)                { preReject = `Already pumped ${change24.toFixed(0)}% in 24h (>500% blocks entry)`;                              preRejectKey = 'Already pumped >500%'; }
 
@@ -701,9 +719,11 @@ export async function scanTokens(): Promise<void> {
 
     const trendOk = settings.trendChecksRequired <= 1 || consecutive >= settings.trendChecksRequired;
 
+    const effectiveMinScore = getAgeAdjustedMinScore(ageH, settings.minEntryScore);
+
     const status: Token['status'] = enteredMints.has(mint)
       ? 'ENTERED'
-      : allPassed && scoreBreakdown.total >= settings.minEntryScore && trendOk
+      : allPassed && scoreBreakdown.total >= effectiveMinScore && trendOk
       ? 'ELIGIBLE'
       : !allPassed
       ? 'REJECTED'
@@ -711,12 +731,12 @@ export async function scanTokens(): Promise<void> {
 
     if (status === 'ELIGIBLE') {
       logger.info(
-        { mint, symbol: pair.baseToken.symbol, score: scoreBreakdown.total, threshold: settings.minEntryScore, consecutive, trendRequired: settings.trendChecksRequired, change5m, breakdown: scoreBreakdown },
+        { mint, symbol: pair.baseToken.symbol, score: scoreBreakdown.total, effectiveMinScore, ageH: ageH.toFixed(2), consecutive, trendRequired: settings.trendChecksRequired, change5m, breakdown: scoreBreakdown },
         'AUDIT ACCEPTED: token meets all requirements — status=ELIGIBLE'
       );
       eligibleCount++;
     } else if (status === 'SCANNING') {
-      logger.debug({ mint, symbol: pair.baseToken.symbol, score: scoreBreakdown.total, threshold: settings.minEntryScore }, 'AUDIT SCANNING');
+      logger.debug({ mint, symbol: pair.baseToken.symbol, score: scoreBreakdown.total, effectiveMinScore }, 'AUDIT SCANNING');
     } else if (status === 'REJECTED') {
       logger.debug({ mint, symbol: pair.baseToken.symbol, score: scoreBreakdown.total, reason: rejectReason }, 'AUDIT REJECTED');
     }
@@ -875,9 +895,11 @@ export async function hotRefreshScanningTokens(): Promise<boolean> {
     const consecutive = isUp ? prevConsecutive + 1 : 0;
     const trendOk = settings.trendChecksRequired <= 1 || consecutive >= settings.trendChecksRequired;
 
+    const effectiveMinScore = getAgeAdjustedMinScore(ageH, settings.minEntryScore);
+
     const newStatus: Token['status'] = enteredMints.has(mint)
       ? 'ENTERED'
-      : allPassed && scoreBreakdown.total >= settings.minEntryScore && trendOk
+      : allPassed && scoreBreakdown.total >= effectiveMinScore && trendOk
       ? 'ELIGIBLE'
       : !allPassed
       ? 'REJECTED'
