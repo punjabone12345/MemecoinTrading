@@ -808,30 +808,41 @@ export async function scanTokens(): Promise<void> {
 
 // ── HOT REFRESH ─────────────────────────────────────────────────────────────
 // Runs every 3 seconds (separate from the full 15s scan cycle).
-// Targets only SCANNING, recently-REJECTED, and brand-new tokens so they
-// flip to ELIGIBLE the moment real-world data corrects — not 15s later.
+// ALL SCANNING tokens refresh every cycle.
+// ALL REJECTED tokens refresh via a 3-batch cursor — 1/3 per cycle — so every
+// rejected token is refreshed within ~9 seconds regardless of when it was last seen.
 // Returns true when at least one token changed status (caller broadcasts).
+let hotRefreshCursor = 0;
 export async function hotRefreshScanningTokens(): Promise<boolean> {
   const settings = await getSettings().catch(() => null);
   if (!settings) return false;
 
   const now = Date.now();
+  const STALE_MS = 8_000; // consider stale if not refreshed in last 8s
 
-  // Collect mints worth refreshing:
-  //  • SCANNING — close to eligible, any filter could flip any second
-  //  • REJECTED in last 90s — might have just been rejected due to stale 5m data
-  //  • Any token not refreshed in last 10s that isn't already ENTERED/ELIGIBLE
-  const targets: { mint: string; pairAddress: string; token: Token }[] = [];
+  const scanningTargets: { mint: string; pairAddress: string; token: Token }[] = [];
+  const rejectedPool:    { mint: string; pairAddress: string; token: Token }[] = [];
+
   for (const [mint, token] of tokenCache.entries()) {
-    if (token.status === 'ENTERED') continue;
-    if (token.status === 'ELIGIBLE') continue;
-    const isScanning  = token.status === 'SCANNING';
-    const recentReject = token.status === 'REJECTED' && (now - token.lastChecked) < 90_000;
-    const stale       = (now - token.lastChecked) > 10_000;
-    if ((isScanning || recentReject) && stale && token.pairAddress) {
-      targets.push({ mint, pairAddress: token.pairAddress, token });
+    if (token.status === 'ENTERED' || token.status === 'ELIGIBLE') continue;
+    if (!token.pairAddress) continue;
+    if ((now - token.lastChecked) < STALE_MS) continue;
+    if (token.status === 'SCANNING') {
+      scanningTargets.push({ mint, pairAddress: token.pairAddress, token });
+    } else {
+      rejectedPool.push({ mint, pairAddress: token.pairAddress, token });
     }
   }
+
+  // Rotate through rejected tokens in 3 equal batches so every token is covered
+  // within 3 cycles × 3 seconds = 9 seconds.
+  const BATCHES = 3;
+  const batchSize = Math.ceil(rejectedPool.length / BATCHES);
+  const batchStart = (hotRefreshCursor % BATCHES) * batchSize;
+  hotRefreshCursor++;
+  const rejectedBatch = rejectedPool.slice(batchStart, batchStart + batchSize);
+
+  const targets = [...scanningTargets, ...rejectedBatch];
   if (targets.length === 0) return false;
 
   // Fetch fresh pair data for all targets in parallel chunks of 30
@@ -879,11 +890,21 @@ export async function hotRefreshScanningTokens(): Promise<boolean> {
     const v1hPrev   = token.volume1hPrev > 0 ? token.volume1hPrev : v1h * 0.8;
     const ageH      = fresh.pairCreatedAt ? (now - fresh.pairCreatedAt) / 3_600_000 : token.age;
 
-    // Quick pre-filter disqualifier — skip re-eval if clearly still wrong
-    if (mc < settings.minMc || mc > settings.maxMc) continue;
-    if (vol24 < settings.minVolume24h) continue;
-    if (ageH > settings.maxAgeHours) continue;
-    if (change24 > 500) continue;
+    // Quick pre-filter disqualifier — token still clearly wrong, but always
+    // update lastChecked and basic display fields so the UI shows current data
+    // and the freshness dot stays green. Without this, these tokens would show
+    // stale timestamps even though we just fetched their data.
+    if (mc < settings.minMc || mc > settings.maxMc ||
+        vol24 < settings.minVolume24h || ageH > settings.maxAgeHours ||
+        change24 > 500) {
+      tokenCache.set(mint, {
+        ...token,
+        marketCap: mc, price, liquidity: liq, age: ageH,
+        priceChange5m: change5m, priceChange1h: change1h, priceChange24h: change24,
+        lastChecked: now,
+      });
+      continue;
+    }
 
     const partial: Partial<Token> = {
       priceChange5m: change5m,
