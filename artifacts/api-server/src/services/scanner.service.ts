@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { WebSocket } from 'ws';
 import { logger } from '../lib/logger.js';
 import { Token, FilterResult, ScoreBreakdown } from '../types/index.js';
 import { getSettings } from './settings.service.js';
@@ -30,6 +31,70 @@ const tokenCache = new Map<string, Token>();
 // cycles and is checked during scanTokens() so even a cold-cache restart
 // never re-marks an entered token as ELIGIBLE.
 const enteredMints = new Set<string>();
+
+// ── Permanent age blacklist ──────────────────────────────────────────────────
+// When a token exceeds maxAgeHours it can NEVER get younger.  Adding it here
+// prevents it from being re-discovered by API sources and wasting scan slots.
+// Cleared only on full server restart (acceptable: new deployment = fresh data).
+const ageBannedMints = new Set<string>();
+
+// ── Real-time fresh-mint queue ───────────────────────────────────────────────
+// Mints discovered via PumpPortal WS or other live sources are queued here.
+// Each scan cycle batch-looks them up on DexScreener so they get evaluated
+// immediately rather than waiting to appear in trending/volume lists.
+const freshMintQueue = new Set<string>();
+
+// ── PumpPortal WebSocket — real-time new Pump.fun token stream ───────────────
+// Works on Render (production).  Fails gracefully on Replit (ECONNREFUSED) —
+// scanner falls back to polling-based discovery automatically.
+let ppWs: WebSocket | null = null;
+let ppReconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
+export function startNewTokenStream(): void {
+  function connect(): void {
+    if (ppWs) {
+      ppWs.removeAllListeners();
+      ppWs.terminate();
+      ppWs = null;
+    }
+    if (ppReconnectTimer) { clearTimeout(ppReconnectTimer); ppReconnectTimer = null; }
+
+    const url = 'wss://pumpportal.fun/api/data';
+    logger.info('PumpPortal WS: connecting…');
+    const ws = new WebSocket(url);
+    ppWs = ws;
+
+    ws.on('open', () => {
+      logger.info('PumpPortal WS: connected — subscribing to new tokens');
+      ws.send(JSON.stringify({ method: 'subscribeNewToken' }));
+      ws.send(JSON.stringify({ method: 'subscribeTokenTrade' }));
+    });
+
+    ws.on('message', (raw: Buffer) => {
+      try {
+        const msg = JSON.parse(raw.toString());
+        const mint: string | undefined = msg.mint ?? msg.tokenAddress;
+        if (mint && mint.length > 20 && !ageBannedMints.has(mint)) {
+          const added = !freshMintQueue.has(mint);
+          freshMintQueue.add(mint);
+          if (added) logger.debug({ mint, symbol: msg.symbol }, 'PumpPortal: new mint queued');
+        }
+      } catch { /* ignore parse errors */ }
+    });
+
+    ws.on('error', (err: Error) => {
+      logger.debug({ msg: err.message }, 'PumpPortal WS: connection error (normal on Replit)');
+    });
+
+    ws.on('close', () => {
+      logger.info('PumpPortal WS: disconnected — will reconnect in 15s');
+      ppWs = null;
+      ppReconnectTimer = setTimeout(connect, 15_000);
+    });
+  }
+
+  connect();
+}
 
 // ── Liquidity stability history ──────────────────────────────────────────────
 // Stores timestamped liquidity readings per mint so we can detect >15% drops
@@ -110,6 +175,9 @@ export function getScanStats() {
     dailyLossLimitHit,
     dailyPnl: dailyPnlSnapshot,
     dailyLossLimit: dailyLossLimitSnapshot,
+    ageBanned: ageBannedMints.size,
+    freshQueueSize: freshMintQueue.size,
+    pumpPortalConnected: ppWs !== null && ppWs.readyState === 1,
     rejectionCounts: Object.fromEntries(
       [...rejectionCounts.entries()].sort((a, b) => b[1] - a[1])
     ),
@@ -341,10 +409,12 @@ interface GeckoPool {
 
 async function fetchGeckoMints(): Promise<string[]> {
   try {
-    // Fetch 5 pages of trending, 5 pages of top-volume, and 3 pages of new pools in parallel.
-    // Each page returns ~20 pools → up to 260 mints from GeckoTerminal alone.
+    // Fetch 5 pages of trending, 5 pages of top-volume, and 10 pages of new pools in parallel.
+    // new_pools sorted newest-first gives us tokens created in the last few minutes — crucial
+    // for catching fresh Pump.fun launches before they appear in trending/volume lists.
+    // Each page ≈ 20 pools → up to 300+ mints from GeckoTerminal alone.
     const pages = [1, 2, 3, 4, 5];
-    const newPages = [1, 2, 3];
+    const newPages = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
 
     const geckoRequests = [
       ...pages.map((p) =>
@@ -417,8 +487,11 @@ async function fetchDexPairs(): Promise<DexPair[]> {
       ).catch(() => ({ data: [] as Array<{ tokenAddress: string; chainId: string }> })),
     ]);
 
-    // Collect all mints for DexScreener batch-lookup
-    const extraMints = new Set<string>([...raydiumMints, ...geckoMints]);
+    // Collect all mints for DexScreener batch-lookup.
+    // freshMintQueue contains mints from PumpPortal WS (real-time new launches) —
+    // include them here so brand-new tokens are evaluated each cycle immediately
+    // rather than waiting to appear in trending/volume aggregator lists.
+    const extraMints = new Set<string>([...raydiumMints, ...geckoMints, ...freshMintQueue]);
 
     if (Array.isArray(profileRes.data)) {
       profileRes.data.filter((t) => t.chainId === 'solana').forEach((t) => extraMints.add(t.tokenAddress));
@@ -426,6 +499,10 @@ async function fetchDexPairs(): Promise<DexPair[]> {
     if (Array.isArray(boostRes.data)) {
       boostRes.data.filter((t) => t.chainId === 'solana').forEach((t) => extraMints.add(t.tokenAddress));
     }
+
+    // Remove age-banned mints before batch lookup — they'll always be rejected,
+    // no point paying for the API calls.
+    for (const banned of ageBannedMints) extraMints.delete(banned);
 
     // Batch-lookup all collected mints on DexScreener.
     // DexScreener allows up to 30 addresses per request and rate-limits aggressive
@@ -574,11 +651,12 @@ export async function scanTokens(): Promise<void> {
 
     let preReject: string | undefined;
     let preRejectKey: string | undefined;
+    let permanentBan = false; // age can never decrease — permanently remove these
     if      (isGraduating)                  { preReject = `Graduating — Pump.fun migration in progress, data unreliable`;                                     preRejectKey = 'Graduating (no real data)'; }
     else if (mc < settings.minMc)           { preReject = `MC too low ($${(mc/1000).toFixed(0)}K < $${(settings.minMc/1000).toFixed(0)}K min)`;             preRejectKey = 'MC too low'; }
     else if (mc > settings.maxMc)           { preReject = `MC too high ($${(mc/1e6).toFixed(1)}M > $${(settings.maxMc/1e6).toFixed(1)}M max)`;              preRejectKey = 'MC too high'; }
     else if (vol24 < settings.minVolume24h) { preReject = `Vol24h too low ($${(vol24/1000).toFixed(0)}K < $${(settings.minVolume24h/1000).toFixed(0)}K min)`; preRejectKey = 'Vol24h too low'; }
-    else if (ageH > settings.maxAgeHours)   { preReject = `Age ${ageH.toFixed(1)}h > ${settings.maxAgeHours}h max`;                                          preRejectKey = 'Age too old'; }
+    else if (ageH > settings.maxAgeHours)   { preReject = `Age ${ageH.toFixed(1)}h > ${settings.maxAgeHours}h max`;                                          preRejectKey = 'Age too old'; permanentBan = true; }
     else if (change24 > 500)                { preReject = `Already pumped ${change24.toFixed(0)}% in 24h (>500% blocks entry)`;                              preRejectKey = 'Already pumped >500%'; }
 
     const existing = tokenCache.get(mint);
@@ -586,6 +664,18 @@ export async function scanTokens(): Promise<void> {
     if (preReject) {
       if (preRejectKey) bumpReject(preRejectKey);
       if (enteredMints.has(mint)) continue;
+
+      // Age-rejected tokens can NEVER get younger — permanently ban and evict.
+      // This stops them re-entering the scan pipeline on every cycle and frees
+      // scan slots for genuinely new tokens.
+      if (permanentBan) {
+        ageBannedMints.add(mint);
+        freshMintQueue.delete(mint); // clean up if it was queued via WS
+        tokenCache.delete(mint);
+        liquidityHistory.delete(mint);
+        continue;
+      }
+
       // Compute real score even for pre-rejected tokens so the UI shows meaningful
       // momentum data instead of 0/100 for everything. Status stays REJECTED.
       const preV1hPrev = existing?.volume1hCurrent ?? 0;
@@ -803,7 +893,20 @@ export async function scanTokens(): Promise<void> {
   // rejection breakdown look like it's missing tokens.
   eligibleCount = Array.from(tokenCache.values()).filter((t) => t.status === 'ELIGIBLE').length;
   passedFilters = Array.from(tokenCache.values()).filter((t) => t.status === 'ELIGIBLE' || t.status === 'SCANNING').length;
-  logger.info({ scanCount, passedFilters, eligibleCount }, 'Scan complete');
+
+  // Prune freshMintQueue: remove any mints that now have a tokenCache entry
+  // (looked up this cycle) or are age-banned. Keeps the queue lean — only mints
+  // that haven't been evaluated yet stay in the queue.
+  // Cap at 2000 to prevent unbounded growth if WS fires many events.
+  for (const mint of freshMintQueue) {
+    if (tokenCache.has(mint) || ageBannedMints.has(mint)) freshMintQueue.delete(mint);
+  }
+  if (freshMintQueue.size > 2000) {
+    const overflow = Array.from(freshMintQueue).slice(0, freshMintQueue.size - 2000);
+    for (const m of overflow) freshMintQueue.delete(m);
+  }
+
+  logger.info({ scanCount, passedFilters, eligibleCount, ageBanned: ageBannedMints.size, freshQueue: freshMintQueue.size }, 'Scan complete');
 }
 
 // ── HOT REFRESH ─────────────────────────────────────────────────────────────
@@ -826,6 +929,7 @@ export async function hotRefreshScanningTokens(): Promise<boolean> {
   for (const [mint, token] of tokenCache.entries()) {
     if (token.status === 'ENTERED' || token.status === 'ELIGIBLE') continue;
     if (!token.pairAddress) continue;
+    if (ageBannedMints.has(mint)) { tokenCache.delete(mint); liquidityHistory.delete(mint); continue; }
     if ((now - token.lastChecked) < STALE_MS) continue;
     if (token.status === 'SCANNING') {
       scanningTargets.push({ mint, pairAddress: token.pairAddress, token });
@@ -890,12 +994,18 @@ export async function hotRefreshScanningTokens(): Promise<boolean> {
     const v1hPrev   = token.volume1hPrev > 0 ? token.volume1hPrev : v1h * 0.8;
     const ageH      = fresh.pairCreatedAt ? (now - fresh.pairCreatedAt) / 3_600_000 : token.age;
 
-    // Quick pre-filter disqualifier — token still clearly wrong, but always
-    // update lastChecked and basic display fields so the UI shows current data
-    // and the freshness dot stays green. Without this, these tokens would show
-    // stale timestamps even though we just fetched their data.
+    // Quick pre-filter disqualifier — token still clearly wrong.
+    // Age-exceeded: permanently ban (age never decreases) and evict entirely.
+    // Other pre-filter fails: update display fields and leave in cache to show in UI.
+    if (ageH > settings.maxAgeHours) {
+      ageBannedMints.add(mint);
+      freshMintQueue.delete(mint);
+      tokenCache.delete(mint);
+      liquidityHistory.delete(mint);
+      continue;
+    }
     if (mc < settings.minMc || mc > settings.maxMc ||
-        vol24 < settings.minVolume24h || ageH > settings.maxAgeHours ||
+        vol24 < settings.minVolume24h ||
         change24 > 500) {
       tokenCache.set(mint, {
         ...token,

@@ -137,5 +137,8 @@ export interface ScanStats {
   dailyLossLimitHit?: boolean;
   dailyPnl?: number;
   dailyLossLimit?: number;
+  ageBanned?: number;
+  freshQueueSize?: number;
+  pumpPortalConnected?: boolean;
   rejectionCounts?: Record<string, number>;
 }

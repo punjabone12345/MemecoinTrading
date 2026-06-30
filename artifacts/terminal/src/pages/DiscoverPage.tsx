@@ -296,9 +296,20 @@ export default function DiscoverPage({ tokens, scanStats, settings }: Props) {
 
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '8px 14px', borderRadius: 10, background: 'rgba(0,255,136,0.04)', border: '1px solid rgba(0,255,136,0.1)' }}>
         <LiveDot />
-        <span style={{ fontSize: 10, color: '#3a5070' }}>
-          Full scan every <b style={{ color: '#7090b0' }}>15s</b> · Hot refresh every <b style={{ color: '#7090b0' }}>3s</b> for near-eligible tokens
+        <span style={{ fontSize: 10, color: '#3a5070', flex: 1, marginLeft: 8 }}>
+          Full scan every <b style={{ color: '#7090b0' }}>15s</b> · Hot refresh every <b style={{ color: '#7090b0' }}>3s</b>
         </span>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          {scanStats.ageBanned !== undefined && scanStats.ageBanned > 0 && (
+            <span style={{ fontSize: 9, color: '#ff4466', fontWeight: 700, background: 'rgba(255,68,102,0.1)', border: '1px solid rgba(255,68,102,0.2)', borderRadius: 4, padding: '2px 6px' }}>
+              {scanStats.ageBanned} age-banned
+            </span>
+          )}
+          <span style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 9, fontWeight: 700, color: scanStats.pumpPortalConnected ? '#00ff88' : '#7090b0', background: scanStats.pumpPortalConnected ? 'rgba(0,255,136,0.08)' : 'rgba(255,255,255,0.03)', border: `1px solid ${scanStats.pumpPortalConnected ? 'rgba(0,255,136,0.2)' : 'rgba(255,255,255,0.06)'}`, borderRadius: 4, padding: '2px 6px' }}>
+            <span style={{ width: 5, height: 5, borderRadius: '50%', background: scanStats.pumpPortalConnected ? '#00ff88' : '#3a5070', display: 'inline-block' }} />
+            PUMP.FUN WS {scanStats.pumpPortalConnected ? 'LIVE' : 'OFF'}
+          </span>
+        </div>
       </div>
 
       {scanStats.rejectionCounts && Object.keys(scanStats.rejectionCounts).length > 0 && (
