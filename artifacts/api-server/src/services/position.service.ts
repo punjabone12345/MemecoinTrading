@@ -439,8 +439,10 @@ async function _updatePositionPrice(id: string, currentPrice: number, freshBsr?:
 
     const emergencyReasons: string[] = [];
 
-    // 1. Rugcheck failure — confirmed immediately (on-chain, not DexScreener noise)
-    if (confirm('rugcheck', !token.rugcheck)) {
+    // 1. Rugcheck failure — only fires when rugcheck is ENABLED in settings.
+    // If the user disabled rugcheck, token.rugcheck may still be false from a
+    // prior cached scan — gating on settings.rugcheckEnabled prevents false exits.
+    if (settings.rugcheckEnabled && confirm('rugcheck', !token.rugcheck)) {
       emergencyReasons.push('Rugcheck failed (on-chain risk detected)');
     }
 

@@ -562,20 +562,26 @@ export async function scanTokens(): Promise<void> {
     const existing = tokenCache.get(mint);
 
     // Rugcheck (with cache — 5-min TTL so we don't hammer rugcheck API)
+    // IMPORTANT: when rugcheckEnabled is false, always use rugOk=true and do NOT
+    // read from the cache. A previously-cached rugcheck:false value would propagate
+    // into token.rugcheck, which the emergency exit in position.service checks, causing
+    // positions to be closed even though the user disabled rugcheck.
     let rugOk = true;
     let topHolder = existing?.topHolder ?? 0;
     let creatorPct = existing?.creatorPct ?? 0;
-    if (existing && Date.now() - existing.lastChecked < 5 * 60_000) {
-      rugOk = existing.rugcheck;
-      // Use cached percentages from previous rugcheck call if available
-      topHolder = existing.topHolder > 0 ? existing.topHolder : topHolder;
-      creatorPct = existing.creatorPct > 0 ? existing.creatorPct : creatorPct;
-    } else if (settings.rugcheckEnabled) {
-      const rugResult = await checkRugcheck(mint, settings.maxCreatorPct).catch(() => ({ ok: true, topHolder: 0, creatorPct: 0 }));
-      rugOk = rugResult.ok;
-      // Only update from rugcheck when it returned real data
-      if (rugResult.topHolder > 0) topHolder = rugResult.topHolder;
-      if (rugResult.creatorPct > 0) creatorPct = rugResult.creatorPct;
+    if (settings.rugcheckEnabled) {
+      if (existing && Date.now() - existing.lastChecked < 5 * 60_000) {
+        rugOk = existing.rugcheck;
+        // Use cached percentages from previous rugcheck call if available
+        topHolder = existing.topHolder > 0 ? existing.topHolder : topHolder;
+        creatorPct = existing.creatorPct > 0 ? existing.creatorPct : creatorPct;
+      } else {
+        const rugResult = await checkRugcheck(mint, settings.maxCreatorPct).catch(() => ({ ok: true, topHolder: 0, creatorPct: 0 }));
+        rugOk = rugResult.ok;
+        // Only update from rugcheck when it returned real data
+        if (rugResult.topHolder > 0) topHolder = rugResult.topHolder;
+        if (rugResult.creatorPct > 0) creatorPct = rugResult.creatorPct;
+      }
     }
 
     // Volume momentum: use fresh h1 as current, previous scan's h1 as baseline
