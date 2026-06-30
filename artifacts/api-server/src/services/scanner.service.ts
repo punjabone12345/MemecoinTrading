@@ -30,6 +30,56 @@ const tokenCache = new Map<string, Token>();
 // cycles and is checked during scanTokens() so even a cold-cache restart
 // never re-marks an entered token as ELIGIBLE.
 const enteredMints = new Set<string>();
+
+// ── Liquidity stability history ──────────────────────────────────────────────
+// Stores timestamped liquidity readings per mint so we can detect >15% drops
+// over a 5-minute window before committing to an entry.
+// Pruned to 10 minutes of data per mint; cleaned up alongside tokenCache eviction.
+const liquidityHistory = new Map<string, Array<{ ts: number; liq: number }>>();
+
+function recordLiquidityPoint(mint: string, liq: number): void {
+  if (liq <= 0) return; // ignore zero/missing liquidity readings
+  const now = Date.now();
+  const PRUNE_MS = 10 * 60_000; // keep 10 min of history
+  const history = liquidityHistory.get(mint) ?? [];
+  history.push({ ts: now, liq });
+  // Prune old entries
+  const cutoff = now - PRUNE_MS;
+  const trimmed = history.filter((h) => h.ts >= cutoff);
+  liquidityHistory.set(mint, trimmed);
+}
+
+/**
+ * Returns whether liquidity is stable (no >15% drop in the last 5 minutes).
+ * Only blocks when we have ≥2 readings spanning at least 30 seconds — new
+ * tokens with no history pass through unblocked.
+ */
+function checkLiquidityStability(mint: string, currentLiq: number): { stable: boolean; dropPct: number } {
+  const WINDOW_MS   = 5 * 60_000; // 5-minute look-back window
+  const MIN_SPAN_MS = 30_000;     // require at least 30s of history before blocking
+  const DROP_LIMIT  = 15;         // block if liquidity fell >15%
+
+  const history = liquidityHistory.get(mint);
+  if (!history || history.length < 2) return { stable: true, dropPct: 0 };
+
+  const now = Date.now();
+  const windowStart = now - WINDOW_MS;
+
+  // Find the oldest reading within the 5-minute window
+  const inWindow = history.filter((h) => h.ts >= windowStart);
+  if (inWindow.length < 2) return { stable: true, dropPct: 0 };
+
+  const oldest = inWindow[0];
+  // Not enough time elapsed — don't penalise brand-new entries in cache
+  if (now - oldest.ts < MIN_SPAN_MS) return { stable: true, dropPct: 0 };
+  // Reference liquidity: the peak over the window (avoids false positives from
+  // brief API dips being the "oldest" reading)
+  const refLiq = Math.max(...inWindow.map((h) => h.liq));
+  if (refLiq <= 0) return { stable: true, dropPct: 0 };
+
+  const dropPct = ((refLiq - currentLiq) / refLiq) * 100;
+  return { stable: dropPct <= DROP_LIMIT, dropPct: Math.max(0, dropPct) };
+}
 let scanCount = 0;
 let passedFilters = 0;
 let eligibleCount = 0;
@@ -135,7 +185,19 @@ export function calcScore(
 
 const ALLOWED_DEXES = ['raydium', 'pump-fun', 'pumpfun', 'pumpswap', 'orca', 'meteora'];
 
-function buildFilterResults(pair: DexPair, settings: Awaited<ReturnType<typeof getSettings>>, rugOk: boolean, topHolder: number, creatorPct: number, qualityScore: number, aggVol24h: number, aggBsr: number, freshChange5m: number, freshLiq?: number): FilterResult[] {
+function buildFilterResults(
+  pair: DexPair,
+  settings: Awaited<ReturnType<typeof getSettings>>,
+  rugOk: boolean,
+  topHolder: number,
+  creatorPct: number,
+  qualityScore: number,
+  aggVol24h: number,
+  aggBsr: number,
+  freshChange5m: number,
+  freshLiq?: number,
+  liqStability?: { stable: boolean; dropPct: number },
+): FilterResult[] {
   const mc = pair.marketCap ?? pair.fdv ?? 0;
   const vol24 = aggVol24h;
   // Use explicitly-passed fresh liquidity when available; bulk endpoint often returns 0 for
@@ -152,6 +214,11 @@ function buildFilterResults(pair: DexPair, settings: Awaited<ReturnType<typeof g
   const isYoung = ageMin < 30;
   const youngScoreOk = !isYoung || qualityScore >= 80;
 
+  // Liquidity stability: passes when stable OR when we have no history yet
+  const liqStable = liqStability?.stable ?? true;
+  const liqDropPct = liqStability?.dropPct ?? 0;
+  const liqStabilityLabel = liqDropPct > 0 ? `-${liqDropPct.toFixed(1)}%` : 'stable';
+
   // Labels dynamically reflect the actual threshold from settings (not hardcoded defaults)
   return [
     { name: `MC ≥$${(settings.minMc/1000).toFixed(0)}K`, passed: mc >= settings.minMc, value: `$${(mc/1000).toFixed(0)}K`, required: `≥$${(settings.minMc/1000).toFixed(0)}K` },
@@ -167,6 +234,8 @@ function buildFilterResults(pair: DexPair, settings: Awaited<ReturnType<typeof g
     // maxTopHolder and maxCreatorPct: only enforce when rugcheck has supplied real data (>0)
     { name: `Top holder ≤${settings.maxTopHolder}%`, passed: topHolder === 0 || topHolder <= settings.maxTopHolder, value: `${topHolder.toFixed(1)}%`, required: `≤${settings.maxTopHolder}%` },
     { name: `Creator ≤${settings.maxCreatorPct}%`, passed: creatorPct === 0 || creatorPct <= settings.maxCreatorPct, value: `${creatorPct.toFixed(1)}%`, required: `≤${settings.maxCreatorPct}%` },
+    // Liquidity stability: block tokens already being drained (>15% drop in last 5 min)
+    { name: 'Liq stable (<15% drop/5m)', passed: liqStable, value: liqStabilityLabel, required: '<15% drop in 5m' },
     // Young token gate: tokens <30 min old must score ≥80 to reduce rug exposure
     ...(isYoung ? [{ name: 'Young token score ≥80', passed: youngScoreOk, value: `score ${qualityScore}`, required: '≥80 (token <30m old)' }] : []),
   ];
@@ -611,8 +680,14 @@ export async function scanTokens(): Promise<void> {
     };
 
     const scoreBreakdown = calcScore(partial, { minMc: settings.minMc, maxMc: settings.maxMc });
-    // Pass real-time change5m and fresh liquidity so filters use accurate data
-    const filterResults = buildFilterResults(pair, settings, rugOk, topHolder, creatorPct, scoreBreakdown.total, vol24, bsr, change5m, freshLiq);
+    // Record liquidity for stability tracking, then evaluate drop over last 5 min
+    recordLiquidityPoint(mint, freshLiq);
+    const liqStability = checkLiquidityStability(mint, freshLiq);
+    if (!liqStability.stable) {
+      logger.info({ mint, symbol: pair.baseToken.symbol, dropPct: liqStability.dropPct.toFixed(1) }, 'LIQ DRAIN: liquidity dropped >15% in 5m — blocking entry');
+    }
+    // Pass real-time change5m, fresh liquidity, and stability check so filters use accurate data
+    const filterResults = buildFilterResults(pair, settings, rugOk, topHolder, creatorPct, scoreBreakdown.total, vol24, bsr, change5m, freshLiq, liqStability);
     const allPassed = filterResults.every((f) => f.passed);
 
     if (allPassed) passedFilters++;
@@ -683,6 +758,7 @@ export async function scanTokens(): Promise<void> {
   for (const [mint, token] of tokenCache.entries()) {
     if (token.status !== 'ENTERED' && Date.now() - token.lastChecked > 30 * 60_000) {
       tokenCache.delete(mint);
+      liquidityHistory.delete(mint); // free associated history alongside cache eviction
     }
   }
 
@@ -783,8 +859,14 @@ export async function hotRefreshScanningTokens(): Promise<boolean> {
       marketCap: mc,
     };
     const scoreBreakdown = calcScore(partial, { minMc: settings.minMc, maxMc: settings.maxMc });
+    // Record liquidity for stability tracking, then evaluate drop over last 5 min
+    recordLiquidityPoint(mint, liq);
+    const liqStability = checkLiquidityStability(mint, liq);
+    if (!liqStability.stable) {
+      logger.info({ mint, symbol: token.symbol, dropPct: liqStability.dropPct.toFixed(1), source: 'hot-refresh' }, 'LIQ DRAIN: liquidity dropped >15% in 5m — blocking entry');
+    }
     // Pass liq explicitly so the filter label shows the real value (per-pair endpoint)
-    const filterResults  = buildFilterResults(fresh, settings, token.rugcheck, token.topHolder, token.creatorPct, scoreBreakdown.total, vol24, bsr, change5m, liq);
+    const filterResults  = buildFilterResults(fresh, settings, token.rugcheck, token.topHolder, token.creatorPct, scoreBreakdown.total, vol24, bsr, change5m, liq, liqStability);
     const allPassed = filterResults.every((f) => f.passed);
     const rejectReason = !allPassed ? filterResults.find((f) => !f.passed)?.name : undefined;
 
