@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { getSettings, updateSettings, resetAllData, getBalance } from '../services/settings.service.js';
-import { broadcastBalance } from '../websocket/server.js';
+import { broadcastBalance, broadcastSettings, broadcastTokens } from '../websocket/server.js';
+import { reEvaluateCachedTokens } from '../services/scanner.service.js';
 
 const router = Router();
 
@@ -17,6 +18,15 @@ router.patch('/', async (req, res) => {
   }
   await updateSettings(stringified);
   const settings = await getSettings();
+
+  // Immediately re-evaluate all cached tokens with the new settings,
+  // then push updated tokens + settings to every connected WS client.
+  // This ensures filter changes (e.g. minMc) take effect right away
+  // without waiting for the next full scan cycle.
+  reEvaluateCachedTokens()
+    .then(() => Promise.all([broadcastTokens(), broadcastSettings()]))
+    .catch(() => { /* non-fatal — next scan will pick up the changes */ });
+
   res.json(settings);
 });
 

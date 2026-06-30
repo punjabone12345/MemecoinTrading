@@ -141,6 +141,6 @@ export interface Analytics {
 }
 
 export interface WSMessage {
-  type: 'positions' | 'tokens' | 'analytics' | 'balance' | 'alert';
+  type: 'positions' | 'tokens' | 'analytics' | 'balance' | 'alert' | 'settings';
   data: unknown;
 }

@@ -126,6 +126,7 @@ export default function App() {
         }
         if (msg.type === 'analytics') setAnalytics(msg.data as Analytics);
         if (msg.type === 'balance') setBalance((msg.data as { balance: number }).balance);
+        if (msg.type === 'settings') setSettings(msg.data as Settings);
       });
       if (destroyed) { ws.close(); return; }
       ws.onopen = () => {

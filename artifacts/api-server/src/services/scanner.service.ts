@@ -1204,6 +1204,83 @@ export async function hotRefreshScanningTokens(): Promise<boolean> {
   return anyChanged;
 }
 
+/**
+ * Re-evaluates every token in the cache with fresh settings — no network calls.
+ * Call this immediately after settings are saved so filter results and statuses
+ * reflect the new thresholds without waiting for the next full scan cycle.
+ */
+export async function reEvaluateCachedTokens(): Promise<void> {
+  const settings = await getSettings();
+  const now = Date.now();
+
+  for (const [mint, token] of tokenCache.entries()) {
+    // Skip tokens that have been entered into a position
+    if (enteredMints.has(mint)) continue;
+
+    // Age-ban check with updated maxAgeHours
+    if (token.age > settings.maxAgeHours) {
+      ageBannedMints.add(mint);
+      freshMintQueue.delete(mint);
+      tokenCache.delete(mint);
+      continue;
+    }
+
+    // Rebuild score with updated MC range
+    const scoreBreakdown = calcScore(token, { minMc: settings.minMc, maxMc: settings.maxMc });
+
+    // Reconstruct a minimal DexPair-compatible object from cached token fields
+    const fakePair: DexPair = {
+      chainId: 'solana',
+      dexId: token.dexId,
+      pairAddress: token.pairAddress,
+      baseToken: { address: mint, name: token.name, symbol: token.symbol },
+      quoteToken: { symbol: 'SOL' },
+      priceUsd: String(token.price),
+      marketCap: token.marketCap,
+      fdv: token.marketCap,
+      liquidity: { usd: token.liquidity },
+      priceChange: { m5: token.priceChange5m, h1: token.priceChange1h, h24: token.priceChange24h },
+      volume: { h1: token.volume1hCurrent, h24: token.volume24h },
+      pairCreatedAt: now - token.age * 3_600_000,
+      txns: {
+        h24: { buys: Math.round(token.buySellRatio * 100), sells: 100 },
+      },
+    };
+
+    const liqStability = checkLiquidityStability(mint, token.liquidity);
+    const filterResults = buildFilterResults(
+      fakePair, settings,
+      token.rugcheck, token.topHolder, token.creatorPct,
+      scoreBreakdown.total,
+      token.volume24h, token.buySellRatio, token.priceChange5m,
+      token.liquidity, liqStability,
+    );
+
+    const allPassed = filterResults.every((f) => f.passed);
+    const rejectReason = !allPassed ? filterResults.find((f) => !f.passed)?.name : undefined;
+
+    const effectiveMinScore = getAgeAdjustedMinScore(token.age, settings.minEntryScore);
+    const trendOk = settings.trendChecksRequired <= 1 || (token.consecutiveTrending ?? 0) >= settings.trendChecksRequired;
+
+    const newStatus: Token['status'] = allPassed && scoreBreakdown.total >= effectiveMinScore && trendOk
+      ? 'ELIGIBLE'
+      : !allPassed
+      ? 'REJECTED'
+      : 'SCANNING';
+
+    tokenCache.set(mint, {
+      ...token,
+      score: scoreBreakdown.total,
+      scoreBreakdown,
+      filterResults,
+      status: newStatus,
+      rejectReason,
+    });
+  }
+
+  logger.info({ tokenCount: tokenCache.size }, 'Settings changed — re-evaluated all cached tokens');
+}
+
 export function markTokenEntered(mint: string): void {
   enteredMints.add(mint);
   const t = tokenCache.get(mint);

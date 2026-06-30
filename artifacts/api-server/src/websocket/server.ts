@@ -93,3 +93,9 @@ export async function broadcastTokens(): Promise<void> {
   const stats = getScanStats();
   broadcast({ type: 'tokens', data: { tokens, stats } });
 }
+
+export async function broadcastSettings(): Promise<void> {
+  const { getSettings } = await import('../services/settings.service.js');
+  const settings = await getSettings();
+  broadcast({ type: 'settings', data: settings });
+}
