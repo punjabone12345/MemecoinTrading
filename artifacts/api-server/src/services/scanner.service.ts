@@ -492,15 +492,27 @@ export async function scanTokens(): Promise<void> {
     if (preReject) {
       if (preRejectKey) bumpReject(preRejectKey);
       if (enteredMints.has(mint)) continue;
+      // Compute real score even for pre-rejected tokens so the UI shows meaningful
+      // momentum data instead of 0/100 for everything. Status stays REJECTED.
+      const preV1hPrev = existing?.volume1hCurrent ?? 0;
+      const prePartial: Partial<Token> = {
+        priceChange5m: change5m,
+        volume1hCurrent: v1h,
+        volume1hPrev: preV1hPrev,
+        volume24h: vol24,
+        buySellRatio: bsr,
+        marketCap: mc,
+      };
+      const preScore = calcScore(prePartial, { minMc: settings.minMc, maxMc: settings.maxMc });
       tokenCache.set(mint, {
         mint, name: pair.baseToken.name || 'Unknown', symbol: pair.baseToken.symbol || '???',
-        score: 0, marketCap: mc, volume24h: vol24, priceChange1h: change1h, priceChange5m: change5m,
+        score: preScore.total, marketCap: mc, volume24h: vol24, priceChange1h: change1h, priceChange5m: change5m,
         priceChange24h: change24, buySellRatio: bsr, liquidity: liq, age: ageH,
         dexId: pair.dexId ?? '', pairAddress: pair.pairAddress, price,
         rugcheck: true, freezeAuthority: false, mintAuthority: false,
         topHolder: existing?.topHolder ?? 0, creatorPct: existing?.creatorPct ?? 0,
-        status: 'REJECTED', rejectReason: preReject, scoreBreakdown: { priceMomentum: 0, volumeMomentum: 0, buyPressure: 0, mcQuality: 0, total: 0 },
-        filterResults: [], consecutiveTrending: 0, volume1hPrev: 0, volume1hCurrent: 0, lastChecked: Date.now(),
+        status: 'REJECTED', rejectReason: preReject, scoreBreakdown: preScore,
+        filterResults: [], consecutiveTrending: 0, volume1hPrev: preV1hPrev, volume1hCurrent: v1h, lastChecked: Date.now(),
       });
       continue;
     }
