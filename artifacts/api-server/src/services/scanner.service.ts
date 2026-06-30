@@ -353,22 +353,29 @@ interface RaydiumResponse {
 
 async function fetchRaydiumMints(): Promise<string[]> {
   try {
-    // Pages 1–10 × 100 pools/page = up to 1000 Raydium pools sorted by 24h volume
+    // Two parallel sweeps of Raydium with different sort keys:
+    //   volume24h DESC → top liquid/trading pools (established memecoins)
+    //   fee24h    DESC → most fees generated today → actively traded new pools
+    // Each sweep: 10 pages × 100 = 1000 pools. Together: up to 2000 unique mints.
     const pages = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-    const requests = pages.map((p) =>
-      axios.get<RaydiumResponse>(
-        `https://api-v3.raydium.io/pools/info/list?poolType=all&poolSortField=volume24h&sortType=desc&pageSize=100&page=${p}`,
-        { timeout: 12000 }
-      ).catch(() => ({ data: { data: { data: [] as RaydiumPool[] } } }))
-    );
 
-    const results = await Promise.all(requests);
+    const makeRequests = (sortField: string) =>
+      pages.map((p) =>
+        axios.get<RaydiumResponse>(
+          `https://api-v3.raydium.io/pools/info/list?poolType=all&poolSortField=${sortField}&sortType=desc&pageSize=100&page=${p}`,
+          { timeout: 12000 }
+        ).catch(() => ({ data: { data: { data: [] as RaydiumPool[] } } }))
+      );
+
+    const [volResults, feeResults] = await Promise.all([
+      Promise.all(makeRequests('volume24h')),
+      Promise.all(makeRequests('fee24h')),
+    ]);
+
     const mints = new Set<string>();
-
-    for (const res of results) {
+    for (const res of [...volResults, ...feeResults]) {
       const pools = res.data?.data?.data ?? [];
       for (const pool of pools) {
-        // Pick the non-quote side as the token we care about
         const mintA = pool.mintA?.address ?? '';
         const mintB = pool.mintB?.address ?? '';
         if (mintA && !RAYDIUM_QUOTE_MINTS.has(mintA)) mints.add(mintA);
@@ -384,7 +391,53 @@ async function fetchRaydiumMints(): Promise<string[]> {
   }
 }
 
+// ── Orca whirlpool mint discovery ────────────────────────────────────────────
+// Orca returns ~15 000 whirlpools in one call (~18 MB).  We cache the mint list
+// for 5 minutes to avoid re-downloading on every 15s scan cycle.
+interface OrcaWhirlpool {
+  tokenA?: { mint?: string };
+  tokenB?: { mint?: string };
+}
+let orcaMintCache: string[] = [];
+let orcaCacheTs = 0;
+let orcaCursor = 0; // rotating window cursor — advances by ORCA_WINDOW each scan
+const ORCA_CACHE_TTL_MS = 5 * 60_000; // 5 min
+
+async function fetchOrcaMints(): Promise<string[]> {
+  const now = Date.now();
+  if (orcaMintCache.length > 0 && now - orcaCacheTs < ORCA_CACHE_TTL_MS) {
+    return orcaMintCache;
+  }
+  try {
+    const res = await axios.get<{ whirlpools: OrcaWhirlpool[] }>(
+      'https://api.mainnet.orca.so/v1/whirlpool/list',
+      { timeout: 20000, decompress: true }
+    );
+    const mints = new Set<string>();
+    for (const wp of res.data?.whirlpools ?? []) {
+      const a = wp.tokenA?.mint ?? '';
+      const b = wp.tokenB?.mint ?? '';
+      if (a && !RAYDIUM_QUOTE_MINTS.has(a)) mints.add(a);
+      if (b && !RAYDIUM_QUOTE_MINTS.has(b)) mints.add(b);
+    }
+    orcaMintCache = Array.from(mints);
+    orcaCacheTs = now;
+    logger.info({ count: orcaMintCache.length }, 'Orca: fetched whirlpool mints');
+    return orcaMintCache;
+  } catch (err) {
+    logger.warn({ err }, 'Orca whirlpool fetch error');
+    return orcaMintCache; // return stale cache on error rather than empty
+  }
+}
+
 const GECKO_BASE = 'https://api.geckoterminal.com/api/v2';
+
+// GeckoTerminal rate-limit guard: free tier allows ~30 req/min.
+// With 20 endpoints × scans every 15s, we'd burn 80 req/min — well over limit.
+// Cache results for 60s (4 scan cycles) so we only fire 20 req/min at most.
+let geckoCachedMints: string[] = [];
+let geckoCacheTs = 0;
+const GECKO_CACHE_TTL_MS = 60_000; // 60s = one request window per rate-limit bucket
 
 interface GeckoPool {
   id: string;
@@ -408,36 +461,53 @@ interface GeckoPool {
 }
 
 async function fetchGeckoMints(): Promise<string[]> {
+  // Return cached results if still fresh (avoid rate-limit hammering)
+  const nowTs = Date.now();
+  if (geckoCachedMints.length > 0 && nowTs - geckoCacheTs < GECKO_CACHE_TTL_MS) {
+    return geckoCachedMints;
+  }
+
   try {
-    // Fetch 5 pages of trending, 5 pages of top-volume, and 10 pages of new pools in parallel.
-    // new_pools sorted newest-first gives us tokens created in the last few minutes — crucial
-    // for catching fresh Pump.fun launches before they appear in trending/volume lists.
-    // Each page ≈ 20 pools → up to 300+ mints from GeckoTerminal alone.
+    // 5 trending + 5 volume + 10 new_pools = 20 pages once per 60s.
+    // new_pools sorted newest-first catches Pump.fun launches early.
     const pages = [1, 2, 3, 4, 5];
     const newPages = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
 
-    const geckoRequests = [
-      ...pages.map((p) =>
-        axios.get<{ data: GeckoPool[] }>(
-          `${GECKO_BASE}/networks/solana/trending_pools?include=base_token&page=${p}`,
-          { timeout: 10000, headers: { Accept: 'application/json;version=20230302' } }
-        ).catch(() => ({ data: { data: [] as GeckoPool[] } }))
-      ),
-      ...pages.map((p) =>
-        axios.get<{ data: GeckoPool[] }>(
-          `${GECKO_BASE}/networks/solana/pools?sort=h24_volume_desc&page=${p}`,
-          { timeout: 10000, headers: { Accept: 'application/json;version=20230302' } }
-        ).catch(() => ({ data: { data: [] as GeckoPool[] } }))
-      ),
-      ...newPages.map((p) =>
-        axios.get<{ data: GeckoPool[] }>(
-          `${GECKO_BASE}/networks/solana/new_pools?include=base_token&page=${p}`,
-          { timeout: 10000, headers: { Accept: 'application/json;version=20230302' } }
-        ).catch(() => ({ data: { data: [] as GeckoPool[] } }))
-      ),
+    // Fire GeckoTerminal requests in staggered groups of 5 with 400ms gaps.
+    // Firing all 20 simultaneously causes instant 429 rate-limit on the free tier.
+    const geckoEndpoints = [
+      ...pages.map((p) => `${GECKO_BASE}/networks/solana/trending_pools?include=base_token&page=${p}`),
+      ...pages.map((p) => `${GECKO_BASE}/networks/solana/pools?sort=h24_volume_desc&page=${p}`),
+      ...newPages.map((p) => `${GECKO_BASE}/networks/solana/new_pools?include=base_token&page=${p}`),
     ];
 
-    const allResults = await Promise.all(geckoRequests);
+    const allResults: Array<{ data: { data: GeckoPool[] } }> = [];
+    const GECKO_CONCURRENCY = 4;
+    const GECKO_DELAY_MS = 500;
+    let geckoErrors = 0;
+
+    for (let i = 0; i < geckoEndpoints.length; i += GECKO_CONCURRENCY) {
+      const group = geckoEndpoints.slice(i, i + GECKO_CONCURRENCY);
+      const groupResults = await Promise.all(
+        group.map((url) =>
+          axios.get<{ data: GeckoPool[] }>(url, {
+            timeout: 10000,
+            headers: { Accept: 'application/json;version=20230302' },
+          }).catch((e) => {
+            if (e?.response?.status === 429) geckoErrors++;
+            return { data: { data: [] as GeckoPool[] } };
+          })
+        )
+      );
+      allResults.push(...groupResults);
+      if (i + GECKO_CONCURRENCY < geckoEndpoints.length) {
+        await new Promise((r) => setTimeout(r, GECKO_DELAY_MS));
+      }
+    }
+
+    if (geckoErrors > 0) {
+      logger.warn({ geckoErrors }, 'GeckoTerminal: rate-limited requests (429)');
+    }
     const mints = new Set<string>();
     for (const res of allResults) {
       for (const pool of res.data?.data ?? []) {
@@ -448,11 +518,17 @@ async function fetchGeckoMints(): Promise<string[]> {
         }
       }
     }
-    logger.info({ count: mints.size }, 'GeckoTerminal: fetched Solana token mints');
-    return Array.from(mints);
+    const result = Array.from(mints);
+    // Update cache only when we actually got results
+    if (result.length > 0) {
+      geckoCachedMints = result;
+      geckoCacheTs = Date.now();
+    }
+    logger.info({ count: result.length }, 'GeckoTerminal: fetched Solana token mints');
+    return result;
   } catch (err) {
     logger.warn({ err }, 'GeckoTerminal fetch error');
-    return [];
+    return geckoCachedMints; // return stale cache rather than empty on error
   }
 }
 
@@ -467,32 +543,65 @@ async function fetchDexPairs(): Promise<DexPair[]> {
     //   3. DexScreener profiles   — boosted/trending tokens
     //   4. DexScreener boosts     — top paid promotions (often early movers)
     // No keyword guessing — every mint comes from actual on-chain activity.
-    const [raydiumMints, geckoMints, profileRes, boostRes] = await Promise.all([
-      // 1. Raydium: 10 pages × 100 pools = up to 1000 on-chain pools
+    const [raydiumMints, geckoMints, orcaMints, profileRes, boostRes] = await Promise.all([
+      // 1. Raydium: 2 sort modes × 10 pages × 100 pools = up to 2000 unique mints
       fetchRaydiumMints(),
 
-      // 2. GeckoTerminal: 13-page deep scan
+      // 2. GeckoTerminal: 10 trending + 10 volume + 10 new_pools = 30 pages
       fetchGeckoMints(),
 
-      // 3. DexScreener: latest token profiles (boosted/trending)
+      // 3. Orca: all ~15 000 whirlpools (cached 5 min) → thousands of token mints
+      fetchOrcaMints(),
+
+      // 4. DexScreener: latest token profiles (boosted/trending)
       axios.get<Array<{ tokenAddress: string; chainId: string }>>(
         `${DEXSCREENER_BASE}/token-profiles/latest/v1`,
         { timeout: 10000 }
       ).catch(() => ({ data: [] as Array<{ tokenAddress: string; chainId: string }> })),
 
-      // 4. DexScreener: top boosted tokens
+      // 5. DexScreener: top boosted tokens
       axios.get<Array<{ tokenAddress: string; chainId: string }>>(
         `${DEXSCREENER_BASE}/token-boosts/top/v1`,
         { timeout: 10000 }
       ).catch(() => ({ data: [] as Array<{ tokenAddress: string; chainId: string }> })),
     ]);
 
-    // Collect all mints for DexScreener batch-lookup.
-    // freshMintQueue contains mints from PumpPortal WS (real-time new launches) —
-    // include them here so brand-new tokens are evaluated each cycle immediately
-    // rather than waiting to appear in trending/volume aggregator lists.
-    const extraMints = new Set<string>([...raydiumMints, ...geckoMints, ...freshMintQueue]);
+    // ── Mint prioritisation + hard cap ──────────────────────────────────────
+    // Priority (highest first):
+    //   1. freshMintQueue  — real-time PumpPortal WS launches (always included)
+    //   2. geckoMints      — new_pools sorted newest-first (fresh launches)
+    //   3. raydiumMints    — top-volume and top-fee Raydium pools
+    //   4. orcaMints       — rotating 1000-mint window of ~15 000 Orca whirlpools
+    //   5. profileRes/boostRes — DexScreener promoted tokens
+    //
+    // Hard cap: MAX_MINTS_PER_SCAN mints per scan → ≤ 100 DexScreener chunks →
+    // keeps each scan cycle under ~10s even on slow networks.
+    const MAX_MINTS_PER_SCAN = 3000;
 
+    // Orca rotating window — sample a different 1000 mints each cycle so we
+    // cover the full ~15 000 pool list across ~15 scan cycles (~3.75 min).
+    const ORCA_WINDOW = 1000;
+    if (orcaMints.length > 0) {
+      orcaCursor = orcaCursor % orcaMints.length;
+    }
+    const orcaSlice = orcaMints.length > 0
+      ? orcaMints.slice(orcaCursor, orcaCursor + ORCA_WINDOW)
+      : [];
+    orcaCursor = (orcaCursor + ORCA_WINDOW) % Math.max(1, orcaMints.length);
+
+    // Build ordered mint list — priority sources first, Orca fills remaining budget.
+    const highPriorityMints: string[] = [
+      ...freshMintQueue,
+      ...geckoMints,
+      ...raydiumMints,
+    ];
+    const extraMints = new Set<string>(highPriorityMints);
+    // Fill remaining budget with Orca rotation
+    for (const m of orcaSlice) {
+      if (extraMints.size >= MAX_MINTS_PER_SCAN) break;
+      extraMints.add(m);
+    }
+    // DexScreener promoted tokens (small set — always include)
     if (Array.isArray(profileRes.data)) {
       profileRes.data.filter((t) => t.chainId === 'solana').forEach((t) => extraMints.add(t.tokenAddress));
     }
@@ -504,9 +613,11 @@ async function fetchDexPairs(): Promise<DexPair[]> {
     // no point paying for the API calls.
     for (const banned of ageBannedMints) extraMints.delete(banned);
 
+    logger.info({ total: extraMints.size, raydium: raydiumMints.length, gecko: geckoMints.length, orca: orcaSlice.length, fresh: freshMintQueue.size }, 'fetchDexPairs: mint sources');
+
     // Batch-lookup all collected mints on DexScreener.
     // DexScreener allows up to 30 addresses per request and rate-limits aggressive
-    // parallel bursts. We fire 5 chunks concurrently, wait 300 ms, then the next 5.
+    // parallel bursts. We fire 8 chunks concurrently, pause 100ms, then next 8.
     // This keeps throughput high (~300 pairs/s) without triggering rate-limits.
     const mintList = Array.from(extraMints);
     const mintChunks: string[][] = [];
@@ -906,7 +1017,12 @@ export async function scanTokens(): Promise<void> {
     for (const m of overflow) freshMintQueue.delete(m);
   }
 
-  logger.info({ scanCount, passedFilters, eligibleCount, ageBanned: ageBannedMints.size, freshQueue: freshMintQueue.size }, 'Scan complete');
+  const topRejects = [...rejectionCounts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 5)
+    .map(([k, v]) => `${k}:${v}`)
+    .join(', ');
+  logger.info({ scanCount, passedFilters, eligibleCount, ageBanned: ageBannedMints.size, freshQueue: freshMintQueue.size, topRejects }, 'Scan complete');
 }
 
 // ── HOT REFRESH ─────────────────────────────────────────────────────────────

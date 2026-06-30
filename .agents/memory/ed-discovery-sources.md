@@ -16,7 +16,24 @@ description: What APIs work for discovering new pump.fun token launches in Repli
 - `https://api.geckoterminal.com/api/v2/networks/solana/new_pools?page=1..10`
 - 10 pages × ~20 pools = ~200 newest pools, sorted newest-first
 - Includes `relationships.base_token.data.id` = `"solana_<MINT>"` for extracting mint address
-- **Rate limit**: free tier allows ~30 req/min; all 10 pages fetched in parallel (fine)
+- **Rate limit (CRITICAL)**: free tier allows ~30 req/min; firing all 20 endpoints (5 trending + 5 volume + 10 new_pools) simultaneously causes instant 429 on ALL of them.
+  - Fix: stagger in groups of 4 with 500ms delay between groups
+  - Fix: cache results for 60s (`geckoCachedMints`/`geckoCacheTs`/`GECKO_CACHE_TTL_MS=60000`); return cache on hit; return stale cache on error
+  - After startup burst, rate-limiting clears and GeckoTerminal starts returning ~80-200 mints/min
+
+### Orca whirlpool discovery
+- `https://api.mainnet.orca.so/v1/whirlpool/list` — returns ~18MB, ~9,854 unique token mints
+- Cache for 5 min (`orcaMintCache`/`orcaCacheTs`/`ORCA_CACHE_TTL_MS=5min`)
+- Rotate a 1000-mint window each cycle using `orcaCursor` module-level variable (advances by `ORCA_WINDOW=1000`)
+- Hard cap of `MAX_MINTS_PER_SCAN=3000` across all sources combined
+
+### Raydium double-sort
+- Fetch both `volume24h` DESC and `fee24h` DESC from Raydium on-chain API → ~2×992 mints, deduped
+
+### ageBannedMints effectiveness
+- After ~10 scan cycles: ~1500+ tokens permanently banned (old established Raydium/Orca pools)
+- Frees scan slots for fresh tokens from PumpPortal WS and GeckoTerminal new_pools
+- scanCount stabilizes around 400-600 fresh tokens after ~5 min of warm-up
 
 ## What is blocked in Replit's sandbox
 - `https://client-api-2-74b1891ee9f9.herokuapp.com` — dead Heroku app ("No such app").
