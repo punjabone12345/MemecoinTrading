@@ -782,11 +782,18 @@ export async function scanTokens(): Promise<void> {
     });
   }
 
-  // Clean old tokens (not seen in last 30 min, not entered)
+  // Evict stale tokens with status-aware TTLs:
+  //   REJECTED  → 3 min  (2-3 scan cycles of buffer; if gone from lists it won't flip)
+  //   SCANNING  → 10 min (give trending tokens more time to reappear in lists)
+  //   ELIGIBLE  → 10 min (shouldn't go stale while near-eligible, but cap it)
+  //   ENTERED   → never evict (position manager owns lifecycle)
+  const now = Date.now();
   for (const [mint, token] of tokenCache.entries()) {
-    if (token.status !== 'ENTERED' && Date.now() - token.lastChecked > 30 * 60_000) {
+    if (token.status === 'ENTERED') continue;
+    const ttl = token.status === 'REJECTED' ? 3 * 60_000 : 10 * 60_000;
+    if (now - token.lastChecked > ttl) {
       tokenCache.delete(mint);
-      liquidityHistory.delete(mint); // free associated history alongside cache eviction
+      liquidityHistory.delete(mint);
     }
   }
 
