@@ -117,8 +117,16 @@ export default function SettingsPage({ settings: init, onUpdate }: Props) {
         <NumberInput label="Min Market Cap ($)" value={n('minMc')} onChange={(v) => update('minMc', v)} min={0} step={10000} />
         <NumberInput label="Max Market Cap ($)" value={n('maxMc')} onChange={(v) => update('maxMc', v)} min={100000} step={500000} />
         <NumberInput label="Min 24h Volume ($)" value={n('minVolume24h')} onChange={(v) => update('minVolume24h', v)} min={0} step={10000} />
-        <NumberInput label="Min Age (hours)" value={n('minAgeHours')} onChange={(v) => update('minAgeHours', v)} min={0} step={0.5} />
         <NumberInput label="Max Age (hours)" value={n('maxAgeHours')} onChange={(v) => update('maxAgeHours', v)} min={1} step={24} />
+        <div style={{ margin: '8px 0', padding: '10px 12px', borderRadius: 10, background: 'rgba(0,212,255,0.05)', border: '1px solid rgba(0,212,255,0.15)' }}>
+          <div style={{ fontSize: 11, fontWeight: 800, color: '#00d4ff', marginBottom: 6, letterSpacing: '0.05em' }}>⏱ Age-Adjusted Score Gate</div>
+          <div style={{ fontSize: 11, color: '#3a5070', lineHeight: 1.7 }}>
+            <div>0 – 30 min → requires score <b style={{ color: '#ffd700' }}>≥ 90</b></div>
+            <div>30 – 60 min → requires score <b style={{ color: '#ffd700' }}>≥ 85</b></div>
+            <div>≥ 1 hour → requires score <b style={{ color: '#ffd700' }}>≥ 80</b></div>
+          </div>
+          <div style={{ fontSize: 10, color: '#1a3050', marginTop: 6 }}>Your Min Entry Score below is an additional floor — the higher of the two thresholds always wins.</div>
+        </div>
         <NumberInput label="Scan Frequency (ms)" value={n('scanFrequencyMs')} onChange={(v) => update('scanFrequencyMs', v)} min={10000} step={5000} />
       </Section>
 

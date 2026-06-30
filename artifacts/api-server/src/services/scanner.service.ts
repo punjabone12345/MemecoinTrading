@@ -599,7 +599,8 @@ export async function scanTokens(): Promise<void> {
         rugcheck: true, freezeAuthority: false, mintAuthority: false,
         topHolder: existing?.topHolder ?? 0, creatorPct: existing?.creatorPct ?? 0,
         status: 'REJECTED', rejectReason: preReject, scoreBreakdown: preScore,
-        filterResults: [], consecutiveTrending: 0, volume1hPrev: preV1hPrev, volume1hCurrent: v1h, lastChecked: Date.now(),
+        filterResults: buildFilterResults(pair, settings, existing?.rugcheck ?? true, existing?.topHolder ?? 0, existing?.creatorPct ?? 0, preScore.total, vol24, bsr, change5m, liq > 0 ? liq : undefined, undefined),
+        consecutiveTrending: 0, volume1hPrev: preV1hPrev, volume1hCurrent: v1h, lastChecked: Date.now(),
       });
       continue;
     }

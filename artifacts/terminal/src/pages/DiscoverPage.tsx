@@ -67,8 +67,15 @@ function TradeBlockBanner({ token, settings, dailyLossLimitHit, dailyPnl, dailyL
   }
 
   const reasons: string[] = [];
-  if (token.score < settings.minEntryScore)
-    reasons.push(`Score ${token.score} below min ${settings.minEntryScore}`);
+  const ageMin = (token.age ?? 0) * 60;
+  const ageBucket = ageMin < 30 ? '0–30m' : ageMin < 60 ? '30–60m' : '≥1h';
+  const ageAdjMin = ageMin < 30
+    ? Math.max(settings.minEntryScore, 90)
+    : ageMin < 60
+      ? Math.max(settings.minEntryScore, 85)
+      : Math.max(settings.minEntryScore, 80);
+  if (token.score < ageAdjMin)
+    reasons.push(`Score ${token.score} below min ${ageAdjMin} (${ageBucket} age bucket)`);
   if (token.buySellRatio < settings.minBuySellRatio)
     reasons.push(`Buy/Sell ratio ${token.buySellRatio.toFixed(2)}x below ${settings.minBuySellRatio}x`);
   if (token.priceChange5m > 50)
