@@ -566,9 +566,16 @@ export async function scanTokens(): Promise<void> {
     const change5m = pair.priceChange?.m5 ?? 0;
     const price    = parseFloat(pair.priceUsd ?? '0');
 
+    // Detect graduating tokens: Pump.fun → Raydium/Meteora migration in progress.
+    // Pattern: massive equal 5m & 24h price changes (stale Pump.fun history) with
+    // near-zero real volume on the new pool. Data is unreliable — skip entirely.
+    const isGraduating = vol24 < 500 && change5m > 200 && change24 > 200
+      && Math.abs(change5m - change24) < Math.abs(change24) * 0.05;
+
     let preReject: string | undefined;
     let preRejectKey: string | undefined;
-    if      (mc < settings.minMc)           { preReject = `MC too low ($${(mc/1000).toFixed(0)}K < $${(settings.minMc/1000).toFixed(0)}K min)`;             preRejectKey = 'MC too low'; }
+    if      (isGraduating)                  { preReject = `Graduating — Pump.fun migration in progress, data unreliable`;                                     preRejectKey = 'Graduating (no real data)'; }
+    else if (mc < settings.minMc)           { preReject = `MC too low ($${(mc/1000).toFixed(0)}K < $${(settings.minMc/1000).toFixed(0)}K min)`;             preRejectKey = 'MC too low'; }
     else if (mc > settings.maxMc)           { preReject = `MC too high ($${(mc/1e6).toFixed(1)}M > $${(settings.maxMc/1e6).toFixed(1)}M max)`;              preRejectKey = 'MC too high'; }
     else if (vol24 < settings.minVolume24h) { preReject = `Vol24h too low ($${(vol24/1000).toFixed(0)}K < $${(settings.minVolume24h/1000).toFixed(0)}K min)`; preRejectKey = 'Vol24h too low'; }
     else if (ageH > settings.maxAgeHours)   { preReject = `Age ${ageH.toFixed(1)}h > ${settings.maxAgeHours}h max`;                                          preRejectKey = 'Age too old'; }
