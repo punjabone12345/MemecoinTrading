@@ -7,10 +7,11 @@ let monitorInterval: ReturnType<typeof setInterval> | null = null;
 
 const lastKnownPrice = new Map<string, number>();
 
-// Track how many consecutive 3s ticks each position has had no price.
-// After NO_PRICE_AUTO_CLOSE_TICKS (20 ticks = 60s), auto-close at last known price.
+// Track how many consecutive 3s ticks each position has had no price
+// — BUT only when we know the API was reachable (not rate-limited/down).
+// After NO_PRICE_AUTO_CLOSE_TICKS confirmed-fetch misses, auto-close.
 const noPriceTicks = new Map<string, number>();
-const NO_PRICE_AUTO_CLOSE_TICKS = 20; // 20 × 3s = 60s
+const NO_PRICE_AUTO_CLOSE_TICKS = 20; // 20 × 3s = 60s of confirmed API misses
 
 interface DexPair {
   baseToken?: { address: string };
@@ -31,14 +32,18 @@ type PriceData = { price: number; mc: number; bsr: number; liquidity: number };
 
 // ── 429 / rate-limit state ───────────────────────────────────────────────────
 let consecutiveDex429s = 0;
-let dexBackoffUntil = 0;          // epoch ms — don't touch DexScreener until this time
-let dexBackoffMultiplier = 1;     // doubles on each consecutive 429
+let dexBackoffUntil = 0;
+let dexBackoffMultiplier = 1;
+
+// Whether any API call actually returned data this cycle (not blocked/errored).
+// Used to avoid counting ticks against a token when we know the API was down.
+let lastCycleApiReached = true;
 
 const MAX_DEX_429S_BEFORE_FALLBACK = 5;
 
 function recordDex429(retryAfterSec: number): void {
   consecutiveDex429s++;
-  dexBackoffMultiplier = Math.pow(2, consecutiveDex429s - 1);  // 1, 2, 4, 8, 16 …
+  dexBackoffMultiplier = Math.pow(2, consecutiveDex429s - 1);
   const waitMs = retryAfterSec * 1000 * dexBackoffMultiplier;
   dexBackoffUntil = Date.now() + waitMs;
   logger.warn(
@@ -61,23 +66,22 @@ function isDexBlocked(): boolean {
 }
 
 function shouldUseFallback(): boolean {
-  return consecutiveDex429s >= MAX_DEX_429S_BEFORE_FALLBACK;
+  // Use GeckoTerminal if DexScreener is currently blocked (any backoff) OR
+  // has had 5+ consecutive 429s. This prevents false "no price" closes during
+  // rate-limit windows.
+  return isDexBlocked() || consecutiveDex429s >= MAX_DEX_429S_BEFORE_FALLBACK;
 }
 
-// Parse Retry-After header — returns seconds (integer).
-// Handles both numeric ("30") and HTTP-date formats.
 function parseRetryAfter(header: string | undefined): number {
-  if (!header) return 15;  // conservative default
+  if (!header) return 15;
   const n = parseInt(header, 10);
-  if (!isNaN(n) && n > 0) return Math.min(n, 120);  // cap at 2 min
-  // HTTP-date format
+  if (!isNaN(n) && n > 0) return Math.min(n, 120);
   const d = Date.parse(header);
   if (!isNaN(d)) return Math.max(5, Math.ceil((d - Date.now()) / 1000));
   return 15;
 }
 
 // ── GeckoTerminal fallback ───────────────────────────────────────────────────
-// Endpoint: GET /networks/solana/pools/multi/{addresses}  (up to 30 per request)
 const GECKO_BASE = 'https://api.geckoterminal.com/api/v2';
 
 interface GeckoPoolAttr {
@@ -118,8 +122,10 @@ async function fetchGeckoByPairAddresses(pairAddresses: string[]): Promise<Map<s
           const liquidity = parseFloat(attr.reserve_in_usd ?? '0');
           const h1 = attr.transactions?.h1 ?? { buys: 0, sells: 0 };
           const bsr = h1.sells > 0 ? h1.buys / h1.sells : h1.buys > 0 ? 99 : 1;
+          // Always store lowercase so lookups are case-insensitive
           result.set(attr.address.toLowerCase(), { price, mc, bsr, liquidity });
         }
+        if (result.size > 0) lastCycleApiReached = true;
       } catch (err) {
         logger.warn({ err }, 'GeckoTerminal price fallback error');
       }
@@ -140,7 +146,6 @@ async function fetchByPairAddresses(pairAddresses: string[]): Promise<Map<string
     return result;
   }
 
-  // All addresses fit in ≤30-address batches. With ≤20 open positions this is always 1 request.
   const chunks: string[][] = [];
   for (let i = 0; i < pairAddresses.length; i += 30) chunks.push(pairAddresses.slice(i, i + 30));
 
@@ -153,6 +158,7 @@ async function fetchByPairAddresses(pairAddresses: string[]): Promise<Map<string
             { timeout: 6000 }
           );
           recordDexSuccess();
+          lastCycleApiReached = true;
           for (const pair of res.data?.pairs ?? []) {
             const pairAddr = pair.pairAddress;
             if (!pairAddr) continue;
@@ -162,7 +168,8 @@ async function fetchByPairAddresses(pairAddresses: string[]): Promise<Map<string
             const h1 = pair.txns?.h1 ?? { buys: 0, sells: 0 };
             const bsr = h1.sells > 0 ? h1.buys / h1.sells : h1.buys > 0 ? 99 : 1;
             const liquidity = pair.liquidity?.usd ?? 0;
-            result.set(pairAddr, { price, mc, bsr, liquidity });
+            // Always lowercase — prevents case-mismatch lookup failures
+            result.set(pairAddr.toLowerCase(), { price, mc, bsr, liquidity });
           }
         } catch (err) {
           const axErr = err as AxiosError;
@@ -201,6 +208,7 @@ async function fetchByMints(mints: string[]): Promise<Map<string, PriceData>> {
         { timeout: 6000 }
       );
       recordDexSuccess();
+      lastCycleApiReached = true;
       const activity = new Map<string, number>();
       for (const pair of res.data?.pairs ?? []) {
         const mint = pair.baseToken?.address;
@@ -223,7 +231,7 @@ async function fetchByMints(mints: string[]): Promise<Map<string, PriceData>> {
       if (axErr.response?.status === 429) {
         const retryAfter = parseRetryAfter(axErr.response.headers['retry-after'] as string | undefined);
         recordDex429(retryAfter);
-        break; // stop hitting DexScreener for remaining chunks
+        break;
       } else {
         logger.warn({ err }, 'Price fetch (by mint) chunk error');
       }
@@ -242,9 +250,6 @@ function pairAddressFromDexUrl(dexUrl?: string): string | undefined {
 export function startPriceMonitor(): void {
   if (monitorInterval) return;
 
-  // 3000ms interval — down from 500ms.
-  // At 20 open positions: 1 batched DexScreener request per 3s = sustainable.
-  // (500ms was 1 request per 500ms = 6 req/s = Cloudflare 1015 rate-limit territory)
   monitorInterval = setInterval(async () => {
     try {
       const positions = await getOpenPositions();
@@ -262,25 +267,26 @@ export function startPriceMonitor(): void {
         }
       }
 
+      // Reset the "did any API respond?" flag for this cycle
+      lastCycleApiReached = false;
+
       let pairPrices: Map<string, PriceData>;
       let mintPrices: Map<string, PriceData>;
 
       if (shouldUseFallback()) {
-        // DexScreener repeatedly rate-limiting — switch to GeckoTerminal
+        // DexScreener is blocked or repeatedly rate-limiting — use GeckoTerminal.
+        // This fires on the FIRST 429 backoff, not just after 5 consecutive ones,
+        // so positions are never closed just because DexScreener rate-limited us.
         logger.info(
-          { consecutiveDex429s, fallback: 'GeckoTerminal' },
-          'DexScreener rate-limited — using GeckoTerminal fallback for price data'
+          { consecutiveDex429s, blocked: isDexBlocked(), fallback: 'GeckoTerminal' },
+          'DexScreener unavailable — using GeckoTerminal fallback for price data'
         );
-        const pairAddrs = withPair.map((w) => w.pairAddr);
-        // GeckoTerminal has no mint-based multi-fetch; mint-only positions get empty prices this cycle
+        const pairAddrs = withPair.map((w) => w.pairAddr.toLowerCase());
         [pairPrices, mintPrices] = await Promise.all([
           fetchGeckoByPairAddresses(pairAddrs),
           Promise.resolve(new Map<string, PriceData>()),
         ]);
-        // Normalize GeckoTerminal keys to lowercase for match (DexScreener uses mixed case)
-        const normalizedPairPrices = new Map<string, PriceData>();
-        for (const [k, v] of pairPrices) normalizedPairPrices.set(k.toLowerCase(), v);
-        pairPrices = normalizedPairPrices;
+        // Keys are already lowercase from fetchGeckoByPairAddresses
       } else {
         [pairPrices, mintPrices] = await Promise.all([
           fetchByPairAddresses(withPair.map((w) => w.pairAddr)),
@@ -288,10 +294,12 @@ export function startPriceMonitor(): void {
         ]);
       }
 
-      // Build unified price map keyed by position ID
+      // Build unified price map keyed by position ID.
+      // Always normalize pair addresses to lowercase on both sides to prevent
+      // case-mismatch lookup failures (DexScreener can return mixed-case addresses).
       const priceById = new Map<string, PriceData>();
       for (const { pos, pairAddr } of withPair) {
-        const d = pairPrices.get(pairAddr) ?? pairPrices.get(pairAddr.toLowerCase());
+        const d = pairPrices.get(pairAddr.toLowerCase());
         if (d && d.price > 0) priceById.set(pos.id, d);
       }
       for (const pos of mintOnly) {
@@ -314,7 +322,7 @@ export function startPriceMonitor(): void {
       for (const pos of positions) {
         const data = priceById.get(pos.id);
         if (data && data.price > 0) {
-          // Price found — reset no-price counter
+          // Price found — reset no-price counter and update
           noPriceTicks.delete(pos.id);
           const prev = lastKnownPrice.get(pos.id);
           const dropThreshold = pairAddressFromDexUrl(pos.dexUrl) ? 0.45 : 0.40;
@@ -335,16 +343,35 @@ export function startPriceMonitor(): void {
             );
           }
         } else {
-          // No price from any source — increment staleness counter
+          // No price returned for this position.
+          //
+          // IMPORTANT: Only count this as a "staleness tick" if we know the API
+          // was actually reachable this cycle. If DexScreener was blocked AND
+          // GeckoTerminal also returned nothing (network issue, rate-limit, etc.),
+          // the token may be perfectly fine — don't penalize it.
+          if (!lastCycleApiReached) {
+            logger.debug(
+              { mint: pos.mint, symbol: pos.symbol },
+              'No price — API unreachable this cycle, not counting against position'
+            );
+            continue;
+          }
+
           const ticks = (noPriceTicks.get(pos.id) ?? 0) + 1;
           noPriceTicks.set(pos.id, ticks);
-          logger.warn({ mint: pos.mint, id: pos.id, symbol: pos.symbol, noPriceTicks: ticks, threshold: NO_PRICE_AUTO_CLOSE_TICKS }, 'No price for open position — SL check skipped');
+          logger.warn(
+            { mint: pos.mint, id: pos.id, symbol: pos.symbol, noPriceTicks: ticks, threshold: NO_PRICE_AUTO_CLOSE_TICKS },
+            'No price for open position — SL check skipped'
+          );
 
           if (ticks >= NO_PRICE_AUTO_CLOSE_TICKS) {
-            // Token has had no price for 60+ seconds — likely dead/rugged/delisted.
-            // Close at last known price so PnL is as accurate as possible.
+            // Only reached here after 60s of confirmed API-reachable misses.
+            // Token is genuinely dead/rugged/delisted.
             const closePrice = lastKnownPrice.get(pos.id) ?? pos.entryPrice;
-            logger.warn({ id: pos.id, symbol: pos.symbol, closePrice, ticks }, 'Auto-closing position: no price data for 60s — token likely dead or rugged');
+            logger.warn(
+              { id: pos.id, symbol: pos.symbol, closePrice, ticks },
+              'Auto-closing position: no price data for 60s of confirmed fetches — token likely dead or rugged'
+            );
             noPriceTicks.delete(pos.id);
             lastKnownPrice.delete(pos.id);
             closePosition(pos.id, closePrice, 'Auto-closed: no price data for 60s — token dead or rugged').catch((err) =>
