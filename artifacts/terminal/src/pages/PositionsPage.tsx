@@ -211,6 +211,7 @@ function LivePriceTicker({ price, entryPrice }: { price: number; entryPrice: num
       prev.current = price;
       return () => clearTimeout(t);
     }
+    return undefined;
   }, [price]);
   const isPos = price >= entryPrice;
   const flashColor = flash === 'up' ? '#00ff8866' : flash === 'down' ? '#ff446644' : 'transparent';
@@ -256,6 +257,15 @@ function PositionCard({ pos, settings, onRefresh }: { pos: Position; settings: S
               <span style={{ fontWeight: 900, fontSize: 15, color: '#d4e0f0', flexShrink: 0 }}>{pos.symbol}</span>
               <span style={{ fontSize: 11, color: '#3a5070', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 80 }}>{pos.name}</span>
               <span style={{ padding: '2px 7px', borderRadius: 6, fontSize: 10, fontWeight: 700, background: 'rgba(0,212,255,0.1)', color: '#00d4ff', border: '1px solid rgba(0,212,255,0.2)', flexShrink: 0 }}>Score: {pos.scoreAtEntry}</span>
+              {pos.sources && pos.sources.length > 0 && pos.sources.map((src) => {
+                const S: Record<string, {bg:string;border:string;color:string;label:string}> = {
+                  pumpfun:  { bg:'rgba(255,140,0,0.12)',  border:'rgba(255,140,0,0.35)',  color:'#ff8c00', label:'🔥 PumpFun' },
+                  trenches: { bg:'rgba(155,89,255,0.12)', border:'rgba(155,89,255,0.35)', color:'#9b59ff', label:'⚔️ Trenches' },
+                  bot:      { bg:'rgba(0,212,255,0.10)',  border:'rgba(0,212,255,0.28)',  color:'#00d4ff', label:'🤖 Bot' },
+                };
+                const s = S[src] ?? { bg:'rgba(255,255,255,0.06)', border:'rgba(255,255,255,0.15)', color:'#7090b0', label:src };
+                return <span key={src} style={{ padding:'1px 6px', borderRadius:5, fontSize:9, fontWeight:800, background:s.bg, border:`1px solid ${s.border}`, color:s.color, flexShrink:0 }}>{s.label}</span>;
+              })}
               {/* Live 500ms indicator */}
               <span title="Price updating every 500ms" style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 9, color: '#00ff88', fontWeight: 800, flexShrink: 0 }}>
                 <span style={{ display: 'inline-block', width: 5, height: 5, borderRadius: '50%', background: '#00ff88', boxShadow: '0 0 5px #00ff88', animation: 'pulse-dot 0.8s ease-in-out infinite' }} />

@@ -159,6 +159,8 @@ export async function initDB(): Promise<void> {
     `ALTER TABLE tokens ADD COLUMN IF NOT EXISTS status         TEXT     DEFAULT 'SCANNING'`,
     `ALTER TABLE tokens ADD COLUMN IF NOT EXISTS reject_reason  TEXT`,
     `ALTER TABLE tokens ADD COLUMN IF NOT EXISTS last_updated   TIMESTAMPTZ DEFAULT NOW()`,
+    // Source labels: comma-separated list of discovery sources ('bot', 'trenches', 'pumpfun')
+    `ALTER TABLE positions ADD COLUMN IF NOT EXISTS sources TEXT DEFAULT '[]'`,
   ];
 
   for (const sql of migrations) {

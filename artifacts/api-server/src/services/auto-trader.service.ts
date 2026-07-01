@@ -226,6 +226,7 @@ async function checkEntries(): Promise<void> {
       price: token.price,
       mc: token.marketCap,
       dexUrl,
+      sources: token.sources ?? [],
     });
     if (position) {
       openMints.add(token.mint);

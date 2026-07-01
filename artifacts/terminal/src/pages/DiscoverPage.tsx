@@ -30,6 +30,30 @@ const StatusBadge = memo(function StatusBadge({ status }: { status: Token['statu
   return <span className={`badge ${cls}`}>{status}</span>;
 });
 
+const SOURCE_STYLES: Record<string, { bg: string; border: string; color: string; label: string }> = {
+  pumpfun:  { bg: 'rgba(255,140,0,0.12)',  border: 'rgba(255,140,0,0.35)',  color: '#ff8c00', label: '🔥 PumpFun' },
+  trenches: { bg: 'rgba(155,89,255,0.12)', border: 'rgba(155,89,255,0.35)', color: '#9b59ff', label: '⚔️ Trenches' },
+  bot:      { bg: 'rgba(0,212,255,0.10)',  border: 'rgba(0,212,255,0.28)',  color: '#00d4ff', label: '🤖 Bot' },
+};
+
+const SourceBadges = memo(function SourceBadges({ sources }: { sources?: string[] }) {
+  if (!sources || sources.length === 0) return null;
+  return (
+    <span style={{ display: 'inline-flex', gap: 4, flexWrap: 'wrap' }}>
+      {sources.map((src) => {
+        const s = SOURCE_STYLES[src] ?? { bg: 'rgba(255,255,255,0.06)', border: 'rgba(255,255,255,0.15)', color: '#7090b0', label: src };
+        return (
+          <span key={src} style={{
+            padding: '1px 6px', borderRadius: 5, fontSize: 9, fontWeight: 800,
+            background: s.bg, border: `1px solid ${s.border}`, color: s.color,
+            letterSpacing: '0.02em',
+          }}>{s.label}</span>
+        );
+      })}
+    </span>
+  );
+});
+
 // Single clock ticks in DiscoverPage — now is passed down; no per-card timers
 function FreshnessDot({ lastChecked, now }: { lastChecked: number; now: number }) {
   const ageMs = now - lastChecked;
@@ -115,6 +139,7 @@ const TokenCard = memo(function TokenCard({ token, settings, scanStats, now }: {
               <span style={{ fontWeight: 800, fontSize: 14, color: '#d4e0f0' }}>{token.symbol}</span>
               <span style={{ fontSize: 11, color: '#3a5070', maxWidth: 100, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{token.name}</span>
               <StatusBadge status={token.status} />
+              <SourceBadges sources={token.sources} />
               {token.lastChecked && <FreshnessDot lastChecked={token.lastChecked} now={now} />}
             </div>
             <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', fontSize: 11, color: '#3a5070' }}>

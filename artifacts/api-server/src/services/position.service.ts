@@ -120,12 +120,13 @@ function rowToPosition(r: Record<string, unknown>): Position {
     notes: r.notes != null ? String(r.notes) : undefined,
     initialSizeSol: r.initial_size_sol != null ? parseFloat(String(r.initial_size_sol)) : undefined,
     bankdProfitSol: r.banked_profit_sol != null ? parseFloat(String(r.banked_profit_sol)) : undefined,
+    sources: (() => { try { return r.sources ? JSON.parse(String(r.sources)) : []; } catch { return []; } })(),
   };
 }
 
 export async function openPosition(params: {
   mint: string; name: string; symbol: string; score: number;
-  price: number; mc: number; dexUrl?: string;
+  price: number; mc: number; dexUrl?: string; sources?: string[];
 }): Promise<Position | null> {
   const settings = await getSettings();
   const open = await getOpenPositions();
@@ -197,6 +198,7 @@ export async function openPosition(params: {
     mode: process.env.TRADING_MODE || 'paper',
     dex_url: params.dexUrl ?? null,
     status: 'OPEN',
+    sources: JSON.stringify(params.sources ?? []),
   };
 
   const colNames = Object.keys(wantedCols).filter((c) => existingCols.has(c));

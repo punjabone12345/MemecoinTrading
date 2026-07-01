@@ -4,6 +4,7 @@ import { logger } from '../lib/logger.js';
 import { Token, FilterResult, ScoreBreakdown } from '../types/index.js';
 import { getSettings } from './settings.service.js';
 import { checkRugcheck } from './rugcheck.service.js';
+import { getMintSources, addMintSource, getTrenchesMints, getPumpfunMints } from './trenches.service.js';
 
 const DEXSCREENER_BASE = 'https://api.dexscreener.com';
 
@@ -684,6 +685,11 @@ async function fetchDexPairs(): Promise<DexPair[]> {
       : [];
     orcaCursor = (orcaCursor + ORCA_WINDOW) % Math.max(1, orcaMints.length);
 
+    // Inject trenches (pump.fun graduated) and pumpfun (migration wallet) mints into
+    // freshMintQueue so they are always evaluated on the next scan cycle.
+    for (const mint of getTrenchesMints()) freshMintQueue.add(mint);
+    for (const mint of getPumpfunMints())  freshMintQueue.add(mint);
+
     // Build ordered mint list — highest-priority sources first, Orca fills remaining budget.
     const highPriorityMints: string[] = [
       ...freshMintQueue,
@@ -898,6 +904,7 @@ export async function scanTokens(): Promise<void> {
         marketCap: mc,
       };
       const preScore = calcScore(prePartial, { minMc: settings.minMc, maxMc: settings.maxMc });
+      addMintSource(mint, 'bot');
       tokenCache.set(mint, {
         mint, name: pair.baseToken.name || 'Unknown', symbol: pair.baseToken.symbol || '???',
         score: preScore.total, marketCap: mc, volume24h: vol24, priceChange1h: change1h, priceChange5m: change5m,
@@ -908,6 +915,7 @@ export async function scanTokens(): Promise<void> {
         status: 'REJECTED', rejectReason: preReject, scoreBreakdown: preScore,
         filterResults: buildFilterResults(pair, settings, existing?.rugcheck ?? true, existing?.topHolder ?? 0, existing?.creatorPct ?? 0, preScore.total, vol24, bsr, change5m, liq > 0 ? liq : undefined, undefined),
         consecutiveTrending: 0, volume1hPrev: preV1hPrev, volume1hCurrent: v1h, lastChecked: Date.now(),
+        sources: getMintSources(mint),
       });
       continue;
     }
@@ -1049,6 +1057,7 @@ export async function scanTokens(): Promise<void> {
       logger.debug({ mint, symbol: pair.baseToken.symbol, score: scoreBreakdown.total, reason: rejectReason }, 'AUDIT REJECTED');
     }
 
+    addMintSource(mint, 'bot');
     tokenCache.set(mint, {
       mint,
       name: pair.baseToken.name || 'Unknown',
@@ -1079,6 +1088,7 @@ export async function scanTokens(): Promise<void> {
       volume1hPrev: v1hPrev,
       volume1hCurrent: freshV1h,
       lastChecked: Date.now(),
+      sources: getMintSources(mint),
     });
   }
 

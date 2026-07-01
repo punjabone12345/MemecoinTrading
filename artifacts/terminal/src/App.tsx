@@ -21,7 +21,7 @@ const DEFAULT_SETTINGS: Settings = {
   trendChecksRequired: 2, maxOpenPositions: 5,
   sizeScore90: 1, sizeScore80: 0.75, sizeScore70: 0.5,
   slPct: 25, tp1Pct: 70, tp1ClosePct: 30, tp2Pct: 150,
-  tp2ClosePct: 30, tp2TrailPct: 30, tp3Pct: 300, tp3ClosePct: 20, trailingSLPct: 20,
+  tp2ClosePct: 30, tp2TrailPct: 30, tp3Pct: 300, tp3ClosePct: 20, trailingSLPct: 20, trailActivatePct: 50,
   maxDailyLossPct: 5, startingBalanceSol: 10, currentBalanceSol: 10,
   rpcEndpoint: 'https://api.mainnet-beta.solana.com',
   slippagePct: 1, priorityFeeSol: 0.001, walletPublicKey: '',
@@ -43,7 +43,7 @@ const pageVariants = {
   center: { opacity: 1, y: 0 },
   exit: { opacity: 0, y: -6 },
 };
-const pageTrans = { duration: 0.14, ease: 'easeOut' };
+const pageTrans = { duration: 0.14, ease: 'easeOut' as const };
 
 // Memoized pages — only re-render when their own props change
 const MemoDiscover = memo(DiscoverPage);
