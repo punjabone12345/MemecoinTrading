@@ -64,8 +64,13 @@ export async function initDB(): Promise<void> {
       tx_signature TEXT,
       dex_url TEXT,
       notes TEXT,
+      discovery_source TEXT,
       created_at TIMESTAMPTZ DEFAULT NOW()
     )
+  `);
+
+  await query(`
+    ALTER TABLE positions ADD COLUMN IF NOT EXISTS discovery_source TEXT
   `);
 
   await query(`
