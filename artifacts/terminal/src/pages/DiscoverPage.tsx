@@ -5,6 +5,7 @@ import { formatMC, formatAge, formatPrice } from '../lib/utils.js';
 interface Props { tokens: Token[]; scanStats: ScanStats; settings: Settings | null }
 type Sort = 'score' | 'marketCap' | 'age' | 'priceChange24h' | 'priceChange5m';
 type Filter = 'ALL' | 'ELIGIBLE' | 'SCANNING' | 'ENTERED' | 'REJECTED';
+type SourceFilter = 'ALL' | 'pumpfun' | 'trenches' | 'bot';
 
 const ScoreRing = memo(function ScoreRing({ score }: { score: number }) {
   const size = 46, r = 18, circ = 2 * Math.PI * r;
@@ -277,6 +278,7 @@ const FILTER_COLOR: Record<Filter, string> = { ALL: '#00d4ff', ELIGIBLE: '#00ff8
 export default function DiscoverPage({ tokens, scanStats, settings }: Props) {
   const [sort, setSort] = useState<Sort>('score');
   const [filter, setFilter] = useState<Filter>('ALL');
+  const [sourceFilter, setSourceFilter] = useState<SourceFilter>('ALL');
   const [search, setSearch] = useState('');
 
   // Single shared clock — replaces N per-card setInterval timers
@@ -293,6 +295,7 @@ export default function DiscoverPage({ tokens, scanStats, settings }: Props) {
   const filtered = useMemo(() => {
     let arr = [...tokens];
     if (filter !== 'ALL') arr = arr.filter((t) => t.status === filter);
+    if (sourceFilter !== 'ALL') arr = arr.filter((t) => t.sources?.includes(sourceFilter));
     if (search) { const q = search.toLowerCase(); arr = arr.filter((t) => t.symbol.toLowerCase().includes(q) || t.name.toLowerCase().includes(q)); }
     arr.sort((a, b) =>
       sort === 'score' ? b.score - a.score :
@@ -302,10 +305,42 @@ export default function DiscoverPage({ tokens, scanStats, settings }: Props) {
       b.priceChange24h - a.priceChange24h
     );
     return arr;
-  }, [tokens, sort, filter, search]);
+  }, [tokens, sort, filter, sourceFilter, search]);
+
+  const trenchesCount = scanStats.trenchesCount ?? 0;
+  const pumpfunCount = scanStats.pumpfunCount ?? 0;
+  const botCount = tokens.filter((t) => t.sources?.includes('bot') && !t.sources?.includes('pumpfun') && !t.sources?.includes('trenches')).length;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      {/* Source discovery counters */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8 }}>
+        {[
+          { label: 'PumpFun', value: pumpfunCount, color: '#ff8c00', glow: '', src: 'pumpfun', icon: '🔥' },
+          { label: 'Trenches', value: trenchesCount, color: '#9b59ff', glow: '', src: 'trenches', icon: '⚔️' },
+          { label: 'Bot', value: botCount, color: '#00d4ff', glow: 'card-glow-cyan', src: 'bot', icon: '🤖' },
+        ].map((s) => {
+          const active = sourceFilter === s.src;
+          return (
+            <button key={s.label} onClick={() => setSourceFilter(active ? 'ALL' : s.src as SourceFilter)}
+              className={`card ${s.glow}`}
+              style={{
+                padding: '10px 8px', textAlign: 'center', cursor: 'pointer', border: `1px solid ${active ? s.color + '55' : 'rgba(255,255,255,0.06)'}`,
+                background: active ? `${s.color}18` : undefined,
+                boxShadow: active ? `0 0 14px ${s.color}22` : undefined,
+                transition: 'all 0.2s',
+              }}>
+              <div style={{ fontSize: 10, marginBottom: 2 }}>{s.icon}</div>
+              <div style={{ fontSize: 22, fontWeight: 900, color: s.color, lineHeight: 1 }}>{s.value}</div>
+              <div style={{ fontSize: 9, color: active ? s.color : '#3a5070', marginTop: 3, letterSpacing: '0.08em', fontWeight: 700 }}>
+                {s.label.toUpperCase()} {active && '●'}
+              </div>
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Scan stats */}
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8 }}>
         {[
           { label: 'Scanning', value: scanStats.scanning, color: '#00d4ff', glow: 'card-glow-cyan' },

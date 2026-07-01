@@ -144,4 +144,6 @@ export interface ScanStats {
   freshQueueSize?: number;
   pumpPortalConnected?: boolean;
   rejectionCounts?: Record<string, number>;
+  trenchesCount?: number;
+  pumpfunCount?: number;
 }

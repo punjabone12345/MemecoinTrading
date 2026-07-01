@@ -182,6 +182,8 @@ export function getScanStats() {
     rejectionCounts: Object.fromEntries(
       [...rejectionCounts.entries()].sort((a, b) => b[1] - a[1])
     ),
+    trenchesCount: getTrenchesMints().size,
+    pumpfunCount: getPumpfunMints().size,
   };
 }
 
