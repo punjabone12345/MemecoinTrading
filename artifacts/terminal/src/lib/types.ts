@@ -40,6 +40,8 @@ export interface Token {
   consecutiveTrending: number;
   volume1hPrev: number;
   volume1hCurrent: number;
+  lastChecked?: number;
+  discoverySource?: string;
 }
 
 export interface Position {
@@ -73,6 +75,7 @@ export interface Position {
   notes?: string;
   initialSizeSol?: number;
   bankdProfitSol?: number;
+  discoverySource?: string;
 }
 
 export interface Analytics {

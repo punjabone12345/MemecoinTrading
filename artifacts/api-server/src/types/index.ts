@@ -28,6 +28,7 @@ export interface Token {
   volume1hPrev: number;
   volume1hCurrent: number;
   lastChecked: number;
+  discoverySource?: string;
 }
 
 export interface ScoreBreakdown {
@@ -76,6 +77,7 @@ export interface Position {
   notes?: string;
   initialSizeSol?: number;
   bankdProfitSol?: number;
+  discoverySource?: string;
 }
 
 export interface Settings {
