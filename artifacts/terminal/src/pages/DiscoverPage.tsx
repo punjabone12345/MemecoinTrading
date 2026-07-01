@@ -1,6 +1,148 @@
-import { useState, useMemo, useEffect, useRef, memo } from 'react';
+import { useState, useMemo, useEffect, useRef, memo, useCallback } from 'react';
 import { Token, ScanStats, Settings } from '../lib/types.js';
 import { formatMC, formatAge, formatPrice } from '../lib/utils.js';
+
+interface DiscoveryEvent { mint: string; ts: number; }
+interface SourceActivity {
+  trenches: { total: number; recent: DiscoveryEvent[] };
+  pumpfun:  { total: number; recent: DiscoveryEvent[] };
+}
+
+function useSourceActivity() {
+  const [data, setData] = useState<SourceActivity | null>(null);
+  const [prevTotals, setPrevTotals] = useState({ trenches: 0, pumpfun: 0 });
+
+  useEffect(() => {
+    let cancelled = false;
+    async function poll() {
+      try {
+        const res = await fetch('/api/scanner/sources');
+        if (!res.ok) return;
+        const json: SourceActivity = await res.json();
+        if (!cancelled) {
+          setData((prev) => {
+            if (prev) {
+              setPrevTotals({ trenches: prev.trenches.total, pumpfun: prev.pumpfun.total });
+            }
+            return json;
+          });
+        }
+      } catch { /* ignore */ }
+    }
+    poll();
+    const id = setInterval(poll, 2000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, []);
+
+  return { data, prevTotals };
+}
+
+function ago(ts: number): string {
+  const s = Math.floor((Date.now() - ts) / 1000);
+  if (s < 60) return `${s}s ago`;
+  return `${Math.floor(s / 60)}m ago`;
+}
+
+function LiveSourceFeed() {
+  const { data, prevTotals } = useSourceActivity();
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setTick((t) => t + 1), 2000);
+    return () => clearInterval(id);
+  }, []);
+
+  const sources = [
+    {
+      key: 'pumpfun' as const,
+      icon: '🔥',
+      label: 'PumpFun Migration Wallet',
+      sublabel: 'On-chain — polls migration wallet every 5s',
+      color: '#ff8c00',
+      border: 'rgba(255,140,0,0.25)',
+      bg: 'rgba(255,140,0,0.06)',
+    },
+    {
+      key: 'trenches' as const,
+      icon: '⚔️',
+      label: 'Trenches (Pump.fun v3 API)',
+      sublabel: 'REST API — polls graduated tokens every 5s',
+      color: '#9b59ff',
+      border: 'rgba(155,89,255,0.25)',
+      bg: 'rgba(155,89,255,0.06)',
+    },
+  ];
+
+  return (
+    <div className="card" style={{ padding: '14px 16px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+        <span style={{ fontSize: 10, fontWeight: 800, letterSpacing: '0.1em', color: '#3a5070' }}>LIVE DISCOVERY FEED</span>
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 9, color: '#00ff88', fontWeight: 800 }}>
+          <span style={{ width: 5, height: 5, borderRadius: '50%', background: '#00ff88', boxShadow: '0 0 6px #00ff88', display: 'inline-block', animation: 'pulse-dot 1.2s ease-in-out infinite' }} />
+          POLLING EVERY 5s
+        </span>
+      </div>
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        {sources.map((src) => {
+          const info = data?.[src.key];
+          const total = info?.total ?? 0;
+          const prev = prevTotals[src.key];
+          const newSinceLastPoll = Math.max(0, total - prev);
+          const recent = info?.recent ?? [];
+
+          return (
+            <div key={src.key} style={{ borderRadius: 10, border: `1px solid ${src.border}`, background: src.bg, padding: '12px 14px' }}>
+              {/* Header row */}
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+                <div>
+                  <span style={{ fontSize: 12, fontWeight: 800, color: src.color }}>{src.icon} {src.label}</span>
+                  <div style={{ fontSize: 9, color: '#3a5070', marginTop: 2 }}>{src.sublabel}</div>
+                </div>
+                <div style={{ textAlign: 'right' }}>
+                  <div style={{ fontSize: 20, fontWeight: 900, color: src.color, lineHeight: 1 }}>{total.toLocaleString()}</div>
+                  <div style={{ fontSize: 9, color: '#3a5070', marginTop: 1 }}>total discovered</div>
+                </div>
+              </div>
+
+              {/* Rate indicator */}
+              {newSinceLastPoll > 0 && (
+                <div style={{ marginBottom: 8, padding: '4px 8px', borderRadius: 6, background: `${src.color}18`, border: `1px solid ${src.color}44`, display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 10, fontWeight: 800, color: src.color }}>
+                  <span style={{ width: 6, height: 6, borderRadius: '50%', background: src.color, display: 'inline-block', boxShadow: `0 0 6px ${src.color}` }} />
+                  +{newSinceLastPoll} new this poll
+                </div>
+              )}
+
+              {/* Rolling mint feed */}
+              {recent.length === 0 ? (
+                <div style={{ fontSize: 10, color: '#3a5070', padding: '6px 0' }}>Waiting for first discovery…</div>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 4, maxHeight: 130, overflowY: 'auto' }}>
+                  {recent.map((ev, i) => (
+                    <div key={ev.mint} style={{
+                      display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                      padding: '4px 8px', borderRadius: 6,
+                      background: i === 0 ? `${src.color}18` : 'rgba(255,255,255,0.02)',
+                      border: `1px solid ${i === 0 ? src.color + '44' : 'rgba(255,255,255,0.05)'}`,
+                      transition: 'background 0.3s',
+                    }}>
+                      <span style={{ fontSize: 10, fontFamily: 'monospace', color: i === 0 ? src.color : '#4a6080', letterSpacing: '0.02em' }}>
+                        {i === 0 && <span style={{ marginRight: 4, fontSize: 8, fontWeight: 900, color: src.color }}>NEW</span>}
+                        {ev.mint.slice(0, 8)}…{ev.mint.slice(-6)}
+                      </span>
+                      <span style={{ fontSize: 9, color: i === 0 ? src.color : '#2a4060', fontWeight: i === 0 ? 700 : 400 }}>
+                        {ago(ev.ts)}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
 
 interface Props { tokens: Token[]; scanStats: ScanStats; settings: Settings | null }
 type Sort = 'score' | 'marketCap' | 'age' | 'priceChange24h' | 'priceChange5m';
@@ -339,6 +481,8 @@ export default function DiscoverPage({ tokens, scanStats, settings }: Props) {
           );
         })}
       </div>
+
+      <LiveSourceFeed />
 
       {/* Scan stats */}
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8 }}>

@@ -45,6 +45,36 @@ const pumpfunMints  = new Set<string>();
 export function getTrenchesMints(): Set<string> { return trenchesMints; }
 export function getPumpfunMints():  Set<string> { return pumpfunMints; }
 
+// ── Activity feed — rolling log of recent discoveries ─────────────────────────
+// Keeps the last 20 mint discoveries per source with timestamps, so the UI
+// can display a live "proof" feed showing tokens arriving in real-time.
+export interface DiscoveryEvent {
+  mint: string;
+  ts: number; // unix ms
+}
+
+const MAX_FEED = 20;
+const trenchesFeed: DiscoveryEvent[] = [];
+const pumpfunFeed:  DiscoveryEvent[] = [];
+
+function pushFeed(feed: DiscoveryEvent[], mint: string): void {
+  feed.unshift({ mint, ts: Date.now() });
+  if (feed.length > MAX_FEED) feed.pop();
+}
+
+export function getSourceActivity() {
+  return {
+    trenches: {
+      total:    trenchesMints.size,
+      recent:   trenchesFeed.slice(0, MAX_FEED),
+    },
+    pumpfun: {
+      total:  pumpfunMints.size,
+      recent: pumpfunFeed.slice(0, MAX_FEED),
+    },
+  };
+}
+
 // ── Pump.fun v3 graduated-token poll ────────────────────────────────────────
 // https://frontend-api-v3.pump.fun/coins?complete=true returns tokens that
 // have recently graduated (migrated) from Pump.fun to Raydium.
@@ -65,9 +95,9 @@ async function pollPumpfunGraduated(): Promise<void> {
       if (!mint || mint.length < 20) continue;
       trenchesMints.add(mint);
       const isNew = addMintSource(mint, 'trenches');
-      if (isNew) added++;
+      if (isNew) { pushFeed(trenchesFeed, mint); added++; }
     }
-    if (added > 0) logger.debug({ added, total: trenchesMints.size }, 'Trenches: new graduated tokens');
+    if (added > 0) logger.info({ added, total: trenchesMints.size }, 'Trenches: new graduated tokens');
   } catch (err: any) {
     logger.debug({ msg: err?.message }, 'Trenches: pump.fun v3 poll failed (will retry)');
   }
@@ -133,7 +163,7 @@ async function trackMigrationWallet(): Promise<void> {
         if (STABLE_MINTS.has(mint)) continue;
         pumpfunMints.add(mint);
         const isNew = addMintSource(mint, 'pumpfun');
-        if (isNew) added++;
+        if (isNew) { pushFeed(pumpfunFeed, mint); added++; }
       }
     }
     if (added > 0) logger.info({ added, newTxns: newSigs.length }, 'Pumpfun wallet: new migration mints discovered');
