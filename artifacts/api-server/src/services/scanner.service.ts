@@ -433,11 +433,21 @@ async function fetchOrcaMints(): Promise<string[]> {
 const GECKO_BASE = 'https://api.geckoterminal.com/api/v2';
 
 // GeckoTerminal rate-limit guard: free tier allows ~30 req/min.
-// With 20 endpoints × scans every 15s, we'd burn 80 req/min — well over limit.
-// Cache results for 60s (4 scan cycles) so we only fire 20 req/min at most.
+// Primary cache: 20 requests per 60s = 20 req/min.
+// Extended cache (h6/h1 trending): 10 requests per 120s = 5 req/min effective.
+// Total average: ~25 req/min — safely under the 30/min limit.
 let geckoCachedMints: string[] = [];
 let geckoCacheTs = 0;
-const GECKO_CACHE_TTL_MS = 60_000; // 60s = one request window per rate-limit bucket
+const GECKO_CACHE_TTL_MS = 60_000;
+
+// Extended GeckoTerminal cache — 6h and 1h volume-sorted pools.
+// These mirror DexScreener's "rankBy=trendingScoreH6" and "rankBy=pairAge" views:
+// tokens with strong recent momentum that haven't yet appeared on 24h rankings.
+let geckoExtCachedMints: string[] = [];
+// Pre-offset by 60s so the extended fetch fires 60s AFTER the primary on first startup,
+// avoiding simultaneous GeckoTerminal bursts that trigger 429 rate-limits.
+let geckoExtCacheTs = Date.now() - 60_000; // stagger: first real fetch at T+60s
+const GECKO_EXT_CACHE_TTL_MS = 120_000; // 120s refresh = ~5 req/min effective
 
 interface GeckoPool {
   id: string;
@@ -468,13 +478,14 @@ async function fetchGeckoMints(): Promise<string[]> {
   }
 
   try {
-    // 5 trending + 5 volume + 10 new_pools = 20 pages once per 60s.
-    // new_pools sorted newest-first catches Pump.fun launches early.
+    // 5 trending + 5 h24_volume + 12 new_pools = 22 pages once per 60s.
+    // new_pools sorted newest-first catches Pump.fun launches early (pages 11-14
+    // cover roughly the 10-14 min window; beyond page 14 GeckoTerminal returns empty).
     const pages = [1, 2, 3, 4, 5];
-    const newPages = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+    const newPages = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
 
-    // Fire GeckoTerminal requests in staggered groups of 5 with 400ms gaps.
-    // Firing all 20 simultaneously causes instant 429 rate-limit on the free tier.
+    // Fire GeckoTerminal requests in staggered groups of 4 with 500ms gaps.
+    // Firing all at once causes instant 429 rate-limit on the free tier.
     const geckoEndpoints = [
       ...pages.map((p) => `${GECKO_BASE}/networks/solana/trending_pools?include=base_token&page=${p}`),
       ...pages.map((p) => `${GECKO_BASE}/networks/solana/pools?sort=h24_volume_desc&page=${p}`),
@@ -532,6 +543,84 @@ async function fetchGeckoMints(): Promise<string[]> {
   }
 }
 
+// ── GeckoTerminal extended — 6h and 1h volume-sorted pools ──────────────────
+// These directly mirror the two DexScreener pages the user discovered:
+//   • dexscreener.com/solana?rankBy=trendingScoreH6  → h6_volume_desc
+//   • dexscreener.com/solana?rankBy=pairAge          → h1_volume_desc (freshest movers)
+//
+// Kept in a separate 120s cache so they don't inflate the 60s primary cache's
+// request budget. Effective rate: 10 requests / 120s = 5 req/min extra.
+async function fetchGeckoExtendedMints(): Promise<string[]> {
+  const nowTs = Date.now();
+  // Check timestamp FIRST — even an empty cache skips the fetch when within TTL.
+  // This is critical for the startup stagger: geckoExtCacheTs is pre-set to
+  // (now - 60s) so the first real fetch is delayed until 60s after startup,
+  // avoiding simultaneous bursts with the primary GeckoTerminal fetch.
+  if (nowTs - geckoExtCacheTs < GECKO_EXT_CACHE_TTL_MS) {
+    return geckoExtCachedMints;
+  }
+
+  try {
+    const pages = [1, 2, 3, 4, 5];
+    const extEndpoints = [
+      // 6h volume: tokens gaining momentum in the last 6h (= "trendingScoreH6" view)
+      ...pages.map((p) => `${GECKO_BASE}/networks/solana/pools?sort=h6_volume_desc&page=${p}`),
+      // 1h volume: very recent movers — catches brand-new pairs within their first hour
+      ...pages.map((p) => `${GECKO_BASE}/networks/solana/pools?sort=h1_volume_desc&page=${p}`),
+    ];
+
+    const GECKO_CONCURRENCY = 4;
+    const GECKO_DELAY_MS = 600;
+    let geckoErrors = 0;
+    const allResults: Array<{ data: { data: GeckoPool[] } }> = [];
+
+    for (let i = 0; i < extEndpoints.length; i += GECKO_CONCURRENCY) {
+      const group = extEndpoints.slice(i, i + GECKO_CONCURRENCY);
+      const groupResults = await Promise.all(
+        group.map((url) =>
+          axios.get<{ data: GeckoPool[] }>(url, {
+            timeout: 10000,
+            headers: { Accept: 'application/json;version=20230302' },
+          }).catch((e) => {
+            if (e?.response?.status === 429) geckoErrors++;
+            return { data: { data: [] as GeckoPool[] } };
+          })
+        )
+      );
+      allResults.push(...groupResults);
+      if (i + GECKO_CONCURRENCY < extEndpoints.length) {
+        await new Promise((r) => setTimeout(r, GECKO_DELAY_MS));
+      }
+    }
+
+    if (geckoErrors > 0) {
+      logger.warn({ geckoErrors }, 'GeckoTerminal extended: rate-limited (429)');
+    }
+
+    const mints = new Set<string>();
+    for (const res of allResults) {
+      for (const pool of res.data?.data ?? []) {
+        const tokenId = pool.relationships?.base_token?.data?.id;
+        if (tokenId) {
+          const mint = tokenId.replace(/^solana_/, '');
+          if (mint && mint.length > 10) mints.add(mint);
+        }
+      }
+    }
+
+    const result = Array.from(mints);
+    if (result.length > 0) {
+      geckoExtCachedMints = result;
+      geckoExtCacheTs = Date.now();
+    }
+    logger.info({ count: result.length }, 'GeckoTerminal extended: fetched h6/h1 volume mints');
+    return result;
+  } catch (err) {
+    logger.warn({ err }, 'GeckoTerminal extended fetch error');
+    return geckoExtCachedMints;
+  }
+}
+
 async function fetchDexPairs(): Promise<DexPair[]> {
   try {
     const allPairs: DexPair[] = [];
@@ -543,23 +632,28 @@ async function fetchDexPairs(): Promise<DexPair[]> {
     //   3. DexScreener profiles   — boosted/trending tokens
     //   4. DexScreener boosts     — top paid promotions (often early movers)
     // No keyword guessing — every mint comes from actual on-chain activity.
-    const [raydiumMints, geckoMints, orcaMints, profileRes, boostRes] = await Promise.all([
+    const [raydiumMints, geckoMints, geckoExtMints, orcaMints, profileRes, boostRes] = await Promise.all([
       // 1. Raydium: 2 sort modes × 10 pages × 100 pools = up to 2000 unique mints
       fetchRaydiumMints(),
 
-      // 2. GeckoTerminal: 10 trending + 10 volume + 10 new_pools = 30 pages
+      // 2. GeckoTerminal primary: trending + h24_volume + new_pools (22 pages, 60s cache)
       fetchGeckoMints(),
 
-      // 3. Orca: all ~15 000 whirlpools (cached 5 min) → thousands of token mints
+      // 3. GeckoTerminal extended: h6_volume + h1_volume (10 pages, 120s cache)
+      //    Mirrors DexScreener's "trendingScoreH6" and "pairAge" ranked views —
+      //    catches tokens with strong recent momentum that haven't reached 24h rankings yet.
+      fetchGeckoExtendedMints(),
+
+      // 4. Orca: all ~15 000 whirlpools (cached 5 min) → thousands of token mints
       fetchOrcaMints(),
 
-      // 4. DexScreener: latest token profiles (boosted/trending)
+      // 5. DexScreener: latest token profiles (boosted/trending)
       axios.get<Array<{ tokenAddress: string; chainId: string }>>(
         `${DEXSCREENER_BASE}/token-profiles/latest/v1`,
         { timeout: 10000 }
       ).catch(() => ({ data: [] as Array<{ tokenAddress: string; chainId: string }> })),
 
-      // 5. DexScreener: top boosted tokens
+      // 6. DexScreener: top boosted tokens
       axios.get<Array<{ tokenAddress: string; chainId: string }>>(
         `${DEXSCREENER_BASE}/token-boosts/top/v1`,
         { timeout: 10000 }
@@ -569,10 +663,11 @@ async function fetchDexPairs(): Promise<DexPair[]> {
     // ── Mint prioritisation + hard cap ──────────────────────────────────────
     // Priority (highest first):
     //   1. freshMintQueue  — real-time PumpPortal WS launches (always included)
-    //   2. geckoMints      — new_pools sorted newest-first (fresh launches)
-    //   3. raydiumMints    — top-volume and top-fee Raydium pools
-    //   4. orcaMints       — rotating 1000-mint window of ~15 000 Orca whirlpools
-    //   5. profileRes/boostRes — DexScreener promoted tokens
+    //   2. geckoExtMints   — h6/h1 volume sorted (6h trending + brand-new movers)
+    //   3. geckoMints      — trending + h24_volume + new_pools (last 12 min)
+    //   4. raydiumMints    — top-volume and top-fee Raydium pools
+    //   5. orcaMints       — rotating 1000-mint window of ~15 000 Orca whirlpools
+    //   6. profileRes/boostRes — DexScreener promoted tokens (always included)
     //
     // Hard cap: MAX_MINTS_PER_SCAN mints per scan → ≤ 100 DexScreener chunks →
     // keeps each scan cycle under ~10s even on slow networks.
@@ -589,9 +684,10 @@ async function fetchDexPairs(): Promise<DexPair[]> {
       : [];
     orcaCursor = (orcaCursor + ORCA_WINDOW) % Math.max(1, orcaMints.length);
 
-    // Build ordered mint list — priority sources first, Orca fills remaining budget.
+    // Build ordered mint list — highest-priority sources first, Orca fills remaining budget.
     const highPriorityMints: string[] = [
       ...freshMintQueue,
+      ...geckoExtMints,  // 6h/1h trending — new source from DexScreener-equivalent views
       ...geckoMints,
       ...raydiumMints,
     ];
@@ -601,7 +697,7 @@ async function fetchDexPairs(): Promise<DexPair[]> {
       if (extraMints.size >= MAX_MINTS_PER_SCAN) break;
       extraMints.add(m);
     }
-    // DexScreener promoted tokens (small set — always include)
+    // DexScreener promoted tokens (small set — always include regardless of cap)
     if (Array.isArray(profileRes.data)) {
       profileRes.data.filter((t) => t.chainId === 'solana').forEach((t) => extraMints.add(t.tokenAddress));
     }
@@ -613,7 +709,10 @@ async function fetchDexPairs(): Promise<DexPair[]> {
     // no point paying for the API calls.
     for (const banned of ageBannedMints) extraMints.delete(banned);
 
-    logger.info({ total: extraMints.size, raydium: raydiumMints.length, gecko: geckoMints.length, orca: orcaSlice.length, fresh: freshMintQueue.size }, 'fetchDexPairs: mint sources');
+    logger.info(
+      { total: extraMints.size, raydium: raydiumMints.length, gecko: geckoMints.length, geckoExt: geckoExtMints.length, orca: orcaSlice.length, fresh: freshMintQueue.size },
+      'fetchDexPairs: mint sources'
+    );
 
     // Batch-lookup all collected mints on DexScreener.
     // DexScreener allows up to 30 addresses per request and rate-limits aggressive
