@@ -72,6 +72,14 @@ function toIST(date: Date): string {
   return date.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', hour12: false });
 }
 
+/** Updates the sources column for any OPEN position with the given mint. */
+export async function updatePositionSource(mint: string, sources: string[]): Promise<void> {
+  await query(
+    `UPDATE positions SET sources = $1 WHERE mint = $2 AND status = 'OPEN'`,
+    [JSON.stringify(sources), mint]
+  );
+}
+
 export async function getOpenPositions(): Promise<Position[]> {
   const rows = await query<Record<string, unknown>>(`
     SELECT * FROM positions WHERE status = 'OPEN' ORDER BY entry_time DESC

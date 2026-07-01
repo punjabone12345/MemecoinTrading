@@ -3,10 +3,8 @@ import app from './app.js';
 import { initDB } from './lib/db.js';
 import { initWebSocket } from './websocket/server.js';
 import { startAutoTrader } from './services/auto-trader.service.js';
-import { startTrenchesScanner } from './services/trenches.service.js';
+import { startTrenchesScanner, setOnMintSourceUpdated } from './services/trenches.service.js';
 import { startPriceMonitor } from './services/price-monitor.service.js';
-import { startTrenchesTracker } from './services/trenches.service.js';
-import { setOnMintSourceUpdated } from './services/scanner.service.js';
 import { updatePositionSource } from './services/position.service.js';
 import { notifyHeartbeat } from './lib/telegram.js';
 import { startTelegramCommands, stopTelegramCommands } from './lib/telegram-commands.js';
@@ -30,7 +28,6 @@ async function main(): Promise<void> {
   startAutoTrader();
   startPriceMonitor();
   startTelegramCommands();
-  startTrenchesTracker();
   setOnMintSourceUpdated(async (mint, sources) => {
     try { await updatePositionSource(mint, sources); } catch { /* non-fatal */ }
   });

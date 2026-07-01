@@ -11,6 +11,16 @@ import { logger } from '../lib/logger.js';
 // Sources accumulate — a token can gain new labels after being found by one source.
 const mintSources = new Map<string, Set<string>>();
 
+// Optional callback: called whenever a mint gains a new source label.
+// Used by index.ts to push updates into open positions in the DB.
+let onMintSourceUpdated: ((mint: string, sources: string[]) => Promise<void>) | null = null;
+
+export function setOnMintSourceUpdated(
+  cb: (mint: string, sources: string[]) => Promise<void>
+): void {
+  onMintSourceUpdated = cb;
+}
+
 export function getMintSources(mint: string): string[] {
   return Array.from(mintSources.get(mint) ?? []);
 }
@@ -21,6 +31,10 @@ export function addMintSource(mint: string, source: string): boolean {
   if (!set) { set = new Set(); mintSources.set(mint, set); }
   const isNew = !set.has(source);
   set.add(source);
+  if (isNew && onMintSourceUpdated) {
+    const sources = Array.from(set);
+    onMintSourceUpdated(mint, sources).catch(() => {});
+  }
   return isNew;
 }
 
