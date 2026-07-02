@@ -1,22 +1,18 @@
-import axios from 'axios';
 import { Connection, PublicKey } from '@solana/web3.js';
 import { logger } from '../lib/logger.js';
+import { query } from '../lib/db.js';
 
-// ── Source registry ──────────────────────────────────────────────────────────
+// ── Source registry ───────────────────────────────────────────────────────────
 // Global map: mint → set of discovery sources
 //   'pumpfun'  = spotted via the official Pump.fun migration wallet on-chain
-//   'trenches' = spotted via Pump.fun v3 REST API (just-graduated tokens)
-//   'bot'      = discovered by the existing scanner (Raydium/Gecko/DexScreener)
-//
-// Sources accumulate — a token can gain new labels after being found by one source.
+//   'meteora'  = spotted via Helius WebSocket Meteora DLMM/DAMM program logs
+//   'bot'      = discovered by the scanner
 const mintSources = new Map<string, Set<string>>();
 
-// Optional callback: called whenever a mint gains a new source label.
-// Used by index.ts to push updates into open positions in the DB.
 let onMintSourceUpdated: ((mint: string, sources: string[]) => Promise<void>) | null = null;
 
 export function setOnMintSourceUpdated(
-  cb: (mint: string, sources: string[]) => Promise<void>
+  cb: (mint: string, sources: string[]) => Promise<void>,
 ): void {
   onMintSourceUpdated = cb;
 }
@@ -25,7 +21,6 @@ export function getMintSources(mint: string): string[] {
   return Array.from(mintSources.get(mint) ?? []);
 }
 
-/** Adds a source to a mint. Returns true if this source was new for this mint. */
 export function addMintSource(mint: string, source: string): boolean {
   let set = mintSources.get(mint);
   if (!set) { set = new Set(); mintSources.set(mint, set); }
@@ -38,78 +33,54 @@ export function addMintSource(mint: string, source: string): boolean {
   return isNew;
 }
 
-// Recent mints from each source — exposed so scanner can add them to freshMintQueue
-const trenchesMints = new Set<string>();
-const pumpfunMints  = new Set<string>();
+// ── PumpFun migration wallet discovery ───────────────────────────────────────
+const pumpfunMints = new Set<string>();
 
-export function getTrenchesMints(): Set<string> { return trenchesMints; }
-export function getPumpfunMints():  Set<string> { return pumpfunMints; }
+export function getPumpfunMints(): Set<string> { return pumpfunMints; }
 
-// ── Activity feed — rolling log of recent discoveries ─────────────────────────
-// Keeps the last 20 mint discoveries per source with timestamps, so the UI
-// can display a live "proof" feed showing tokens arriving in real-time.
+// ── Activity feed ─────────────────────────────────────────────────────────────
 export interface DiscoveryEvent {
   mint: string;
-  ts: number; // unix ms
+  ts: number;
+  txSig?: string;
+  instructionType?: string;
+  poolAddress?: string;
+  creatorWallet?: string;
 }
 
 const MAX_FEED = 20;
-const trenchesFeed: DiscoveryEvent[] = [];
-const pumpfunFeed:  DiscoveryEvent[] = [];
+const pumpfunFeed: DiscoveryEvent[] = [];
 
-function pushFeed(feed: DiscoveryEvent[], mint: string): void {
-  feed.unshift({ mint, ts: Date.now() });
+function pushFeed(feed: DiscoveryEvent[], ev: DiscoveryEvent): void {
+  feed.unshift(ev);
   if (feed.length > MAX_FEED) feed.pop();
 }
 
 export function getSourceActivity() {
   return {
-    trenches: {
-      total:    trenchesMints.size,
-      recent:   trenchesFeed.slice(0, MAX_FEED),
-    },
     pumpfun: {
-      total:  pumpfunMints.size,
+      total: pumpfunMints.size,
       recent: pumpfunFeed.slice(0, MAX_FEED),
     },
   };
 }
 
-// ── Pump.fun v3 graduated-token poll ────────────────────────────────────────
-// https://frontend-api-v3.pump.fun/coins?complete=true returns tokens that
-// have recently graduated (migrated) from Pump.fun to Raydium.
-// These are exactly what the "trenches" tab shows — high-momentum meme coins
-// at the moment of migration, which is the best entry window.
-const PUMPFUN_V3_URL = 'https://frontend-api-v3.pump.fun/coins?complete=true';
+// ── Stable mints to ignore ────────────────────────────────────────────────────
+const STABLE_MINTS = new Set([
+  'So11111111111111111111111111111111111111112',    // wSOL
+  'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', // USDC
+  'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB',  // USDT
+]);
 
-async function pollPumpfunGraduated(): Promise<void> {
-  try {
-    const res = await axios.get<Array<{ mint?: string; address?: string }>>(
-      PUMPFUN_V3_URL,
-      { timeout: 8000, headers: { 'Accept': 'application/json' } }
-    );
-    const items = Array.isArray(res.data) ? res.data : [];
-    let added = 0;
-    for (const item of items) {
-      const mint = item.mint ?? item.address;
-      if (!mint || mint.length < 20) continue;
-      trenchesMints.add(mint);
-      const isNew = addMintSource(mint, 'trenches');
-      if (isNew) { pushFeed(trenchesFeed, mint); added++; }
-    }
-    if (added > 0) logger.info({ added, total: trenchesMints.size }, 'Trenches: new graduated tokens');
-  } catch (err: any) {
-    logger.debug({ msg: err?.message }, 'Trenches: pump.fun v3 poll failed (will retry)');
-  }
-}
-
-// ── Migration wallet tracker ─────────────────────────────────────────────────
-// When Pump.fun migrates a token to Raydium, the official migration wallet
+// ── Migration wallet tracker ──────────────────────────────────────────────────
+// When Pump.fun migrates a token, the official migration wallet
 // 39azUYFWPz3VHgKCf3VChUwbpURdCHRxjWVowf5jUJjg signs the transaction.
-// We poll getSignaturesForAddress every 5s and extract token mints from
-// the postTokenBalances of each new transaction.
+// We detect: migrate, migrate_v2, and pool_create instruction types.
 const MIGRATION_WALLET = '39azUYFWPz3VHgKCf3VChUwbpURdCHRxjWVowf5jUJjg';
 const PUBLIC_RPC = 'https://api.mainnet-beta.solana.com';
+
+// Keywords that identify migration-related instructions in transaction logs
+const MIGRATION_KEYWORDS = ['migrate', 'Migrate', 'MigrateV2', 'migrateV2', 'migrate_v2', 'PoolCreate', 'pool_create', 'CreatePool'];
 
 let lastSeenSig: string | null = null;
 let connection: Connection | null = null;
@@ -122,78 +93,123 @@ function getConnection(): Connection {
   return connection;
 }
 
+// Callback invoked whenever a new mint is discovered from the migration wallet
+let onNewMint: ((mint: string) => void) | null = null;
+export function setOnNewMint(cb: (mint: string) => void): void {
+  onNewMint = cb;
+}
+
+function detectMigrationInstructionType(logs: string[]): string {
+  for (const log of logs) {
+    if (log.includes('MigrateV2') || log.includes('migrateV2') || log.includes('migrate_v2')) return 'migrate_v2';
+    if (log.includes('Migrate') || log.includes('migrate')) return 'migrate';
+    if (log.includes('PoolCreate') || log.includes('pool_create') || log.includes('CreatePool')) return 'pool_create';
+  }
+  return 'migration';
+}
+
 async function trackMigrationWallet(): Promise<void> {
   try {
     const conn = getConnection();
     const pk = new PublicKey(MIGRATION_WALLET);
 
-    // Fetch last 15 signatures — fast and cheap
+    // Fetch the latest 15 signatures for this wallet
     const sigs = await conn.getSignaturesForAddress(pk, { limit: 15 });
     if (!sigs.length) return;
 
-    // Find the new ones (everything before the last seen signature)
+    // Find new signatures since our last checkpoint
     const newSigs: string[] = [];
     for (const sig of sigs) {
       if (sig.signature === lastSeenSig) break;
       if (!sig.err) newSigs.push(sig.signature);
     }
-    // Update the cursor regardless so we don't re-process on next tick
     lastSeenSig = sigs[0].signature;
 
     if (!newSigs.length) return;
 
-    // Fetch parsed transactions in parallel (cap at 5 to avoid RPC rate limits)
+    // Fetch up to 5 parsed transactions in parallel
     const toFetch = newSigs.slice(0, 5);
     const txns = await Promise.all(
       toFetch.map((sig) =>
         conn.getParsedTransaction(sig, { maxSupportedTransactionVersion: 0 })
-          .catch(() => null)
-      )
+          .catch(() => null),
+      ),
     );
 
     let added = 0;
-    for (const tx of txns) {
+    for (let i = 0; i < txns.length; i++) {
+      const tx = txns[i];
       if (!tx) continue;
-      // postTokenBalances contains all token accounts touched in the tx
+
+      const sig = toFetch[i];
+      const logs = tx.meta?.logMessages ?? [];
+      const instructionType = detectMigrationInstructionType(logs);
+
+      // Extract creator wallet (fee payer = first account key)
+      const accountKeys: any[] = (tx.transaction.message as any).accountKeys ?? [];
+      const creatorWallet: string = accountKeys[0]?.pubkey?.toString() ?? accountKeys[0]?.toString() ?? '';
+
+      // Extract pool address (first non-signer non-stable writable account)
+      let poolAddress: string | undefined;
+      for (let j = 1; j < Math.min(accountKeys.length, 8); j++) {
+        const addr = accountKeys[j]?.pubkey?.toString() ?? accountKeys[j]?.toString() ?? '';
+        if (addr && addr !== creatorWallet && !STABLE_MINTS.has(addr) && addr.length > 30) {
+          poolAddress = addr;
+          break;
+        }
+      }
+
+      // Extract mints from postTokenBalances
       const balances = tx.meta?.postTokenBalances ?? [];
       for (const bal of balances) {
         const mint = bal.mint;
-        if (!mint || mint.length < 20) continue;
-        // Ignore common quote tokens (SOL wSOL, USDC, USDT)
-        if (STABLE_MINTS.has(mint)) continue;
+        if (!mint || mint.length < 20 || STABLE_MINTS.has(mint)) continue;
+
         pumpfunMints.add(mint);
         const isNew = addMintSource(mint, 'pumpfun');
-        if (isNew) { pushFeed(pumpfunFeed, mint); added++; }
+        if (!isNew) continue;
+
+        added++;
+        pushFeed(pumpfunFeed, { mint, ts: Date.now(), txSig: sig, instructionType, poolAddress, creatorWallet });
+        if (onNewMint) onNewMint(mint);
+
+        logger.info(
+          { mint, sig: sig.slice(0, 16), instructionType, poolAddress, creatorWallet: creatorWallet.slice(0, 16) },
+          'PumpFun wallet: migration detected',
+        );
+
+        // Persist to DB
+        try {
+          await query(`
+            INSERT INTO detected_migrations
+              (source, instruction_type, tx_signature, pool_address, mint, creator_wallet)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            ON CONFLICT (tx_signature) DO NOTHING
+          `, ['pumpfun_wallet', instructionType, sig, poolAddress ?? null, mint, creatorWallet]);
+        } catch (dbErr: any) {
+          logger.debug({ msg: dbErr?.message }, 'PumpFun wallet: DB insert skipped (non-fatal)');
+        }
       }
     }
-    if (added > 0) logger.info({ added, newTxns: newSigs.length }, 'Pumpfun wallet: new migration mints discovered');
+
+    if (added > 0) logger.info({ added, newTxns: newSigs.length, total: pumpfunMints.size }, 'PumpFun wallet: new migration mints');
   } catch (err: any) {
-    logger.debug({ msg: err?.message }, 'Pumpfun wallet: RPC poll failed (will retry)');
+    logger.debug({ msg: err?.message }, 'PumpFun wallet: RPC poll failed (will retry)');
   }
 }
 
-const STABLE_MINTS = new Set([
-  'So11111111111111111111111111111111111111112',    // wSOL
-  'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', // USDC
-  'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB',  // USDT
-]);
-
-// ── Scanner lifecycle ────────────────────────────────────────────────────────
+// ── Scanner lifecycle ─────────────────────────────────────────────────────────
 let started = false;
 
 export function startTrenchesScanner(): void {
   if (started) return;
   started = true;
 
-  // Immediate first polls
-  void pollPumpfunGraduated();
+  // Immediate first poll
   void trackMigrationWallet();
 
-  // Pump.fun v3: every 5 seconds
-  setInterval(() => { void pollPumpfunGraduated(); }, 5_000);
-
-  // Migration wallet: every 5 seconds
+  // Poll every 5 seconds
   setInterval(() => { void trackMigrationWallet(); }, 5_000);
 
-  logger.info('Trenches scanner started (pump.fun v3 + migration wallet)');
+  logger.info('PumpFun migration wallet tracker started (polls every 5s)');
 }

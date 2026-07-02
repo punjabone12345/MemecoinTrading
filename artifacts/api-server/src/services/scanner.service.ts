@@ -1,10 +1,10 @@
 import axios from 'axios';
-import { WebSocket } from 'ws';
 import { logger } from '../lib/logger.js';
 import { Token, FilterResult, ScoreBreakdown } from '../types/index.js';
 import { getSettings } from './settings.service.js';
 import { checkRugcheck } from './rugcheck.service.js';
-import { getMintSources, addMintSource, getTrenchesMints, getPumpfunMints } from './trenches.service.js';
+import { getMintSources, addMintSource, getPumpfunMints } from './trenches.service.js';
+import { getMeteoraMintsCount } from './helius-ws.service.js';
 
 const DEXSCREENER_BASE = 'https://api.dexscreener.com';
 
@@ -28,133 +28,67 @@ interface DexPair {
 }
 
 const tokenCache = new Map<string, Token>();
-// Persistent set of mints that have open positions — survives between scan
-// cycles and is checked during scanTokens() so even a cold-cache restart
-// never re-marks an entered token as ELIGIBLE.
+
+// Mints with open positions — never re-marked eligible
 const enteredMints = new Set<string>();
 
-// ── Permanent age blacklist ──────────────────────────────────────────────────
-// When a token exceeds maxAgeHours it can NEVER get younger.  Adding it here
-// prevents it from being re-discovered by API sources and wasting scan slots.
-// Cleared only on full server restart (acceptable: new deployment = fresh data).
+// Permanent age blacklist — these never get younger, skip forever
 const ageBannedMints = new Set<string>();
 
-// ── Real-time fresh-mint queue ───────────────────────────────────────────────
-// Mints discovered via PumpPortal WS or other live sources are queued here.
-// Each scan cycle batch-looks them up on DexScreener so they get evaluated
-// immediately rather than waiting to appear in trending/volume lists.
+// ── Fresh mint queue ──────────────────────────────────────────────────────────
+// Fed by two discovery methods:
+//   1. Helius WS → Meteora DLMM/DAMM pool creation
+//   2. PumpFun migration wallet polling
+// Each scan cycle batch-looks them up on DexScreener and applies filters.
 const freshMintQueue = new Set<string>();
 
-// ── PumpPortal WebSocket — real-time new Pump.fun token stream ───────────────
-// Works on Render (production).  Fails gracefully on Replit (ECONNREFUSED) —
-// scanner falls back to polling-based discovery automatically.
-let ppWs: WebSocket | null = null;
-let ppReconnectTimer: ReturnType<typeof setTimeout> | null = null;
-
-export function startNewTokenStream(): void {
-  function connect(): void {
-    if (ppWs) {
-      ppWs.removeAllListeners();
-      ppWs.terminate();
-      ppWs = null;
-    }
-    if (ppReconnectTimer) { clearTimeout(ppReconnectTimer); ppReconnectTimer = null; }
-
-    const url = 'wss://pumpportal.fun/api/data';
-    logger.info('PumpPortal WS: connecting…');
-    const ws = new WebSocket(url);
-    ppWs = ws;
-
-    ws.on('open', () => {
-      logger.info('PumpPortal WS: connected — subscribing to new tokens');
-      ws.send(JSON.stringify({ method: 'subscribeNewToken' }));
-      ws.send(JSON.stringify({ method: 'subscribeTokenTrade' }));
-    });
-
-    ws.on('message', (raw: Buffer) => {
-      try {
-        const msg = JSON.parse(raw.toString());
-        const mint: string | undefined = msg.mint ?? msg.tokenAddress;
-        if (mint && mint.length > 20 && !ageBannedMints.has(mint)) {
-          const added = !freshMintQueue.has(mint);
-          freshMintQueue.add(mint);
-          if (added) logger.debug({ mint, symbol: msg.symbol }, 'PumpPortal: new mint queued');
-        }
-      } catch { /* ignore parse errors */ }
-    });
-
-    ws.on('error', (err: Error) => {
-      logger.debug({ msg: err.message }, 'PumpPortal WS: connection error (normal on Replit)');
-    });
-
-    ws.on('close', () => {
-      logger.info('PumpPortal WS: disconnected — will reconnect in 15s');
-      ppWs = null;
-      ppReconnectTimer = setTimeout(connect, 15_000);
-    });
+export function addToFreshMintQueue(mint: string): void {
+  if (!ageBannedMints.has(mint) && mint.length > 20) {
+    freshMintQueue.add(mint);
   }
-
-  connect();
 }
 
-// ── Liquidity stability history ──────────────────────────────────────────────
-// Stores timestamped liquidity readings per mint so we can detect >15% drops
-// over a 5-minute window before committing to an entry.
-// Pruned to 10 minutes of data per mint; cleaned up alongside tokenCache eviction.
+// ── Liquidity stability tracking ──────────────────────────────────────────────
 const liquidityHistory = new Map<string, Array<{ ts: number; liq: number }>>();
 
 function recordLiquidityPoint(mint: string, liq: number): void {
-  if (liq <= 0) return; // ignore zero/missing liquidity readings
+  if (liq <= 0) return;
   const now = Date.now();
-  const PRUNE_MS = 10 * 60_000; // keep 10 min of history
+  const PRUNE_MS = 10 * 60_000;
   const history = liquidityHistory.get(mint) ?? [];
   history.push({ ts: now, liq });
-  // Prune old entries
-  const cutoff = now - PRUNE_MS;
-  const trimmed = history.filter((h) => h.ts >= cutoff);
-  liquidityHistory.set(mint, trimmed);
+  liquidityHistory.set(mint, history.filter((h) => h.ts >= now - PRUNE_MS));
 }
 
-/**
- * Returns whether liquidity is stable (no >15% drop in the last 5 minutes).
- * Only blocks when we have ≥2 readings spanning at least 30 seconds — new
- * tokens with no history pass through unblocked.
- */
 function checkLiquidityStability(mint: string, currentLiq: number): { stable: boolean; dropPct: number } {
-  const WINDOW_MS   = 5 * 60_000; // 5-minute look-back window
-  const MIN_SPAN_MS = 30_000;     // require at least 30s of history before blocking
-  const DROP_LIMIT  = 15;         // block if liquidity fell >15%
+  const WINDOW_MS   = 5 * 60_000;
+  const MIN_SPAN_MS = 30_000;
+  const DROP_LIMIT  = 15;
 
   const history = liquidityHistory.get(mint);
   if (!history || history.length < 2) return { stable: true, dropPct: 0 };
 
   const now = Date.now();
-  const windowStart = now - WINDOW_MS;
-
-  // Find the oldest reading within the 5-minute window
-  const inWindow = history.filter((h) => h.ts >= windowStart);
+  const inWindow = history.filter((h) => h.ts >= now - WINDOW_MS);
   if (inWindow.length < 2) return { stable: true, dropPct: 0 };
 
   const oldest = inWindow[0];
-  // Not enough time elapsed — don't penalise brand-new entries in cache
   if (now - oldest.ts < MIN_SPAN_MS) return { stable: true, dropPct: 0 };
-  // Reference liquidity: the peak over the window (avoids false positives from
-  // brief API dips being the "oldest" reading)
+
   const refLiq = Math.max(...inWindow.map((h) => h.liq));
   if (refLiq <= 0) return { stable: true, dropPct: 0 };
 
   const dropPct = ((refLiq - currentLiq) / refLiq) * 100;
   return { stable: dropPct <= DROP_LIMIT, dropPct: Math.max(0, dropPct) };
 }
+
+// ── Scan stats ─────────────────────────────────────────────────────────────────
 let scanCount = 0;
 let passedFilters = 0;
 let eligibleCount = 0;
-
-// Rejection reason counters — reset each scan, read by getScanStats()
 const rejectionCounts = new Map<string, number>();
 function bumpReject(reason: string) { rejectionCounts.set(reason, (rejectionCounts.get(reason) ?? 0) + 1); }
 
-// Exposed so auto-trader can update this after entry checks
 let dailyLossLimitHit = false;
 let dailyPnlSnapshot = 0;
 let dailyLossLimitSnapshot = 0;
@@ -166,8 +100,6 @@ export function setDailyLossStatus(hit: boolean, pnl: number, limit: number): vo
 }
 
 export function getScanStats() {
-  // Recompute eligible from the live cache so it stays accurate after
-  // markTokenEntered() is called post-scan (e.g. to sync DB open positions)
   const liveEligible = Array.from(tokenCache.values()).filter((t) => t.status === 'ELIGIBLE').length;
   return {
     scanning: scanCount,
@@ -178,12 +110,14 @@ export function getScanStats() {
     dailyLossLimit: dailyLossLimitSnapshot,
     ageBanned: ageBannedMints.size,
     freshQueueSize: freshMintQueue.size,
-    pumpPortalConnected: ppWs !== null && ppWs.readyState === 1,
+    pumpPortalConnected: false, // Legacy field kept for API compat
     rejectionCounts: Object.fromEntries(
       [...rejectionCounts.entries()].sort((a, b) => b[1] - a[1])
     ),
-    trenchesCount: getTrenchesMints().size,
+    // Discovery method counts
+    meteoraCount: getMeteoraMintsCount(),
     pumpfunCount: getPumpfunMints().size,
+    trenchesCount: 0, // removed — replaced by meteoraCount
   };
 }
 
@@ -195,6 +129,7 @@ export function getTokenByMint(mint: string): Token | undefined {
   return tokenCache.get(mint);
 }
 
+// ── Scoring ────────────────────────────────────────────────────────────────────
 export function calcScore(
   token: Partial<Token>,
   mcRange?: { minMc: number; maxMc: number },
@@ -208,8 +143,6 @@ export function calcScore(
   let volumeMomentum = 0;
   const v1h = token.volume1hCurrent ?? 0;
   const v1hPrev = token.volume1hPrev ?? 0;
-  // Fall back to 24h average hourly rate when no prior h1 window exists.
-  // This gives meaningful momentum on first-scan tokens instead of always 0.
   const avgHourly = (token.volume24h ?? 0) / 24;
   const baseline = v1hPrev > 0 ? v1hPrev : (avgHourly > 0 ? avgHourly : 0);
   const vRatio = baseline > 0 ? v1h / baseline : (v1h > 0 ? 2 : 0);
@@ -224,21 +157,16 @@ export function calcScore(
   else if (bsr > 1.5) buyPressure = 12;
   else if (bsr > 1.2) buyPressure = 6;
 
-  // MC Quality — scored relative to the user-configured MC filter range.
-  // Divides [minMc, maxMc] into 4 equal quartiles; lower MC = higher score
-  // because early/small tokens have more upside potential.
-  // Falls back to absolute thresholds when no range is provided.
   let mcQuality = 0;
   const mc = token.marketCap ?? 0;
   if (mcRange && mcRange.maxMc > mcRange.minMc && mc >= mcRange.minMc && mc <= mcRange.maxMc) {
     const span = mcRange.maxMc - mcRange.minMc;
-    const pos = (mc - mcRange.minMc) / span; // 0 = at minMc, 1 = at maxMc
-    if (pos < 0.25) mcQuality = 25;       // Q1: freshest — most upside
-    else if (pos < 0.50) mcQuality = 18;  // Q2
-    else if (pos < 0.75) mcQuality = 12;  // Q3
-    else mcQuality = 6;                   // Q4: near maxMc — less upside
+    const pos = (mc - mcRange.minMc) / span;
+    if (pos < 0.25) mcQuality = 25;
+    else if (pos < 0.50) mcQuality = 18;
+    else if (pos < 0.75) mcQuality = 12;
+    else mcQuality = 6;
   } else {
-    // Fallback: absolute ranges (used when no mcRange passed)
     if (mc >= 250_000 && mc < 1_000_000) mcQuality = 25;
     else if (mc >= 100_000 && mc < 250_000) mcQuality = 18;
     else if (mc >= 1_000_000 && mc < 5_000_000) mcQuality = 15;
@@ -256,14 +184,6 @@ export function calcScore(
 
 const ALLOWED_DEXES = ['raydium', 'pump-fun', 'pumpfun', 'pumpswap', 'orca', 'meteora'];
 
-/**
- * Age-adjusted minimum score gate.
- * Younger tokens face higher score bars to compensate for thinner history.
- *   0 – 30 min  → 90
- *   30 – 60 min → 85
- *   ≥ 1 h       → 80
- * The user's configured minEntryScore is respected as an additional floor.
- */
 function getAgeAdjustedMinScore(ageH: number, settingsMin: number): number {
   const ageMin = ageH * 60;
   let required: number;
@@ -288,8 +208,6 @@ function buildFilterResults(
 ): FilterResult[] {
   const mc = pair.marketCap ?? pair.fdv ?? 0;
   const vol24 = aggVol24h;
-  // Use explicitly-passed fresh liquidity when available; bulk endpoint often returns 0 for
-  // Meteora/Orca DLMM pools even though real liquidity exists (per-pair endpoint is accurate).
   const liq = freshLiq !== undefined ? freshLiq : (pair.liquidity?.usd ?? 0);
   const ageH = pair.pairCreatedAt ? (Date.now() - pair.pairCreatedAt) / 3_600_000 : 0;
   const bsr = aggBsr;
@@ -297,19 +215,15 @@ function buildFilterResults(
   const change24 = pair.priceChange?.h24 ?? 0;
   const dexOk = ALLOWED_DEXES.includes(pair.dexId?.toLowerCase() ?? '');
 
-  // Age-adjusted score gate — replaces both the hard minAge lower bound and the
-  // old "young token ≥80" check. Each age bucket gets a tighter requirement.
   const effectiveMinScore = getAgeAdjustedMinScore(ageH, settings.minEntryScore);
   const ageScoreOk = qualityScore >= effectiveMinScore;
   const ageMin = ageH * 60;
   const ageBucket = ageMin < 30 ? '0–30m' : ageMin < 60 ? '30–60m' : '≥1h';
 
-  // Liquidity stability: passes when stable OR when we have no history yet
   const liqStable = liqStability?.stable ?? true;
   const liqDropPct = liqStability?.dropPct ?? 0;
   const liqStabilityLabel = liqDropPct > 0 ? `-${liqDropPct.toFixed(1)}%` : 'stable';
 
-  // Labels dynamically reflect the actual threshold from settings (not hardcoded defaults)
   return [
     { name: `MC ≥$${(settings.minMc/1000).toFixed(0)}K`, passed: mc >= settings.minMc, value: `$${(mc/1000).toFixed(0)}K`, required: `≥$${(settings.minMc/1000).toFixed(0)}K` },
     { name: `MC ≤$${(settings.maxMc/1_000_000).toFixed(1)}M`, passed: mc <= settings.maxMc, value: `$${(mc/1_000_000).toFixed(2)}M`, required: `≤$${(settings.maxMc/1_000_000).toFixed(1)}M` },
@@ -320,482 +234,82 @@ function buildFilterResults(
     { name: 'No 5m FOMO >50%', passed: change5m <= 50, value: `${change5m.toFixed(1)}%`, required: '≤50% in 5m' },
     { name: 'Not pumped >500%', passed: change24 <= 500, value: `${change24.toFixed(0)}%`, required: '≤500% in 24h' },
     { name: 'Rugcheck pass', passed: rugOk || !settings.rugcheckEnabled, value: rugOk ? 'PASS' : 'FAIL', required: 'PASS' },
-    { name: 'DEX supported', passed: dexOk, value: pair.dexId ?? 'unknown', required: 'Raydium/Pump/Orca' },
-    // maxTopHolder and maxCreatorPct: only enforce when rugcheck has supplied real data (>0)
+    { name: 'DEX supported', passed: dexOk, value: pair.dexId ?? 'unknown', required: 'Raydium/Pump/Orca/Meteora' },
     { name: `Top holder ≤${settings.maxTopHolder}%`, passed: topHolder === 0 || topHolder <= settings.maxTopHolder, value: `${topHolder.toFixed(1)}%`, required: `≤${settings.maxTopHolder}%` },
     { name: `Creator ≤${settings.maxCreatorPct}%`, passed: creatorPct === 0 || creatorPct <= settings.maxCreatorPct, value: `${creatorPct.toFixed(1)}%`, required: `≤${settings.maxCreatorPct}%` },
-    // Liquidity stability: block tokens already being drained (>15% drop in last 5 min)
     { name: 'Liq stable (<15% drop/5m)', passed: liqStable, value: liqStabilityLabel, required: '<15% drop in 5m' },
-    // Age-adjusted score gate: younger tokens need higher scores to account for thin history
     { name: `Score ≥${effectiveMinScore} (${ageBucket})`, passed: ageScoreOk, value: `score ${qualityScore}`, required: `≥${effectiveMinScore}` },
   ];
 }
 
-// ── Raydium on-chain pool API ────────────────────────────────────────────────
-// Fetches all Raydium AMM/CPMM pools sorted by 24h volume directly from their
-// official API — no keyword guessing, just every real trading pair on-chain.
-// Quote tokens (SOL, USDC, USDT) are stripped so only base meme-coin mints remain.
-const RAYDIUM_QUOTE_MINTS = new Set([
-  'So11111111111111111111111111111111111111112',  // SOL (wrapped)
-  'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', // USDC
-  'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB',  // USDT
-]);
-
-interface RaydiumPool {
-  id?: string;
-  mintA?: { address?: string };
-  mintB?: { address?: string };
-  tvl?: number;
-  day?: { volume?: number };
-}
-
-interface RaydiumResponse {
-  success?: boolean;
-  data?: { count?: number; data?: RaydiumPool[] };
-}
-
-async function fetchRaydiumMints(): Promise<string[]> {
-  try {
-    // Two parallel sweeps of Raydium with different sort keys:
-    //   volume24h DESC → top liquid/trading pools (established memecoins)
-    //   fee24h    DESC → most fees generated today → actively traded new pools
-    // Each sweep: 10 pages × 100 = 1000 pools. Together: up to 2000 unique mints.
-    const pages = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-
-    const makeRequests = (sortField: string) =>
-      pages.map((p) =>
-        axios.get<RaydiumResponse>(
-          `https://api-v3.raydium.io/pools/info/list?poolType=all&poolSortField=${sortField}&sortType=desc&pageSize=100&page=${p}`,
-          { timeout: 12000 }
-        ).catch(() => ({ data: { data: { data: [] as RaydiumPool[] } } }))
-      );
-
-    const [volResults, feeResults] = await Promise.all([
-      Promise.all(makeRequests('volume24h')),
-      Promise.all(makeRequests('fee24h')),
-    ]);
-
-    const mints = new Set<string>();
-    for (const res of [...volResults, ...feeResults]) {
-      const pools = res.data?.data?.data ?? [];
-      for (const pool of pools) {
-        const mintA = pool.mintA?.address ?? '';
-        const mintB = pool.mintB?.address ?? '';
-        if (mintA && !RAYDIUM_QUOTE_MINTS.has(mintA)) mints.add(mintA);
-        if (mintB && !RAYDIUM_QUOTE_MINTS.has(mintB)) mints.add(mintB);
-      }
-    }
-
-    logger.info({ count: mints.size }, 'Raydium on-chain: fetched pool mints');
-    return Array.from(mints);
-  } catch (err) {
-    logger.warn({ err }, 'Raydium API fetch error');
-    return [];
-  }
-}
-
-// ── Orca whirlpool mint discovery ────────────────────────────────────────────
-// Orca returns ~15 000 whirlpools in one call (~18 MB).  We cache the mint list
-// for 5 minutes to avoid re-downloading on every 15s scan cycle.
-interface OrcaWhirlpool {
-  tokenA?: { mint?: string };
-  tokenB?: { mint?: string };
-}
-let orcaMintCache: string[] = [];
-let orcaCacheTs = 0;
-let orcaCursor = 0; // rotating window cursor — advances by ORCA_WINDOW each scan
-const ORCA_CACHE_TTL_MS = 5 * 60_000; // 5 min
-
-async function fetchOrcaMints(): Promise<string[]> {
-  const now = Date.now();
-  if (orcaMintCache.length > 0 && now - orcaCacheTs < ORCA_CACHE_TTL_MS) {
-    return orcaMintCache;
-  }
-  try {
-    const res = await axios.get<{ whirlpools: OrcaWhirlpool[] }>(
-      'https://api.mainnet.orca.so/v1/whirlpool/list',
-      { timeout: 20000, decompress: true }
-    );
-    const mints = new Set<string>();
-    for (const wp of res.data?.whirlpools ?? []) {
-      const a = wp.tokenA?.mint ?? '';
-      const b = wp.tokenB?.mint ?? '';
-      if (a && !RAYDIUM_QUOTE_MINTS.has(a)) mints.add(a);
-      if (b && !RAYDIUM_QUOTE_MINTS.has(b)) mints.add(b);
-    }
-    orcaMintCache = Array.from(mints);
-    orcaCacheTs = now;
-    logger.info({ count: orcaMintCache.length }, 'Orca: fetched whirlpool mints');
-    return orcaMintCache;
-  } catch (err) {
-    logger.warn({ err }, 'Orca whirlpool fetch error');
-    return orcaMintCache; // return stale cache on error rather than empty
-  }
-}
-
-const GECKO_BASE = 'https://api.geckoterminal.com/api/v2';
-
-// GeckoTerminal rate-limit guard: free tier allows ~30 req/min.
-// Primary cache: 20 requests per 60s = 20 req/min.
-// Extended cache (h6/h1 trending): 10 requests per 120s = 5 req/min effective.
-// Total average: ~25 req/min — safely under the 30/min limit.
-let geckoCachedMints: string[] = [];
-let geckoCacheTs = 0;
-const GECKO_CACHE_TTL_MS = 60_000;
-
-// Extended GeckoTerminal cache — 6h and 1h volume-sorted pools.
-// These mirror DexScreener's "rankBy=trendingScoreH6" and "rankBy=pairAge" views:
-// tokens with strong recent momentum that haven't yet appeared on 24h rankings.
-let geckoExtCachedMints: string[] = [];
-// Pre-offset by 60s so the extended fetch fires 60s AFTER the primary on first startup,
-// avoiding simultaneous GeckoTerminal bursts that trigger 429 rate-limits.
-let geckoExtCacheTs = Date.now() - 60_000; // stagger: first real fetch at T+60s
-const GECKO_EXT_CACHE_TTL_MS = 120_000; // 120s refresh = ~5 req/min effective
-
-interface GeckoPool {
-  id: string;
-  attributes: {
-    name?: string;
-    address?: string;
-    base_token_price_usd?: string;
-    market_cap_usd?: string;
-    fdv_usd?: string;
-    volume_usd?: { h24?: string; h1?: string };
-    price_change_percentage?: { m5?: string; h1?: string; h24?: string };
-    transactions?: { m5?: { buys: number; sells: number }; h1?: { buys: number; sells: number }; h24?: { buys: number; sells: number } };
-    reserve_in_usd?: string;
-    pool_created_at?: string;
-    dex_id?: string;
-  };
-  relationships?: {
-    base_token?: { data?: { id?: string } };
-    dex?: { data?: { id?: string } };
-  };
-}
-
-async function fetchGeckoMints(): Promise<string[]> {
-  // Return cached results if still fresh (avoid rate-limit hammering)
-  const nowTs = Date.now();
-  if (geckoCachedMints.length > 0 && nowTs - geckoCacheTs < GECKO_CACHE_TTL_MS) {
-    return geckoCachedMints;
-  }
-
-  try {
-    // 5 trending + 5 h24_volume + 12 new_pools = 22 pages once per 60s.
-    // new_pools sorted newest-first catches Pump.fun launches early (pages 11-14
-    // cover roughly the 10-14 min window; beyond page 14 GeckoTerminal returns empty).
-    const pages = [1, 2, 3, 4, 5];
-    const newPages = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
-
-    // Fire GeckoTerminal requests in staggered groups of 4 with 500ms gaps.
-    // Firing all at once causes instant 429 rate-limit on the free tier.
-    const geckoEndpoints = [
-      ...pages.map((p) => `${GECKO_BASE}/networks/solana/trending_pools?include=base_token&page=${p}`),
-      ...pages.map((p) => `${GECKO_BASE}/networks/solana/pools?sort=h24_volume_desc&page=${p}`),
-      ...newPages.map((p) => `${GECKO_BASE}/networks/solana/new_pools?include=base_token&page=${p}`),
-    ];
-
-    const allResults: Array<{ data: { data: GeckoPool[] } }> = [];
-    const GECKO_CONCURRENCY = 4;
-    const GECKO_DELAY_MS = 500;
-    let geckoErrors = 0;
-
-    for (let i = 0; i < geckoEndpoints.length; i += GECKO_CONCURRENCY) {
-      const group = geckoEndpoints.slice(i, i + GECKO_CONCURRENCY);
-      const groupResults = await Promise.all(
-        group.map((url) =>
-          axios.get<{ data: GeckoPool[] }>(url, {
-            timeout: 10000,
-            headers: { Accept: 'application/json;version=20230302' },
-          }).catch((e) => {
-            if (e?.response?.status === 429) geckoErrors++;
-            return { data: { data: [] as GeckoPool[] } };
-          })
-        )
-      );
-      allResults.push(...groupResults);
-      if (i + GECKO_CONCURRENCY < geckoEndpoints.length) {
-        await new Promise((r) => setTimeout(r, GECKO_DELAY_MS));
-      }
-    }
-
-    if (geckoErrors > 0) {
-      logger.warn({ geckoErrors }, 'GeckoTerminal: rate-limited requests (429)');
-    }
-    const mints = new Set<string>();
-    for (const res of allResults) {
-      for (const pool of res.data?.data ?? []) {
-        const tokenId = pool.relationships?.base_token?.data?.id;
-        if (tokenId) {
-          const mint = tokenId.replace(/^solana_/, '');
-          if (mint && mint.length > 10) mints.add(mint);
-        }
-      }
-    }
-    const result = Array.from(mints);
-    // Update cache only when we actually got results
-    if (result.length > 0) {
-      geckoCachedMints = result;
-      geckoCacheTs = Date.now();
-    }
-    logger.info({ count: result.length }, 'GeckoTerminal: fetched Solana token mints');
-    return result;
-  } catch (err) {
-    logger.warn({ err }, 'GeckoTerminal fetch error');
-    return geckoCachedMints; // return stale cache rather than empty on error
-  }
-}
-
-// ── GeckoTerminal extended — 6h and 1h volume-sorted pools ──────────────────
-// These directly mirror the two DexScreener pages the user discovered:
-//   • dexscreener.com/solana?rankBy=trendingScoreH6  → h6_volume_desc
-//   • dexscreener.com/solana?rankBy=pairAge          → h1_volume_desc (freshest movers)
-//
-// Kept in a separate 120s cache so they don't inflate the 60s primary cache's
-// request budget. Effective rate: 10 requests / 120s = 5 req/min extra.
-async function fetchGeckoExtendedMints(): Promise<string[]> {
-  const nowTs = Date.now();
-  // Check timestamp FIRST — even an empty cache skips the fetch when within TTL.
-  // This is critical for the startup stagger: geckoExtCacheTs is pre-set to
-  // (now - 60s) so the first real fetch is delayed until 60s after startup,
-  // avoiding simultaneous bursts with the primary GeckoTerminal fetch.
-  if (nowTs - geckoExtCacheTs < GECKO_EXT_CACHE_TTL_MS) {
-    return geckoExtCachedMints;
-  }
-
-  try {
-    const pages = [1, 2, 3, 4, 5];
-    const extEndpoints = [
-      // 6h volume: tokens gaining momentum in the last 6h (= "trendingScoreH6" view)
-      ...pages.map((p) => `${GECKO_BASE}/networks/solana/pools?sort=h6_volume_desc&page=${p}`),
-      // 1h volume: very recent movers — catches brand-new pairs within their first hour
-      ...pages.map((p) => `${GECKO_BASE}/networks/solana/pools?sort=h1_volume_desc&page=${p}`),
-    ];
-
-    const GECKO_CONCURRENCY = 4;
-    const GECKO_DELAY_MS = 600;
-    let geckoErrors = 0;
-    const allResults: Array<{ data: { data: GeckoPool[] } }> = [];
-
-    for (let i = 0; i < extEndpoints.length; i += GECKO_CONCURRENCY) {
-      const group = extEndpoints.slice(i, i + GECKO_CONCURRENCY);
-      const groupResults = await Promise.all(
-        group.map((url) =>
-          axios.get<{ data: GeckoPool[] }>(url, {
-            timeout: 10000,
-            headers: { Accept: 'application/json;version=20230302' },
-          }).catch((e) => {
-            if (e?.response?.status === 429) geckoErrors++;
-            return { data: { data: [] as GeckoPool[] } };
-          })
-        )
-      );
-      allResults.push(...groupResults);
-      if (i + GECKO_CONCURRENCY < extEndpoints.length) {
-        await new Promise((r) => setTimeout(r, GECKO_DELAY_MS));
-      }
-    }
-
-    if (geckoErrors > 0) {
-      logger.warn({ geckoErrors }, 'GeckoTerminal extended: rate-limited (429)');
-    }
-
-    const mints = new Set<string>();
-    for (const res of allResults) {
-      for (const pool of res.data?.data ?? []) {
-        const tokenId = pool.relationships?.base_token?.data?.id;
-        if (tokenId) {
-          const mint = tokenId.replace(/^solana_/, '');
-          if (mint && mint.length > 10) mints.add(mint);
-        }
-      }
-    }
-
-    const result = Array.from(mints);
-    if (result.length > 0) {
-      geckoExtCachedMints = result;
-      geckoExtCacheTs = Date.now();
-    }
-    logger.info({ count: result.length }, 'GeckoTerminal extended: fetched h6/h1 volume mints');
-    return result;
-  } catch (err) {
-    logger.warn({ err }, 'GeckoTerminal extended fetch error');
-    return geckoExtCachedMints;
-  }
-}
-
-async function fetchDexPairs(): Promise<DexPair[]> {
-  try {
-    const allPairs: DexPair[] = [];
-
-    // ── Run all independent fetches in parallel ──────────────────────
-    // Sources:
-    //   1. Raydium on-chain API   — all real AMM/CPMM pools sorted by 24h volume
-    //   2. GeckoTerminal          — trending + top-volume + new_pools (13 pages)
-    //   3. DexScreener profiles   — boosted/trending tokens
-    //   4. DexScreener boosts     — top paid promotions (often early movers)
-    // No keyword guessing — every mint comes from actual on-chain activity.
-    const [raydiumMints, geckoMints, geckoExtMints, orcaMints, profileRes, boostRes] = await Promise.all([
-      // 1. Raydium: 2 sort modes × 10 pages × 100 pools = up to 2000 unique mints
-      fetchRaydiumMints(),
-
-      // 2. GeckoTerminal primary: trending + h24_volume + new_pools (22 pages, 60s cache)
-      fetchGeckoMints(),
-
-      // 3. GeckoTerminal extended: h6_volume + h1_volume (10 pages, 120s cache)
-      //    Mirrors DexScreener's "trendingScoreH6" and "pairAge" ranked views —
-      //    catches tokens with strong recent momentum that haven't reached 24h rankings yet.
-      fetchGeckoExtendedMints(),
-
-      // 4. Orca: all ~15 000 whirlpools (cached 5 min) → thousands of token mints
-      fetchOrcaMints(),
-
-      // 5. DexScreener: latest token profiles (boosted/trending)
-      axios.get<Array<{ tokenAddress: string; chainId: string }>>(
-        `${DEXSCREENER_BASE}/token-profiles/latest/v1`,
-        { timeout: 10000 }
-      ).catch(() => ({ data: [] as Array<{ tokenAddress: string; chainId: string }> })),
-
-      // 6. DexScreener: top boosted tokens
-      axios.get<Array<{ tokenAddress: string; chainId: string }>>(
-        `${DEXSCREENER_BASE}/token-boosts/top/v1`,
-        { timeout: 10000 }
-      ).catch(() => ({ data: [] as Array<{ tokenAddress: string; chainId: string }> })),
-    ]);
-
-    // ── Mint prioritisation + hard cap ──────────────────────────────────────
-    // Priority (highest first):
-    //   1. freshMintQueue  — real-time PumpPortal WS launches (always included)
-    //   2. geckoExtMints   — h6/h1 volume sorted (6h trending + brand-new movers)
-    //   3. geckoMints      — trending + h24_volume + new_pools (last 12 min)
-    //   4. raydiumMints    — top-volume and top-fee Raydium pools
-    //   5. orcaMints       — rotating 1000-mint window of ~15 000 Orca whirlpools
-    //   6. profileRes/boostRes — DexScreener promoted tokens (always included)
-    //
-    // Hard cap: MAX_MINTS_PER_SCAN mints per scan → ≤ 100 DexScreener chunks →
-    // keeps each scan cycle under ~10s even on slow networks.
-    const MAX_MINTS_PER_SCAN = 3000;
-
-    // Orca rotating window — sample a different 1000 mints each cycle so we
-    // cover the full ~15 000 pool list across ~15 scan cycles (~3.75 min).
-    const ORCA_WINDOW = 1000;
-    if (orcaMints.length > 0) {
-      orcaCursor = orcaCursor % orcaMints.length;
-    }
-    const orcaSlice = orcaMints.length > 0
-      ? orcaMints.slice(orcaCursor, orcaCursor + ORCA_WINDOW)
-      : [];
-    orcaCursor = (orcaCursor + ORCA_WINDOW) % Math.max(1, orcaMints.length);
-
-    // Inject trenches (pump.fun graduated) and pumpfun (migration wallet) mints into
-    // freshMintQueue so they are always evaluated on the next scan cycle.
-    for (const mint of getTrenchesMints()) freshMintQueue.add(mint);
-    for (const mint of getPumpfunMints())  freshMintQueue.add(mint);
-
-    // Build ordered mint list — highest-priority sources first, Orca fills remaining budget.
-    const highPriorityMints: string[] = [
-      ...freshMintQueue,
-      ...geckoExtMints,  // 6h/1h trending — new source from DexScreener-equivalent views
-      ...geckoMints,
-      ...raydiumMints,
-    ];
-    const extraMints = new Set<string>(highPriorityMints);
-    // Fill remaining budget with Orca rotation
-    for (const m of orcaSlice) {
-      if (extraMints.size >= MAX_MINTS_PER_SCAN) break;
-      extraMints.add(m);
-    }
-    // DexScreener promoted tokens (small set — always include regardless of cap)
-    if (Array.isArray(profileRes.data)) {
-      profileRes.data.filter((t) => t.chainId === 'solana').forEach((t) => extraMints.add(t.tokenAddress));
-    }
-    if (Array.isArray(boostRes.data)) {
-      boostRes.data.filter((t) => t.chainId === 'solana').forEach((t) => extraMints.add(t.tokenAddress));
-    }
-
-    // Remove age-banned mints before batch lookup — they'll always be rejected,
-    // no point paying for the API calls.
-    for (const banned of ageBannedMints) extraMints.delete(banned);
-
-    logger.info(
-      { total: extraMints.size, raydium: raydiumMints.length, gecko: geckoMints.length, geckoExt: geckoExtMints.length, orca: orcaSlice.length, fresh: freshMintQueue.size },
-      'fetchDexPairs: mint sources'
-    );
-
-    // Batch-lookup all collected mints on DexScreener.
-    // DexScreener allows up to 30 addresses per request and rate-limits aggressive
-    // parallel bursts. We fire 8 chunks concurrently, pause 100ms, then next 8.
-    // This keeps throughput high (~300 pairs/s) without triggering rate-limits.
-    const mintList = Array.from(extraMints);
-    const mintChunks: string[][] = [];
-    for (let i = 0; i < mintList.length; i += 30) mintChunks.push(mintList.slice(i, i + 30));
-
-    const CONCURRENCY = 8;
-    const CHUNK_DELAY_MS = 100;
-
-    for (let i = 0; i < mintChunks.length; i += CONCURRENCY) {
-      const batch = mintChunks.slice(i, i + CONCURRENCY);
-      const batchResults = await Promise.all(
-        batch.map((chunk) =>
-          axios.get<{ pairs: DexPair[] }>(
-            `${DEXSCREENER_BASE}/latest/dex/tokens/${chunk.join(',')}`,
-            { timeout: 12000 }
-          ).catch(() => ({ data: { pairs: [] as DexPair[] } }))
-        )
-      );
-      for (const r of batchResults) {
-        if (r.data?.pairs) allPairs.push(...r.data.pairs.filter((p) => p.chainId === 'solana'));
-      }
-      // Brief pause between concurrency windows to avoid rate-limiting
-      if (i + CONCURRENCY < mintChunks.length) {
-        await new Promise((res) => setTimeout(res, CHUNK_DELAY_MS));
-      }
-    }
-
-    // Deduplicate by pairAddress
-    const seen = new Set<string>();
-    const deduped = allPairs.filter((p) => {
-      if (!p.pairAddress || seen.has(p.pairAddress)) return false;
-      seen.add(p.pairAddress);
-      return true;
-    });
-
-    logger.info({ total: deduped.length }, 'fetchDexPairs: total unique pairs fetched');
-    return deduped;
-  } catch (err) {
-    logger.warn({ err }, 'DexScreener fetch error');
-    return [];
-  }
-}
-
-// DEX quality ranking: tiebreaker only — used AFTER liquidity to pick between
-// equally-liquid pairs. Higher = preferred.
+// DEX quality ranking — tiebreaker only after liquidity
 const DEX_RANK: Record<string, number> = { raydium: 100, orca: 80, meteora: 70, pumpswap: 60, 'pump-fun': 50, pumpfun: 50 };
 
+// ── DexScreener lookup from freshMintQueue ────────────────────────────────────
+// Only processes mints fed by the two discovery methods:
+//   1. Helius WS → Meteora DLMM/DAMM (via addToFreshMintQueue)
+//   2. PumpFun migration wallet polling (via addToFreshMintQueue)
+async function fetchDexPairs(): Promise<DexPair[]> {
+  // Also enqueue any pumpfun wallet mints not yet in the queue
+  for (const mint of getPumpfunMints()) {
+    if (!ageBannedMints.has(mint)) freshMintQueue.add(mint);
+  }
+
+  if (freshMintQueue.size === 0) return [];
+
+  const mintList = Array.from(freshMintQueue)
+    .filter((m) => !ageBannedMints.has(m))
+    .slice(0, 300); // cap per cycle to keep DexScreener calls fast
+
+  if (mintList.length === 0) return [];
+
+  const allPairs: DexPair[] = [];
+  const chunks: string[][] = [];
+  for (let i = 0; i < mintList.length; i += 30) chunks.push(mintList.slice(i, i + 30));
+
+  const CONCURRENCY = 8;
+  const CHUNK_DELAY_MS = 100;
+
+  for (let i = 0; i < chunks.length; i += CONCURRENCY) {
+    const batch = chunks.slice(i, i + CONCURRENCY);
+    const results = await Promise.all(
+      batch.map((chunk) =>
+        axios.get<{ pairs: DexPair[] }>(
+          `${DEXSCREENER_BASE}/latest/dex/tokens/${chunk.join(',')}`,
+          { timeout: 12000 },
+        ).catch(() => ({ data: { pairs: [] as DexPair[] } }))
+      )
+    );
+    for (const r of results) {
+      if (r.data?.pairs) allPairs.push(...r.data.pairs.filter((p) => p.chainId === 'solana'));
+    }
+    if (i + CONCURRENCY < chunks.length) {
+      await new Promise((res) => setTimeout(res, CHUNK_DELAY_MS));
+    }
+  }
+
+  logger.info(
+    { queued: freshMintQueue.size, processed: mintList.length, pairs: allPairs.length },
+    'Queue scan: DexScreener lookup complete',
+  );
+
+  const seen = new Set<string>();
+  return allPairs.filter((p) => {
+    if (!p.pairAddress || seen.has(p.pairAddress)) return false;
+    seen.add(p.pairAddress);
+    return true;
+  });
+}
+
+// ── Main scan loop ────────────────────────────────────────────────────────────
 export async function scanTokens(): Promise<void> {
   const settings = await getSettings();
   const allPairs = await fetchDexPairs();
   passedFilters = 0;
   eligibleCount = 0;
-  rejectionCounts.clear(); // reset counters each scan cycle
+  rejectionCounts.clear();
 
-  // ── Multi-pool aggregation ───────────────────────────────────────────────
-  // A token can trade across multiple pools (e.g. Raydium + PumpSwap).
-  // DexScreener's website shows TOTAL volume across all pools; we must do
-  // the same or we'll see a fraction of the real volume and miss valid trades.
-  //
-  // Strategy:
-  //   • Group all pairs by mint
-  //   • Pick the BEST pair for price/MC/liq/priceChange data:
-  //       PRIMARY   — highest liquidity.usd  (most liquid pool = most reliable data)
-  //       SECONDARY — highest h1 volume      (most active pool this hour)
-  //       TERTIARY  — DEX rank               (tiebreaker: established AMMs preferred)
-  //     NOTE: DEX rank must NOT override liquidity. The old formula multiplied rank
-  //     by 1000, letting a low-liquidity Meteora pair beat a $52K PumpSwap pair
-  //     simply because Meteora rank(70) > PumpSwap rank(50). This caused all data
-  //     (price changes, liquidity, DEX label) to reflect the wrong/empty pair.
-  //   • SUM vol24h, vol1h across all pools → true total market volume
-  //   • SUM h1 buys/sells across all pools → true BSR
+  // ── Multi-pool aggregation ────────────────────────────────────────────────
   type AggregatedPair = DexPair & { aggVol24h: number; aggVol1h: number; aggBsr: number };
 
   const mintGroupMap = new Map<string, DexPair[]>();
@@ -809,12 +323,6 @@ export async function scanTokens(): Promise<void> {
 
   const pairs: AggregatedPair[] = [];
   for (const [, group] of mintGroupMap) {
-    // Liquidity-first pair selection:
-    //   liq (USD)  × 100  → primary key  (1 dollar of liquidity = 100 score points)
-    //   h1 vol     × 1    → secondary    (activity this hour)
-    //   DEX rank   × 1    → tertiary     (tiebreaker between equal-liquidity pools)
-    // With this formula a pool needs ZERO liquidity and ZERO h1 vol for DEX rank
-    // alone to decide — i.e. rank only matters when pools are equally illiquid.
     let best = group[0];
     let bestScore = 0;
     for (const p of group) {
@@ -824,25 +332,17 @@ export async function scanTokens(): Promise<void> {
       const s = liq * 100 + h1vol + rank;
       if (s > bestScore) { bestScore = s; best = p; }
     }
-    // Aggregate volumes and transaction counts across ALL pools
     const aggVol24h = group.reduce((sum, p) => sum + (p.volume?.h24 ?? 0), 0);
     const aggVol1h  = group.reduce((sum, p) => sum + (p.volume?.h1  ?? 0), 0);
-    // Use h24 buys/sells — matches what DexScreener displays and is far more stable
-    // than h1 which is too noisy (one weak hour tanks a genuinely bullish token)
     const totalBuys24h  = group.reduce((sum, p) => sum + (p.txns?.h24?.buys  ?? 0), 0);
     const totalSells24h = group.reduce((sum, p) => sum + (p.txns?.h24?.sells ?? 0), 0);
     const aggBsr = totalSells24h > 0 ? totalBuys24h / totalSells24h : totalBuys24h > 0 ? 99 : 1;
     pairs.push({ ...best, aggVol24h, aggVol1h, aggBsr });
   }
 
-  // scanCount = unique mints in THIS cycle (after dedup). This keeps the number
-  // consistent with rejectionCounts so the UI breakdown adds up correctly.
-  // (Using tokenCache.size inflates the count with stale entries from past cycles.)
   scanCount = pairs.length;
 
-  // ── PASS 1: Pre-filter using bulk data ──────────────────────────────────
-  // Eliminates 95%+ of tokens (wrong MC/vol/age) without expensive API calls.
-  // Candidates (those passing pre-filter) go to Pass 2 for real-time data.
+  // ── PASS 1: Pre-filter ────────────────────────────────────────────────────
   type CandidateEntry = { pair: AggregatedPair; mc: number; vol24: number; bsr: number; v1h: number; liq: number; ageH: number; change24: number; change1h: number; change5m: number; price: number };
   const candidates: CandidateEntry[] = [];
 
@@ -861,21 +361,18 @@ export async function scanTokens(): Promise<void> {
     const change5m = pair.priceChange?.m5 ?? 0;
     const price    = parseFloat(pair.priceUsd ?? '0');
 
-    // Detect graduating tokens: Pump.fun → Raydium/Meteora migration in progress.
-    // Pattern: massive equal 5m & 24h price changes (stale Pump.fun history) with
-    // near-zero real volume on the new pool. Data is unreliable — skip entirely.
     const isGraduating = vol24 < 500 && change5m > 200 && change24 > 200
       && Math.abs(change5m - change24) < Math.abs(change24) * 0.05;
 
     let preReject: string | undefined;
     let preRejectKey: string | undefined;
-    let permanentBan = false; // age can never decrease — permanently remove these
-    if      (isGraduating)                  { preReject = `Graduating — Pump.fun migration in progress, data unreliable`;                                     preRejectKey = 'Graduating (no real data)'; }
-    else if (mc < settings.minMc)           { preReject = `MC too low ($${(mc/1000).toFixed(0)}K < $${(settings.minMc/1000).toFixed(0)}K min)`;             preRejectKey = 'MC too low'; }
-    else if (mc > settings.maxMc)           { preReject = `MC too high ($${(mc/1e6).toFixed(1)}M > $${(settings.maxMc/1e6).toFixed(1)}M max)`;              preRejectKey = 'MC too high'; }
-    else if (vol24 < settings.minVolume24h) { preReject = `Vol24h too low ($${(vol24/1000).toFixed(0)}K < $${(settings.minVolume24h/1000).toFixed(0)}K min)`; preRejectKey = 'Vol24h too low'; }
-    else if (ageH > settings.maxAgeHours)   { preReject = `Age ${ageH.toFixed(1)}h > ${settings.maxAgeHours}h max`;                                          preRejectKey = 'Age too old'; permanentBan = true; }
-    else if (change24 > 500)                { preReject = `Already pumped ${change24.toFixed(0)}% in 24h (>500% blocks entry)`;                              preRejectKey = 'Already pumped >500%'; }
+    let permanentBan = false;
+    if      (isGraduating)                  { preReject = `Graduating — migration in progress, data unreliable`;                                               preRejectKey = 'Graduating (no real data)'; }
+    else if (mc < settings.minMc)           { preReject = `MC too low ($${(mc/1000).toFixed(0)}K < $${(settings.minMc/1000).toFixed(0)}K min)`;               preRejectKey = 'MC too low'; }
+    else if (mc > settings.maxMc)           { preReject = `MC too high ($${(mc/1e6).toFixed(1)}M > $${(settings.maxMc/1e6).toFixed(1)}M max)`;                preRejectKey = 'MC too high'; }
+    else if (vol24 < settings.minVolume24h) { preReject = `Vol24h too low ($${(vol24/1000).toFixed(0)}K < $${(settings.minVolume24h/1000).toFixed(0)}K min)`;  preRejectKey = 'Vol24h too low'; }
+    else if (ageH > settings.maxAgeHours)   { preReject = `Age ${ageH.toFixed(1)}h > ${settings.maxAgeHours}h max`;                                            preRejectKey = 'Age too old'; permanentBan = true; }
+    else if (change24 > 500)                { preReject = `Already pumped ${change24.toFixed(0)}% in 24h (>500% blocks entry)`;                                preRejectKey = 'Already pumped >500%'; }
 
     const existing = tokenCache.get(mint);
 
@@ -883,35 +380,26 @@ export async function scanTokens(): Promise<void> {
       if (preRejectKey) bumpReject(preRejectKey);
       if (enteredMints.has(mint)) continue;
 
-      // Age-rejected tokens can NEVER get younger — permanently ban and evict.
-      // This stops them re-entering the scan pipeline on every cycle and frees
-      // scan slots for genuinely new tokens.
       if (permanentBan) {
         ageBannedMints.add(mint);
-        freshMintQueue.delete(mint); // clean up if it was queued via WS
+        freshMintQueue.delete(mint);
         tokenCache.delete(mint);
         liquidityHistory.delete(mint);
         continue;
       }
 
-      // Compute real score even for pre-rejected tokens so the UI shows meaningful
-      // momentum data instead of 0/100 for everything. Status stays REJECTED.
       const preV1hPrev = existing?.volume1hCurrent ?? 0;
       const prePartial: Partial<Token> = {
-        priceChange5m: change5m,
-        volume1hCurrent: v1h,
-        volume1hPrev: preV1hPrev,
-        volume24h: vol24,
-        buySellRatio: bsr,
-        marketCap: mc,
+        priceChange5m: change5m, volume1hCurrent: v1h, volume1hPrev: preV1hPrev,
+        volume24h: vol24, buySellRatio: bsr, marketCap: mc,
       };
       const preScore = calcScore(prePartial, { minMc: settings.minMc, maxMc: settings.maxMc });
       addMintSource(mint, 'bot');
       tokenCache.set(mint, {
         mint, name: pair.baseToken.name || 'Unknown', symbol: pair.baseToken.symbol || '???',
-        score: preScore.total, marketCap: mc, volume24h: vol24, priceChange1h: change1h, priceChange5m: change5m,
-        priceChange24h: change24, buySellRatio: bsr, liquidity: liq, age: ageH,
-        dexId: pair.dexId ?? '', pairAddress: pair.pairAddress, price,
+        score: preScore.total, marketCap: mc, volume24h: vol24, priceChange1h: change1h,
+        priceChange5m: change5m, priceChange24h: change24, buySellRatio: bsr, liquidity: liq,
+        age: ageH, dexId: pair.dexId ?? '', pairAddress: pair.pairAddress, price,
         rugcheck: true, freezeAuthority: false, mintAuthority: false,
         topHolder: existing?.topHolder ?? 0, creatorPct: existing?.creatorPct ?? 0,
         status: 'REJECTED', rejectReason: preReject, scoreBreakdown: preScore,
@@ -925,13 +413,8 @@ export async function scanTokens(): Promise<void> {
     candidates.push({ pair, mc, vol24, bsr, v1h, liq, ageH, change24, change1h, change5m, price });
   }
 
-  // ── PASS 2: Targeted fresh-data fetch for candidates ────────────────────
-  // Candidates passed MC/vol/age pre-filter — now we need REAL-TIME 5m/1h
-  // data before applying the full filter. The bulk batch endpoint can return
-  // 5m data that is 15-60s stale, causing valid tokens to be falsely rejected
-  // (or worse, FOMO-pumped tokens to be wrongly accepted).
-  // DexScreener's /pairs endpoint returns live data for specific pair addresses.
-  const freshPairMap = new Map<string, DexPair>(); // pairAddress → live pair
+  // ── PASS 2: Fresh per-pair data for candidates ─────────────────────────────
+  const freshPairMap = new Map<string, DexPair>();
   if (candidates.length > 0) {
     const pairAddrs = candidates.map((c) => c.pair.pairAddress).filter(Boolean) as string[];
     const freshChunks: string[][] = [];
@@ -941,7 +424,7 @@ export async function scanTokens(): Promise<void> {
       freshChunks.map((chunk) =>
         axios.get<{ pairs: DexPair[] }>(
           `${DEXSCREENER_BASE}/latest/dex/pairs/solana/${chunk.join(',')}`,
-          { timeout: 8000 }
+          { timeout: 8000 },
         ).catch(() => ({ data: { pairs: [] as DexPair[] } }))
       )
     );
@@ -950,93 +433,65 @@ export async function scanTokens(): Promise<void> {
         if (p.pairAddress) freshPairMap.set(p.pairAddress, p);
       }
     }
-    logger.info({ candidates: candidates.length, freshFetched: freshPairMap.size }, 'Fresh pair data fetched for candidates');
+    logger.info({ candidates: candidates.length, freshFetched: freshPairMap.size }, 'Fresh pair data fetched');
   }
 
-  // ── PASS 2 continued: full filter evaluation with real-time data ─────────
+  // ── PASS 2 continued: full filter with real-time data ─────────────────────
   for (const { pair, mc, vol24, bsr, v1h, liq, ageH, change24, change1h, change5m: bulkChange5m, price } of candidates) {
     const mint = pair.baseToken?.address;
     if (!mint) continue;
 
-    // Use live data from targeted fetch; fall back to bulk data if not returned
     const fresh = freshPairMap.get(pair.pairAddress ?? '');
-    // 5m and 1h price change: use freshest available — these are the most time-sensitive
-    const change5m = fresh?.priceChange?.m5  ?? bulkChange5m;
+    const change5m   = fresh?.priceChange?.m5  ?? bulkChange5m;
     const freshChange1h = fresh?.priceChange?.h1 ?? change1h;
-    // Price: prefer fresh (more accurate for entry price calculations)
     const freshPrice = fresh ? parseFloat(fresh.priceUsd ?? '0') || price : price;
-    // Liquidity: bulk endpoint frequently returns 0 for Meteora/Orca DLMM pools;
-    // per-pair endpoint is authoritative — always prefer it when available.
-    const freshLiq = (fresh?.liquidity?.usd !== undefined && fresh.liquidity.usd > 0)
-      ? fresh.liquidity.usd
-      : liq > 0 ? liq : (fresh?.liquidity?.usd ?? 0);
-    // h1 volume: bulk /tokens/ endpoint sometimes omits or zeroes h1;
-    // per-pair endpoint returns accurate real-time volume — use it for scoring.
-    const freshV1h = (fresh?.volume?.h1 !== undefined && fresh.volume.h1 > 0)
-      ? fresh.volume.h1
-      : v1h;
+    const freshLiq   = (fresh?.liquidity?.usd !== undefined && fresh.liquidity.usd > 0)
+      ? fresh.liquidity.usd : liq > 0 ? liq : (fresh?.liquidity?.usd ?? 0);
+    const freshV1h   = (fresh?.volume?.h1 !== undefined && fresh.volume.h1 > 0)
+      ? fresh.volume.h1 : v1h;
 
     const existing = tokenCache.get(mint);
 
-    // Rugcheck (with cache — 5-min TTL so we don't hammer rugcheck API)
-    // IMPORTANT: when rugcheckEnabled is false, always use rugOk=true and do NOT
-    // read from the cache. A previously-cached rugcheck:false value would propagate
-    // into token.rugcheck, which the emergency exit in position.service checks, causing
-    // positions to be closed even though the user disabled rugcheck.
     let rugOk = true;
     let topHolder = existing?.topHolder ?? 0;
     let creatorPct = existing?.creatorPct ?? 0;
     if (settings.rugcheckEnabled) {
       if (existing && Date.now() - existing.lastChecked < 5 * 60_000) {
         rugOk = existing.rugcheck;
-        // Use cached percentages from previous rugcheck call if available
         topHolder = existing.topHolder > 0 ? existing.topHolder : topHolder;
         creatorPct = existing.creatorPct > 0 ? existing.creatorPct : creatorPct;
       } else {
         const rugResult = await checkRugcheck(mint, settings.maxCreatorPct).catch(() => ({ ok: true, topHolder: 0, creatorPct: 0 }));
         rugOk = rugResult.ok;
-        // Only update from rugcheck when it returned real data
         if (rugResult.topHolder > 0) topHolder = rugResult.topHolder;
         if (rugResult.creatorPct > 0) creatorPct = rugResult.creatorPct;
       }
     }
 
-    // Volume momentum: use fresh h1 as current, previous scan's h1 as baseline
     const v1hPrev = (existing && existing.volume1hCurrent > 0)
-      ? existing.volume1hCurrent
-      : freshV1h * 0.8;
+      ? existing.volume1hCurrent : freshV1h * 0.8;
 
     const partial: Partial<Token> = {
-      priceChange5m: change5m,
-      volume1hCurrent: freshV1h,
-      volume1hPrev: v1hPrev,
-      volume24h: vol24,
-      buySellRatio: bsr,
-      marketCap: mc,
+      priceChange5m: change5m, volume1hCurrent: freshV1h, volume1hPrev: v1hPrev,
+      volume24h: vol24, buySellRatio: bsr, marketCap: mc,
     };
-
     const scoreBreakdown = calcScore(partial, { minMc: settings.minMc, maxMc: settings.maxMc });
-    // Record liquidity for stability tracking, then evaluate drop over last 5 min
+
     recordLiquidityPoint(mint, freshLiq);
     const liqStability = checkLiquidityStability(mint, freshLiq);
     if (!liqStability.stable) {
       logger.info({ mint, symbol: pair.baseToken.symbol, dropPct: liqStability.dropPct.toFixed(1) }, 'LIQ DRAIN: liquidity dropped >15% in 5m — blocking entry');
     }
-    // Pass real-time change5m, fresh liquidity, and stability check so filters use accurate data
-    const filterResults = buildFilterResults(pair, settings, rugOk, topHolder, creatorPct, scoreBreakdown.total, vol24, bsr, change5m, freshLiq, liqStability);
+
+    const filterResults = buildFilterResults(fresh ?? pair, settings, rugOk, topHolder, creatorPct, scoreBreakdown.total, vol24, bsr, change5m, freshLiq, liqStability);
     const allPassed = filterResults.every((f) => f.passed);
-
-    if (allPassed) passedFilters++;
-
     const rejectReason = !allPassed ? filterResults.find((f) => !f.passed)?.name : undefined;
     if (rejectReason) bumpReject(rejectReason);
 
     const prevConsecutive = existing?.consecutiveTrending ?? 0;
     const isUp = change5m >= 0 && (scoreBreakdown.total >= (existing?.score ?? 0));
     const consecutive = isUp ? prevConsecutive + 1 : 0;
-
     const trendOk = settings.trendChecksRequired <= 1 || consecutive >= settings.trendChecksRequired;
-
     const effectiveMinScore = getAgeAdjustedMinScore(ageH, settings.minEntryScore);
 
     const status: Token['status'] = enteredMints.has(mint)
@@ -1049,14 +504,10 @@ export async function scanTokens(): Promise<void> {
 
     if (status === 'ELIGIBLE') {
       logger.info(
-        { mint, symbol: pair.baseToken.symbol, score: scoreBreakdown.total, effectiveMinScore, ageH: ageH.toFixed(2), consecutive, trendRequired: settings.trendChecksRequired, change5m, breakdown: scoreBreakdown },
-        'AUDIT ACCEPTED: token meets all requirements — status=ELIGIBLE'
+        { mint, symbol: pair.baseToken.symbol, score: scoreBreakdown.total, effectiveMinScore, ageH: ageH.toFixed(2), consecutive },
+        'AUDIT ACCEPTED: token meets all requirements — status=ELIGIBLE',
       );
       eligibleCount++;
-    } else if (status === 'SCANNING') {
-      logger.debug({ mint, symbol: pair.baseToken.symbol, score: scoreBreakdown.total, effectiveMinScore }, 'AUDIT SCANNING');
-    } else if (status === 'REJECTED') {
-      logger.debug({ mint, symbol: pair.baseToken.symbol, score: scoreBreakdown.total, reason: rejectReason }, 'AUDIT REJECTED');
     }
 
     addMintSource(mint, 'bot');
@@ -1094,11 +545,7 @@ export async function scanTokens(): Promise<void> {
     });
   }
 
-  // Evict stale tokens with status-aware TTLs:
-  //   REJECTED  → 3 min  (2-3 scan cycles of buffer; if gone from lists it won't flip)
-  //   SCANNING  → 10 min (give trending tokens more time to reappear in lists)
-  //   ELIGIBLE  → 10 min (shouldn't go stale while near-eligible, but cap it)
-  //   ENTERED   → never evict (position manager owns lifecycle)
+  // ── Evict stale tokens ────────────────────────────────────────────────────
   const now = Date.now();
   for (const [mint, token] of tokenCache.entries()) {
     if (token.status === 'ENTERED') continue;
@@ -1109,17 +556,10 @@ export async function scanTokens(): Promise<void> {
     }
   }
 
-  // Recount eligible/scanning from current cycle only (mints processed above).
-  // scanCount was already set to pairs.length after dedup — do NOT override with
-  // tokenCache.size, which includes stale entries from past cycles and makes the
-  // rejection breakdown look like it's missing tokens.
   eligibleCount = Array.from(tokenCache.values()).filter((t) => t.status === 'ELIGIBLE').length;
   passedFilters = Array.from(tokenCache.values()).filter((t) => t.status === 'ELIGIBLE' || t.status === 'SCANNING').length;
 
-  // Prune freshMintQueue: remove any mints that now have a tokenCache entry
-  // (looked up this cycle) or are age-banned. Keeps the queue lean — only mints
-  // that haven't been evaluated yet stay in the queue.
-  // Cap at 2000 to prevent unbounded growth if WS fires many events.
+  // Prune freshMintQueue: remove evaluated or age-banned mints
   for (const mint of freshMintQueue) {
     if (tokenCache.has(mint) || ageBannedMints.has(mint)) freshMintQueue.delete(mint);
   }
@@ -1136,19 +576,14 @@ export async function scanTokens(): Promise<void> {
   logger.info({ scanCount, passedFilters, eligibleCount, ageBanned: ageBannedMints.size, freshQueue: freshMintQueue.size, topRejects }, 'Scan complete');
 }
 
-// ── HOT REFRESH ─────────────────────────────────────────────────────────────
-// Runs every 3 seconds (separate from the full 15s scan cycle).
-// ALL SCANNING tokens refresh every cycle.
-// ALL REJECTED tokens refresh via a 3-batch cursor — 1/3 per cycle — so every
-// rejected token is refreshed within ~9 seconds regardless of when it was last seen.
-// Returns true when at least one token changed status (caller broadcasts).
+// ── HOT REFRESH ───────────────────────────────────────────────────────────────
 let hotRefreshCursor = 0;
 export async function hotRefreshScanningTokens(): Promise<boolean> {
   const settings = await getSettings().catch(() => null);
   if (!settings) return false;
 
   const now = Date.now();
-  const STALE_MS = 8_000; // consider stale if not refreshed in last 8s
+  const STALE_MS = 8_000;
 
   const scanningTargets: { mint: string; pairAddress: string; token: Token }[] = [];
   const rejectedPool:    { mint: string; pairAddress: string; token: Token }[] = [];
@@ -1165,8 +600,6 @@ export async function hotRefreshScanningTokens(): Promise<boolean> {
     }
   }
 
-  // Rotate through rejected tokens in 3 equal batches so every token is covered
-  // within 3 cycles × 3 seconds = 9 seconds.
   const BATCHES = 3;
   const batchSize = Math.ceil(rejectedPool.length / BATCHES);
   const batchStart = (hotRefreshCursor % BATCHES) * batchSize;
@@ -1176,7 +609,6 @@ export async function hotRefreshScanningTokens(): Promise<boolean> {
   const targets = [...scanningTargets, ...rejectedBatch];
   if (targets.length === 0) return false;
 
-  // Fetch fresh pair data for all targets in parallel chunks of 30
   const pairAddrs = targets.map((t) => t.pairAddress);
   const chunks: string[][] = [];
   for (let i = 0; i < pairAddrs.length; i += 30) chunks.push(pairAddrs.slice(i, i + 30));
@@ -1186,7 +618,7 @@ export async function hotRefreshScanningTokens(): Promise<boolean> {
     chunks.map((chunk) =>
       axios.get<{ pairs: DexPair[] }>(
         `${DEXSCREENER_BASE}/latest/dex/pairs/solana/${chunk.join(',')}`,
-        { timeout: 6000 }
+        { timeout: 6000 },
       ).catch(() => ({ data: { pairs: [] as DexPair[] } }))
     )
   );
@@ -1200,30 +632,22 @@ export async function hotRefreshScanningTokens(): Promise<boolean> {
 
   for (const { mint, pairAddress, token } of targets) {
     const fresh = freshMap.get(pairAddress);
-    if (!fresh) continue; // pair not returned — leave as-is
+    if (!fresh) continue;
 
-    // Pull the freshest values — these are what was stale before
     const change5m  = fresh.priceChange?.m5  ?? token.priceChange5m;
     const change1h  = fresh.priceChange?.h1  ?? token.priceChange1h;
     const change24  = fresh.priceChange?.h24 ?? token.priceChange24h;
     const mc        = fresh.marketCap ?? fresh.fdv ?? token.marketCap;
-    // Prefer fresh per-pair liquidity; fall back to stored value (already corrected by Pass 2)
     const liq       = (fresh.liquidity?.usd !== undefined && fresh.liquidity.usd > 0)
-      ? fresh.liquidity.usd
-      : token.liquidity;
+      ? fresh.liquidity.usd : token.liquidity;
     const price     = parseFloat(fresh.priceUsd ?? '0') || token.price;
-    const vol24     = token.volume24h;  // aggregated value — keep as-is (not in single pair fetch)
+    const vol24     = token.volume24h;
     const bsr       = token.buySellRatio;
-    // Prefer fresh h1 volume; fall back to stored value
     const v1h       = (fresh.volume?.h1 !== undefined && fresh.volume.h1 > 0)
-      ? fresh.volume.h1
-      : token.volume1hCurrent;
+      ? fresh.volume.h1 : token.volume1hCurrent;
     const v1hPrev   = token.volume1hPrev > 0 ? token.volume1hPrev : v1h * 0.8;
     const ageH      = fresh.pairCreatedAt ? (now - fresh.pairCreatedAt) / 3_600_000 : token.age;
 
-    // Quick pre-filter disqualifier — token still clearly wrong.
-    // Age-exceeded: permanently ban (age never decreases) and evict entirely.
-    // Other pre-filter fails: update display fields and leave in cache to show in UI.
     if (ageH > settings.maxAgeHours) {
       ageBannedMints.add(mint);
       freshMintQueue.delete(mint);
@@ -1231,34 +655,25 @@ export async function hotRefreshScanningTokens(): Promise<boolean> {
       liquidityHistory.delete(mint);
       continue;
     }
-    if (mc < settings.minMc || mc > settings.maxMc ||
-        vol24 < settings.minVolume24h ||
-        change24 > 500) {
+    if (mc < settings.minMc || mc > settings.maxMc || vol24 < settings.minVolume24h || change24 > 500) {
       tokenCache.set(mint, {
         ...token,
         marketCap: mc, price, liquidity: liq, age: ageH,
-        priceChange5m: change5m, priceChange1h: change1h, priceChange24h: change24,
-        lastChecked: now,
+        priceChange5m: change5m, priceChange1h: change1h, priceChange24h: change24, lastChecked: now,
       });
       continue;
     }
 
     const partial: Partial<Token> = {
-      priceChange5m: change5m,
-      volume1hCurrent: v1h,
-      volume1hPrev: v1hPrev,
-      volume24h: vol24,
-      buySellRatio: bsr,
-      marketCap: mc,
+      priceChange5m: change5m, volume1hCurrent: v1h, volume1hPrev: v1hPrev,
+      volume24h: vol24, buySellRatio: bsr, marketCap: mc,
     };
     const scoreBreakdown = calcScore(partial, { minMc: settings.minMc, maxMc: settings.maxMc });
-    // Record liquidity for stability tracking, then evaluate drop over last 5 min
     recordLiquidityPoint(mint, liq);
     const liqStability = checkLiquidityStability(mint, liq);
     if (!liqStability.stable) {
       logger.info({ mint, symbol: token.symbol, dropPct: liqStability.dropPct.toFixed(1), source: 'hot-refresh' }, 'LIQ DRAIN: liquidity dropped >15% in 5m — blocking entry');
     }
-    // Pass liq explicitly so the filter label shows the real value (per-pair endpoint)
     const filterResults  = buildFilterResults(fresh, settings, token.rugcheck, token.topHolder, token.creatorPct, scoreBreakdown.total, vol24, bsr, change5m, liq, liqStability);
     const allPassed = filterResults.every((f) => f.passed);
     const rejectReason = !allPassed ? filterResults.find((f) => !f.passed)?.name : undefined;
@@ -1267,45 +682,28 @@ export async function hotRefreshScanningTokens(): Promise<boolean> {
     const isUp = change5m >= 0 && (scoreBreakdown.total >= (token.score ?? 0));
     const consecutive = isUp ? prevConsecutive + 1 : 0;
     const trendOk = settings.trendChecksRequired <= 1 || consecutive >= settings.trendChecksRequired;
-
     const effectiveMinScore = getAgeAdjustedMinScore(ageH, settings.minEntryScore);
 
     const newStatus: Token['status'] = enteredMints.has(mint)
       ? 'ENTERED'
       : allPassed && scoreBreakdown.total >= effectiveMinScore && trendOk
       ? 'ELIGIBLE'
-      : !allPassed
-      ? 'REJECTED'
-      : 'SCANNING';
+      : !allPassed ? 'REJECTED' : 'SCANNING';
 
     if (newStatus !== token.status) {
       anyChanged = true;
       if (newStatus === 'ELIGIBLE') {
-        logger.info(
-          { mint, symbol: token.symbol, score: scoreBreakdown.total, change5m, source: 'hot-refresh' },
-          'HOT REFRESH → ELIGIBLE'
-        );
+        logger.info({ mint, symbol: token.symbol, score: scoreBreakdown.total, change5m, source: 'hot-refresh' }, 'HOT REFRESH → ELIGIBLE');
       }
     }
 
     tokenCache.set(mint, {
       ...token,
-      marketCap: mc,
-      liquidity: liq,
-      price,
-      priceChange5m: change5m,
-      priceChange1h: change1h,
-      priceChange24h: change24,
-      age: ageH,
-      score: scoreBreakdown.total,
-      scoreBreakdown,
-      filterResults,
-      consecutiveTrending: consecutive,
-      status: newStatus,
-      rejectReason,
-      volume1hCurrent: v1h,
-      volume1hPrev: v1hPrev,
-      lastChecked: now,
+      marketCap: mc, liquidity: liq, price,
+      priceChange5m: change5m, priceChange1h: change1h, priceChange24h: change24,
+      age: ageH, score: scoreBreakdown.total, scoreBreakdown, filterResults,
+      consecutiveTrending: consecutive, status: newStatus, rejectReason,
+      volume1hCurrent: v1h, volume1hPrev: v1hPrev, lastChecked: now,
     });
   }
 
@@ -1315,20 +713,12 @@ export async function hotRefreshScanningTokens(): Promise<boolean> {
   return anyChanged;
 }
 
-/**
- * Re-evaluates every token in the cache with fresh settings — no network calls.
- * Call this immediately after settings are saved so filter results and statuses
- * reflect the new thresholds without waiting for the next full scan cycle.
- */
 export async function reEvaluateCachedTokens(): Promise<void> {
   const settings = await getSettings();
   const now = Date.now();
 
   for (const [mint, token] of tokenCache.entries()) {
-    // Skip tokens that have been entered into a position
     if (enteredMints.has(mint)) continue;
-
-    // Age-ban check with updated maxAgeHours
     if (token.age > settings.maxAgeHours) {
       ageBannedMints.add(mint);
       freshMintQueue.delete(mint);
@@ -1336,57 +726,35 @@ export async function reEvaluateCachedTokens(): Promise<void> {
       continue;
     }
 
-    // Rebuild score with updated MC range
     const scoreBreakdown = calcScore(token, { minMc: settings.minMc, maxMc: settings.maxMc });
-
-    // Reconstruct a minimal DexPair-compatible object from cached token fields
     const fakePair: DexPair = {
-      chainId: 'solana',
-      dexId: token.dexId,
-      pairAddress: token.pairAddress,
+      chainId: 'solana', dexId: token.dexId, pairAddress: token.pairAddress,
       baseToken: { address: mint, name: token.name, symbol: token.symbol },
       quoteToken: { symbol: 'SOL' },
-      priceUsd: String(token.price),
-      marketCap: token.marketCap,
-      fdv: token.marketCap,
+      priceUsd: String(token.price), marketCap: token.marketCap, fdv: token.marketCap,
       liquidity: { usd: token.liquidity },
       priceChange: { m5: token.priceChange5m, h1: token.priceChange1h, h24: token.priceChange24h },
       volume: { h1: token.volume1hCurrent, h24: token.volume24h },
       pairCreatedAt: now - token.age * 3_600_000,
-      txns: {
-        h24: { buys: Math.round(token.buySellRatio * 100), sells: 100 },
-      },
+      txns: { h24: { buys: Math.round(token.buySellRatio * 100), sells: 100 } },
     };
 
     const liqStability = checkLiquidityStability(mint, token.liquidity);
     const filterResults = buildFilterResults(
-      fakePair, settings,
-      token.rugcheck, token.topHolder, token.creatorPct,
-      scoreBreakdown.total,
-      token.volume24h, token.buySellRatio, token.priceChange5m,
+      fakePair, settings, token.rugcheck, token.topHolder, token.creatorPct,
+      scoreBreakdown.total, token.volume24h, token.buySellRatio, token.priceChange5m,
       token.liquidity, liqStability,
     );
 
     const allPassed = filterResults.every((f) => f.passed);
     const rejectReason = !allPassed ? filterResults.find((f) => !f.passed)?.name : undefined;
-
     const effectiveMinScore = getAgeAdjustedMinScore(token.age, settings.minEntryScore);
     const trendOk = settings.trendChecksRequired <= 1 || (token.consecutiveTrending ?? 0) >= settings.trendChecksRequired;
 
     const newStatus: Token['status'] = allPassed && scoreBreakdown.total >= effectiveMinScore && trendOk
-      ? 'ELIGIBLE'
-      : !allPassed
-      ? 'REJECTED'
-      : 'SCANNING';
+      ? 'ELIGIBLE' : !allPassed ? 'REJECTED' : 'SCANNING';
 
-    tokenCache.set(mint, {
-      ...token,
-      score: scoreBreakdown.total,
-      scoreBreakdown,
-      filterResults,
-      status: newStatus,
-      rejectReason,
-    });
+    tokenCache.set(mint, { ...token, score: scoreBreakdown.total, scoreBreakdown, filterResults, status: newStatus, rejectReason });
   }
 
   logger.info({ tokenCount: tokenCache.size }, 'Settings changed — re-evaluated all cached tokens');
@@ -1409,7 +777,6 @@ const tradedTodaySet = new Set<string>();
 export function setTradedTodayMints(mints: Set<string>): void {
   tradedTodaySet.clear();
   for (const m of mints) tradedTodaySet.add(m);
-  // Update cache for any tokens already present
   for (const mint of mints) {
     const t = tokenCache.get(mint);
     if (t) tokenCache.set(mint, { ...t, tradedToday: true });

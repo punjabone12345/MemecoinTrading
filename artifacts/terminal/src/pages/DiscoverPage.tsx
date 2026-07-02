@@ -2,15 +2,15 @@ import { useState, useMemo, useEffect, useRef, memo, useCallback } from 'react';
 import { Token, ScanStats, Settings } from '../lib/types.js';
 import { formatMC, formatAge, formatPrice } from '../lib/utils.js';
 
-interface DiscoveryEvent { mint: string; ts: number; }
+interface DiscoveryEvent { mint: string; ts: number; txSig?: string; instructionType?: string; }
 interface SourceActivity {
-  trenches: { total: number; recent: DiscoveryEvent[] };
-  pumpfun:  { total: number; recent: DiscoveryEvent[] };
+  meteora: { total: number; recent: DiscoveryEvent[] };
+  pumpfun: { total: number; recent: DiscoveryEvent[] };
 }
 
 function useSourceActivity() {
   const [data, setData] = useState<SourceActivity | null>(null);
-  const [prevTotals, setPrevTotals] = useState({ trenches: 0, pumpfun: 0 });
+  const [prevTotals, setPrevTotals] = useState({ meteora: 0, pumpfun: 0 });
 
   useEffect(() => {
     let cancelled = false;
@@ -22,7 +22,7 @@ function useSourceActivity() {
         if (!cancelled) {
           setData((prev) => {
             if (prev) {
-              setPrevTotals({ trenches: prev.trenches.total, pumpfun: prev.pumpfun.total });
+              setPrevTotals({ meteora: prev.meteora?.total ?? 0, pumpfun: prev.pumpfun?.total ?? 0 });
             }
             return json;
           });
@@ -56,19 +56,19 @@ function LiveSourceFeed() {
       key: 'pumpfun' as const,
       icon: '🔥',
       label: 'PumpFun Migration Wallet',
-      sublabel: 'On-chain — polls migration wallet every 5s',
+      sublabel: 'On-chain — polls 39azUY… wallet every 5s for migrate/pool_create',
       color: '#ff8c00',
       border: 'rgba(255,140,0,0.25)',
       bg: 'rgba(255,140,0,0.06)',
     },
     {
-      key: 'trenches' as const,
-      icon: '⚔️',
-      label: 'Trenches (Pump.fun v3 API)',
-      sublabel: 'REST API — polls graduated tokens every 5s',
-      color: '#9b59ff',
-      border: 'rgba(155,89,255,0.25)',
-      bg: 'rgba(155,89,255,0.06)',
+      key: 'meteora' as const,
+      icon: '🌊',
+      label: 'Meteora DLMM + DAMM',
+      sublabel: 'Helius WebSocket — real-time pool creation events',
+      color: '#00d4ff',
+      border: 'rgba(0,212,255,0.25)',
+      bg: 'rgba(0,212,255,0.06)',
     },
   ];
 
@@ -147,7 +147,7 @@ function LiveSourceFeed() {
 interface Props { tokens: Token[]; scanStats: ScanStats; settings: Settings | null }
 type Sort = 'score' | 'marketCap' | 'age' | 'priceChange24h' | 'priceChange5m';
 type Filter = 'ALL' | 'ELIGIBLE' | 'SCANNING' | 'ENTERED' | 'REJECTED';
-type SourceFilter = 'ALL' | 'pumpfun' | 'trenches' | 'bot';
+type SourceFilter = 'ALL' | 'pumpfun' | 'meteora' | 'bot';
 
 const ScoreRing = memo(function ScoreRing({ score }: { score: number }) {
   const size = 46, r = 18, circ = 2 * Math.PI * r;
@@ -175,8 +175,8 @@ const StatusBadge = memo(function StatusBadge({ status }: { status: Token['statu
 
 const SOURCE_STYLES: Record<string, { bg: string; border: string; color: string; label: string }> = {
   pumpfun:  { bg: 'rgba(255,140,0,0.12)',  border: 'rgba(255,140,0,0.35)',  color: '#ff8c00', label: '🔥 PumpFun' },
-  trenches: { bg: 'rgba(155,89,255,0.12)', border: 'rgba(155,89,255,0.35)', color: '#9b59ff', label: '⚔️ Trenches' },
-  bot:      { bg: 'rgba(0,212,255,0.10)',  border: 'rgba(0,212,255,0.28)',  color: '#00d4ff', label: '🤖 Bot' },
+  meteora:  { bg: 'rgba(0,212,255,0.10)',  border: 'rgba(0,212,255,0.28)',  color: '#00d4ff', label: '🌊 Meteora' },
+  bot:      { bg: 'rgba(100,180,100,0.10)', border: 'rgba(100,180,100,0.28)', color: '#64b464', label: '🤖 Bot' },
 };
 
 const SourceBadges = memo(function SourceBadges({ sources }: { sources?: string[] }) {
@@ -449,9 +449,9 @@ export default function DiscoverPage({ tokens, scanStats, settings }: Props) {
     return arr;
   }, [tokens, sort, filter, sourceFilter, search]);
 
-  const trenchesCount = scanStats.trenchesCount ?? 0;
+  const meteoraCount = (scanStats as any).meteoraCount ?? 0;
   const pumpfunCount = scanStats.pumpfunCount ?? 0;
-  const botCount = tokens.filter((t) => t.sources?.includes('bot') && !t.sources?.includes('pumpfun') && !t.sources?.includes('trenches')).length;
+  const botCount = tokens.filter((t) => t.sources?.includes('bot') && !t.sources?.includes('pumpfun') && !t.sources?.includes('meteora')).length;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
@@ -459,8 +459,8 @@ export default function DiscoverPage({ tokens, scanStats, settings }: Props) {
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8 }}>
         {[
           { label: 'PumpFun', value: pumpfunCount, color: '#ff8c00', glow: '', src: 'pumpfun', icon: '🔥' },
-          { label: 'Trenches', value: trenchesCount, color: '#9b59ff', glow: '', src: 'trenches', icon: '⚔️' },
-          { label: 'Bot', value: botCount, color: '#00d4ff', glow: 'card-glow-cyan', src: 'bot', icon: '🤖' },
+          { label: 'Meteora', value: meteoraCount, color: '#00d4ff', glow: 'card-glow-cyan', src: 'meteora', icon: '🌊' },
+          { label: 'Bot', value: botCount, color: '#64b464', glow: '', src: 'bot', icon: '🤖' },
         ].map((s) => {
           const active = sourceFilter === s.src;
           return (

@@ -3,7 +3,9 @@ import app from './app.js';
 import { initDB } from './lib/db.js';
 import { initWebSocket } from './websocket/server.js';
 import { startAutoTrader } from './services/auto-trader.service.js';
-import { startTrenchesScanner, setOnMintSourceUpdated } from './services/trenches.service.js';
+import { startTrenchesScanner, setOnMintSourceUpdated, setOnNewMint } from './services/trenches.service.js';
+import { startHeliusWatcher } from './services/helius-ws.service.js';
+import { addToFreshMintQueue } from './services/scanner.service.js';
 import { startPriceMonitor } from './services/price-monitor.service.js';
 import { updatePositionSource } from './services/position.service.js';
 import { notifyHeartbeat } from './lib/telegram.js';
@@ -24,7 +26,10 @@ async function main(): Promise<void> {
     logger.info({ port: PORT }, 'Apex Meme Trader API running');
   });
 
+  // Wire discovery callbacks → freshMintQueue
+  setOnNewMint(addToFreshMintQueue);
   startTrenchesScanner();
+  startHeliusWatcher(addToFreshMintQueue);
   startAutoTrader();
   startPriceMonitor();
   startTelegramCommands();

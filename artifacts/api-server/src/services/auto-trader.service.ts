@@ -1,5 +1,5 @@
 import { logger } from '../lib/logger.js';
-import { scanTokens, getAllTokens, setDailyLossStatus, markTokenEntered, setTradedTodayMints, hotRefreshScanningTokens, startNewTokenStream } from './scanner.service.js';
+import { scanTokens, getAllTokens, setDailyLossStatus, markTokenEntered, setTradedTodayMints, hotRefreshScanningTokens } from './scanner.service.js';
 import { getSettings } from './settings.service.js';
 import { openPosition, getOpenPositions } from './position.service.js';
 import { getBalance } from './settings.service.js';
@@ -44,12 +44,6 @@ let cachedTradedTodayMints = new Set<string>();
 export function startAutoTrader(): void {
   if (traderStarted) return;
   traderStarted = true;
-
-  // Start real-time new token stream (PumpPortal WS — works on Render,
-  // fails gracefully on Replit).  Adds brand-new mints to freshMintQueue
-  // so they are evaluated in the next scan cycle without waiting for
-  // trending/volume lists to pick them up.
-  startNewTokenStream();
 
   // ── FETCH loop ──────────────────────────────────────────────────────────
   // Self-scheduling setTimeout loop — re-reads scanFrequencyMs from settings

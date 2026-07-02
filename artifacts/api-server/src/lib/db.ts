@@ -347,5 +347,24 @@ export async function initDB(): Promise<void> {
     logger.warn({ err }, 'Close-reason backfill skipped (non-fatal)');
   }
 
+  // ── detected_migrations: all pool creation events from both discovery methods ──
+  await query(`
+    CREATE TABLE IF NOT EXISTS detected_migrations (
+      id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      source       TEXT NOT NULL,
+      instruction_type TEXT,
+      tx_signature TEXT NOT NULL,
+      pool_address TEXT,
+      mint         TEXT,
+      symbol       TEXT,
+      liquidity    NUMERIC DEFAULT 0,
+      creator_wallet TEXT,
+      detected_at  TIMESTAMPTZ DEFAULT NOW(),
+      UNIQUE (tx_signature)
+    )
+  `);
+  await query(`CREATE INDEX IF NOT EXISTS idx_migrations_detected_at ON detected_migrations (detected_at DESC)`);
+  await query(`CREATE INDEX IF NOT EXISTS idx_migrations_mint ON detected_migrations (mint)`);
+
   logger.info('Database initialized');
 }
