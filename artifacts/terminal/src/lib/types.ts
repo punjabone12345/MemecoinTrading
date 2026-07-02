@@ -143,7 +143,9 @@ export interface ScanStats {
   ageBanned?: number;
   freshQueueSize?: number;
   pumpPortalConnected?: boolean;
+  pumpfunPolling?: boolean;
   rejectionCounts?: Record<string, number>;
   trenchesCount?: number;
   pumpfunCount?: number;
+  meteoraCount?: number;
 }

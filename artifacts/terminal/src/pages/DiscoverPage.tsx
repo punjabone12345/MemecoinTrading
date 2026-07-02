@@ -449,7 +449,7 @@ export default function DiscoverPage({ tokens, scanStats, settings }: Props) {
     return arr;
   }, [tokens, sort, filter, sourceFilter, search]);
 
-  const meteoraCount = (scanStats as any).meteoraCount ?? 0;
+  const meteoraCount = scanStats.meteoraCount ?? 0;
   const pumpfunCount = scanStats.pumpfunCount ?? 0;
   const botCount = tokens.filter((t) => t.sources?.includes('bot') && !t.sources?.includes('pumpfun') && !t.sources?.includes('meteora')).length;
 
@@ -509,9 +509,9 @@ export default function DiscoverPage({ tokens, scanStats, settings }: Props) {
               {scanStats.ageBanned} age-banned
             </span>
           )}
-          <span style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 9, fontWeight: 700, color: scanStats.pumpPortalConnected ? '#00ff88' : '#7090b0', background: scanStats.pumpPortalConnected ? 'rgba(0,255,136,0.08)' : 'rgba(255,255,255,0.03)', border: `1px solid ${scanStats.pumpPortalConnected ? 'rgba(0,255,136,0.2)' : 'rgba(255,255,255,0.06)'}`, borderRadius: 4, padding: '2px 6px' }}>
-            <span style={{ width: 5, height: 5, borderRadius: '50%', background: scanStats.pumpPortalConnected ? '#00ff88' : '#3a5070', display: 'inline-block' }} />
-            PUMP.FUN WS {scanStats.pumpPortalConnected ? 'LIVE' : 'OFF'}
+          <span style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 9, fontWeight: 700, color: '#00ff88', background: 'rgba(0,255,136,0.08)', border: '1px solid rgba(0,255,136,0.2)', borderRadius: 4, padding: '2px 6px' }}>
+            <span style={{ width: 5, height: 5, borderRadius: '50%', background: '#00ff88', boxShadow: '0 0 5px #00ff88', display: 'inline-block', animation: 'pulse-dot 1.2s ease-in-out infinite' }} />
+            PUMP.FUN POLLING LIVE
           </span>
         </div>
       </div>

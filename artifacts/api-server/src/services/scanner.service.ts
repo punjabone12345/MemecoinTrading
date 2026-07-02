@@ -110,7 +110,8 @@ export function getScanStats() {
     dailyLossLimit: dailyLossLimitSnapshot,
     ageBanned: ageBannedMints.size,
     freshQueueSize: freshMintQueue.size,
-    pumpPortalConnected: false, // Legacy field kept for API compat
+    pumpPortalConnected: true, // Polling is always active (wallet tracker runs every 5s)
+    pumpfunPolling: true,
     rejectionCounts: Object.fromEntries(
       [...rejectionCounts.entries()].sort((a, b) => b[1] - a[1])
     ),
