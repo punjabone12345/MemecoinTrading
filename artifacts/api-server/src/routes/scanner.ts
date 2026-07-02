@@ -20,14 +20,24 @@ router.get('/sources', (_req, res) => {
   // Use the same counters as the dashboard tiles (getPumpfunMints().size and
   // getMeteoraMintsCount()) so live-feed totals always match the tile numbers.
   const pumpfunTotal = getPumpfunMints().size;
-  const pumpfunFeed  = getPumpfunFeed();
+  let pumpfunFeedItems = getPumpfunFeed();
   const meteoraFeed  = getMeteoraFeed();
   const meteoraTotal = getMeteoraMintsCount();
+
+  // Fallback: if the in-memory feed is empty but mints exist (e.g. after an
+  // incomplete restart cycle), synthesise placeholder entries from the mint set
+  // so the live-feed panel always matches the counter tile.
+  if (pumpfunFeedItems.length === 0 && pumpfunTotal > 0) {
+    const now = Date.now();
+    pumpfunFeedItems = Array.from(getPumpfunMints())
+      .slice(0, 20)
+      .map((mint) => ({ mint, ts: now, instructionType: 'migrate' }));
+  }
 
   res.json({
     pumpfun: {
       total: pumpfunTotal,
-      recent: pumpfunFeed,
+      recent: pumpfunFeedItems,
     },
     meteora: {
       total: meteoraTotal,

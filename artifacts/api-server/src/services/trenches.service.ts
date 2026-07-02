@@ -78,7 +78,6 @@ const STABLE_MINTS = new Set([
 // 39azUYFWPz3VHgKCf3VChUwbpURdCHRxjWVowf5jUJjg signs the transaction.
 // We detect: migrate, migrate_v2, and pool_create instruction types.
 const MIGRATION_WALLET = '39azUYFWPz3VHgKCf3VChUwbpURdCHRxjWVowf5jUJjg';
-const PUBLIC_RPC = 'https://api.mainnet-beta.solana.com';
 
 // Keywords that identify migration-related instructions in transaction logs
 const MIGRATION_KEYWORDS = ['migrate', 'Migrate', 'MigrateV2', 'migrateV2', 'migrate_v2', 'PoolCreate', 'pool_create', 'CreatePool'];
@@ -88,7 +87,10 @@ let connection: Connection | null = null;
 
 function getConnection(): Connection {
   if (!connection) {
-    const rpc = process.env.RPC_ENDPOINT ?? PUBLIC_RPC;
+    // Prefer Helius HTTP RPC to avoid public RPC rate limits.
+    const heliusKey = process.env.HELIUS_API_KEY;
+    const rpc = process.env.RPC_ENDPOINT
+      ?? (heliusKey ? `https://mainnet.helius-rpc.com/?api-key=${heliusKey}` : 'https://api.mainnet-beta.solana.com');
     connection = new Connection(rpc, { commitment: 'confirmed' });
   }
   return connection;

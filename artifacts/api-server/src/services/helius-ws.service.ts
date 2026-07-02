@@ -79,8 +79,13 @@ function extractInstructionType(logs: string[]): string | undefined {
 let conn: Connection | null = null;
 function getConn(): Connection {
   if (!conn) {
-    const rpc = process.env.RPC_ENDPOINT ?? 'https://api.mainnet-beta.solana.com';
+    // Prefer Helius HTTP RPC (same key as the WS) — avoids public RPC rate limits.
+    // Falls back to explicit RPC_ENDPOINT, then public mainnet as last resort.
+    const heliusKey = process.env.HELIUS_API_KEY;
+    const rpc = process.env.RPC_ENDPOINT
+      ?? (heliusKey ? `https://mainnet.helius-rpc.com/?api-key=${heliusKey}` : 'https://api.mainnet-beta.solana.com');
     conn = new Connection(rpc, { commitment: 'confirmed' });
+    logger.info({ rpc: rpc.replace(/api-key=[^&?]+/, 'api-key=***') }, 'Helius WS: using RPC for tx fetch');
   }
   return conn;
 }
@@ -163,7 +168,7 @@ async function processSignature(
         .catch((e: any) => logger.debug({ msg: e?.message }, 'Helius WS: DB insert skipped'));
     }
   } catch (err: any) {
-    logger.debug({ sig: sig.slice(0, 16), msg: err?.message }, 'Helius WS: tx fetch failed');
+    logger.warn({ sig: sig.slice(0, 16), msg: err?.message }, 'Helius WS: tx fetch failed');
   }
 }
 
