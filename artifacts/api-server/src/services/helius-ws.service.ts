@@ -137,6 +137,28 @@ async function processSignature(
     const logMessages: string[] = (tx.meta as any)?.logMessages ?? [];
     const instructionType = extractInstructionType(logMessages);
 
+    // Guard: skip non-creation instructions (swaps, addLiquidity, removeLiquidity, etc.)
+    // Only pool initialisation / creation events are relevant for discovery.
+    if (instructionType) {
+      const inst = instructionType.toLowerCase();
+      const isNonCreation =
+        inst.startsWith('swap') ||
+        inst.includes('addliq') ||
+        inst.includes('removeliq') ||
+        inst.includes('remove_liq') ||
+        inst.includes('claim') ||
+        inst.includes('deposit') ||
+        inst.includes('withdraw') ||
+        inst.includes('transfer') ||
+        inst.includes('close') ||
+        inst.includes('fund') ||
+        inst.includes('bootstrap');
+      if (isNonCreation) {
+        logger.debug({ sig: sig.slice(0, 16), instructionType, source }, 'Helius WS: skipping non-creation instruction');
+        return;
+      }
+    }
+
     // Rough liquidity estimate
     let liquidity = 0;
     for (const bal of postBalances) {

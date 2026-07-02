@@ -4,7 +4,7 @@ import { Token, FilterResult, ScoreBreakdown } from '../types/index.js';
 import { getSettings } from './settings.service.js';
 import { checkRugcheck } from './rugcheck.service.js';
 import { getMintSources, addMintSource, getPumpfunMints } from './trenches.service.js';
-import { getMeteoraMintsCount, getMeteoraMintsSet } from './helius-ws.service.js';
+import { getMeteoraMintsCount, getMeteoraMintsSet, getMeteoraFeed } from './helius-ws.service.js';
 
 const DEXSCREENER_BASE = 'https://api.dexscreener.com';
 
@@ -290,6 +290,39 @@ async function fetchDexPairs(): Promise<DexPair[]> {
     }
     if (i + CONCURRENCY < chunks.length) {
       await new Promise((res) => setTimeout(res, CHUNK_DELAY_MS));
+    }
+  }
+
+  // ── Meteora pool-address fallback ────────────────────────────────────────────
+  // If a Meteora mint returned no pairs from the token-address query, try querying
+  // by pool address — DexScreener often indexes the pair before it indexes the token.
+  const pairsFoundMints = new Set(allPairs.map((p) => p.baseToken?.address).filter(Boolean));
+  const meteoraFeedItems = getMeteoraFeed();
+  const missingPoolAddrs = meteoraFeedItems
+    .filter((ev) => ev.poolAddress && !pairsFoundMints.has(ev.mint) && !ageBannedMints.has(ev.mint))
+    .map((ev) => ev.poolAddress!)
+    .filter((addr, i, arr) => arr.indexOf(addr) === i) // dedupe
+    .slice(0, 30);
+
+  if (missingPoolAddrs.length > 0) {
+    const poolChunks: string[][] = [];
+    for (let i = 0; i < missingPoolAddrs.length; i += 30) poolChunks.push(missingPoolAddrs.slice(i, i + 30));
+    const poolResults = await Promise.all(
+      poolChunks.map((chunk) =>
+        axios.get<{ pairs: DexPair[] }>(
+          `${DEXSCREENER_BASE}/latest/dex/pairs/solana/${chunk.join(',')}`,
+          { timeout: 8000 },
+        ).catch(() => ({ data: { pairs: [] as DexPair[] } }))
+      )
+    );
+    let poolPairsAdded = 0;
+    for (const r of poolResults) {
+      for (const p of r.data?.pairs ?? []) {
+        if (p.chainId === 'solana') { allPairs.push(p); poolPairsAdded++; }
+      }
+    }
+    if (poolPairsAdded > 0) {
+      logger.info({ poolPairsAdded }, 'Meteora pool-address fallback: pairs found');
     }
   }
 
