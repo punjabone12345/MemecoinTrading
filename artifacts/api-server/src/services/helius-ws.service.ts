@@ -64,13 +64,20 @@ function enqueue(sig: string, source: MeteoraEvent['source'], onMint: (mint: str
   drainQueue();
 }
 
-// ── Try to pick instruction type from logs ────────────────────────────────────
-function extractInstructionType(logs: string[]): string | undefined {
-  for (const log of logs) {
-    const lower = log.toLowerCase();
-    if (lower.includes('instruction:')) {
-      const parts = log.split('Instruction:');
-      if (parts[1]) return parts[1].trim().split(/\s/)[0];
+// ── Extract instruction type specifically from a Meteora program's invoke block ──
+// The naive approach (first "Instruction:" in logs) breaks because complex txs run
+// SPL Token / System instructions before Meteora — returning "InitializeAccount" or
+// "Transfer" instead of the actual Meteora instruction ("AddLiquidityByStrategy",
+// "Swap", etc.).  We scan forward from the Meteora program's "invoke" log line.
+function extractMeteoraInstructionType(logs: string[], programId: string): string | undefined {
+  for (let i = 0; i < logs.length; i++) {
+    if (logs[i].includes(programId) && logs[i].toLowerCase().includes('invoke')) {
+      for (let j = i + 1; j < Math.min(i + 5, logs.length); j++) {
+        if (logs[j].includes('Instruction:')) {
+          const parts = logs[j].split('Instruction:');
+          if (parts[1]) return parts[1].trim().split(/\s+/)[0];
+        }
+      }
     }
   }
   return undefined;
@@ -133,28 +140,65 @@ async function processSignature(
     if (mints.length === 0) return; // no new token accounts (swap or unrelated tx)
 
     // Try to infer instruction type from inner instructions / logs
-    const innerInstructions = tx.meta?.innerInstructions ?? [];
     const logMessages: string[] = (tx.meta as any)?.logMessages ?? [];
-    const instructionType = extractInstructionType(logMessages);
 
-    // Guard: skip non-creation instructions (swaps, addLiquidity, removeLiquidity, etc.)
-    // Only pool initialisation / creation events are relevant for discovery.
+    // Determine which program ID fired this notification so we look at the right invoke block
+    const programId = source === 'meteora_dlmm' ? METEORA_DLMM
+      : source === 'meteora_damm2' ? METEORA_DAMM2 : METEORA_DAMM;
+    const instructionType = extractMeteoraInstructionType(logMessages, programId);
+    const allLogText = logMessages.join(' ').toLowerCase();
+
     if (instructionType) {
       const inst = instructionType.toLowerCase();
+      // Known non-creation → always skip
       const isNonCreation =
         inst.startsWith('swap') ||
         inst.includes('addliq') ||
+        inst.includes('add_liq') ||
         inst.includes('removeliq') ||
         inst.includes('remove_liq') ||
         inst.includes('claim') ||
         inst.includes('deposit') ||
         inst.includes('withdraw') ||
         inst.includes('transfer') ||
+        inst.includes('position') ||   // InitializePosition, ClosePosition etc.
         inst.includes('close') ||
         inst.includes('fund') ||
-        inst.includes('bootstrap');
+        inst.includes('bootstrap') ||
+        inst.includes('binarray') ||   // InitializeBinArray (internal book-keeping)
+        inst.includes('bin_array');
       if (isNonCreation) {
         logger.debug({ sig: sig.slice(0, 16), instructionType, source }, 'Helius WS: skipping non-creation instruction');
+        return;
+      }
+      // Known creation → allow through
+      const isCreation =
+        inst.includes('initialize') || inst.includes('create') || inst.includes('init');
+      if (!isCreation) {
+        // Unknown instruction for this program — skip conservatively
+        logger.debug({ sig: sig.slice(0, 16), instructionType, source }, 'Helius WS: unknown instruction, skipping');
+        return;
+      }
+    } else {
+      // Could not locate Meteora invoke block in logs — use full-text scan as fallback
+      const hasNonCreation =
+        allLogText.includes('instruction: swap') ||
+        allLogText.includes('instruction: addliquidity') ||
+        allLogText.includes('instruction: removeliquidity') ||
+        allLogText.includes('instruction: claimfee') ||
+        allLogText.includes('instruction: closeposition');
+      if (hasNonCreation) return;
+
+      // If logs are substantial but have no pool-creation keyword, skip conservatively
+      const hasCreation =
+        allLogText.includes('initializelbpair') ||
+        allLogText.includes('initialize_lb_pair') ||
+        allLogText.includes('createpool') ||
+        allLogText.includes('create_pool') ||
+        allLogText.includes('createpermissionless') ||
+        allLogText.includes('createpermissioned');
+      if (logMessages.length > 5 && !hasCreation) {
+        logger.debug({ sig: sig.slice(0, 16), source }, 'Helius WS: no creation keyword in logs, skipping');
         return;
       }
     }

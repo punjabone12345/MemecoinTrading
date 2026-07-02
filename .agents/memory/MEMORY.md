@@ -18,3 +18,4 @@
 - [ED token discovery sources](ed-discovery-sources.md) — GeckoTerminal new_pools is the working source; pumpportal WS + pump.fun APIs all blocked/dead in Replit; rugcheck single-holder must be skipped for <15min tokens
 - [ED rugcheck boolean bug](ed-rugcheck-boolean-bug.md) — passing rugcheckStatus===passed (boolean) to checkEntryConditions broke the guard; always pass the raw status string
 - [ED accountSubscribe pattern](ed-accountsubscribe.md) — Helius WS handles both logsNotification (id=1) and accountNotification; track reqId→mint then swap to subscriptionId on confirmation; clean up on token prune
+- [Meteora instruction type filter bug](meteora-instruction-filter.md) — naive first-"Instruction:"-in-logs extraction returns SPL Token "InitializeAccount", not Meteora op; must scan from Meteora programId invoke line
