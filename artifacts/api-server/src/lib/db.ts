@@ -224,10 +224,18 @@ export async function initDB(): Promise<void> {
   // Uses exact-old-value guards so user edits above the threshold are preserved.
   const forceMigrations: [string, string, string][] = [
     // [key, old-value, new-value]
-    ['minLiquidity', '20000', '25000'],  // raised liquidity floor
-    ['slPct',        '25',    '20'],     // reduced hard SL
-    ['sizeScore80',  '0.75',  '1'],      // flat sizing: remove score tiers
-    ['sizeScore70',  '0.5',   '1'],      // flat sizing: remove score tiers
+    ['minLiquidity',   '20000',   '25000'],  // raised liquidity floor
+    ['slPct',          '25',      '20'],     // reduced hard SL
+    ['sizeScore80',    '0.75',    '1'],      // flat sizing: remove score tiers
+    ['sizeScore70',    '0.5',     '1'],      // flat sizing: remove score tiers
+    // ── v2: fix factory defaults that were too strict for fresh graduation events ──
+    // PumpFun tokens graduate at ~$69K MC; minMc=$500K blocked 100% of them.
+    // minVolume24h=$100K blocked tokens seconds after graduation (24h vol is tiny).
+    // Only migrate if still at the bad default — user edits above these are kept.
+    ['minMc',          '500000',  '50000'],  // $500K → $50K: catches $69K graduation MC
+    ['maxMc',          '7000000', '5000000'],// $7M  → $5M : focus on small-mid caps
+    ['minVolume24h',   '100000',  '15000'],  // $100K→ $15K: fresh tokens have low 24h vol
+    ['maxAgeHours',    '720',     '48'],     // 30 days → 48h: ignore stale tokens
   ];
   for (const [key, oldVal, newVal] of forceMigrations) {
     await query(

@@ -107,16 +107,24 @@ async function processSignature(
       }
     }
 
-    // Collect new token mints from postTokenBalances (excludes stable coins)
+    // Detect pool-creation vs swap:
+    // In a pool creation, new token accounts are initialized → mint appears in
+    // postTokenBalances but NOT in preTokenBalances (account didn't exist before).
+    // In a swap, both pre and post balances contain the same mints.
+    const preBalances  = tx.meta?.preTokenBalances  ?? [];
     const postBalances = tx.meta?.postTokenBalances ?? [];
+    const preMints = new Set(preBalances.map((b) => b.mint).filter(Boolean));
+
     const mints: string[] = [];
     for (const bal of postBalances) {
       const mint = bal.mint;
       if (!mint || STABLE_MINTS.has(mint)) continue;
+      // Only include mints that are NEW in post (not present in pre) → pool creation
+      if (preMints.has(mint)) continue;
       if (!mints.includes(mint)) mints.push(mint);
     }
 
-    if (mints.length === 0) return; // no new-token activity
+    if (mints.length === 0) return; // no new token accounts (swap or unrelated tx)
 
     // Try to infer instruction type from inner instructions / logs
     const innerInstructions = tx.meta?.innerInstructions ?? [];

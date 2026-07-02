@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { getAllTokens, getScanStats } from '../services/scanner.service.js';
-import { getSourceActivity } from '../services/trenches.service.js';
-import { getMeteoraFeed } from '../services/helius-ws.service.js';
+import { getSourceActivity, getPumpfunMints, getPumpfunFeed } from '../services/trenches.service.js';
+import { getMeteoraFeed, getMeteoraMintsCount } from '../services/helius-ws.service.js';
 import { query } from '../lib/db.js';
 
 const router = Router();
@@ -17,18 +17,24 @@ router.get('/stats', (_req, res) => {
 });
 
 router.get('/sources', (_req, res) => {
-  const activity = getSourceActivity();
-  const meteoraFeed = getMeteoraFeed();
-  const stats = getScanStats();
+  // Use the same counters as the dashboard tiles (getPumpfunMints().size and
+  // getMeteoraMintsCount()) so live-feed totals always match the tile numbers.
+  const pumpfunTotal = getPumpfunMints().size;
+  const pumpfunFeed  = getPumpfunFeed();
+  const meteoraFeed  = getMeteoraFeed();
+  const meteoraTotal = getMeteoraMintsCount();
+
   res.json({
-    ...activity,
+    pumpfun: {
+      total: pumpfunTotal,
+      recent: pumpfunFeed,
+    },
     meteora: {
-      total: stats.meteoraCount,
+      total: meteoraTotal,
       recent: meteoraFeed.map((e) => ({
         mint: e.mint,
         ts: e.ts,
         txSig: e.txSig,
-        source: e.source,
         instructionType: e.instructionType,
       })),
     },

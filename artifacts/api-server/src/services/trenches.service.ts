@@ -37,6 +37,7 @@ export function addMintSource(mint: string, source: string): boolean {
 const pumpfunMints = new Set<string>();
 
 export function getPumpfunMints(): Set<string> { return pumpfunMints; }
+export function getPumpfunFeed(): DiscoveryEvent[] { return pumpfunFeed.slice(0, MAX_FEED); }
 
 // ── Activity feed ─────────────────────────────────────────────────────────────
 export interface DiscoveryEvent {
