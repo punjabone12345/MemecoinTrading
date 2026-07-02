@@ -4,7 +4,7 @@ import { Token, FilterResult, ScoreBreakdown } from '../types/index.js';
 import { getSettings } from './settings.service.js';
 import { checkRugcheck } from './rugcheck.service.js';
 import { getMintSources, addMintSource, getPumpfunMints } from './trenches.service.js';
-import { getMeteoraMintsCount } from './helius-ws.service.js';
+import { getMeteoraMintsCount, getMeteoraMintsSet } from './helius-ws.service.js';
 
 const DEXSCREENER_BASE = 'https://api.dexscreener.com';
 
@@ -251,8 +251,12 @@ const DEX_RANK: Record<string, number> = { raydium: 100, orca: 80, meteora: 70, 
 //   1. Helius WS → Meteora DLMM/DAMM (via addToFreshMintQueue)
 //   2. PumpFun migration wallet polling (via addToFreshMintQueue)
 async function fetchDexPairs(): Promise<DexPair[]> {
-  // Also enqueue any pumpfun wallet mints not yet in the queue
+  // Re-enqueue all discovered mints on every cycle so they stay in the queue
+  // even after a first-pass pruning. PumpFun and Meteora both get the same treatment.
   for (const mint of getPumpfunMints()) {
+    if (!ageBannedMints.has(mint)) freshMintQueue.add(mint);
+  }
+  for (const mint of getMeteoraMintsSet()) {
     if (!ageBannedMints.has(mint)) freshMintQueue.add(mint);
   }
 

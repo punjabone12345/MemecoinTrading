@@ -33,6 +33,7 @@ const meteoraFeed: MeteoraEvent[] = [];
 const seenSigs = new Set<string>();
 
 export function getMeteoraMintsCount(): number { return meteoraMints.size; }
+export function getMeteoraMintsSet(): Set<string> { return meteoraMints; }
 export function getMeteoraFeed(): MeteoraEvent[] { return meteoraFeed.slice(0, 20); }
 
 // ── Concurrency limiter ───────────────────────────────────────────────────────
