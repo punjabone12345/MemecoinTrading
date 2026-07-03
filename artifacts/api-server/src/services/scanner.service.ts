@@ -187,11 +187,9 @@ const ALLOWED_DEXES = ['raydium', 'pump-fun', 'pumpfun', 'pumpswap', 'orca', 'me
 
 function getAgeAdjustedMinScore(ageH: number, settingsMin: number): number {
   const ageMin = ageH * 60;
-  let required: number;
-  if (ageMin < 30) required = 90;
-  else if (ageMin < 60) required = 85;
-  else required = 80;
-  return Math.max(settingsMin, required);
+  if (ageMin < 30) return settingsMin + 10; // newest tokens: stricter by +10
+  if (ageMin < 60) return settingsMin + 5;  // mid-age tokens: stricter by +5
+  return settingsMin;                        // older tokens: base min score
 }
 
 function buildFilterResults(
