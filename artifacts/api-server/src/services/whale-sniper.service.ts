@@ -743,10 +743,58 @@ async function pollTokenBuys(mint: string): Promise<void> {
     const sigs = await conn.getSignaturesForAddress(pk, { limit: 20 });
     if (!sigs.length) return;
 
-    // First poll: baseline — mark all existing sigs as seen
+    // First poll: baseline.
+    // Mark all existing sigs as seen so we don't re-process them on future polls.
+    // BUT also scan any that are RECENT (≤5 min old, after migration) — this catches
+    // whales who bought during the pool-activation delay (30s stability wait) that
+    // would otherwise be silently discarded.
     if (!mintCheckpointed.has(mint)) {
       mintCheckpointed.add(mint);
       for (const s of sigs) seen.add(s.signature);
+
+      const tok            = trackedTokens.get(mint);
+      const migrationSec   = tok ? Math.floor(tok.migrationTime / 1_000) : 0;
+      const fiveMinAgoSec  = Math.floor(Date.now() / 1_000) - 5 * 60;
+      const earlyWhales    = sigs.filter(
+        s => !s.err && s.blockTime != null && s.blockTime >= Math.max(migrationSec, fiveMinAgoSec),
+      );
+
+      if (earlyWhales.length === 0) return;
+
+      logger.info(
+        { mint: mint.slice(0, 12), count: earlyWhales.length },
+        'Whale sniper: baseline — scanning recent txns for early whale buys',
+      );
+
+      await fetchSolPrice();
+      let currentPrice = 0;
+      try {
+        const r     = await axios.get<any>(`${DEX_BASE}/latest/dex/tokens/${mint}`, { timeout: 5_000 });
+        const pairs: any[] = (r.data?.pairs ?? []).sort((a: any, b: any) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0));
+        currentPrice = parseFloat(pairs[0]?.priceUsd ?? '0');
+      } catch { /* use 0 */ }
+
+      // Process from oldest → newest so we trigger on the FIRST qualifying buy
+      const toFetchEarly = earlyWhales.slice().reverse().slice(0, 5).map(s => s.signature);
+      const earlyTxns    = await Promise.all(
+        toFetchEarly.map(sig =>
+          conn.getParsedTransaction(sig, { maxSupportedTransactionVersion: 0 }).catch(() => null),
+        ),
+      );
+      for (let i = 0; i < earlyTxns.length; i++) {
+        const tx = earlyTxns[i];
+        if (!tx) continue;
+        const buy = detectBuy(tx, mint);
+        if (!buy) continue;
+        const amountUsd = buy.solSpent * cachedSolPrice;
+        if (amountUsd < 10) continue;
+        logger.info(
+          { mint: mint.slice(0, 12), wallet: buy.wallet.slice(0, 8), usd: amountUsd.toFixed(0), sig: toFetchEarly[i].slice(0, 12) },
+          'Whale sniper: baseline — early whale buy found',
+        );
+        await handleWhaleBuy(mint, buy.wallet, amountUsd, toFetchEarly[i], currentPrice);
+        if (trackedTokens.get(mint)?.entryTriggered) break; // entered — stop scanning
+      }
       return;
     }
 
