@@ -41,7 +41,7 @@ export default function SettingsPage({ settings: init, onUpdate }: Props) {
   const [resetInput, setResetInput] = useState('');
 
   function update(key: keyof Settings, value: string) {
-    const numKeys = ['minMc','maxMc','minVolume24h','minAgeHours','maxAgeHours','scanFrequencyMs','minBuySellRatio','maxTopHolder','maxCreatorPct','minLiquidity','minEntryScore','trendChecksRequired','maxOpenPositions','sizeScore90','sizeScore80','sizeScore70','slPct','tp1Pct','tp1ClosePct','tp2Pct','tp2ClosePct','tp2TrailPct','tp3Pct','tp3ClosePct','trailingSLPct','trailActivatePct','maxDailyLossPct','startingBalanceSol','currentBalanceSol','slippagePct','priorityFeeSol','whaleSlippagePct'];
+    const numKeys = ['minMc','maxMc','minVolume24h','minAgeHours','maxAgeHours','scanFrequencyMs','minBuySellRatio','maxTopHolder','maxCreatorPct','minLiquidity','minEntryScore','trendChecksRequired','maxOpenPositions','sizeScore90','sizeScore80','sizeScore70','slPct','tp1Pct','tp1ClosePct','tp2Pct','tp2ClosePct','tp2TrailPct','tp3Pct','tp3ClosePct','trailingSLPct','trailActivatePct','maxDailyLossPct','startingBalanceSol','currentBalanceSol','slippagePct','priorityFeeSol','whaleSlippagePct','wt1Tp1Pct','wt1Tp1Exit','wt1Tp2Pct','wt1Tp2Exit','wt1Tp2Trail','wt1Tp3Pct','wt1Tp3Exit','wt1Tp3Trail','wt2Tp1Pct','wt2Tp1Exit','wt2Tp2Pct','wt2Tp2Exit','wt2Tp2Trail','wt2Tp3Pct','wt2Tp3Exit','wt2Tp3Trail','wt3Tp1Pct','wt3Tp1Exit','wt3Tp2Pct','wt3Tp2Exit','wt3Tp2Trail','wt3Tp3Pct','wt3Tp3Exit','wt3Tp3Trail'];
     const updated = { ...settings } as Record<string, unknown>;
     if (numKeys.includes(key)) updated[key] = parseFloat(value) || 0;
     else updated[key] = value;
@@ -94,6 +94,74 @@ export default function SettingsPage({ settings: init, onUpdate }: Props) {
           min={0} step={0.1} suffix="SOL"
           sublabel="Updates automatically when positions open/close in paper mode"
         />
+      </Section>
+
+      {/* Whale TP Tiers */}
+      <Section title="Whale TP Tiers" color="#ff9900">
+        <div style={{ fontSize: 11, color: '#3a5070', marginBottom: 14, lineHeight: 1.6 }}>
+          Each TP exits <b style={{ color: '#c0c8e0' }}>30% of the original position</b> → 10% runner held until trailing SL. Tier is set by whale buy size at detection.
+        </div>
+
+        {/* Tier header helper */}
+        {([
+          { label: 'Tier 1 — $500–$999 buys',   k: 'wt1' as const, color: '#00d4ff' },
+          { label: 'Tier 2 — $1000–$1999 buys', k: 'wt2' as const, color: '#9b59ff' },
+          { label: 'Tier 3 — $2000+ buys',       k: 'wt3' as const, color: '#ff9900' },
+        ] as const).map(({ label, k, color }) => (
+          <div key={k} style={{ marginBottom: 18 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+              <div style={{ width: 3, height: 12, borderRadius: 2, background: color }} />
+              <span style={{ fontSize: 11, fontWeight: 800, color, letterSpacing: '0.06em' }}>{label}</span>
+            </div>
+
+            {/* Column headers */}
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 6, marginBottom: 4 }}>
+              {['Level', 'Gain %', 'Exit %', 'SL Trail %'].map(h => (
+                <div key={h} style={{ fontSize: 10, color: '#2a3a50', fontWeight: 700, letterSpacing: '0.05em' }}>{h}</div>
+              ))}
+            </div>
+
+            {/* TP1 row */}
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 6, marginBottom: 6, alignItems: 'center' }}>
+              <div style={{ fontSize: 11, color: '#7090b0', fontWeight: 700 }}>TP1</div>
+              <input type="number" value={n(`${k}Tp1Pct` as keyof Settings)} min={10} max={500} step={5}
+                onChange={e => update(`${k}Tp1Pct` as keyof Settings, e.target.value)}
+                className="input-premium" style={{ padding: '6px 8px', fontSize: 12 }} />
+              <input type="number" value={n(`${k}Tp1Exit` as keyof Settings)} min={5} max={50} step={5}
+                onChange={e => update(`${k}Tp1Exit` as keyof Settings, e.target.value)}
+                className="input-premium" style={{ padding: '6px 8px', fontSize: 12 }} />
+              <div style={{ fontSize: 10, color: '#3a5070', fontStyle: 'italic' }}>→ Breakeven</div>
+            </div>
+
+            {/* TP2 row */}
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 6, marginBottom: 6, alignItems: 'center' }}>
+              <div style={{ fontSize: 11, color: '#7090b0', fontWeight: 700 }}>TP2</div>
+              <input type="number" value={n(`${k}Tp2Pct` as keyof Settings)} min={10} max={1000} step={5}
+                onChange={e => update(`${k}Tp2Pct` as keyof Settings, e.target.value)}
+                className="input-premium" style={{ padding: '6px 8px', fontSize: 12 }} />
+              <input type="number" value={n(`${k}Tp2Exit` as keyof Settings)} min={5} max={50} step={5}
+                onChange={e => update(`${k}Tp2Exit` as keyof Settings, e.target.value)}
+                className="input-premium" style={{ padding: '6px 8px', fontSize: 12 }} />
+              <input type="number" value={n(`${k}Tp2Trail` as keyof Settings)} min={5} max={50} step={5}
+                onChange={e => update(`${k}Tp2Trail` as keyof Settings, e.target.value)}
+                className="input-premium" style={{ padding: '6px 8px', fontSize: 12 }} />
+            </div>
+
+            {/* TP3 row */}
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 6, alignItems: 'center' }}>
+              <div style={{ fontSize: 11, color: '#7090b0', fontWeight: 700 }}>TP3 + Runner</div>
+              <input type="number" value={n(`${k}Tp3Pct` as keyof Settings)} min={10} max={2000} step={10}
+                onChange={e => update(`${k}Tp3Pct` as keyof Settings, e.target.value)}
+                className="input-premium" style={{ padding: '6px 8px', fontSize: 12 }} />
+              <input type="number" value={n(`${k}Tp3Exit` as keyof Settings)} min={5} max={50} step={5}
+                onChange={e => update(`${k}Tp3Exit` as keyof Settings, e.target.value)}
+                className="input-premium" style={{ padding: '6px 8px', fontSize: 12 }} />
+              <input type="number" value={n(`${k}Tp3Trail` as keyof Settings)} min={3} max={50} step={1}
+                onChange={e => update(`${k}Tp3Trail` as keyof Settings, e.target.value)}
+                className="input-premium" style={{ padding: '6px 8px', fontSize: 12 }} />
+            </div>
+          </div>
+        ))}
       </Section>
 
       <Section title="Stop Loss" color="#ff4466">

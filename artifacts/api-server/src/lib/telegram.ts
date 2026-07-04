@@ -154,6 +154,32 @@ export async function notifyWhaleClose(params: {
   );
 }
 
+export async function notifyWhaleTP(params: {
+  name: string; symbol: string; mint: string;
+  tpNum: 1 | 2 | 3; gainPct: number;
+  chunkSol: number; returnedSol: number;
+  remainingSizeSol: number; initialSizeSol: number;
+  newSLPrice: number; newSLDesc: string;
+  entryPrice: number; currentPrice: number;
+  totalBanked: number;
+}): Promise<void> {
+  const { name, symbol, mint, tpNum, gainPct, chunkSol, returnedSol,
+          remainingSizeSol, initialSizeSol, newSLPrice, newSLDesc,
+          entryPrice, currentPrice, totalBanked } = params;
+  const profitSol = returnedSol - chunkSol;
+  const pctRemaining = initialSizeSol > 0 ? ((remainingSizeSol / initialSizeSol) * 100).toFixed(0) : '?';
+  await sendMessage(
+    `🎯 <b>WHALE TP${tpNum} — ${symbol}</b> (${name})\n` +
+    `Mint: <code>${mint.slice(0, 16)}…</code>\n` +
+    `Gain: +${gainPct.toFixed(1)}%  (Entry ${entryPrice.toFixed(8)} → ${currentPrice.toFixed(8)})\n` +
+    `Sold: ${chunkSol.toFixed(4)} SOL → ${returnedSol.toFixed(4)} SOL (+${profitSol.toFixed(4)} profit)\n` +
+    `Remaining: ${pctRemaining}% of position (${remainingSizeSol.toFixed(4)} SOL)\n` +
+    `Total banked: ${totalBanked.toFixed(4)} SOL\n` +
+    `New SL: ${newSLPrice.toFixed(8)} (${newSLDesc})\n` +
+    `Time: ${toIST(new Date())}`
+  );
+}
+
 export async function notifyWhaleSkip(params: {
   name: string; symbol: string; mint: string;
   whaleAmountUsd: number; reason: string;

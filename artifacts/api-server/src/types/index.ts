@@ -124,6 +124,16 @@ export interface Settings {
   priorityFeeSol: number;
   walletPublicKey: string;
   whaleSlippagePct: number;
+  // Whale TP tier configs ($500-$999 / $1000-$1999 / $2000+)
+  wt1Tp1Pct: number;  wt1Tp1Exit: number;
+  wt1Tp2Pct: number;  wt1Tp2Exit: number;  wt1Tp2Trail: number;
+  wt1Tp3Pct: number;  wt1Tp3Exit: number;  wt1Tp3Trail: number;
+  wt2Tp1Pct: number;  wt2Tp1Exit: number;
+  wt2Tp2Pct: number;  wt2Tp2Exit: number;  wt2Tp2Trail: number;
+  wt2Tp3Pct: number;  wt2Tp3Exit: number;  wt2Tp3Trail: number;
+  wt3Tp1Pct: number;  wt3Tp1Exit: number;
+  wt3Tp2Pct: number;  wt3Tp2Exit: number;  wt3Tp2Trail: number;
+  wt3Tp3Pct: number;  wt3Tp3Exit: number;  wt3Tp3Trail: number;
 }
 
 export interface Analytics {

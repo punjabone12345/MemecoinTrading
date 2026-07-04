@@ -193,6 +193,16 @@ export async function initDB(): Promise<void> {
     `ALTER TABLE tokens ADD COLUMN IF NOT EXISTS last_updated   TIMESTAMPTZ DEFAULT NOW()`,
     // Source labels: comma-separated list of discovery sources ('bot', 'trenches', 'pumpfun')
     `ALTER TABLE positions ADD COLUMN IF NOT EXISTS sources TEXT DEFAULT '[]'`,
+    // whale_positions TP tier columns (multi-stage exits)
+    `ALTER TABLE whale_positions ADD COLUMN IF NOT EXISTS tp1_hit BOOLEAN DEFAULT FALSE`,
+    `ALTER TABLE whale_positions ADD COLUMN IF NOT EXISTS tp2_hit BOOLEAN DEFAULT FALSE`,
+    `ALTER TABLE whale_positions ADD COLUMN IF NOT EXISTS tp3_hit BOOLEAN DEFAULT FALSE`,
+    `ALTER TABLE whale_positions ADD COLUMN IF NOT EXISTS initial_size_sol NUMERIC DEFAULT 0`,
+    `ALTER TABLE whale_positions ADD COLUMN IF NOT EXISTS remaining_size_sol NUMERIC DEFAULT 0`,
+    `ALTER TABLE whale_positions ADD COLUMN IF NOT EXISTS banked_sol NUMERIC DEFAULT 0`,
+    `ALTER TABLE whale_positions ADD COLUMN IF NOT EXISTS tp_tier INTEGER DEFAULT 1`,
+    `ALTER TABLE whale_positions ADD COLUMN IF NOT EXISTS trigger_amount_usd NUMERIC DEFAULT 0`,
+    `ALTER TABLE whale_positions ADD COLUMN IF NOT EXISTS current_sl_price NUMERIC DEFAULT 0`,
   ];
 
   for (const sql of migrations) {
@@ -238,6 +248,16 @@ export async function initDB(): Promise<void> {
     ['slippagePct', '1'],
     ['priorityFeeSol', '0.001'],
     ['walletPublicKey', ''],
+    // Whale TP tier configs
+    ['wt1Tp1Pct', '50'],   ['wt1Tp1Exit', '30'],
+    ['wt1Tp2Pct', '125'],  ['wt1Tp2Exit', '30'],  ['wt1Tp2Trail', '30'],
+    ['wt1Tp3Pct', '200'],  ['wt1Tp3Exit', '30'],  ['wt1Tp3Trail', '20'],
+    ['wt2Tp1Pct', '100'],  ['wt2Tp1Exit', '30'],
+    ['wt2Tp2Pct', '250'],  ['wt2Tp2Exit', '30'],  ['wt2Tp2Trail', '25'],
+    ['wt2Tp3Pct', '400'],  ['wt2Tp3Exit', '30'],  ['wt2Tp3Trail', '15'],
+    ['wt3Tp1Pct', '150'],  ['wt3Tp1Exit', '30'],
+    ['wt3Tp2Pct', '350'],  ['wt3Tp2Exit', '30'],  ['wt3Tp2Trail', '20'],
+    ['wt3Tp3Pct', '550'],  ['wt3Tp3Exit', '30'],  ['wt3Tp3Trail', '10'],
   ];
 
   for (const [key, value] of seedDefaults) {

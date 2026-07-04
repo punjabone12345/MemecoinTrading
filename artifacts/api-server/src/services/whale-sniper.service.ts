@@ -4,7 +4,7 @@ import { WebSocket } from 'ws';
 import { logger } from '../lib/logger.js';
 import { broadcast } from '../websocket/server.js';
 import { getBalance, setBalance, getSettings } from './settings.service.js';
-import { notifyWhaleTrade, notifyWhaleSkip, notifyWhaleClose } from '../lib/telegram.js';
+import { notifyWhaleTrade, notifyWhaleSkip, notifyWhaleClose, notifyWhaleTP } from '../lib/telegram.js';
 import { query } from '../lib/db.js';
 
 const MAX_TRACKING_MS       = 30 * 60 * 1_000;
@@ -69,7 +69,7 @@ export interface WhalePosition {
   entryPrice: number;
   entryMcap: number;
   entryTime: number;
-  sizeSol: number;
+  sizeSol: number;       // kept in sync with remainingSizeSol for display
   sizePct: number;
   peakPrice: number;
   lastPrice: number;
@@ -77,6 +77,48 @@ export interface WhalePosition {
   baselineLiquidity: number;
   migrationTime: number;
   pnlPct: number;
+  // Multi-stage TP
+  tp1Hit: boolean;
+  tp2Hit: boolean;
+  tp3Hit: boolean;
+  initialSizeSol: number;    // original allocation (immutable)
+  remainingSizeSol: number;  // still-open portion (decreases at each TP)
+  bankedSol: number;         // SOL returned to balance from partial closes
+  tpTier: 1 | 2 | 3;
+  triggerAmountUsd: number;
+  currentSLPrice: number;    // hard SL → breakeven → trailing
+}
+
+// ── Tier config ───────────────────────────────────────────────────────────────
+
+interface WhaleTierConfig {
+  tp1Pct: number;   tp1Exit: number;
+  tp2Pct: number;   tp2Exit: number;   tp2Trail: number;
+  tp3Pct: number;   tp3Exit: number;   tp3Trail: number;
+}
+
+function determineTier(amountUsd: number): 1 | 2 | 3 {
+  if (amountUsd >= 2_000) return 3;
+  if (amountUsd >= 1_000) return 2;
+  return 1;
+}
+
+function getTierConfig(tier: 1 | 2 | 3, s: { [k: string]: number }): WhaleTierConfig {
+  if (tier === 3) return {
+    tp1Pct: s['wt3Tp1Pct'] ?? 150, tp1Exit: s['wt3Tp1Exit'] ?? 30,
+    tp2Pct: s['wt3Tp2Pct'] ?? 350, tp2Exit: s['wt3Tp2Exit'] ?? 30, tp2Trail: s['wt3Tp2Trail'] ?? 20,
+    tp3Pct: s['wt3Tp3Pct'] ?? 550, tp3Exit: s['wt3Tp3Exit'] ?? 30, tp3Trail: s['wt3Tp3Trail'] ?? 10,
+  };
+  if (tier === 2) return {
+    tp1Pct: s['wt2Tp1Pct'] ?? 100, tp1Exit: s['wt2Tp1Exit'] ?? 30,
+    tp2Pct: s['wt2Tp2Pct'] ?? 250, tp2Exit: s['wt2Tp2Exit'] ?? 30, tp2Trail: s['wt2Tp2Trail'] ?? 25,
+    tp3Pct: s['wt2Tp3Pct'] ?? 400, tp3Exit: s['wt2Tp3Exit'] ?? 30, tp3Trail: s['wt2Tp3Trail'] ?? 15,
+  };
+  return {
+    tp1Pct: s['wt1Tp1Pct'] ?? 50,  tp1Exit: s['wt1Tp1Exit'] ?? 30,
+    tp2Pct: s['wt1Tp2Pct'] ?? 125, tp2Exit: s['wt1Tp2Exit'] ?? 30, tp2Trail: s['wt1Tp2Trail'] ?? 30,
+    tp3Pct: s['wt1Tp3Pct'] ?? 200, tp3Exit: s['wt1Tp3Exit'] ?? 30, tp3Trail: s['wt1Tp3Trail'] ?? 20,
+  };
 }
 
 export interface ClosedWhalePosition extends WhalePosition {
@@ -395,16 +437,28 @@ async function saveWhalePosition(pos: WhalePosition): Promise<void> {
     await query(
       `INSERT INTO whale_positions
         (id, mint, name, symbol, entry_price, entry_mcap, entry_time, size_sol, size_pct,
-         peak_price, last_price, last_liquidity, baseline_liquidity, migration_time, pnl_pct, status)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,'OPEN')
+         peak_price, last_price, last_liquidity, baseline_liquidity, migration_time, pnl_pct,
+         tp1_hit, tp2_hit, tp3_hit, initial_size_sol, remaining_size_sol, banked_sol,
+         tp_tier, trigger_amount_usd, current_sl_price, status)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,'OPEN')
        ON CONFLICT (id) DO UPDATE SET
-         peak_price = EXCLUDED.peak_price,
-         last_price = EXCLUDED.last_price,
-         last_liquidity = EXCLUDED.last_liquidity,
-         pnl_pct = EXCLUDED.pnl_pct`,
+         peak_price        = EXCLUDED.peak_price,
+         last_price        = EXCLUDED.last_price,
+         last_liquidity    = EXCLUDED.last_liquidity,
+         pnl_pct           = EXCLUDED.pnl_pct,
+         size_sol          = EXCLUDED.size_sol,
+         tp1_hit           = EXCLUDED.tp1_hit,
+         tp2_hit           = EXCLUDED.tp2_hit,
+         tp3_hit           = EXCLUDED.tp3_hit,
+         remaining_size_sol = EXCLUDED.remaining_size_sol,
+         banked_sol        = EXCLUDED.banked_sol,
+         current_sl_price  = EXCLUDED.current_sl_price`,
       [pos.id, pos.mint, pos.name, pos.symbol, pos.entryPrice, pos.entryMcap ?? 0, pos.entryTime,
        pos.sizeSol, pos.sizePct, pos.peakPrice, pos.lastPrice, pos.lastLiquidity,
-       pos.baselineLiquidity, pos.migrationTime, pos.pnlPct],
+       pos.baselineLiquidity, pos.migrationTime, pos.pnlPct,
+       pos.tp1Hit, pos.tp2Hit, pos.tp3Hit,
+       pos.initialSizeSol, pos.remainingSizeSol, pos.bankedSol,
+       pos.tpTier, pos.triggerAmountUsd, pos.currentSLPrice],
     );
   } catch (err: any) {
     logger.warn({ err: err?.message }, 'Whale sniper: failed to persist position');
@@ -426,14 +480,28 @@ export async function restoreWhalePositionsFromDB(): Promise<void> {
   try {
     const rows = await query<any>(`SELECT * FROM whale_positions WHERE status = 'OPEN' ORDER BY entry_time ASC`);
     for (const r of rows) {
+      const rawSize   = Number(r.size_sol);
+      const initSize  = Number(r.initial_size_sol ?? 0) || rawSize;
+      const remSize   = Number(r.remaining_size_sol ?? 0) || rawSize;
+      const entryP    = Number(r.entry_price);
+      const storedSL  = Number(r.current_sl_price ?? 0);
       const pos: WhalePosition = {
         id: r.id, mint: r.mint, name: r.name, symbol: r.symbol,
-        entryPrice: Number(r.entry_price), entryMcap: Number(r.entry_mcap ?? 0),
+        entryPrice: entryP, entryMcap: Number(r.entry_mcap ?? 0),
         entryTime: Number(r.entry_time),
-        sizeSol: Number(r.size_sol), sizePct: Number(r.size_pct),
+        sizeSol: remSize, sizePct: Number(r.size_pct),
         peakPrice: Number(r.peak_price), lastPrice: Number(r.last_price),
         lastLiquidity: Number(r.last_liquidity), baselineLiquidity: Number(r.baseline_liquidity),
         migrationTime: Number(r.migration_time), pnlPct: Number(r.pnl_pct),
+        tp1Hit:           Boolean(r.tp1_hit),
+        tp2Hit:           Boolean(r.tp2_hit),
+        tp3Hit:           Boolean(r.tp3_hit),
+        initialSizeSol:   initSize,
+        remainingSizeSol: remSize,
+        bankedSol:        Number(r.banked_sol ?? 0),
+        tpTier:           (Number(r.tp_tier ?? 1) as 1 | 2 | 3),
+        triggerAmountUsd: Number(r.trigger_amount_usd ?? 0),
+        currentSLPrice:   storedSL > 0 ? storedSL : entryP * (1 - PRICE_SL_PCT),
       };
       whalePositions.set(pos.mint, pos);
     }
@@ -441,15 +509,23 @@ export async function restoreWhalePositionsFromDB(): Promise<void> {
       `SELECT * FROM whale_positions WHERE status = 'CLOSED' ORDER BY close_time DESC LIMIT 20`,
     );
     for (const r of closedRows) {
+      const rawSize = Number(r.size_sol);
       closedPositions.push({
         id: r.id, mint: r.mint, name: r.name, symbol: r.symbol,
         entryPrice: Number(r.entry_price), entryMcap: Number(r.entry_mcap ?? 0),
         entryTime: Number(r.entry_time),
-        sizeSol: Number(r.size_sol), sizePct: Number(r.size_pct),
+        sizeSol: rawSize, sizePct: Number(r.size_pct),
         peakPrice: Number(r.peak_price), lastPrice: Number(r.last_price),
         lastLiquidity: Number(r.last_liquidity), baselineLiquidity: Number(r.baseline_liquidity),
         migrationTime: Number(r.migration_time), pnlPct: Number(r.pnl_pct),
         closeTime: Number(r.close_time), closeReason: r.close_reason ?? '', closePnlPct: Number(r.close_pnl_pct ?? 0),
+        tp1Hit: Boolean(r.tp1_hit), tp2Hit: Boolean(r.tp2_hit), tp3Hit: Boolean(r.tp3_hit),
+        initialSizeSol: Number(r.initial_size_sol ?? 0) || rawSize,
+        remainingSizeSol: Number(r.remaining_size_sol ?? 0) || rawSize,
+        bankedSol: Number(r.banked_sol ?? 0),
+        tpTier: (Number(r.tp_tier ?? 1) as 1 | 2 | 3),
+        triggerAmountUsd: Number(r.trigger_amount_usd ?? 0),
+        currentSLPrice: Number(r.current_sl_price ?? 0),
       });
     }
     if (rows.length > 0 || closedRows.length > 0) {
@@ -524,6 +600,7 @@ async function enterWhalePosition(
 
     const balance = await getBalance().catch(() => 10);
     const sizeSol = balance * (sizePct / 100);
+    const tpTier  = determineTier(triggerAmountUsd);
 
     const pos: WhalePosition = {
       id: `${mint}-${Date.now()}`,
@@ -537,6 +614,14 @@ async function enterWhalePosition(
       baselineLiquidity: liquidity > 0 ? liquidity : 1,
       migrationTime: trackedTokens.get(mint)?.migrationTime ?? Date.now(),
       pnlPct: 0,
+      // Multi-stage TP
+      tp1Hit: false, tp2Hit: false, tp3Hit: false,
+      initialSizeSol:    sizeSol,
+      remainingSizeSol:  sizeSol,
+      bankedSol:         0,
+      tpTier,
+      triggerAmountUsd,
+      currentSLPrice:    entryPrice * (1 - PRICE_SL_PCT),
     };
 
     whalePositions.set(mint, pos);
@@ -705,30 +790,87 @@ async function pollTokenBuys(mint: string): Promise<void> {
 
 // ── Position exit monitoring ──────────────────────────────────────────────────
 
+// ── Partial close at a TP level ───────────────────────────────────────────────
+
+async function partialCloseWhaleTP(
+  pos: WhalePosition,
+  tpNum: 1 | 2 | 3,
+  exitPct: number,       // % of initialSizeSol to sell (e.g. 30)
+  currentPrice: number,
+  newSLPrice: number,
+  newSLDesc: string,
+): Promise<void> {
+  const chunkSol    = pos.initialSizeSol * (exitPct / 100);
+  const returnedSol = chunkSol * (currentPrice / pos.entryPrice);
+  const profitOnChunk = returnedSol - chunkSol;
+
+  pos.bankedSol        += returnedSol;
+  pos.remainingSizeSol -= chunkSol;
+  pos.sizeSol           = pos.remainingSizeSol;  // keep UI field in sync
+  pos.currentSLPrice    = newSLPrice;
+
+  // Credit returned SOL to balance immediately
+  const bal = await getBalance().catch(() => 0);
+  await setBalance(bal + returnedSol).catch(() => {});
+
+  void saveWhalePosition(pos);
+  broadcastWhaleStatus();
+
+  const gainPct = (currentPrice / pos.entryPrice - 1) * 100;
+  logger.info(
+    { mint: pos.mint.slice(0, 12), symbol: pos.symbol, tpNum,
+      gainPct: gainPct.toFixed(1), chunkSol: chunkSol.toFixed(4),
+      returnedSol: returnedSol.toFixed(4), profitOnChunk: profitOnChunk.toFixed(4),
+      remaining: pos.remainingSizeSol.toFixed(4), newSLPrice },
+    `Whale sniper: TP${tpNum} partial close`,
+  );
+
+  notifyWhaleTP({
+    name: pos.name, symbol: pos.symbol, mint: pos.mint,
+    tpNum, gainPct,
+    chunkSol, returnedSol,
+    remainingSizeSol: pos.remainingSizeSol,
+    initialSizeSol:   pos.initialSizeSol,
+    newSLPrice, newSLDesc,
+    entryPrice: pos.entryPrice, currentPrice,
+    totalBanked: pos.bankedSol,
+  }).catch(() => {});
+}
+
+// ── Full position close ───────────────────────────────────────────────────────
+
 async function closeWhalePosition(pos: WhalePosition, reason: string): Promise<void> {
-  // Synchronous reservation, same rationale as enterWhalePosition — prevents
-  // two overlapping monitor cycles from both closing (and double-crediting
-  // balance for) the same position.
+  // Synchronous reservation — prevents two overlapping monitor cycles from
+  // both closing (and double-crediting balance for) the same position.
   if (closeLocks.has(pos.mint) || !whalePositions.has(pos.mint)) return;
   closeLocks.add(pos.mint);
   whalePositions.delete(pos.mint);
 
   try {
-    const pnlPct  = ((pos.lastPrice - pos.entryPrice) / pos.entryPrice) * 100;
-    const pnlSol  = pos.sizeSol * (pnlPct / 100);
-    const newBal  = (await getBalance().catch(() => 0)) + pos.sizeSol + pnlSol;
+    const exitPrice = pos.lastPrice;
+
+    // Runner return: value of the remaining open portion at exit price.
+    // bankedSol was already credited to balance on each partial TP close.
+    const runnerReturn = pos.remainingSizeSol * (exitPrice / pos.entryPrice);
+    const totalReturn  = pos.bankedSol + runnerReturn;
+    const initSize     = pos.initialSizeSol > 0.0001 ? pos.initialSizeSol : pos.sizeSol;
+    const pnlSol       = totalReturn - initSize;
+    const pnlPct       = (pnlSol / initSize) * 100;
+
+    // Only add runner's return — banked portions already credited
+    const newBal = (await getBalance().catch(() => 0)) + runnerReturn;
     await setBalance(Math.max(0, newBal)).catch(() => {});
 
     closedPositions.unshift({ ...pos, closeTime: Date.now(), closeReason: reason, closePnlPct: pnlPct });
     if (closedPositions.length > 100) closedPositions.pop();
     void closeWhalePositionInDB(pos.id, reason, pnlPct);
 
-    logger.info({ mint: pos.mint, symbol: pos.symbol, pnlPct: pnlPct.toFixed(1), reason }, 'Whale sniper: CLOSED');
+    logger.info({ mint: pos.mint, symbol: pos.symbol, pnlPct: pnlPct.toFixed(1), pnlSol: pnlSol.toFixed(4), reason }, 'Whale sniper: CLOSED');
 
     notifyWhaleClose({
       name: pos.name, symbol: pos.symbol, mint: pos.mint,
       pnlPct, pnlSol, reason,
-      entryPrice: pos.entryPrice, exitPrice: pos.lastPrice, sizeSol: pos.sizeSol,
+      entryPrice: pos.entryPrice, exitPrice, sizeSol: initSize,
     }).catch(() => {});
 
     broadcastWhaleStatus();
@@ -741,6 +883,9 @@ async function closeWhalePosition(pos: WhalePosition, reason: string): Promise<v
 async function monitorPositions(): Promise<void> {
   const mints = Array.from(whalePositions.keys());
   if (mints.length === 0) return;
+
+  let settings: Awaited<ReturnType<typeof getSettings>>;
+  try { settings = await getSettings(); } catch { return; }
 
   try {
     const r      = await axios.get<any>(`${DEX_BASE}/latest/dex/tokens/${mints.slice(0, 30).join(',')}`, { timeout: 8_000 });
@@ -756,34 +901,78 @@ async function monitorPositions(): Promise<void> {
       const liquidity = best.liquidity?.usd ?? 0;
       if (price <= 0) continue;
 
+      // Update live price & peak
       pos.lastPrice     = price;
       pos.lastLiquidity = liquidity;
-      pos.pnlPct        = ((price - pos.entryPrice) / pos.entryPrice) * 100;
       if (price > pos.peakPrice) pos.peakPrice = price;
+
+      // Live P&L: accounts for banked SOL from partial closes
+      const initSize = pos.initialSizeSol > 0.0001 ? pos.initialSizeSol : pos.sizeSol;
+      pos.pnlPct = initSize > 0
+        ? ((pos.bankedSol + pos.remainingSizeSol * (price / pos.entryPrice) - initSize) / initSize) * 100
+        : ((price - pos.entryPrice) / pos.entryPrice) * 100;
+
       void saveWhalePosition(pos);
 
-      // TP: +100% (no grace period — capturing a 2x is always correct)
-      if (price >= pos.entryPrice * 2) {
-        await closeWhalePosition(pos, '+100% take profit');
-        continue;
+      const cfg = getTierConfig(pos.tpTier, settings as unknown as Record<string, number>);
+      let tpHitThisCycle = false;
+
+      // ── Multi-stage TP checks (in order) ──────────────────────────────────
+
+      // TP1
+      if (!pos.tp1Hit && price >= pos.entryPrice * (1 + cfg.tp1Pct / 100)) {
+        pos.tp1Hit = true;
+        const newSL = pos.entryPrice;  // breakeven
+        await partialCloseWhaleTP(pos, 1, cfg.tp1Exit, price, newSL, 'breakeven');
+        tpHitThisCycle = true;
       }
 
-      // Grace period: skip SL/liquidity exits for the first 90s after entry.
-      // The entry price comes from a single-mint DexScreener fetch; monitorPositions
-      // uses a multi-mint query that can return a slightly different price, causing
-      // the SL to fire immediately on volatile tokens before the trade has a chance
-      // to develop. TP is still active during the grace window.
+      // TP2 (requires TP1)
+      if (pos.tp1Hit && !pos.tp2Hit && price >= pos.entryPrice * (1 + cfg.tp2Pct / 100)) {
+        pos.tp2Hit = true;
+        const newSL = Math.max(pos.currentSLPrice, pos.peakPrice * (1 - cfg.tp2Trail / 100));
+        await partialCloseWhaleTP(pos, 2, cfg.tp2Exit, price, newSL, `-${cfg.tp2Trail}% from peak`);
+        tpHitThisCycle = true;
+      }
+
+      // TP3 (requires TP2)
+      if (pos.tp2Hit && !pos.tp3Hit && price >= pos.entryPrice * (1 + cfg.tp3Pct / 100)) {
+        pos.tp3Hit = true;
+        const newSL = Math.max(pos.currentSLPrice, pos.peakPrice * (1 - cfg.tp3Trail / 100));
+        await partialCloseWhaleTP(pos, 3, cfg.tp3Exit, price, newSL, `-${cfg.tp3Trail}% from peak (runner)`);
+        tpHitThisCycle = true;
+      }
+
+      // ── Ratchet trailing SL upward as peak rises ──────────────────────────
+      if (pos.tp3Hit) {
+        const trail = pos.peakPrice * (1 - cfg.tp3Trail / 100);
+        if (trail > pos.currentSLPrice) pos.currentSLPrice = trail;
+      } else if (pos.tp2Hit) {
+        const trail = pos.peakPrice * (1 - cfg.tp2Trail / 100);
+        if (trail > pos.currentSLPrice) pos.currentSLPrice = trail;
+      }
+
+      // Grace period: suppress SL/liq/time exits for 90s post-entry.
+      // Entry price (single-mint DexScreener) vs monitor price (multi-mint) can
+      // diverge enough to trigger SL before the trade has developed.
       const posAgeMs = Date.now() - pos.entryTime;
       if (posAgeMs < 90_000) continue;
 
-      // SL: price dropped -30% from entry
-      if (price <= pos.entryPrice * (1 - PRICE_SL_PCT)) {
-        await closeWhalePosition(pos, `-${(PRICE_SL_PCT * 100).toFixed(0)}% stop loss`);
+      // ── Exit conditions (skip if a TP just fired this cycle) ─────────────
+
+      // SL hit
+      if (!tpHitThisCycle && price <= pos.currentSLPrice) {
+        let slReason: string;
+        if (pos.tp3Hit)      slReason = `Runner SL (-${cfg.tp3Trail}% from peak)`;
+        else if (pos.tp2Hit) slReason = `Trailing SL (-${cfg.tp2Trail}% from peak)`;
+        else if (pos.tp1Hit) slReason = 'Breakeven SL';
+        else                 slReason = `-${(PRICE_SL_PCT * 100).toFixed(0)}% hard stop loss`;
+        await closeWhalePosition(pos, slReason);
         continue;
       }
 
-      // Emergency: liq dropped >40%
-      if (pos.baselineLiquidity > 1 && liquidity > 0) {
+      // Emergency: liquidity dropped >40%
+      if (!tpHitThisCycle && pos.baselineLiquidity > 1 && liquidity > 0) {
         const drop = (pos.baselineLiquidity - liquidity) / pos.baselineLiquidity;
         if (drop > 0.4) {
           await closeWhalePosition(pos, `Liquidity -${(drop * 100).toFixed(0)}% emergency exit`);
@@ -791,13 +980,13 @@ async function monitorPositions(): Promise<void> {
         }
       }
 
-      // Emergency: liq at zero
-      if (liquidity === 0 && pos.baselineLiquidity > 1) {
+      // Emergency: liquidity went to zero
+      if (!tpHitThisCycle && liquidity === 0 && pos.baselineLiquidity > 1) {
         await closeWhalePosition(pos, 'Liquidity $0 — emergency exit');
         continue;
       }
 
-      // Time exit: 30min from migration
+      // Time exit: 30min from migration (runner allowed to run beyond this)
       if (pos.migrationTime && Date.now() - pos.migrationTime > MAX_TRACKING_MS) {
         await closeWhalePosition(pos, '30min from migration — time exit');
         continue;

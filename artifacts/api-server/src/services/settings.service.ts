@@ -69,6 +69,16 @@ export async function getSettings(): Promise<Settings> {
     priorityFeeSol: num('priorityFeeSol', 0.001),
     walletPublicKey: str('walletPublicKey', ''),
     whaleSlippagePct: num('whaleSlippagePct', 20),
+    // Whale TP tier configs
+    wt1Tp1Pct: num('wt1Tp1Pct', 50),   wt1Tp1Exit: num('wt1Tp1Exit', 30),
+    wt1Tp2Pct: num('wt1Tp2Pct', 125),  wt1Tp2Exit: num('wt1Tp2Exit', 30),  wt1Tp2Trail: num('wt1Tp2Trail', 30),
+    wt1Tp3Pct: num('wt1Tp3Pct', 200),  wt1Tp3Exit: num('wt1Tp3Exit', 30),  wt1Tp3Trail: num('wt1Tp3Trail', 20),
+    wt2Tp1Pct: num('wt2Tp1Pct', 100),  wt2Tp1Exit: num('wt2Tp1Exit', 30),
+    wt2Tp2Pct: num('wt2Tp2Pct', 250),  wt2Tp2Exit: num('wt2Tp2Exit', 30),  wt2Tp2Trail: num('wt2Tp2Trail', 25),
+    wt2Tp3Pct: num('wt2Tp3Pct', 400),  wt2Tp3Exit: num('wt2Tp3Exit', 30),  wt2Tp3Trail: num('wt2Tp3Trail', 15),
+    wt3Tp1Pct: num('wt3Tp1Pct', 150),  wt3Tp1Exit: num('wt3Tp1Exit', 30),
+    wt3Tp2Pct: num('wt3Tp2Pct', 350),  wt3Tp2Exit: num('wt3Tp2Exit', 30),  wt3Tp2Trail: num('wt3Tp2Trail', 20),
+    wt3Tp3Pct: num('wt3Tp3Pct', 550),  wt3Tp3Exit: num('wt3Tp3Exit', 30),  wt3Tp3Trail: num('wt3Tp3Trail', 10),
   };
 
   settingsCache = settings;
