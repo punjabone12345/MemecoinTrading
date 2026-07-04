@@ -3,7 +3,8 @@ import app from './app.js';
 import { initDB } from './lib/db.js';
 import { initWebSocket } from './websocket/server.js';
 import { startAutoTrader } from './services/auto-trader.service.js';
-import { startTrenchesScanner, setOnMintSourceUpdated, setOnNewMint } from './services/trenches.service.js';
+import { startTrenchesScanner, setOnMintSourceUpdated, setOnNewMint, setOnGraduation } from './services/trenches.service.js';
+import { startWhaleSniper, addGraduatedToken } from './services/whale-sniper.service.js';
 import { startHeliusWatcher } from './services/helius-ws.service.js';
 import { addToFreshMintQueue } from './services/scanner.service.js';
 import { startPriceMonitor } from './services/price-monitor.service.js';
@@ -28,9 +29,11 @@ async function main(): Promise<void> {
 
   // Wire discovery callbacks → freshMintQueue
   setOnNewMint(addToFreshMintQueue);
+  setOnGraduation(addGraduatedToken);
   startTrenchesScanner();
   startHeliusWatcher(addToFreshMintQueue);
   startAutoTrader();
+  startWhaleSniper();
   startPriceMonitor();
   startTelegramCommands();
   setOnMintSourceUpdated(async (mint, sources) => {

@@ -1,597 +1,500 @@
-import { useState, useMemo, useEffect, useRef, memo, useCallback } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Token, ScanStats, Settings } from '../lib/types.js';
-import { formatMC, formatAge, formatPrice } from '../lib/utils.js';
 
-interface DiscoveryEvent { mint: string; ts: number; txSig?: string; instructionType?: string; }
-interface SourceActivity {
-  meteora: { total: number; recent: DiscoveryEvent[] };
-  pumpfun: { total: number; recent: DiscoveryEvent[] };
+// ── Types (mirrors whale-sniper.service.ts) ───────────────────────────────────
+
+interface WhaleBuy {
+  wallet: string;
+  amountUsd: number;
+  timestamp: number;
+  txSig: string;
 }
 
-function useSourceActivity() {
-  const [data, setData] = useState<SourceActivity | null>(null);
-  const [prevTotals, setPrevTotals] = useState({ meteora: 0, pumpfun: 0 });
-
-  useEffect(() => {
-    let cancelled = false;
-    async function poll() {
-      try {
-        const res = await fetch('/api/scanner/sources');
-        if (!res.ok) return;
-        const json: SourceActivity = await res.json();
-        if (!cancelled) {
-          setData((prev) => {
-            if (prev) {
-              setPrevTotals({ meteora: prev.meteora?.total ?? 0, pumpfun: prev.pumpfun?.total ?? 0 });
-            }
-            return json;
-          });
-        }
-      } catch { /* ignore */ }
-    }
-    poll();
-    const id = setInterval(poll, 2000);
-    return () => { cancelled = true; clearInterval(id); };
-  }, []);
-
-  return { data, prevTotals };
+interface TrackedToken {
+  mint: string;
+  name: string;
+  symbol: string;
+  poolAddress?: string;
+  migrationTime: number;
+  expiresAt: number;
+  entryTriggered: boolean;
+  whaleBuys: WhaleBuy[];
 }
 
-function ago(ts: number): string {
+interface WhalePosition {
+  id: string;
+  mint: string;
+  name: string;
+  symbol: string;
+  entryPrice: number;
+  entryTime: number;
+  sizeSol: number;
+  sizePct: number;
+  peakPrice: number;
+  lastPrice: number;
+  lastLiquidity: number;
+  baselineLiquidity: number;
+  migrationTime: number;
+  pnlPct: number;
+}
+
+interface ClosedWhalePosition extends WhalePosition {
+  closeTime: number;
+  closeReason: string;
+  closePnlPct: number;
+}
+
+interface WhaleBuyLog {
+  mint: string;
+  name: string;
+  symbol: string;
+  wallet: string;
+  amountUsd: number;
+  timestamp: number;
+  txSig: string;
+  entered: boolean;
+  skipReason?: string;
+}
+
+interface PendingSignal {
+  mint: string;
+  name: string;
+  symbol: string;
+  sizePct: number;
+  triggerAmountUsd: number;
+  queuedAt: number;
+}
+
+interface WhaleStatus {
+  trackedTokens: TrackedToken[];
+  openPositions: WhalePosition[];
+  closedPositions: ClosedWhalePosition[];
+  recentBuyLog: WhaleBuyLog[];
+  queuedSignals: PendingSignal[];
+  solPriceUsd: number;
+  stats: { tracking: number; positions: number; queued: number };
+}
+
+// ── Props ─────────────────────────────────────────────────────────────────────
+
+interface Props {
+  tokens: Token[];
+  scanStats: ScanStats;
+  settings: Settings | null;
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+function timeAgo(ts: number): string {
   const s = Math.floor((Date.now() - ts) / 1000);
   if (s < 60) return `${s}s ago`;
   return `${Math.floor(s / 60)}m ago`;
 }
 
-function LiveSourceFeed() {
-  const { data, prevTotals } = useSourceActivity();
+function countdown(expiresAt: number): string {
+  const ms = expiresAt - Date.now();
+  if (ms <= 0) return 'expired';
+  const s = Math.floor(ms / 1000);
+  const m = Math.floor(s / 60);
+  const ss = s % 60;
+  return `${m}:${ss.toString().padStart(2, '0')}`;
+}
+
+function countdownPct(migrationTime: number, expiresAt: number): number {
+  const total = expiresAt - migrationTime;
+  const elapsed = Date.now() - migrationTime;
+  return Math.min(100, Math.max(0, (elapsed / total) * 100));
+}
+
+function fmtUsd(n: number): string {
+  if (n >= 1000) return `$${(n / 1000).toFixed(1)}k`;
+  return `$${n.toFixed(0)}`;
+}
+
+function fmtPnl(pct: number): string {
+  return (pct >= 0 ? '+' : '') + pct.toFixed(1) + '%';
+}
+
+function shortAddr(addr: string): string {
+  return addr.slice(0, 4) + '…' + addr.slice(-4);
+}
+
+// ── Whale status hook ─────────────────────────────────────────────────────────
+
+function useWhaleStatus() {
+  const [status, setStatus] = useState<WhaleStatus | null>(null);
   const [tick, setTick] = useState(0);
+
+  // Poll API every 2s
   useEffect(() => {
-    const id = setInterval(() => setTick((t) => t + 1), 2000);
+    let cancelled = false;
+    async function poll() {
+      try {
+        const r = await fetch('/api/whale/status');
+        if (!r.ok) return;
+        const data: WhaleStatus = await r.json();
+        if (!cancelled) setStatus(data);
+      } catch { /* ignore */ }
+    }
+    poll();
+    const id = setInterval(poll, 2_000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, []);
+
+  // Tick every second for countdown timers
+  useEffect(() => {
+    const id = setInterval(() => setTick(t => t + 1), 1_000);
     return () => clearInterval(id);
   }, []);
 
-  const sources = [
-    {
-      key: 'pumpfun' as const,
-      icon: '🔥',
-      label: 'PumpFun Migration Wallet',
-      sublabel: 'On-chain — polls 39azUY… wallet every 5s for migrate/pool_create',
-      color: '#ff8c00',
-      border: 'rgba(255,140,0,0.25)',
-      bg: 'rgba(255,140,0,0.06)',
-    },
-    {
-      key: 'meteora' as const,
-      icon: '🌊',
-      label: 'Meteora DLMM + DAMM',
-      sublabel: 'Helius WebSocket — real-time pool creation events',
-      color: '#00d4ff',
-      border: 'rgba(0,212,255,0.25)',
-      bg: 'rgba(0,212,255,0.06)',
-    },
-  ];
-
-  return (
-    <div className="card" style={{ padding: '14px 16px' }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
-        <span style={{ fontSize: 10, fontWeight: 800, letterSpacing: '0.1em', color: '#3a5070' }}>LIVE DISCOVERY FEED</span>
-        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 9, color: '#00ff88', fontWeight: 800 }}>
-          <span style={{ width: 5, height: 5, borderRadius: '50%', background: '#00ff88', boxShadow: '0 0 6px #00ff88', display: 'inline-block', animation: 'pulse-dot 1.2s ease-in-out infinite' }} />
-          POLLING EVERY 5s
-        </span>
-      </div>
-
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-        {sources.map((src) => {
-          const info = data?.[src.key];
-          const total = info?.total ?? 0;
-          const prev = prevTotals[src.key];
-          const newSinceLastPoll = Math.max(0, total - prev);
-          const recent = info?.recent ?? [];
-
-          return (
-            <div key={src.key} style={{ borderRadius: 10, border: `1px solid ${src.border}`, background: src.bg, padding: '12px 14px' }}>
-              {/* Header row */}
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
-                <div>
-                  <span style={{ fontSize: 12, fontWeight: 800, color: src.color }}>{src.icon} {src.label}</span>
-                  <div style={{ fontSize: 9, color: '#3a5070', marginTop: 2 }}>{src.sublabel}</div>
-                </div>
-                <div style={{ textAlign: 'right' }}>
-                  <div style={{ fontSize: 20, fontWeight: 900, color: src.color, lineHeight: 1 }}>{total.toLocaleString()}</div>
-                  <div style={{ fontSize: 9, color: '#3a5070', marginTop: 1 }}>total discovered</div>
-                </div>
-              </div>
-
-              {/* Rate indicator */}
-              {newSinceLastPoll > 0 && (
-                <div style={{ marginBottom: 8, padding: '4px 8px', borderRadius: 6, background: `${src.color}18`, border: `1px solid ${src.color}44`, display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 10, fontWeight: 800, color: src.color }}>
-                  <span style={{ width: 6, height: 6, borderRadius: '50%', background: src.color, display: 'inline-block', boxShadow: `0 0 6px ${src.color}` }} />
-                  +{newSinceLastPoll} new this poll
-                </div>
-              )}
-
-              {/* Rolling mint feed */}
-              {recent.length === 0 ? (
-                <div style={{ fontSize: 10, color: '#3a5070', padding: '6px 0' }}>Waiting for first discovery…</div>
-              ) : (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 4, maxHeight: 130, overflowY: 'auto' }}>
-                  {recent.map((ev, i) => (
-                    <div key={ev.mint} style={{
-                      display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                      padding: '4px 8px', borderRadius: 6,
-                      background: i === 0 ? `${src.color}18` : 'rgba(255,255,255,0.02)',
-                      border: `1px solid ${i === 0 ? src.color + '44' : 'rgba(255,255,255,0.05)'}`,
-                      transition: 'background 0.3s',
-                    }}>
-                      <span style={{ fontSize: 10, fontFamily: 'monospace', color: i === 0 ? src.color : '#4a6080', letterSpacing: '0.02em' }}>
-                        {i === 0 && <span style={{ marginRight: 4, fontSize: 8, fontWeight: 900, color: src.color }}>NEW</span>}
-                        {ev.mint.slice(0, 8)}…{ev.mint.slice(-6)}
-                      </span>
-                      <span style={{ fontSize: 9, color: i === 0 ? src.color : '#2a4060', fontWeight: i === 0 ? 700 : 400 }}>
-                        {ago(ev.ts)}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          );
-        })}
-      </div>
-    </div>
-  );
+  return { status, tick };
 }
 
-interface Props { tokens: Token[]; scanStats: ScanStats; settings: Settings | null }
-type Sort = 'score' | 'marketCap' | 'age' | 'priceChange24h' | 'priceChange5m';
-type Filter = 'ALL' | 'ELIGIBLE' | 'SCANNING' | 'ENTERED' | 'REJECTED';
-type SourceFilter = 'ALL' | 'pumpfun' | 'meteora' | 'bot';
+// ── Discovery source feed hook (graduation events) ───────────────────────────
 
-const ScoreRing = memo(function ScoreRing({ score }: { score: number }) {
-  const size = 46, r = 18, circ = 2 * Math.PI * r;
-  const filled = (score / 100) * circ;
-  const color = score >= 70 ? '#00ff88' : score >= 50 ? '#ffd700' : '#ff4466';
-  return (
-    <div style={{ position: 'relative', width: size, height: size, flexShrink: 0 }}>
-      <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
-        <circle cx={size/2} cy={size/2} r={r} fill="none" stroke="rgba(255,255,255,0.06)" strokeWidth={4} />
-        <circle cx={size/2} cy={size/2} r={r} fill="none" stroke={color} strokeWidth={4}
-          strokeDasharray={`${filled} ${circ - filled}`} strokeLinecap="round"
-          className="score-ring" style={{ filter: `drop-shadow(0 0 4px ${color}66)` }} />
-      </svg>
-      <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-        <span style={{ fontSize: 11, fontWeight: 900, color }}>{score}</span>
-      </div>
-    </div>
-  );
-});
+interface DiscoveryEvent { mint: string; ts: number; txSig?: string; instructionType?: string; }
+interface SourceActivity {
+  pumpfun: { total: number; recent: DiscoveryEvent[] };
+}
 
-const StatusBadge = memo(function StatusBadge({ status }: { status: Token['status'] }) {
-  const cls = { ELIGIBLE: 'badge-eligible', SCANNING: 'badge-scanning', ENTERED: 'badge-entered', REJECTED: 'badge-rejected' }[status];
-  return <span className={`badge ${cls}`}>{status}</span>;
-});
+function useSourceActivity() {
+  const [data, setData] = useState<SourceActivity | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    async function poll() {
+      try {
+        const r = await fetch('/api/scanner/sources');
+        if (!r.ok) return;
+        const json = await r.json();
+        if (!cancelled) setStatus(json);
+      } catch { /* ignore */ }
+      function setStatus(d: SourceActivity) { if (!cancelled) setData(d); }
+    }
+    poll();
+    const id = setInterval(poll, 3_000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, []);
+  return data;
+}
 
-const SOURCE_STYLES: Record<string, { bg: string; border: string; color: string; label: string }> = {
-  pumpfun:  { bg: 'rgba(255,140,0,0.12)',  border: 'rgba(255,140,0,0.35)',  color: '#ff8c00', label: '🔥 PumpFun' },
-  meteora:  { bg: 'rgba(0,212,255,0.10)',  border: 'rgba(0,212,255,0.28)',  color: '#00d4ff', label: '🌊 Meteora' },
-  bot:      { bg: 'rgba(100,180,100,0.10)', border: 'rgba(100,180,100,0.28)', color: '#64b464', label: '🤖 Bot' },
+// ── Sub-components ────────────────────────────────────────────────────────────
+
+const C = {
+  card:   { background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.07)', borderRadius: 12, padding: '12px 14px', marginBottom: 10 } as React.CSSProperties,
+  label:  { fontSize: 9, fontWeight: 800, letterSpacing: '0.12em', color: '#3a5070' } as React.CSSProperties,
+  whale:  '#00bfff',
+  green:  '#00ff88',
+  red:    '#ff4466',
+  yellow: '#ffd700',
+  gray:   '#4a6080',
 };
 
-const SourceBadges = memo(function SourceBadges({ sources }: { sources?: string[] }) {
-  if (!sources || sources.length === 0) return null;
+function StatPill({ label, value, color }: { label: string; value: string | number; color?: string }) {
   return (
-    <span style={{ display: 'inline-flex', gap: 4, flexWrap: 'wrap' }}>
-      {sources.map((src) => {
-        const s = SOURCE_STYLES[src] ?? { bg: 'rgba(255,255,255,0.06)', border: 'rgba(255,255,255,0.15)', color: '#7090b0', label: src };
-        return (
-          <span key={src} style={{
-            padding: '1px 6px', borderRadius: 5, fontSize: 9, fontWeight: 800,
-            background: s.bg, border: `1px solid ${s.border}`, color: s.color,
-            letterSpacing: '0.02em',
-          }}>{s.label}</span>
-        );
-      })}
-    </span>
-  );
-});
-
-// Single clock ticks in DiscoverPage — now is passed down; no per-card timers
-function FreshnessDot({ lastChecked, now }: { lastChecked: number; now: number }) {
-  const ageMs = now - lastChecked;
-  const ageSec = Math.floor(ageMs / 1000);
-  const isHot = ageMs < 5_000;
-  const isRecent = ageMs < 20_000;
-  const color = isHot ? '#00ff88' : isRecent ? '#00d4ff' : '#3a5070';
-  const label = ageSec < 60 ? `${ageSec}s ago` : `${Math.floor(ageSec / 60)}m ago`;
-  return (
-    <span title={`Data refreshed ${label}`} style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 10, color, fontWeight: isHot ? 800 : 600 }}>
-      <span style={{
-        display: 'inline-block', width: 6, height: 6, borderRadius: '50%', background: color,
-        boxShadow: isHot ? `0 0 6px ${color}` : 'none',
-        animation: isHot ? 'pulse-dot 1s ease-in-out infinite' : 'none',
-      }} />
-      {label}
-    </span>
-  );
-}
-
-function TradeBlockBanner({ token, settings, dailyLossLimitHit, dailyPnl, dailyLossLimit }: {
-  token: Token; settings: Settings;
-  dailyLossLimitHit?: boolean; dailyPnl?: number; dailyLossLimit?: number;
-}) {
-  if (dailyLossLimitHit) {
-    const pnlStr = dailyPnl !== undefined ? dailyPnl.toFixed(4) : '?';
-    const limitStr = dailyLossLimit !== undefined ? dailyLossLimit.toFixed(4) : '?';
-    return (
-      <div style={{ marginTop: 8, padding: '8px 12px', borderRadius: 8, background: 'rgba(255,68,102,0.08)', border: '1px solid rgba(255,68,102,0.25)', fontSize: 11 }}>
-        <div style={{ color: '#ff4466', fontWeight: 700, marginBottom: 4 }}>🚫 Daily loss limit hit — trading paused until midnight</div>
-        <div style={{ color: '#a03050' }}>Today P&amp;L: <b style={{ color: '#ff4466' }}>{pnlStr} SOL</b> / limit: <b>{limitStr} SOL</b></div>
-        <div style={{ color: '#a03050', marginTop: 3, fontSize: 10 }}>Reset settings &gt; max daily loss % to unlock, or wait for next day</div>
-      </div>
-    );
-  }
-
-  const reasons: string[] = [];
-  const ageMin = (token.age ?? 0) * 60;
-  const ageBucket = ageMin < 30 ? '0–30m' : ageMin < 60 ? '30–60m' : '≥1h';
-  const ageAdjMin = ageMin < 30
-    ? settings.minEntryScore + 10
-    : ageMin < 60
-      ? settings.minEntryScore + 5
-      : settings.minEntryScore;
-  if (token.score < ageAdjMin)
-    reasons.push(`Score ${token.score} below min ${ageAdjMin} (${ageBucket} age bucket)`);
-  if (token.buySellRatio < settings.minBuySellRatio)
-    reasons.push(`Buy/Sell ratio ${token.buySellRatio.toFixed(2)}x below ${settings.minBuySellRatio}x`);
-  if (token.priceChange5m > 50)
-    reasons.push(`5m pump +${token.priceChange5m.toFixed(1)}% — FOMO guard (>50% in 5m blocks entry)`);
-
-  if (reasons.length === 0) {
-    return (
-      <div style={{ marginTop: 8, padding: '7px 12px', borderRadius: 8, background: 'rgba(0,255,136,0.06)', border: '1px solid rgba(0,255,136,0.2)', fontSize: 11, color: '#00ff88' }}>
-        ✅ All conditions met — entering position next cycle
-      </div>
-    );
-  }
-  return (
-    <div style={{ marginTop: 8, padding: '8px 12px', borderRadius: 8, background: 'rgba(255,180,0,0.06)', border: '1px solid rgba(255,180,0,0.2)', fontSize: 11 }}>
-      <div style={{ color: '#ffd700', fontWeight: 700, marginBottom: 5 }}>⏳ Waiting to trade — conditions not met:</div>
-      {reasons.map((r, i) => <div key={i} style={{ color: '#b08830', marginBottom: 2 }}>• {r}</div>)}
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2, minWidth: 54 }}>
+      <span style={{ fontSize: 18, fontWeight: 900, color: color ?? C.whale, fontVariantNumeric: 'tabular-nums' }}>{value}</span>
+      <span style={{ fontSize: 8, fontWeight: 800, letterSpacing: '0.1em', color: C.gray, textTransform: 'uppercase' }}>{label}</span>
     </div>
   );
 }
 
-// Memoized — only re-renders when token data or now-bucket (5s rounding) changes
-const TokenCard = memo(function TokenCard({ token, settings, scanStats, now }: { token: Token; settings: Settings | null; scanStats: ScanStats; now: number }) {
-  const [open, setOpen] = useState(false);
-  const isEligible = token.status === 'ELIGIBLE';
-  const isEntered = token.status === 'ENTERED';
-  const c5m = token.priceChange5m;
-  const c1h = token.priceChange1h ?? 0;
+function TrackedCard({ tok, tick }: { tok: TrackedToken; tick: number }) {
+  void tick;
+  const pct       = countdownPct(tok.migrationTime, tok.expiresAt);
+  const remaining = countdown(tok.expiresAt);
+  const expired   = tok.expiresAt <= Date.now();
+  const biggestBuy = tok.whaleBuys.reduce((max, b) => b.amountUsd > max ? b.amountUsd : max, 0);
 
   return (
-    <div className={`card ${isEligible ? 'card-glow-green' : isEntered ? 'card-glow-gold' : ''}`}
-      style={{ borderColor: isEligible ? 'rgba(0,255,136,0.2)' : isEntered ? 'rgba(255,215,0,0.2)' : undefined, overflow: 'hidden' }}>
-      <div style={{ padding: '14px 16px' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-          <ScoreRing score={token.score} />
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 4 }}>
-              <span style={{ fontWeight: 800, fontSize: 14, color: '#d4e0f0' }}>{token.symbol}</span>
-              <span style={{ fontSize: 11, color: '#3a5070', maxWidth: 100, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{token.name}</span>
-              <StatusBadge status={token.status} />
-              <SourceBadges sources={token.sources} />
-              {token.lastChecked && <FreshnessDot lastChecked={token.lastChecked} now={now} />}
-            </div>
-            <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', fontSize: 11, color: '#3a5070' }}>
-              <span>MC <b style={{ color: '#7090b0' }}>{formatMC(token.marketCap)}</b></span>
-              <span>Vol <b style={{ color: '#7090b0' }}>{formatMC(token.volume24h)}</b></span>
-              <span>Age <b style={{ color: '#7090b0' }}>{formatAge(token.age)}</b></span>
-              <span style={{ color: token.priceChange24h >= 0 ? '#00ff88' : '#ff4466', fontWeight: 700 }}>
-                {token.priceChange24h >= 0 ? '+' : ''}{token.priceChange24h.toFixed(1)}% 24h
-              </span>
-            </div>
-            <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', fontSize: 11, marginTop: 3 }}>
-              <span style={{ color: c5m >= 3 ? '#00ff88' : c5m >= 0 ? '#7090b0' : '#ff4466', fontWeight: 700 }}>
-                5m {c5m >= 0 ? '+' : ''}{c5m.toFixed(1)}%
-              </span>
-              <span style={{ color: c1h >= 0 ? '#7090b0' : '#ff4466' }}>
-                1h {c1h >= 0 ? '+' : ''}{c1h.toFixed(1)}%
-              </span>
-              <span style={{ color: token.buySellRatio >= 1.5 ? '#00ff88' : token.buySellRatio >= 1.1 ? '#7090b0' : '#ff4466' }}>
-                B/S {token.buySellRatio.toFixed(2)}x
-              </span>
-              <span style={{ color: '#3a5070' }}>
-                Trend <b style={{ color: token.consecutiveTrending >= (settings?.trendChecksRequired ?? 2) ? '#00ff88' : '#7090b0' }}>
-                  {token.consecutiveTrending}/{settings?.trendChecksRequired ?? 2}↑
-                </b>
-              </span>
-            </div>
+    <div style={{
+      ...C.card, marginBottom: 8,
+      borderColor: tok.entryTriggered ? 'rgba(0,255,136,0.25)' : biggestBuy >= 500 ? 'rgba(0,191,255,0.3)' : 'rgba(255,255,255,0.07)',
+    }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+        <div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <span style={{ fontSize: 13, fontWeight: 900, color: '#e0e8ff' }}>{tok.symbol}</span>
+            <span style={{ fontSize: 9, color: C.gray }}>{tok.name}</span>
+            {tok.entryTriggered && (
+              <span style={{ fontSize: 8, fontWeight: 800, padding: '2px 6px', borderRadius: 4, background: 'rgba(0,255,136,0.12)', color: C.green, border: '1px solid rgba(0,255,136,0.3)' }}>ENTERED</span>
+            )}
           </div>
-          <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
-            <a href={`https://dexscreener.com/solana/${token.mint}`} target="_blank" rel="noopener noreferrer"
-              className="btn-primary" style={{ padding: '5px 10px', fontSize: 11, textDecoration: 'none', display: 'inline-block' }}
-              onClick={(e) => e.stopPropagation()}>DEX ↗</a>
-            <button onClick={() => setOpen(!open)}
-              style={{ width: 28, height: 28, borderRadius: 8, background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.08)', color: '#7090b0', cursor: 'pointer', fontSize: 11 }}>
-              {open ? '▲' : '▼'}
-            </button>
+          <div style={{ fontSize: 9, color: C.gray, marginTop: 3, fontFamily: 'monospace' }}>
+            {shortAddr(tok.mint)}
           </div>
         </div>
 
-        {token.tradedToday && token.status !== 'ENTERED' && (
-          <div style={{ marginTop: 6, padding: '7px 12px', borderRadius: 8, background: 'rgba(155,89,255,0.08)', border: '1px solid rgba(155,89,255,0.25)', fontSize: 11 }}>
-            <span style={{ color: '#9b59ff', fontWeight: 700 }}>🚫 Already traded today</span>
-            <span style={{ color: '#6a3a9a', marginLeft: 6 }}>— no re-entry until IST midnight</span>
+        <div style={{ textAlign: 'right' }}>
+          <div style={{ fontSize: 13, fontWeight: 900, fontVariantNumeric: 'tabular-nums', color: expired ? C.red : pct > 80 ? C.yellow : '#00d4ff' }}>
+            {remaining}
           </div>
-        )}
-        {isEligible && settings && (
-          <TradeBlockBanner token={token} settings={settings} dailyLossLimitHit={scanStats.dailyLossLimitHit} dailyPnl={scanStats.dailyPnl} dailyLossLimit={scanStats.dailyLossLimit} />
-        )}
-        {token.status === 'REJECTED' && token.rejectReason && (
-          <div style={{ marginTop: 6, padding: '5px 10px', borderRadius: 6, background: 'rgba(255,68,102,0.06)', border: '1px solid rgba(255,68,102,0.15)', fontSize: 11, color: '#ff6680' }}>
-            ❌ {token.rejectReason}
-          </div>
-        )}
+          <div style={{ fontSize: 8, color: C.gray }}>remaining</div>
+        </div>
       </div>
 
-      {open && (
-        <div style={{ borderTop: '1px solid rgba(255,255,255,0.06)', padding: '14px 16px' }}>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
-            <div>
-              <div className="section-label" style={{ marginBottom: 10 }}>Score Breakdown</div>
-              {[
-                { label: 'Price Momentum', v: token.scoreBreakdown?.priceMomentum ?? 0, color: '#00d4ff' },
-                { label: 'Volume Momentum', v: token.scoreBreakdown?.volumeMomentum ?? 0, color: '#9b59ff' },
-                { label: 'Buy Pressure', v: token.scoreBreakdown?.buyPressure ?? 0, color: '#00ff88' },
-                { label: 'MC Quality', v: token.scoreBreakdown?.mcQuality ?? 0, color: '#ffd700' },
-              ].map((item) => (
-                <div key={item.label} style={{ marginBottom: 8 }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, marginBottom: 4, color: '#3a5070' }}>
-                    <span>{item.label}</span>
-                    <span style={{ color: item.color, fontWeight: 700 }}>{item.v}/25</span>
-                  </div>
-                  <div style={{ height: 4, borderRadius: 4, background: 'rgba(255,255,255,0.06)' }}>
-                    <div style={{ height: '100%', borderRadius: 4, width: `${(item.v / 25) * 100}%`, background: item.color, boxShadow: `0 0 6px ${item.color}55`, transition: 'width 0.4s ease' }} />
-                  </div>
-                </div>
-              ))}
-              <div style={{ marginTop: 10, paddingTop: 10, borderTop: '1px solid rgba(255,255,255,0.06)', fontSize: 11 }}>
-                <span style={{ color: '#3a5070' }}>Price </span>
-                <b style={{ color: '#7090b0' }}>${formatPrice(token.price)}</b>
-              </div>
-            </div>
-            <div>
-              <div className="section-label" style={{ marginBottom: 10 }}>Filter Checks</div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
-                {(token.filterResults ?? []).map((f) => (
-                  <div key={f.name} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: 10 }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-                      <span>{f.passed ? '✅' : '❌'}</span>
-                      <span style={{ color: f.passed ? '#7090b0' : '#ff4466' }}>{f.name}</span>
-                    </div>
-                    <span style={{ color: f.passed ? '#3a5070' : '#ff6688', fontWeight: f.passed ? 400 : 700 }}>{f.value}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
-          {token.rejectReason && (
-            <div style={{ marginTop: 10, padding: '8px 12px', borderRadius: 10, background: 'rgba(255,68,102,0.08)', border: '1px solid rgba(255,68,102,0.18)', fontSize: 11, color: '#ff4466' }}>
-              ❌ Rejected: {token.rejectReason}
-            </div>
-          )}
+      {/* Progress bar */}
+      <div style={{ margin: '8px 0 6px', height: 3, borderRadius: 2, background: 'rgba(255,255,255,0.06)', overflow: 'hidden' }}>
+        <div style={{ width: `${pct}%`, height: '100%', borderRadius: 2, background: expired ? C.red : pct > 80 ? `linear-gradient(90deg,${C.yellow},${C.red})` : `linear-gradient(90deg,${C.whale},#7b5ea7)`, transition: 'width 1s linear' }} />
+      </div>
+
+      {/* Whale buys on this token */}
+      {tok.whaleBuys.length === 0 ? (
+        <div style={{ fontSize: 9, color: C.gray, marginTop: 2 }}>Monitoring for whale buys…</div>
+      ) : (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 2 }}>
+          {tok.whaleBuys.slice(0, 5).map((b, i) => (
+            <span key={i} style={{
+              fontSize: 9, fontWeight: 800, padding: '2px 6px', borderRadius: 4,
+              background: b.amountUsd >= 2000 ? 'rgba(0,191,255,0.18)' : b.amountUsd >= 1000 ? 'rgba(0,191,255,0.11)' : 'rgba(0,191,255,0.06)',
+              color: C.whale, border: '1px solid rgba(0,191,255,0.2)',
+            }}>
+              🐋 {fmtUsd(b.amountUsd)} · {timeAgo(b.timestamp)}
+            </span>
+          ))}
         </div>
       )}
     </div>
   );
-}, (prev, next) => {
-  // Custom comparator: skip re-render if only `now` changed but freshness bucket didn't
-  // FreshnessDot buckets: hot (<5s), recent (<20s), old (>=20s) → 5s resolution is fine
-  const prevBucket = prev.now - (prev.token.lastChecked ?? 0);
-  const nextBucket = next.now - (next.token.lastChecked ?? 0);
-  const bucketChanged =
-    (prevBucket < 5000) !== (nextBucket < 5000) ||
-    (prevBucket < 20000) !== (nextBucket < 20000) ||
-    Math.floor(prevBucket / 5000) !== Math.floor(nextBucket / 5000);
-
-  return (
-    prev.token === next.token &&
-    prev.settings === next.settings &&
-    prev.scanStats === next.scanStats &&
-    !bucketChanged
-  );
-});
-
-function LiveDot() {
-  return (
-    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 10, color: '#00ff88', fontWeight: 800, letterSpacing: '0.08em' }}>
-      <span style={{ display: 'inline-block', width: 7, height: 7, borderRadius: '50%', background: '#00ff88', boxShadow: '0 0 8px #00ff88', animation: 'pulse-dot 1.2s ease-in-out infinite' }} />
-      LIVE
-    </span>
-  );
 }
 
-const FILTERS: Filter[] = ['ALL', 'ELIGIBLE', 'SCANNING', 'ENTERED', 'REJECTED'];
-const FILTER_COLOR: Record<Filter, string> = { ALL: '#00d4ff', ELIGIBLE: '#00ff88', SCANNING: '#00d4ff', ENTERED: '#ffd700', REJECTED: '#ff4466' };
-
-export default function DiscoverPage({ tokens, scanStats, settings }: Props) {
-  const [sort, setSort] = useState<Sort>('score');
-  const [filter, setFilter] = useState<Filter>('ALL');
-  const [sourceFilter, setSourceFilter] = useState<SourceFilter>('ALL');
-  const [search, setSearch] = useState('');
-
-  // Single shared clock — replaces N per-card setInterval timers
-  // Rounds to nearest 5s so TokenCard memo skips renders when bucket unchanged
-  const [now, setNow] = useState(() => Math.round(Date.now() / 5000) * 5000);
-  const clockRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  useEffect(() => {
-    clockRef.current = setInterval(() => {
-      setNow(Math.round(Date.now() / 5000) * 5000);
-    }, 5000);
-    return () => { if (clockRef.current) clearInterval(clockRef.current); };
-  }, []);
-
-  const filtered = useMemo(() => {
-    let arr = [...tokens];
-    if (filter !== 'ALL') arr = arr.filter((t) => t.status === filter);
-    if (sourceFilter !== 'ALL') arr = arr.filter((t) => t.sources?.includes(sourceFilter));
-    if (search) { const q = search.toLowerCase(); arr = arr.filter((t) => t.symbol.toLowerCase().includes(q) || t.name.toLowerCase().includes(q)); }
-    arr.sort((a, b) =>
-      sort === 'score' ? b.score - a.score :
-      sort === 'marketCap' ? b.marketCap - a.marketCap :
-      sort === 'age' ? a.age - b.age :
-      sort === 'priceChange5m' ? b.priceChange5m - a.priceChange5m :
-      b.priceChange24h - a.priceChange24h
-    );
-    return arr;
-  }, [tokens, sort, filter, sourceFilter, search]);
-
-  const meteoraCount = scanStats.meteoraCount ?? 0;
-  const pumpfunCount = scanStats.pumpfunCount ?? 0;
-  const botCount = tokens.filter((t) => t.sources?.includes('bot') && !t.sources?.includes('pumpfun') && !t.sources?.includes('meteora')).length;
-
+function WhaleBuyRow({ entry }: { entry: WhaleBuyLog }) {
+  const tier = entry.amountUsd >= 2000 ? '🐳' : entry.amountUsd >= 1000 ? '🐋' : '🐬';
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-      {/* Source discovery counters */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8 }}>
-        {[
-          { label: 'PumpFun', value: pumpfunCount, color: '#ff8c00', glow: '', src: 'pumpfun', icon: '🔥' },
-          { label: 'Meteora', value: meteoraCount, color: '#00d4ff', glow: 'card-glow-cyan', src: 'meteora', icon: '🌊' },
-          { label: 'Bot', value: botCount, color: '#64b464', glow: '', src: 'bot', icon: '🤖' },
-        ].map((s) => {
-          const active = sourceFilter === s.src;
-          return (
-            <button key={s.label} onClick={() => setSourceFilter(active ? 'ALL' : s.src as SourceFilter)}
-              className={`card ${s.glow}`}
-              style={{
-                padding: '10px 8px', textAlign: 'center', cursor: 'pointer', border: `1px solid ${active ? s.color + '55' : 'rgba(255,255,255,0.06)'}`,
-                background: active ? `${s.color}18` : undefined,
-                boxShadow: active ? `0 0 14px ${s.color}22` : undefined,
-                transition: 'all 0.2s',
-              }}>
-              <div style={{ fontSize: 10, marginBottom: 2 }}>{s.icon}</div>
-              <div style={{ fontSize: 22, fontWeight: 900, color: s.color, lineHeight: 1 }}>{s.value}</div>
-              <div style={{ fontSize: 9, color: active ? s.color : '#3a5070', marginTop: 3, letterSpacing: '0.08em', fontWeight: 700 }}>
-                {s.label.toUpperCase()} {active && '●'}
-              </div>
-            </button>
-          );
-        })}
-      </div>
-
-      <LiveSourceFeed />
-
-      {/* Scan stats */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8 }}>
-        {[
-          { label: 'Scanning', value: scanStats.scanning, color: '#00d4ff', glow: 'card-glow-cyan' },
-          { label: 'Passed', value: scanStats.passed, color: '#ffd700', glow: 'card-glow-gold' },
-          { label: 'Eligible', value: scanStats.eligible, color: '#00ff88', glow: 'card-glow-green' },
-        ].map((s) => (
-          <div key={s.label} className={`card ${s.glow}`} style={{ padding: '12px 8px', textAlign: 'center' }}>
-            <div style={{ fontSize: 26, fontWeight: 900, color: s.color, lineHeight: 1 }}>{s.value}</div>
-            <div style={{ fontSize: 9, color: '#3a5070', marginTop: 4, letterSpacing: '0.08em', fontWeight: 700 }}>{s.label.toUpperCase()}</div>
-          </div>
-        ))}
-      </div>
-
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '8px 14px', borderRadius: 10, background: 'rgba(0,255,136,0.04)', border: '1px solid rgba(0,255,136,0.1)' }}>
-        <LiveDot />
-        <span style={{ fontSize: 10, color: '#3a5070', flex: 1, marginLeft: 8 }}>
-          Full scan every <b style={{ color: '#7090b0' }}>15s</b> · Hot refresh every <b style={{ color: '#7090b0' }}>3s</b>
-        </span>
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-          {scanStats.ageBanned !== undefined && scanStats.ageBanned > 0 && (
-            <span style={{ fontSize: 9, color: '#ff4466', fontWeight: 700, background: 'rgba(255,68,102,0.1)', border: '1px solid rgba(255,68,102,0.2)', borderRadius: 4, padding: '2px 6px' }}>
-              {scanStats.ageBanned} age-banned
+    <div style={{
+      display: 'flex', alignItems: 'flex-start', gap: 10,
+      padding: '8px 0', borderBottom: '1px solid rgba(255,255,255,0.04)',
+    }}>
+      <span style={{ fontSize: 16, flexShrink: 0, marginTop: 1 }}>{tier}</span>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+          <span style={{ fontSize: 12, fontWeight: 900, color: C.whale }}>{fmtUsd(entry.amountUsd)}</span>
+          <span style={{ fontSize: 10, color: '#e0e8ff', fontWeight: 700 }}>buy on {entry.symbol}</span>
+          {entry.entered ? (
+            <span style={{ fontSize: 8, fontWeight: 800, padding: '1px 5px', borderRadius: 3, background: 'rgba(0,255,136,0.12)', color: C.green, border: '1px solid rgba(0,255,136,0.25)' }}>
+              ENTERED
+            </span>
+          ) : (
+            <span style={{ fontSize: 8, padding: '1px 5px', borderRadius: 3, background: 'rgba(255,255,255,0.04)', color: C.gray }}>
+              {entry.skipReason ?? 'skipped'}
             </span>
           )}
-          <span style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 9, fontWeight: 700, color: '#00ff88', background: 'rgba(0,255,136,0.08)', border: '1px solid rgba(0,255,136,0.2)', borderRadius: 4, padding: '2px 6px' }}>
-            <span style={{ width: 5, height: 5, borderRadius: '50%', background: '#00ff88', boxShadow: '0 0 5px #00ff88', display: 'inline-block', animation: 'pulse-dot 1.2s ease-in-out infinite' }} />
-            PUMP.FUN POLLING LIVE
-          </span>
+        </div>
+        <div style={{ fontSize: 8, color: C.gray, marginTop: 2 }}>
+          {shortAddr(entry.wallet)} · {timeAgo(entry.timestamp)}
         </div>
       </div>
+    </div>
+  );
+}
 
-      {scanStats.rejectionCounts && Object.keys(scanStats.rejectionCounts).length > 0 && (
-        <div className="card" style={{ padding: '12px 14px' }}>
-          <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: '0.1em', color: '#3a5070', marginBottom: 10 }}>
-            REJECTION BREAKDOWN <span style={{ color: '#1a3050', fontWeight: 600 }}>({Object.values(scanStats.rejectionCounts).reduce((a, b) => a + b, 0)} filtered out)</span>
+function PositionCard({ pos }: { pos: WhalePosition }) {
+  const pnlColor = pos.pnlPct >= 0 ? C.green : C.red;
+  const tpPct    = ((pos.lastPrice / pos.entryPrice) / 2) * 100; // progress toward +100%
+  return (
+    <div style={{
+      ...C.card, marginBottom: 8,
+      borderColor: pos.pnlPct >= 0 ? 'rgba(0,255,136,0.2)' : 'rgba(255,68,102,0.2)',
+    }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+        <div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <span style={{ fontSize: 13, fontWeight: 900, color: '#e0e8ff' }}>{pos.symbol}</span>
+            <span style={{ fontSize: 9, color: C.gray }}>{pos.sizePct}% position</span>
           </div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
-            {Object.entries(scanStats.rejectionCounts).map(([reason, count]) => {
-              const total = Object.values(scanStats.rejectionCounts!).reduce((a, b) => a + b, 0);
-              const pct = total > 0 ? (count / total) * 100 : 0;
-              const isPreReject = ['MC too low', 'MC too high', 'Vol24h too low', 'Age too new', 'Age too old', 'Already pumped >500%'].includes(reason);
-              return (
-                <div key={reason} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 3 }}>
-                      <span style={{ fontSize: 10, color: isPreReject ? '#7090b0' : '#ff6688', fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {reason}
-                      </span>
-                      <span style={{ fontSize: 10, color: '#3a5070', marginLeft: 8, flexShrink: 0 }}>
-                        <b style={{ color: '#7090b0' }}>{count}</b>
-                      </span>
-                    </div>
-                    <div style={{ height: 3, borderRadius: 2, background: 'rgba(255,255,255,0.05)', overflow: 'hidden' }}>
-                      <div style={{ height: '100%', width: `${pct}%`, borderRadius: 2, background: isPreReject ? 'rgba(0,212,255,0.4)' : 'rgba(255,68,102,0.5)', transition: 'width 0.4s ease' }} />
-                    </div>
-                  </div>
-                </div>
-              );
-            })}
+          <div style={{ fontSize: 9, color: C.gray, marginTop: 2 }}>
+            Entry ${pos.entryPrice < 0.001 ? pos.entryPrice.toExponential(3) : pos.entryPrice.toFixed(6)} · {pos.sizeSol.toFixed(3)} SOL
           </div>
         </div>
-      )}
-
-      <div style={{ display: 'flex', gap: 8 }}>
-        <input type="text" placeholder="Search token..." value={search} onChange={(e) => setSearch(e.target.value)}
-          className="input-premium" style={{ flex: 1, padding: '9px 12px', fontSize: 13 }} />
-        <select value={sort} onChange={(e) => setSort(e.target.value as Sort)}
-          style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 10, color: '#d4e0f0', padding: '9px 10px', fontSize: 12, cursor: 'pointer' }}>
-          <option value="score">Score</option>
-          <option value="marketCap">Mkt Cap</option>
-          <option value="age">Newest</option>
-          <option value="priceChange5m">5m Change</option>
-          <option value="priceChange24h">24h Change</option>
-        </select>
-      </div>
-
-      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-        {FILTERS.map((f) => {
-          const active = filter === f;
-          const c = FILTER_COLOR[f];
-          const count = f === 'ALL' ? tokens.length : tokens.filter((t) => t.status === f).length;
-          return (
-            <button key={f} onClick={() => setFilter(f)}
-              style={{
-                padding: '5px 12px', borderRadius: 20, fontSize: 10, fontWeight: 800, letterSpacing: '0.05em', cursor: 'pointer',
-                background: active ? `${c}22` : 'rgba(255,255,255,0.03)',
-                border: `1px solid ${active ? `${c}55` : 'rgba(255,255,255,0.07)'}`,
-                color: active ? c : '#3a5070',
-                boxShadow: active ? `0 0 12px ${c}22` : 'none',
-              }}>{f} {count > 0 && <span style={{ opacity: 0.7 }}>({count})</span>}</button>
-          );
-        })}
-      </div>
-
-      {filtered.length === 0 ? (
-        <div style={{ textAlign: 'center', padding: '48px 20px', color: '#3a5070' }}>
-          <div style={{ fontSize: 48, marginBottom: 12 }}>🔍</div>
-          <div style={{ fontWeight: 700, color: '#7090b0', marginBottom: 6 }}>
-            {filter !== 'ALL' ? `No ${filter} tokens right now` : 'Scanning Solana...'}
-          </div>
-          <div style={{ fontSize: 12 }}>Full scan every 15s · hot refresh every 3s</div>
+        <div style={{ textAlign: 'right' }}>
+          <div style={{ fontSize: 16, fontWeight: 900, color: pnlColor, fontVariantNumeric: 'tabular-nums' }}>{fmtPnl(pos.pnlPct)}</div>
+          <div style={{ fontSize: 8, color: C.gray }}>peak {fmtPnl(((pos.peakPrice - pos.entryPrice) / pos.entryPrice) * 100)}</div>
         </div>
+      </div>
+      {/* TP progress bar */}
+      <div style={{ marginTop: 8 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 3 }}>
+          <span style={{ fontSize: 8, color: C.gray }}>Progress to +100% TP</span>
+          <span style={{ fontSize: 8, color: pnlColor, fontWeight: 700 }}>{Math.min(100, Math.max(0, tpPct)).toFixed(0)}%</span>
+        </div>
+        <div style={{ height: 3, borderRadius: 2, background: 'rgba(255,255,255,0.06)', overflow: 'hidden' }}>
+          <div style={{ width: `${Math.min(100, Math.max(0, tpPct))}%`, height: '100%', borderRadius: 2, background: `linear-gradient(90deg,${C.whale},${C.green})` }} />
+        </div>
+      </div>
+      <div style={{ display: 'flex', gap: 12, marginTop: 7 }}>
+        <span style={{ fontSize: 8, color: C.gray }}>Liq ${pos.lastLiquidity >= 1000 ? (pos.lastLiquidity / 1000).toFixed(1) + 'k' : pos.lastLiquidity.toFixed(0)}</span>
+        <span style={{ fontSize: 8, color: C.gray }}>· {timeAgo(pos.entryTime)}</span>
+      </div>
+    </div>
+  );
+}
+
+function ClosedCard({ pos }: { pos: ClosedWhalePosition }) {
+  const pnlColor = pos.closePnlPct >= 0 ? C.green : C.red;
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '7px 0', borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
+      <div>
+        <span style={{ fontSize: 11, fontWeight: 800, color: '#c0c8e0' }}>{pos.symbol}</span>
+        <span style={{ fontSize: 9, color: C.gray, marginLeft: 6 }}>{pos.closeReason}</span>
+      </div>
+      <div style={{ textAlign: 'right' }}>
+        <div style={{ fontSize: 12, fontWeight: 900, color: pnlColor }}>{fmtPnl(pos.closePnlPct)}</div>
+        <div style={{ fontSize: 8, color: C.gray }}>{timeAgo(pos.closeTime)}</div>
+      </div>
+    </div>
+  );
+}
+
+// ── Source feed (graduation events) ──────────────────────────────────────────
+
+function GraduationFeed() {
+  const data = useSourceActivity();
+  const [tick, setTick] = useState(0);
+  useEffect(() => { const id = setInterval(() => setTick(t => t + 1), 5_000); return () => clearInterval(id); }, []);
+  void tick;
+
+  const events = data?.pumpfun?.recent ?? [];
+
+  return (
+    <div style={C.card}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+        <span style={C.label}>🔥 RECENT PUMP.FUN GRADUATIONS</span>
+        <span style={{ fontSize: 9, color: C.green, fontWeight: 700 }}>
+          <span style={{ display: 'inline-block', width: 5, height: 5, borderRadius: '50%', background: C.green, boxShadow: `0 0 6px ${C.green}`, marginRight: 4, verticalAlign: 'middle' }} />
+          LIVE
+        </span>
+        {data && <span style={{ fontSize: 9, color: C.gray, marginLeft: 'auto' }}>total: {data.pumpfun?.total ?? 0}</span>}
+      </div>
+      {events.length === 0 ? (
+        <div style={{ fontSize: 9, color: C.gray }}>Waiting for graduation events…</div>
       ) : (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-          {filtered.map((t) => <TokenCard key={t.mint} token={t} settings={settings} scanStats={scanStats} now={now} />)}
+        events.slice(0, 8).map((ev, i) => (
+          <div key={i} style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', borderBottom: i < 7 ? '1px solid rgba(255,255,255,0.03)' : 'none' }}>
+            <div style={{ fontSize: 9, color: '#c0c8e0', fontFamily: 'monospace' }}>
+              {ev.mint.slice(0, 8)}…{ev.mint.slice(-6)}
+              <span style={{ fontSize: 8, color: C.gray, marginLeft: 6 }}>{ev.instructionType}</span>
+            </div>
+            <span style={{ fontSize: 8, color: C.gray }}>{timeAgo(ev.ts)}</span>
+          </div>
+        ))
+      )}
+    </div>
+  );
+}
+
+// ── Main page ─────────────────────────────────────────────────────────────────
+
+export default function DiscoverPage(_props: Props) {
+  const { status, tick } = useWhaleStatus();
+
+  const tracked  = status?.trackedTokens  ?? [];
+  const positions = status?.openPositions ?? [];
+  const buyLogs  = status?.recentBuyLog   ?? [];
+  const closed   = status?.closedPositions ?? [];
+  const queued   = status?.queuedSignals  ?? [];
+  const stats    = status?.stats ?? { tracking: 0, positions: 0, queued: 0 };
+
+  return (
+    <div>
+      {/* ── Header ── */}
+      <div style={{ ...C.card, marginBottom: 16, background: 'linear-gradient(135deg,rgba(0,191,255,0.06),rgba(123,94,167,0.06))', borderColor: 'rgba(0,191,255,0.2)' }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 }}>
+          <div>
+            <div style={{ fontSize: 18, fontWeight: 900, color: C.whale, letterSpacing: '0.04em' }}>🐋 WHALE SNIPER</div>
+            <div style={{ fontSize: 9, color: C.gray, marginTop: 2 }}>Following pump.fun graduations · Paper mode</div>
+          </div>
+          <div style={{ textAlign: 'right', fontSize: 9, color: C.gray }}>
+            SOL<br />
+            <span style={{ fontSize: 13, fontWeight: 800, color: '#e0e8ff' }}>${status?.solPriceUsd?.toFixed(0) ?? '—'}</span>
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', justifyContent: 'space-around', padding: '10px 0', borderTop: '1px solid rgba(255,255,255,0.06)', borderBottom: '1px solid rgba(255,255,255,0.06)', margin: '0 -2px' }}>
+          <StatPill label="Tracking" value={stats.tracking} />
+          <div style={{ width: 1, background: 'rgba(255,255,255,0.06)' }} />
+          <StatPill label={`Positions`} value={`${stats.positions}/10`} color={stats.positions >= 10 ? C.yellow : C.green} />
+          <div style={{ width: 1, background: 'rgba(255,255,255,0.06)' }} />
+          <StatPill label="Queued" value={stats.queued} color={stats.queued > 0 ? C.yellow : C.gray} />
+        </div>
+
+        {/* Strategy summary */}
+        <div style={{ marginTop: 12, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+          {[
+            { label: '≥$500 → 0.5%', color: 'rgba(0,191,255,0.15)' },
+            { label: '≥$1k → 0.75%', color: 'rgba(0,191,255,0.22)' },
+            { label: '≥$2k → 1%',    color: 'rgba(0,191,255,0.30)' },
+            { label: 'TP +100%',      color: 'rgba(0,255,136,0.15)' },
+            { label: 'SL liq -40%',   color: 'rgba(255,68,102,0.12)' },
+            { label: '30min window',  color: 'rgba(255,215,0,0.10)' },
+          ].map(({ label, color }) => (
+            <span key={label} style={{ fontSize: 8, fontWeight: 700, padding: '2px 7px', borderRadius: 4, background: color, color: '#c0c8e0', border: '1px solid rgba(255,255,255,0.08)' }}>{label}</span>
+          ))}
+        </div>
+      </div>
+
+      {/* ── Open Positions ── */}
+      {positions.length > 0 && (
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ ...C.label, marginBottom: 8 }}>OPEN POSITIONS ({positions.length}/10)</div>
+          {positions.map(pos => <PositionCard key={pos.id} pos={pos} />)}
         </div>
       )}
+
+      {/* ── Queued signals ── */}
+      {queued.length > 0 && (
+        <div style={{ ...C.card, marginBottom: 16, borderColor: 'rgba(255,215,0,0.2)' }}>
+          <div style={{ ...C.label, marginBottom: 8 }}>⏳ QUEUED SIGNALS ({queued.length})</div>
+          {queued.map((sig, i) => (
+            <div key={i} style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', borderBottom: i < queued.length - 1 ? '1px solid rgba(255,255,255,0.04)' : 'none' }}>
+              <span style={{ fontSize: 10, color: '#e0e8ff', fontWeight: 700 }}>{sig.symbol}</span>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                <span style={{ fontSize: 9, color: C.whale }}>🐋 {fmtUsd(sig.triggerAmountUsd)}</span>
+                <span style={{ fontSize: 9, color: C.yellow }}>{sig.sizePct}% position</span>
+                <span style={{ fontSize: 8, color: C.gray }}>{timeAgo(sig.queuedAt)}</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* ── Tracked Tokens ── */}
+      <div style={{ marginBottom: 16 }}>
+        <div style={{ ...C.label, marginBottom: 8 }}>
+          TRACKED TOKENS — 30min WATCH WINDOW {tracked.length > 0 && `(${tracked.length})`}
+        </div>
+        {tracked.length === 0 ? (
+          <div style={{ ...C.card, color: C.gray, fontSize: 11, textAlign: 'center', padding: '24px 16px' }}>
+            Watching for pump.fun graduations…<br />
+            <span style={{ fontSize: 9, color: '#2a3a50', marginTop: 6, display: 'block' }}>Every migrated token is tracked for 30 minutes</span>
+          </div>
+        ) : (
+          tracked
+            .slice()
+            .sort((a, b) => b.whaleBuys.length - a.whaleBuys.length || b.migrationTime - a.migrationTime)
+            .map(tok => <TrackedCard key={tok.mint} tok={tok} tick={tick} />)
+        )}
+      </div>
+
+      {/* ── Whale Buy Feed ── */}
+      <div style={{ ...C.card, marginBottom: 16 }}>
+        <div style={{ ...C.label, marginBottom: 2 }}>WHALE BUY FEED</div>
+        <div style={{ fontSize: 9, color: '#2a3a50', marginBottom: 10 }}>All detected buys ≥$500 on tracked tokens</div>
+        {buyLogs.length === 0 ? (
+          <div style={{ fontSize: 11, color: C.gray, textAlign: 'center', padding: '16px 0' }}>No whale buys detected yet</div>
+        ) : (
+          buyLogs.map((log, i) => <WhaleBuyRow key={i} entry={log} />)
+        )}
+      </div>
+
+      {/* ── Recently Closed ── */}
+      {closed.length > 0 && (
+        <div style={{ ...C.card, marginBottom: 16 }}>
+          <div style={{ ...C.label, marginBottom: 8 }}>RECENTLY CLOSED</div>
+          {closed.slice(0, 10).map((pos, i) => <ClosedCard key={i} pos={pos} />)}
+        </div>
+      )}
+
+      {/* ── Graduation source feed ── */}
+      <GraduationFeed />
     </div>
   );
 }

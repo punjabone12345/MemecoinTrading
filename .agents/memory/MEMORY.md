@@ -19,3 +19,4 @@
 - [ED rugcheck boolean bug](ed-rugcheck-boolean-bug.md) — passing rugcheckStatus===passed (boolean) to checkEntryConditions broke the guard; always pass the raw status string
 - [ED accountSubscribe pattern](ed-accountsubscribe.md) — Helius WS handles both logsNotification (id=1) and accountNotification; track reqId→mint then swap to subscriptionId on confirmation; clean up on token prune
 - [Meteora instruction type filter bug](meteora-instruction-filter.md) — naive first-"Instruction:"-in-logs extraction returns SPL Token "InitializeAccount", not Meteora op; must scan from Meteora programId invoke line
+- [Whale sniper architecture](whale-sniper-arch.md) — completely separate service from auto-trader; in-memory state only; buy detection via getSignaturesForAddress polling; setOnGraduation hook in trenches.service.ts

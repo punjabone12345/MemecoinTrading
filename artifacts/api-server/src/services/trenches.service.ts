@@ -102,6 +102,12 @@ export function setOnNewMint(cb: (mint: string) => void): void {
   onNewMint = cb;
 }
 
+// Callback invoked with full graduation context (for whale sniper)
+let onGraduation: ((ev: { mint: string; poolAddress?: string; ts: number }) => void) | null = null;
+export function setOnGraduation(cb: (ev: { mint: string; poolAddress?: string; ts: number }) => void): void {
+  onGraduation = cb;
+}
+
 function detectMigrationInstructionType(logs: string[]): string {
   for (const log of logs) {
     if (log.includes('MigrateV2') || log.includes('migrateV2') || log.includes('migrate_v2')) return 'migrate_v2';
@@ -175,6 +181,7 @@ async function trackMigrationWallet(): Promise<void> {
         added++;
         pushFeed(pumpfunFeed, { mint, ts: Date.now(), txSig: sig, instructionType, poolAddress, creatorWallet });
         if (onNewMint) onNewMint(mint);
+        if (onGraduation) onGraduation({ mint, poolAddress, ts: Date.now() });
 
         logger.info(
           { mint, sig: sig.slice(0, 16), instructionType, poolAddress, creatorWallet: creatorWallet.slice(0, 16) },

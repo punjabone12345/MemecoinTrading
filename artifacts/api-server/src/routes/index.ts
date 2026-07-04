@@ -2,6 +2,7 @@ import { Router } from 'express';
 import positionsRouter from './positions.js';
 import scannerRouter from './scanner.js';
 import settingsRouter from './settings.js';
+import whaleSniperRouter from './whale-sniper.js';
 
 const router = Router();
 
@@ -22,5 +23,6 @@ router.get('/config', (_req, res) => {
 router.use('/positions', positionsRouter);
 router.use('/scanner', scannerRouter);
 router.use('/settings', settingsRouter);
+router.use('/whale', whaleSniperRouter);
 
 export default router;
