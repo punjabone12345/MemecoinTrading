@@ -1,3 +1,4 @@
+import axios from 'axios';
 import { logger } from '../lib/logger.js';
 import { scanTokens, getAllTokens, setDailyLossStatus, markTokenEntered, setTradedTodayMints, hotRefreshScanningTokens } from './scanner.service.js';
 import { getSettings } from './settings.service.js';
@@ -5,6 +6,29 @@ import { openPosition, getOpenPositions } from './position.service.js';
 import { getBalance } from './settings.service.js';
 import { query } from '../lib/db.js';
 import { broadcastTokens } from '../websocket/server.js';
+
+/**
+ * Fetch the live price for a specific pair from DexScreener right now.
+ * Used at trade-entry time to avoid using a stale cached price (which can be
+ * 15s+ old and cause 30-70% entry-price drift vs. actual market price).
+ * Falls back to the cached price if the API call fails.
+ */
+async function fetchLivePairPrice(pairAddress: string, fallback: number): Promise<number> {
+  try {
+    const res = await axios.get<{ pairs?: { priceUsd?: string; dexId?: string }[] }>(
+      `https://api.dexscreener.com/latest/dex/pairs/solana/${pairAddress}`,
+      { timeout: 5000 }
+    );
+    const pairs = (res.data?.pairs ?? []).filter(
+      (p) => (p.dexId ?? '').toLowerCase() !== 'pumpfun'
+    );
+    const price = parseFloat(pairs[0]?.priceUsd ?? '0');
+    if (price > 0) return price;
+  } catch (err) {
+    logger.warn({ err, pairAddress }, 'Live price fetch before entry failed — using cached price');
+  }
+  return fallback;
+}
 
 // ── Two independent loops ────────────────────────────────────────────────────
 //
@@ -206,8 +230,16 @@ async function checkEntries(): Promise<void> {
     // Use pair-specific URL so the price monitor fallback fetcher can resolve
     // the correct pool, and the DEX button links to the right pair page.
     const dexUrl = `https://dexscreener.com/solana/${token.pairAddress || token.mint}`;
+
+    // Fetch a guaranteed live price at the moment of entry — NOT the cached price.
+    // The token cache can be up to 15s stale (fetch loop interval), causing 30-70%
+    // entry-price drift vs. what DexScreener actually shows at trade time.
+    const livePrice = token.pairAddress
+      ? await fetchLivePairPrice(token.pairAddress, token.price)
+      : token.price;
+
     logger.info(
-      { mint: token.mint, symbol: token.symbol, score: token.score, price: token.price, mc: token.marketCap, bsr: token.buySellRatio },
+      { mint: token.mint, symbol: token.symbol, score: token.score, cachedPrice: token.price, livePrice, mc: token.marketCap, bsr: token.buySellRatio },
       'ELIGIBLE token found — attempting to open position'
     );
     // Lock this mint immediately — before the async openPosition() call.
@@ -220,7 +252,7 @@ async function checkEntries(): Promise<void> {
       name: token.name,
       symbol: token.symbol,
       score: token.score,
-      price: token.price,
+      price: livePrice,
       mc: token.marketCap,
       dexUrl,
       sources: token.sources ?? [],

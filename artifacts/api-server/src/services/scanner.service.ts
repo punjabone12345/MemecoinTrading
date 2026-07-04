@@ -359,9 +359,14 @@ export async function scanTokens(): Promise<void> {
 
   const pairs: AggregatedPair[] = [];
   for (const [, group] of mintGroupMap) {
-    let best = group[0];
+    // Prefer non-pumpfun pairs for price — the bonding-curve pair (dexId='pumpfun')
+    // reports the pre-graduation price which is ~10x lower than the real market price.
+    // Only fall back to pumpfun if no other pair exists for this mint.
+    const nonPumpfun = group.filter((p) => (p.dexId ?? '').toLowerCase() !== 'pumpfun');
+    const eligible = nonPumpfun.length > 0 ? nonPumpfun : group;
+    let best = eligible[0];
     let bestScore = 0;
-    for (const p of group) {
+    for (const p of eligible) {
       const liq  = p.liquidity?.usd ?? 0;
       const h1vol = p.volume?.h1 ?? 0;
       const rank  = DEX_RANK[p.dexId?.toLowerCase() ?? ''] ?? 0;
@@ -625,7 +630,9 @@ export async function hotRefreshScanningTokens(): Promise<boolean> {
   const rejectedPool:    { mint: string; pairAddress: string; token: Token }[] = [];
 
   for (const [mint, token] of tokenCache.entries()) {
-    if (token.status === 'ENTERED' || token.status === 'ELIGIBLE') continue;
+    // ELIGIBLE tokens must be refreshed every cycle — their price is used as the
+    // entry price. Skipping them caused 30–70% stale-price drift at trade time.
+    if (token.status === 'ENTERED') continue;
     if (!token.pairAddress) continue;
     if (ageBannedMints.has(mint)) { tokenCache.delete(mint); liquidityHistory.delete(mint); continue; }
     if ((now - token.lastChecked) < STALE_MS) continue;
