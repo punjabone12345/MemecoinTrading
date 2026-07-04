@@ -1301,6 +1301,97 @@ function schedulePositionMonitor(): void {
   }, PRICE_CHECK_MS);
 }
 
+// ── Manual management (called from HTTP routes) ───────────────────────────────
+
+export function findWhalePositionById(id: string): WhalePosition | undefined {
+  for (const pos of whalePositions.values()) {
+    if (pos.id === id) return pos;
+  }
+  return undefined;
+}
+
+function findClosedByIdInternal(id: string): ClosedWhalePosition | undefined {
+  return closedPositions.find(p => p.id === id);
+}
+
+/** Manually close an open whale position at its last known price */
+export async function manualCloseWhalePosition(id: string, reason: string): Promise<boolean> {
+  const pos = findWhalePositionById(id);
+  if (!pos) return false;
+  // If already being closed by concurrent monitor, report failure (position still exists)
+  if (closeLocks.has(pos.mint)) return false;
+  await closeWhalePosition(pos, reason);
+  // Return true only if position was actually removed from the map
+  return !whalePositions.has(pos.mint);
+}
+
+/** Edit fields of an open whale position */
+export function editWhalePositionFields(id: string, updates: {
+  entryPrice?: number; currentSLPrice?: number; triggerAmountUsd?: number;
+}): WhalePosition | undefined {
+  const pos = findWhalePositionById(id);
+  if (!pos) return undefined;
+  if (updates.entryPrice !== undefined && updates.entryPrice > 0) {
+    pos.entryPrice = updates.entryPrice;
+    // Recalculate hard SL if TP1 not yet hit
+    if (!pos.tp1Hit) pos.currentSLPrice = updates.entryPrice * (1 - PRICE_SL_PCT);
+  }
+  if (updates.currentSLPrice !== undefined && updates.currentSLPrice > 0) {
+    pos.currentSLPrice = updates.currentSLPrice;
+  }
+  if (updates.triggerAmountUsd !== undefined && updates.triggerAmountUsd > 0) {
+    pos.triggerAmountUsd = updates.triggerAmountUsd;
+    pos.tpTier = determineTier(updates.triggerAmountUsd);
+  }
+  void saveWhalePosition(pos);
+  broadcastWhaleStatus();
+  return pos;
+}
+
+/** Delete an open whale position and refund remaining SOL to balance */
+export async function deleteWhalePositionById(id: string): Promise<boolean> {
+  const pos = findWhalePositionById(id);
+  if (!pos || closeLocks.has(pos.mint) || !whalePositions.has(pos.mint)) return false;
+  closeLocks.add(pos.mint);
+  whalePositions.delete(pos.mint);
+  try {
+    const bal = await getBalance().catch(() => 0);
+    await setBalance(Math.max(0, bal + pos.remainingSizeSol)).catch(() => {});
+    await query(`DELETE FROM whale_positions WHERE id = $1`, [pos.id]).catch(() => {});
+    broadcastWhaleStatus();
+    await processQueue();
+  } finally {
+    closeLocks.delete(pos.mint);
+  }
+  return true;
+}
+
+/** Edit a closed whale position record */
+export async function editClosedWhalePositionById(id: string, updates: {
+  closeReason?: string; closePnlPct?: number;
+}): Promise<ClosedWhalePosition | undefined> {
+  const pos = findClosedByIdInternal(id);
+  if (!pos) return undefined;
+  if (updates.closeReason !== undefined) pos.closeReason = updates.closeReason;
+  if (updates.closePnlPct !== undefined) pos.closePnlPct = updates.closePnlPct;
+  await query(
+    `UPDATE whale_positions SET close_reason = $2, close_pnl_pct = $3 WHERE id = $1`,
+    [id, pos.closeReason, pos.closePnlPct],
+  ).catch(() => {});
+  broadcastWhaleStatus();
+  return pos;
+}
+
+/** Delete a closed whale position record */
+export async function deleteClosedWhalePositionById(id: string): Promise<boolean> {
+  const idx = closedPositions.findIndex(p => p.id === id);
+  if (idx === -1) return false;
+  closedPositions.splice(idx, 1);
+  await query(`DELETE FROM whale_positions WHERE id = $1`, [id]).catch(() => {});
+  broadcastWhaleStatus();
+  return true;
+}
+
 export function startWhaleSniper(): void {
   logger.info('Whale sniper: started (paper mode — following pump.fun graduations)');
 

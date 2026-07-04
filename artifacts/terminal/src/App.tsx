@@ -23,7 +23,17 @@ const DEFAULT_SETTINGS: Settings = {
   tp2ClosePct: 30, tp2TrailPct: 30, tp3Pct: 300, tp3ClosePct: 20, trailingSLPct: 20, trailActivatePct: 50,
   maxDailyLossPct: 5, startingBalanceSol: 10, currentBalanceSol: 10,
   rpcEndpoint: 'https://api.mainnet-beta.solana.com',
-  slippagePct: 1, priorityFeeSol: 0.001, walletPublicKey: '', whaleSlippagePct: 20,
+  slippagePct: 1, priorityFeeSol: 0.001, walletPublicKey: '',
+  whaleSlippagePct: 20, whaleStagnationPct: 5,
+  wt1Tp1Pct: 50,  wt1Tp1Exit: 30,
+  wt1Tp2Pct: 125, wt1Tp2Exit: 30, wt1Tp2Trail: 30,
+  wt1Tp3Pct: 200, wt1Tp3Exit: 30, wt1Tp3Trail: 20,
+  wt2Tp1Pct: 100, wt2Tp1Exit: 30,
+  wt2Tp2Pct: 250, wt2Tp2Exit: 30, wt2Tp2Trail: 25,
+  wt2Tp3Pct: 400, wt2Tp3Exit: 30, wt2Tp3Trail: 15,
+  wt3Tp1Pct: 150, wt3Tp1Exit: 30,
+  wt3Tp2Pct: 350, wt3Tp2Exit: 30, wt3Tp2Trail: 20,
+  wt3Tp3Pct: 550, wt3Tp3Exit: 30, wt3Tp3Trail: 10,
 };
 
 interface NavTab { id: Tab; label: string; color: string; icon: React.ReactNode }
@@ -70,11 +80,12 @@ export default function App() {
 
   const loadInitial = useCallback(async () => {
     try {
-      const [posData, scanData, settingsData, analyticsData] = await Promise.all([
+      const [posData, scanData, settingsData, analyticsData, whaleData] = await Promise.all([
         api.getPositions(),
         api.getScanner(),
         api.getSettings(),
         api.getAnalytics(),
+        api.getWhaleStatus(),
       ]);
       setOpenPositions(posData.open);
       setClosedPositions(posData.closed);
@@ -83,6 +94,7 @@ export default function App() {
       setSettings(settingsData);
       setBalance(settingsData.currentBalanceSol);
       setAnalytics(analyticsData);
+      setWhaleStatus(whaleData);
       setDataLoaded(true);
     } catch {
       retryRef.current = setTimeout(loadInitial, 3000);
@@ -160,14 +172,16 @@ export default function App() {
         const wsLive = wsConnectedRef.current;
 
         if (!wsLive) {
-          // WS offline — pull positions + balance from HTTP
-          const [posData, settingsData] = await Promise.all([
+          // WS offline — pull positions + balance + whale status from HTTP
+          const [posData, settingsData, whaleData] = await Promise.all([
             api.getPositions(),
             api.getSettings(),
+            api.getWhaleStatus(),
           ]);
           setOpenPositions(posData.open);
           setClosedPositions(posData.closed);
           setBalance(settingsData.currentBalanceSol);
+          setWhaleStatus(whaleData);
         }
 
         // Scanner + analytics: refresh every 15s regardless of WS state
@@ -306,7 +320,7 @@ export default function App() {
               />
             )}
             {tab === 'analytics' && (
-              <MemoAnalytics analytics={analytics} closedPositions={closedPositions} balance={portfolioValue} onRefresh={refreshClosed} />
+              <MemoAnalytics analytics={analytics} closedPositions={closedPositions} balance={portfolioValue} onRefresh={refreshClosed} whaleStatus={whaleStatus} />
             )}
             {tab === 'settings' && (
               <MemoSettings settings={effectiveSettings} onUpdate={(s) => setSettings(s)} />

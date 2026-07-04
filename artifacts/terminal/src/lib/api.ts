@@ -1,4 +1,4 @@
-import { Position, Analytics, Settings, Token, ScanStats } from './types.js';
+import { Position, Analytics, Settings, Token, ScanStats, WhaleStatus, WhalePosition, ClosedWhalePosition } from './types.js';
 
 // In local dev VITE_API_URL is empty — Vite proxy forwards /api → :8080.
 // On Vercel set VITE_API_URL=https://your-app.onrender.com so the static
@@ -17,22 +17,42 @@ async function apiFetch<T>(path: string, opts?: RequestInit): Promise<T> {
 }
 
 export const api = {
-  getPositions: () => apiFetch<{ open: Position[]; closed: Position[] }>('/positions'),
+  // ── Auto-trader positions ─────────────────────────────────────────────────
+  getPositions:     () => apiFetch<{ open: Position[]; closed: Position[] }>('/positions'),
   getOpenPositions: () => apiFetch<Position[]>('/positions/open'),
   getClosedPositions: () => apiFetch<Position[]>('/positions/closed'),
-  getAnalytics: () => apiFetch<Analytics>('/positions/analytics'),
-  closePosition: (id: string, currentPrice: number, reason?: string) =>
+  getAnalytics:     () => apiFetch<Analytics>('/positions/analytics'),
+  closePosition:    (id: string, currentPrice: number, reason?: string) =>
     apiFetch<Position>(`/positions/${id}/close`, { method: 'POST', body: JSON.stringify({ currentPrice, reason }) }),
-  editPosition: (id: string, updates: Partial<Position>) =>
+  editPosition:     (id: string, updates: Partial<Position>) =>
     apiFetch<Position>(`/positions/${id}`, { method: 'PATCH', body: JSON.stringify(updates) }),
-  deletePosition: (id: string) =>
+  deletePosition:   (id: string) =>
     apiFetch<{ success: boolean }>(`/positions/${id}`, { method: 'DELETE' }),
-  getScanner: () => apiFetch<{ tokens: Token[]; stats: ScanStats }>('/scanner'),
-  getSettings: () => apiFetch<Settings>('/settings'),
-  updateSettings: (updates: Partial<Settings>) =>
+
+  // ── Scanner / settings ────────────────────────────────────────────────────
+  getScanner:       () => apiFetch<{ tokens: Token[]; stats: ScanStats }>('/scanner'),
+  getSettings:      () => apiFetch<Settings>('/settings'),
+  updateSettings:   (updates: Partial<Settings>) =>
     apiFetch<Settings>('/settings', { method: 'PATCH', body: JSON.stringify(updates) }),
-  resetAll: () => apiFetch<{ success: boolean; balance: number }>('/settings/reset', { method: 'POST' }),
-  getConfig: () => apiFetch<{ wsUrl: string | null }>('/config'),
+  resetAll:         () => apiFetch<{ success: boolean; balance: number }>('/settings/reset', { method: 'POST' }),
+  getConfig:        () => apiFetch<{ wsUrl: string | null }>('/config'),
+
+  // ── Whale sniper — read ───────────────────────────────────────────────────
+  getWhaleStatus: () => apiFetch<WhaleStatus>('/whale/status'),
+
+  // ── Whale sniper — open position management ───────────────────────────────
+  closeWhalePosition: (id: string, reason?: string) =>
+    apiFetch<{ success: boolean }>(`/whale/${id}/close`, { method: 'POST', body: JSON.stringify({ reason }) }),
+  editWhalePosition:  (id: string, updates: { entryPrice?: number; currentSLPrice?: number; triggerAmountUsd?: number }) =>
+    apiFetch<WhalePosition>(`/whale/${id}`, { method: 'PATCH', body: JSON.stringify(updates) }),
+  deleteWhalePosition: (id: string) =>
+    apiFetch<{ success: boolean }>(`/whale/${id}`, { method: 'DELETE' }),
+
+  // ── Whale sniper — closed position management ─────────────────────────────
+  editClosedWhalePosition:   (id: string, updates: { closeReason?: string; closePnlPct?: number }) =>
+    apiFetch<ClosedWhalePosition>(`/whale/closed/${id}`, { method: 'PATCH', body: JSON.stringify(updates) }),
+  deleteClosedWhalePosition: (id: string) =>
+    apiFetch<{ success: boolean }>(`/whale/closed/${id}`, { method: 'DELETE' }),
 };
 
 // WebSocket with auto-reconnect

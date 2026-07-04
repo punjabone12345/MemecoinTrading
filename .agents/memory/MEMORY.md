@@ -21,3 +21,4 @@
 - [Meteora instruction type filter bug](meteora-instruction-filter.md) — naive first-"Instruction:"-in-logs extraction returns SPL Token "InitializeAccount", not Meteora op; must scan from Meteora programId invoke line
 - [Whale sniper architecture](whale-sniper-arch.md) — completely separate service from auto-trader; in-memory state only; buy detection via getSignaturesForAddress polling; setOnGraduation hook in trenches.service.ts
 - [Whale position live display](whale-position-live-display.md) — whale positions shown in Trades tab via whaleStatus prop; poll 2s, monitor 1.5s; Helius WS logsSubscribe per mint when key set
+- [Whale position management](whale-position-management.md) — full CRUD via /whale/:id + /whale/closed/:id routes; loadInitial must fetch whaleStatus or paper-mode positions never appear; $ in JSX string arrays corrupts via WriteFile tool — use python3 replace instead
