@@ -2,7 +2,8 @@ import axios from 'axios';
 import { Connection, PublicKey } from '@solana/web3.js';
 import { logger } from '../lib/logger.js';
 import { broadcast } from '../websocket/server.js';
-import { getBalance, setBalance } from './settings.service.js';
+import { getBalance, setBalance, getSettings } from './settings.service.js';
+import { notifyWhaleTrade, notifyWhaleSkip } from '../lib/telegram.js';
 
 const MAX_TRACKING_MS  = 30 * 60 * 1_000;
 const MAX_POSITIONS    = 10;
@@ -26,6 +27,7 @@ export interface WhaleBuy {
   amountUsd: number;
   timestamp: number;
   txSig: string;
+  priceAtDetection: number;
 }
 
 export interface TrackedToken {
@@ -72,6 +74,9 @@ export interface WhaleBuyLog {
   txSig: string;
   entered: boolean;
   skipReason?: string;
+  priceAtDetection?: number;
+  entryPrice?: number;
+  slippagePct?: number;
 }
 
 interface PendingSignal {
@@ -81,6 +86,7 @@ interface PendingSignal {
   sizePct: number;
   triggerAmountUsd: number;
   queuedAt: number;
+  priceAtDetection: number;
 }
 
 // ── In-memory state ───────────────────────────────────────────────────────────
@@ -123,6 +129,24 @@ async function fetchSolPrice(): Promise<void> {
   } catch { /* keep cached value */ }
 }
 
+// ── Fetch token price from DexScreener ────────────────────────────────────────
+
+async function fetchTokenPrice(mint: string): Promise<{ price: number; liquidity: number; name: string; symbol: string }> {
+  try {
+    const r     = await axios.get<any>(`${DEX_BASE}/latest/dex/tokens/${mint}`, { timeout: 6_000 });
+    const pairs: any[] = (r.data?.pairs ?? []).sort((a: any, b: any) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0));
+    const best  = pairs[0];
+    return {
+      price:     parseFloat(best?.priceUsd ?? '0'),
+      liquidity: best?.liquidity?.usd ?? 0,
+      name:      best?.baseToken?.name   ?? '',
+      symbol:    best?.baseToken?.symbol ?? '',
+    };
+  } catch {
+    return { price: 0, liquidity: 0, name: '', symbol: '' };
+  }
+}
+
 // ── Buy detection from a parsed Solana transaction ───────────────────────────
 
 interface BuyInfo { wallet: string; solSpent: number; }
@@ -134,7 +158,6 @@ function detectBuy(tx: any, targetMint: string): BuyInfo | null {
   const postSol: number[] = tx.meta?.postBalances ?? [];
   const keys: any[]       = (tx.transaction?.message as any)?.accountKeys ?? [];
 
-  // Any account gained tokens of this mint?
   const gained = postTok.some((post: any) => {
     if (post.mint !== targetMint) return false;
     const pre      = preTok.find((p: any) => p.accountIndex === post.accountIndex && p.mint === targetMint);
@@ -144,9 +167,8 @@ function detectBuy(tx: any, targetMint: string): BuyInfo | null {
   });
   if (!gained) return null;
 
-  // Fee payer (account 0) is the buyer in direct swaps
   const spent = (preSol[0] ?? 0) - (postSol[0] ?? 0);
-  if (spent < 10_000) return null; // below tx-fee noise
+  if (spent < 10_000) return null;
 
   const wallet = keys[0]?.pubkey?.toString() ?? keys[0]?.toString() ?? 'unknown';
   return { wallet, solSpent: spent / 1e9 };
@@ -157,31 +179,56 @@ function detectBuy(tx: any, targetMint: string): BuyInfo | null {
 async function enterWhalePosition(
   mint: string, name: string, symbol: string,
   sizePct: number, triggerAmountUsd: number,
+  priceAtDetection: number,
 ): Promise<void> {
   if (whalePositions.has(mint)) return;
 
-  // Resolve entry price & liquidity from DexScreener
-  let entryPrice = 0;
-  let liquidity  = 0;
-  try {
-    const r     = await axios.get<any>(`${DEX_BASE}/latest/dex/tokens/${mint}`, { timeout: 6_000 });
-    const pairs: any[] = (r.data?.pairs ?? []).sort((a: any, b: any) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0));
-    const best  = pairs[0];
-    entryPrice  = parseFloat(best?.priceUsd ?? '0');
-    liquidity   = best?.liquidity?.usd ?? 0;
-    // Enrich name/symbol from DexScreener if still placeholder
-    const tok   = trackedTokens.get(mint);
-    if (tok && (tok.name.endsWith('…') || !tok.symbol)) {
-      tok.name   = best?.baseToken?.name   || tok.name;
-      tok.symbol = best?.baseToken?.symbol || tok.symbol;
-      name   = tok.name;
-      symbol = tok.symbol;
-    }
-  } catch { /* fall through — entryPrice stays 0 */ }
+  // Fetch current price & liquidity
+  const { price: entryPrice, liquidity, name: dexName, symbol: dexSymbol } = await fetchTokenPrice(mint);
 
   if (entryPrice === 0) {
     logger.warn({ mint }, 'Whale sniper: no price available at entry — skipped');
+    notifyWhaleSkip({
+      name, symbol, mint, whaleAmountUsd: triggerAmountUsd,
+      reason: 'No price available at entry',
+    }).catch(() => {});
     return;
+  }
+
+  // Enrich name/symbol from DexScreener if still placeholder
+  const tok = trackedTokens.get(mint);
+  if (tok) {
+    if (tok.name.endsWith('…') || !tok.symbol) {
+      tok.name   = dexName   || tok.name;
+      tok.symbol = dexSymbol || tok.symbol;
+      name   = tok.name;
+      symbol = tok.symbol;
+    }
+  }
+
+  // ── Slippage guard ─────────────────────────────────────────────────────────
+  // If price has moved more than whaleSlippagePct% above the whale's detection
+  // price, the opportunity has already pumped too much — skip it.
+  let maxSlippage = 20;
+  try {
+    const s = await getSettings();
+    maxSlippage = s.whaleSlippagePct ?? 20;
+  } catch { /* use default */ }
+
+  if (priceAtDetection > 0) {
+    const slipPct = ((entryPrice - priceAtDetection) / priceAtDetection) * 100;
+    if (slipPct > maxSlippage) {
+      logger.warn(
+        { mint: mint.slice(0, 12), symbol, slipPct: slipPct.toFixed(1), maxSlippage },
+        'Whale sniper: slippage exceeded — skipped',
+      );
+      notifyWhaleSkip({
+        name, symbol, mint, whaleAmountUsd: triggerAmountUsd,
+        reason: `Slippage ${slipPct.toFixed(1)}% > ${maxSlippage}% max`,
+        entryPrice, whalePriceAtDetection: priceAtDetection, maxSlippagePct: maxSlippage,
+      }).catch(() => {});
+      return;
+    }
   }
 
   const balance = await getBalance().catch(() => 10);
@@ -202,7 +249,6 @@ async function enterWhalePosition(
 
   whalePositions.set(mint, pos);
 
-  const tok = trackedTokens.get(mint);
   if (tok) tok.entryTriggered = true;
 
   await setBalance(Math.max(0, balance - sizeSol)).catch(() => {});
@@ -211,14 +257,23 @@ async function enterWhalePosition(
     { mint, symbol, sizePct, sizeSol: sizeSol.toFixed(3), entryPrice, trigger: triggerAmountUsd.toFixed(0) },
     'Whale sniper: ENTERED',
   );
+
+  notifyWhaleTrade({
+    name, symbol, mint,
+    whaleAmountUsd: triggerAmountUsd,
+    sizePct, sizeSol, entryPrice,
+    whalePriceAtDetection: priceAtDetection,
+    slippagePct: maxSlippage,
+  }).catch(() => {});
+
   broadcastWhaleStatus();
 }
 
 // ── Queue / slot management ───────────────────────────────────────────────────
 
-function enqueueSignal(mint: string, name: string, symbol: string, sizePct: number, amountUsd: number): void {
+function enqueueSignal(mint: string, name: string, symbol: string, sizePct: number, amountUsd: number, priceAtDetection: number): void {
   if (signalQueue.find(s => s.mint === mint)) return;
-  signalQueue.push({ mint, name, symbol, sizePct, triggerAmountUsd: amountUsd, queuedAt: Date.now() });
+  signalQueue.push({ mint, name, symbol, sizePct, triggerAmountUsd: amountUsd, queuedAt: Date.now(), priceAtDetection });
   logger.info({ mint, symbol, sizePct, reason: 'max 10 positions' }, 'Whale sniper: signal queued');
 }
 
@@ -228,41 +283,53 @@ async function processQueue(): Promise<void> {
     const tok  = trackedTokens.get(sig.mint);
     if (!tok || Date.now() > tok.expiresAt) continue;
     if (whalePositions.has(sig.mint)) continue;
-    await enterWhalePosition(sig.mint, sig.name, sig.symbol, sig.sizePct, sig.triggerAmountUsd);
+    await enterWhalePosition(sig.mint, sig.name, sig.symbol, sig.sizePct, sig.triggerAmountUsd, sig.priceAtDetection);
   }
 }
 
 // ── Whale buy handler ─────────────────────────────────────────────────────────
 
 async function handleWhaleBuy(
-  mint: string, wallet: string, amountUsd: number, txSig: string,
+  mint: string, wallet: string, amountUsd: number, txSig: string, priceAtDetection: number,
 ): Promise<void> {
   const tok = trackedTokens.get(mint);
   if (!tok) return;
 
-  tok.whaleBuys.push({ wallet, amountUsd, timestamp: Date.now(), txSig });
+  tok.whaleBuys.push({ wallet, amountUsd, timestamp: Date.now(), txSig, priceAtDetection });
 
   const tier = WHALE_TIERS.find(t => amountUsd >= t.minUsd);
 
   const entry: WhaleBuyLog = {
     mint, name: tok.name, symbol: tok.symbol,
     wallet, amountUsd, timestamp: Date.now(), txSig,
-    entered: false,
+    entered: false, priceAtDetection,
   };
 
   if (!tier) {
     entry.skipReason = `$${amountUsd.toFixed(0)} below $500 threshold`;
+    notifyWhaleSkip({
+      name: tok.name, symbol: tok.symbol, mint, whaleAmountUsd: amountUsd,
+      reason: entry.skipReason,
+    }).catch(() => {});
   } else if (whalePositions.has(mint) || tok.entryTriggered) {
     entry.skipReason = 'Already entered this token';
+    notifyWhaleSkip({
+      name: tok.name, symbol: tok.symbol, mint, whaleAmountUsd: amountUsd,
+      reason: entry.skipReason,
+    }).catch(() => {});
   } else if (whalePositions.size >= MAX_POSITIONS) {
     entry.skipReason = 'Max positions — queued';
-    enqueueSignal(mint, tok.name, tok.symbol, tier.sizePct, amountUsd);
+    enqueueSignal(mint, tok.name, tok.symbol, tier.sizePct, amountUsd, priceAtDetection);
+    notifyWhaleSkip({
+      name: tok.name, symbol: tok.symbol, mint, whaleAmountUsd: amountUsd,
+      reason: 'Max 10 positions reached — queued for next slot',
+    }).catch(() => {});
   } else {
     entry.entered = true;
     buyLog.unshift(entry);
     if (buyLog.length > MAX_BUY_LOG) buyLog.pop();
     broadcastWhaleStatus();
-    await enterWhalePosition(mint, tok.name, tok.symbol, tier.sizePct, amountUsd);
+    await enterWhalePosition(mint, tok.name, tok.symbol, tier.sizePct, amountUsd, priceAtDetection);
     return;
   }
 
@@ -300,6 +367,14 @@ async function pollTokenBuys(mint: string): Promise<void> {
 
     await fetchSolPrice();
 
+    // Fetch current token price for slippage reference
+    let currentPrice = 0;
+    try {
+      const r     = await axios.get<any>(`${DEX_BASE}/latest/dex/tokens/${mint}`, { timeout: 5_000 });
+      const pairs: any[] = (r.data?.pairs ?? []).sort((a: any, b: any) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0));
+      currentPrice = parseFloat(pairs[0]?.priceUsd ?? '0');
+    } catch { /* use 0 as fallback */ }
+
     // Fetch up to 5 new txns in parallel
     const toFetch = newSigs.slice(0, 5);
     const txns    = await Promise.all(
@@ -318,7 +393,7 @@ async function pollTokenBuys(mint: string): Promise<void> {
         { mint: mint.slice(0, 12), wallet: buy.wallet.slice(0, 8), usd: amountUsd.toFixed(0), sig: toFetch[i].slice(0, 12) },
         'Whale sniper: buy detected',
       );
-      await handleWhaleBuy(mint, buy.wallet, amountUsd, toFetch[i]);
+      await handleWhaleBuy(mint, buy.wallet, amountUsd, toFetch[i], currentPrice);
     }
   } catch (err: any) {
     logger.debug({ mint: mint.slice(0, 12), err: err?.message }, 'Whale sniper: poll error');
@@ -407,14 +482,12 @@ function pruneExpiredTracking(): void {
     trackedTokens.delete(mint);
     seenTxns.delete(mint);
     mintCheckpointed.delete(mint);
-    // Exit any still-open position for this token
     const pos = whalePositions.get(mint);
     if (pos) {
       pos.lastPrice = pos.lastPrice || pos.entryPrice;
       closeWhalePosition(pos, '30min window expired').catch(() => {});
     }
   }
-  // Drop queued signals for expired tokens
   const keep = signalQueue.filter(s => trackedTokens.has(s.mint));
   signalQueue.splice(0, signalQueue.length, ...keep);
 }
@@ -463,7 +536,6 @@ function broadcastWhaleStatus(): void {
 export function startWhaleSniper(): void {
   logger.info('Whale sniper: started (paper mode — following pump.fun graduations)');
 
-  // Buy poll loop — staggered so we don't blast RPC all at once
   setInterval(async () => {
     pruneExpiredTracking();
     for (const mint of Array.from(trackedTokens.keys())) {
@@ -472,12 +544,10 @@ export function startWhaleSniper(): void {
     }
   }, POLL_INTERVAL_MS);
 
-  // Position monitor loop
   setInterval(async () => {
     await monitorPositions();
     broadcastWhaleStatus();
   }, PRICE_CHECK_MS);
 
-  // Warm up SOL price
   void fetchSolPrice();
 }

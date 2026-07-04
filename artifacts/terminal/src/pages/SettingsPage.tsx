@@ -41,7 +41,7 @@ export default function SettingsPage({ settings: init, onUpdate }: Props) {
   const [resetInput, setResetInput] = useState('');
 
   function update(key: keyof Settings, value: string) {
-    const numKeys = ['minMc','maxMc','minVolume24h','minAgeHours','maxAgeHours','scanFrequencyMs','minBuySellRatio','maxTopHolder','maxCreatorPct','minLiquidity','minEntryScore','trendChecksRequired','maxOpenPositions','sizeScore90','sizeScore80','sizeScore70','slPct','tp1Pct','tp1ClosePct','tp2Pct','tp2ClosePct','tp2TrailPct','tp3Pct','tp3ClosePct','trailingSLPct','trailActivatePct','maxDailyLossPct','startingBalanceSol','currentBalanceSol','slippagePct','priorityFeeSol'];
+    const numKeys = ['minMc','maxMc','minVolume24h','minAgeHours','maxAgeHours','scanFrequencyMs','minBuySellRatio','maxTopHolder','maxCreatorPct','minLiquidity','minEntryScore','trendChecksRequired','maxOpenPositions','sizeScore90','sizeScore80','sizeScore70','slPct','tp1Pct','tp1ClosePct','tp2Pct','tp2ClosePct','tp2TrailPct','tp3Pct','tp3ClosePct','trailingSLPct','trailActivatePct','maxDailyLossPct','startingBalanceSol','currentBalanceSol','slippagePct','priorityFeeSol','whaleSlippagePct'];
     const updated = { ...settings } as Record<string, unknown>;
     if (numKeys.includes(key)) updated[key] = parseFloat(value) || 0;
     else updated[key] = value;
@@ -103,6 +103,16 @@ export default function SettingsPage({ settings: init, onUpdate }: Props) {
           onChange={(v) => update('slPct', v)}
           min={5} max={50} step={5} suffix="%"
           sublabel="Whale sniper exits at +100% TP or emergency (liq -40%, liq=$0, 30min timeout). This hard SL applies to any legacy auto-trader positions."
+        />
+      </Section>
+
+      <Section title="Whale Entry Slippage" color="#ffaa00">
+        <NumberInput
+          label="Max Slippage vs Whale Price"
+          value={n('whaleSlippagePct')}
+          onChange={(v) => update('whaleSlippagePct', v)}
+          min={1} max={100} step={1} suffix="%"
+          sublabel="Skip a trade if the current price has pumped more than this % above the detected whale buy price. Default: 20%. Telegram alert is sent on every skip."
         />
       </Section>
 

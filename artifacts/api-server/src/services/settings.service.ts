@@ -68,6 +68,7 @@ export async function getSettings(): Promise<Settings> {
     slippagePct: num('slippagePct', 1),
     priorityFeeSol: num('priorityFeeSol', 0.001),
     walletPublicKey: str('walletPublicKey', ''),
+    whaleSlippagePct: num('whaleSlippagePct', 20),
   };
 
   settingsCache = settings;

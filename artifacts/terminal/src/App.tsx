@@ -23,7 +23,7 @@ const DEFAULT_SETTINGS: Settings = {
   tp2ClosePct: 30, tp2TrailPct: 30, tp3Pct: 300, tp3ClosePct: 20, trailingSLPct: 20, trailActivatePct: 50,
   maxDailyLossPct: 5, startingBalanceSol: 10, currentBalanceSol: 10,
   rpcEndpoint: 'https://api.mainnet-beta.solana.com',
-  slippagePct: 1, priorityFeeSol: 0.001, walletPublicKey: '',
+  slippagePct: 1, priorityFeeSol: 0.001, walletPublicKey: '', whaleSlippagePct: 20,
 };
 
 interface NavTab { id: Tab; label: string; color: string; icon: React.ReactNode }

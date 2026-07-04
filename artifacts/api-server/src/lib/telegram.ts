@@ -110,3 +110,43 @@ export async function notifyHeartbeat(params: {
     `Time: ${toIST(new Date())}`
   );
 }
+
+export async function notifyWhaleTrade(params: {
+  name: string; symbol: string; mint: string;
+  whaleAmountUsd: number; sizePct: number; sizeSol: number;
+  entryPrice: number; whalePriceAtDetection: number; slippagePct: number;
+}): Promise<void> {
+  const { name, symbol, mint, whaleAmountUsd, sizePct, sizeSol, entryPrice, whalePriceAtDetection, slippagePct } = params;
+  const actualSlip = whalePriceAtDetection > 0
+    ? ((entryPrice - whalePriceAtDetection) / whalePriceAtDetection * 100).toFixed(1)
+    : '0.0';
+  await sendMessage(
+    `🐋 <b>WHALE ENTRY — ${symbol}</b> (${name})\n` +
+    `Mint: <code>${mint.slice(0, 16)}…</code>\n` +
+    `Whale Buy: $${whaleAmountUsd.toFixed(0)}\n` +
+    `Size: ${sizeSol.toFixed(3)} SOL (${sizePct.toFixed(2)}%)\n` +
+    `Entry Price: $${entryPrice.toFixed(8)}\n` +
+    `Whale Price: $${whalePriceAtDetection.toFixed(8)} (slip ${actualSlip}% of ${slippagePct}% max)\n` +
+    `Time: ${toIST(new Date())}`
+  );
+}
+
+export async function notifyWhaleSkip(params: {
+  name: string; symbol: string; mint: string;
+  whaleAmountUsd: number; reason: string;
+  entryPrice?: number; whalePriceAtDetection?: number; maxSlippagePct?: number;
+}): Promise<void> {
+  const { name, symbol, mint, whaleAmountUsd, reason, entryPrice, whalePriceAtDetection, maxSlippagePct } = params;
+  let extra = '';
+  if (entryPrice && whalePriceAtDetection && maxSlippagePct) {
+    const slip = ((entryPrice - whalePriceAtDetection) / whalePriceAtDetection * 100).toFixed(1);
+    extra = `\nPrice Slip: ${slip}% (max ${maxSlippagePct}%)\nWhale Price: $${whalePriceAtDetection.toFixed(8)}\nCurrent: $${entryPrice.toFixed(8)}`;
+  }
+  await sendMessage(
+    `⏭️ <b>WHALE SKIP — ${symbol}</b> (${name})\n` +
+    `Mint: <code>${mint.slice(0, 16)}…</code>\n` +
+    `Whale Buy: $${whaleAmountUsd.toFixed(0)}\n` +
+    `Skip Reason: ${reason}${extra}\n` +
+    `Time: ${toIST(new Date())}`
+  );
+}

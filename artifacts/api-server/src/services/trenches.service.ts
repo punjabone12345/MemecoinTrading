@@ -1,4 +1,5 @@
 import { Connection, PublicKey } from '@solana/web3.js';
+import { WebSocket } from 'ws';
 import { logger } from '../lib/logger.js';
 import { query } from '../lib/db.js';
 
@@ -211,15 +212,175 @@ async function trackMigrationWallet(): Promise<void> {
 // ── Scanner lifecycle ─────────────────────────────────────────────────────────
 let started = false;
 
+// ── Real-time Helius WebSocket subscription to the migration wallet ───────────
+// Subscribes to logsSubscribe for the migration wallet so we get notified
+// immediately when it signs a transaction, instead of waiting for the 5s poll.
+// On notification, we enqueue the tx signature for async processing — the same
+// path used by the HTTP poller, so deduplication (lastSeenSig) still works.
+
+const wsSeen = new Set<string>();
+
+function startMigrationWalletWS(): void {
+  const apiKey = process.env.HELIUS_API_KEY;
+  const wsUrl  = process.env.HELIUS_WS_URL
+    ?? (apiKey ? `wss://mainnet.helius-rpc.com/?api-key=${apiKey}` : null);
+
+  if (!wsUrl) {
+    logger.info('PumpFun WS: no HELIUS_API_KEY — real-time migration wallet subscription disabled (polling only)');
+    return;
+  }
+
+  let ws: WebSocket | null  = null;
+  let pingTimer: ReturnType<typeof setInterval> | null = null;
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  let reqId = 1;
+
+  async function processMigrationSig(sig: string): Promise<void> {
+    if (wsSeen.has(sig)) return;
+    wsSeen.add(sig);
+    if (wsSeen.size > 5_000) {
+      const arr = Array.from(wsSeen);
+      arr.slice(0, 1000).forEach(s => wsSeen.delete(s));
+    }
+
+    try {
+      const conn = getConnection();
+      const tx   = await conn.getParsedTransaction(sig, { maxSupportedTransactionVersion: 0 });
+      if (!tx || tx.meta?.err) return;
+
+      const logs            = tx.meta?.logMessages ?? [];
+      const instructionType = detectMigrationInstructionType(logs);
+
+      // Only process genuine migration/pool-create instructions
+      const lowerLogs = logs.join(' ').toLowerCase();
+      const isMigration =
+        lowerLogs.includes('migrate') ||
+        lowerLogs.includes('pool_create') ||
+        lowerLogs.includes('createpool') ||
+        lowerLogs.includes('poolcreate');
+      if (!isMigration) return;
+
+      const accountKeys: any[] = (tx.transaction.message as any).accountKeys ?? [];
+      const creatorWallet: string = accountKeys[0]?.pubkey?.toString() ?? accountKeys[0]?.toString() ?? '';
+
+      let poolAddress: string | undefined;
+      for (let j = 1; j < Math.min(accountKeys.length, 8); j++) {
+        const addr = accountKeys[j]?.pubkey?.toString() ?? accountKeys[j]?.toString() ?? '';
+        if (addr && addr !== creatorWallet && !STABLE_MINTS.has(addr) && addr.length > 30) {
+          poolAddress = addr;
+          break;
+        }
+      }
+
+      const balances = tx.meta?.postTokenBalances ?? [];
+      for (const bal of balances) {
+        const mint = bal.mint;
+        if (!mint || mint.length < 20 || STABLE_MINTS.has(mint)) continue;
+
+        pumpfunMints.add(mint);
+        const isNew = addMintSource(mint, 'pumpfun');
+        if (!isNew) continue;
+
+        pushFeed(pumpfunFeed, { mint, ts: Date.now(), txSig: sig, instructionType, poolAddress, creatorWallet });
+        if (onNewMint) onNewMint(mint);
+        if (onGraduation) onGraduation({ mint, poolAddress, ts: Date.now() });
+
+        logger.info(
+          { mint, sig: sig.slice(0, 16), instructionType, poolAddress: poolAddress?.slice(0, 16), source: 'helius_ws' },
+          'PumpFun WS: real-time migration detected',
+        );
+
+        query(`
+          INSERT INTO detected_migrations
+            (source, instruction_type, tx_signature, pool_address, mint, creator_wallet)
+          VALUES ($1, $2, $3, $4, $5, $6)
+          ON CONFLICT (tx_signature) DO NOTHING
+        `, ['pumpfun_ws', instructionType, sig, poolAddress ?? null, mint, creatorWallet])
+          .catch((e: any) => logger.debug({ msg: e?.message }, 'PumpFun WS: DB insert skipped'));
+      }
+    } catch (err: any) {
+      logger.debug({ sig: sig.slice(0, 16), msg: err?.message }, 'PumpFun WS: tx fetch failed');
+    }
+  }
+
+  function connect(): void {
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+    if (pingTimer)      { clearInterval(pingTimer); pingTimer = null; }
+    if (ws)             { ws.removeAllListeners(); try { ws.terminate(); } catch {} ws = null; }
+
+    logger.info('PumpFun WS: connecting to Helius for real-time migration wallet monitoring…');
+    ws = new WebSocket(wsUrl!);
+
+    ws.on('open', () => {
+      // Subscribe to logs for the migration wallet
+      ws!.send(JSON.stringify({
+        jsonrpc: '2.0', id: reqId++,
+        method: 'logsSubscribe',
+        params: [{ mentions: [MIGRATION_WALLET] }, { commitment: 'confirmed' }],
+      }));
+
+      // Keep-alive ping
+      pingTimer = setInterval(() => {
+        if (ws?.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ jsonrpc: '2.0', id: 99998, method: 'getHealth' }));
+        }
+      }, 30_000);
+
+      logger.info('PumpFun WS: subscribed to migration wallet logs');
+    });
+
+    ws.on('message', (raw: Buffer) => {
+      try {
+        const msg = JSON.parse(raw.toString());
+        if (msg.result !== undefined && typeof msg.result === 'number') {
+          logger.info({ subId: msg.result }, 'PumpFun WS: subscription confirmed');
+          return;
+        }
+        if (msg.method !== 'logsNotification') return;
+        const value = msg.params?.result?.value;
+        if (!value || value.err !== null) return;
+
+        const sig: string  = value.signature;
+        const logs: string[] = value.logs ?? [];
+
+        // Quick pre-filter: skip if no migration keyword in raw logs
+        const logText = logs.join(' ').toLowerCase();
+        const hasMigration =
+          logText.includes('migrate') ||
+          logText.includes('pool_create') ||
+          logText.includes('poolcreate') ||
+          logText.includes('createpool');
+        if (!hasMigration) return;
+
+        processMigrationSig(sig).catch(() => {});
+      } catch { /* ignore parse errors */ }
+    });
+
+    ws.on('error', (err: Error) => {
+      logger.warn({ msg: err.message }, 'PumpFun WS: connection error');
+    });
+
+    ws.on('close', () => {
+      logger.info('PumpFun WS: disconnected — reconnecting in 15s');
+      if (pingTimer) { clearInterval(pingTimer); pingTimer = null; }
+      ws = null;
+      reconnectTimer = setTimeout(connect, 15_000);
+    });
+  }
+
+  connect();
+}
+
 export function startTrenchesScanner(): void {
   if (started) return;
   started = true;
 
-  // Immediate first poll
-  void trackMigrationWallet();
+  // Real-time WebSocket subscription (primary, instant)
+  startMigrationWalletWS();
 
-  // Poll every 5 seconds
+  // Polling fallback (catches any WS gaps)
+  void trackMigrationWallet();
   setInterval(() => { void trackMigrationWallet(); }, 5_000);
 
-  logger.info('PumpFun migration wallet tracker started (polls every 5s)');
+  logger.info('PumpFun migration wallet tracker started (real-time WS + 5s poll fallback)');
 }

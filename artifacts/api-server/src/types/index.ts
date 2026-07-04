@@ -123,6 +123,7 @@ export interface Settings {
   slippagePct: number;
   priorityFeeSol: number;
   walletPublicKey: string;
+  whaleSlippagePct: number;
 }
 
 export interface Analytics {
