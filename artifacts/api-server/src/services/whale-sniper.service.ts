@@ -958,6 +958,7 @@ async function monitorPositions(): Promise<void> {
     for (const pos of Array.from(whalePositions.values())) {
       const best = (pairs as any[])
         .filter((p: any) => p.baseToken?.address === pos.mint)
+        .filter((p: any) => (p.dexId ?? '').toLowerCase() !== 'pumpfun')
         .sort((a: any, b: any) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0))[0];
 
       if (!best) continue;
