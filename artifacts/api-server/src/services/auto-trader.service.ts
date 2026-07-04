@@ -44,6 +44,20 @@ async function fetchLivePairPrice(pairAddress: string, fallback: number): Promis
 // every single second without hammering external APIs.
 // ────────────────────────────────────────────────────────────────────────────
 
+// ── Post-restart guard ───────────────────────────────────────────────────────
+// On restart the scanner re-discovers ALL tokens currently on DexScreener,
+// including old graduations from hours ago. We only want to trade tokens that
+// graduated AFTER this server instance started.
+//
+// Two guards in checkEntries():
+//   1. preStartupMints — all mints already in detected_migrations at boot time.
+//      Populated once in startAutoTrader() before any scanning begins.
+//   2. Pair-age check — any DexScreener token whose pool is older than this
+//      server has been running is skipped (it graduated before restart).
+// ────────────────────────────────────────────────────────────────────────────
+const STARTUP_TIME_MS = Date.now();
+const preStartupMints = new Set<string>();
+
 let fetchTimeout: ReturnType<typeof setTimeout> | null = null;
 let checkInterval: ReturnType<typeof setInterval> | null = null;
 let hotRefreshInterval: ReturnType<typeof setInterval> | null = null;
@@ -71,6 +85,17 @@ let cachedTradedTodayMints = new Set<string>();
 export function startAutoTrader(): void {
   if (traderStarted) return;
   traderStarted = true;
+
+  // ── Snapshot pre-existing mints before scanning starts ──────────────────
+  // Load every mint already in detected_migrations so we never trade a token
+  // that graduated before this restart. This runs once, synchronously queued,
+  // before the first fetch loop executes.
+  query<{ mint: string }>(`SELECT DISTINCT mint FROM detected_migrations WHERE mint IS NOT NULL`)
+    .then((rows) => {
+      for (const r of rows) preStartupMints.add(r.mint);
+      logger.info({ count: preStartupMints.size }, 'Post-restart guard: pre-startup mints loaded — these will not be traded');
+    })
+    .catch((err) => logger.warn({ err }, 'Post-restart guard: failed to load pre-startup mints'));
 
   // ── FETCH loop ──────────────────────────────────────────────────────────
   // Self-scheduling setTimeout loop — re-reads scanFrequencyMs from settings
@@ -195,9 +220,13 @@ async function checkEntries(): Promise<void> {
   const openPositions = await getOpenPositions();
   const openMints = new Set(openPositions.map((p) => p.mint));
 
+  // Server uptime in ms — used to determine if a pair graduated before restart.
+  const serverUptimeMs = Date.now() - STARTUP_TIME_MS;
+
   let attempted = 0;
   let skippedDuplicate = 0;
   let skippedTradedToday = 0;
+  let skippedPreStartup = 0;
   let skippedNotEligible = 0;
   let skippedNoPrice = 0;
 
@@ -213,6 +242,20 @@ async function checkEntries(): Promise<void> {
       logger.info({ mint: token.mint, symbol: token.symbol }, 'SKIP: already traded this mint before (one trade per mint ever — no re-entry)');
       skippedTradedToday++; continue;
     }
+
+    // ── Post-restart guard ────────────────────────────────────────────────
+    // Guard 1: mint was in detected_migrations before this server started.
+    if (preStartupMints.has(token.mint)) {
+      skippedPreStartup++; continue;
+    }
+    // Guard 2: pair was created before this server instance started.
+    // token.age is in hours; convert to ms and compare to server uptime.
+    // If the pool is older than we've been running, it graduated pre-restart.
+    const pairAgeMs = token.age * 3_600_000;
+    if (pairAgeMs > serverUptimeMs) {
+      skippedPreStartup++; continue;
+    }
+    // ─────────────────────────────────────────────────────────────────────
 
     // ELIGIBLE is already a full gate: scanner sets it only when ALL filter checks pass
     // AND score >= minEntryScore. Do NOT re-check those conditions here.
@@ -273,8 +316,8 @@ async function checkEntries(): Promise<void> {
     }
   }
 
-  if (attempted > 0 || skippedTradedToday > 0) {
-    logger.info({ attempted, skippedDuplicate, skippedTradedToday, skippedNotEligible, skippedNoPrice }, 'checkEntries complete');
+  if (attempted > 0 || skippedTradedToday > 0 || skippedPreStartup > 0) {
+    logger.info({ attempted, skippedDuplicate, skippedTradedToday, skippedPreStartup, skippedNotEligible, skippedNoPrice }, 'checkEntries complete');
   }
 }
 
