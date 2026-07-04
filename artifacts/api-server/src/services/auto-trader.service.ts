@@ -36,7 +36,10 @@ let cachedLimitHit = false;
 let lastDailyLossCheck = 0;
 const DAILY_LOSS_CACHE_MS = 10_000;
 
-// Cached traded-today mints — refreshed every 30s (mints don't change often)
+// Cached ever-traded mints — refreshed every 30s (mints don't change often).
+// Once a mint is traded it is NEVER re-entered, even after the position closes
+// or the server restarts. The full historical positions table is queried so
+// there is no date boundary.
 let lastTradedTodayCheck = 0;
 const TRADED_TODAY_CACHE_MS = 30_000;
 let cachedTradedTodayMints = new Set<string>();
@@ -152,13 +155,13 @@ async function checkEntries(): Promise<void> {
     return;
   }
 
-  // ── Traded-today mints — cached, refreshed every 30s ────────────────────
+  // ── Ever-traded mints — cached, refreshed every 30s ─────────────────────
+  // Query ALL positions (no date filter) so a mint is never re-entered even
+  // if it was traded days/weeks ago or if the server was restarted.
   if (nowMs - lastTradedTodayCheck > TRADED_TODAY_CACHE_MS) {
-    const istOffsetMs = 5.5 * 60 * 60 * 1000;
-    const istMidnightMs = Math.floor((nowMs + istOffsetMs) / 86_400_000) * 86_400_000 - istOffsetMs;
     const tradedTodayRows = await query<{ mint: string }>(`
-      SELECT DISTINCT mint FROM positions WHERE entry_time >= $1
-    `, [new Date(istMidnightMs).toISOString()]);
+      SELECT DISTINCT mint FROM positions
+    `);
     cachedTradedTodayMints = new Set(tradedTodayRows.map((r) => r.mint));
     setTradedTodayMints(cachedTradedTodayMints);
     lastTradedTodayCheck = nowMs;
@@ -183,7 +186,7 @@ async function checkEntries(): Promise<void> {
       skippedDuplicate++; continue;
     }
     if (cachedTradedTodayMints.has(token.mint)) {
-      logger.info({ mint: token.mint, symbol: token.symbol }, 'SKIP: already traded today (no re-entry until IST midnight)');
+      logger.info({ mint: token.mint, symbol: token.symbol }, 'SKIP: already traded this mint before (one trade per mint ever — no re-entry)');
       skippedTradedToday++; continue;
     }
 

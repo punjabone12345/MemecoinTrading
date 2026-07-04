@@ -16,6 +16,7 @@ const NO_PRICE_AUTO_CLOSE_TICKS = 20; // 20 × 3s = 60s of confirmed API misses
 interface DexPair {
   baseToken?: { address: string };
   pairAddress?: string;
+  dexId?: string;
   priceUsd?: string;
   marketCap?: number;
   fdv?: number;
@@ -213,6 +214,9 @@ async function fetchByMints(mints: string[]): Promise<Map<string, PriceData>> {
       for (const pair of res.data?.pairs ?? []) {
         const mint = pair.baseToken?.address;
         if (!mint) continue;
+        // Skip the pump.fun bonding-curve pair — its price is ~10x lower than
+        // the graduated Raydium/PumpSwap price and causes massively wrong P&L.
+        if ((pair.dexId ?? '').toLowerCase() === 'pumpfun') continue;
         const price = parseFloat(pair.priceUsd ?? '0');
         if (price <= 0) continue;
         const mc = pair.marketCap ?? pair.fdv ?? 0;
