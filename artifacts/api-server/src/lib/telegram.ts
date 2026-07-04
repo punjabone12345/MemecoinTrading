@@ -115,14 +115,19 @@ export async function notifyWhaleTrade(params: {
   name: string; symbol: string; mint: string;
   whaleAmountUsd: number; sizePct: number; sizeSol: number;
   entryPrice: number; whalePriceAtDetection: number; slippagePct: number;
+  whaleWallet?: string;
 }): Promise<void> {
-  const { name, symbol, mint, whaleAmountUsd, sizePct, sizeSol, entryPrice, whalePriceAtDetection, slippagePct } = params;
+  const { name, symbol, mint, whaleAmountUsd, sizePct, sizeSol, entryPrice, whalePriceAtDetection, slippagePct, whaleWallet } = params;
   const actualSlip = whalePriceAtDetection > 0
     ? ((entryPrice - whalePriceAtDetection) / whalePriceAtDetection * 100).toFixed(1)
     : '0.0';
+  const walletLine = whaleWallet && whaleWallet !== 'unknown'
+    ? `Whale Wallet: <code>${whaleWallet}</code>\n`
+    : '';
   await sendMessage(
     `🐋 <b>WHALE ENTRY — ${symbol}</b> (${name})\n` +
     `Mint: <code>${mint.slice(0, 16)}…</code>\n` +
+    walletLine +
     `Whale Buy: $${whaleAmountUsd.toFixed(0)}\n` +
     `Size: ${sizeSol.toFixed(3)} SOL (${sizePct.toFixed(2)}%)\n` +
     `Entry Price: $${entryPrice.toFixed(8)}\n` +

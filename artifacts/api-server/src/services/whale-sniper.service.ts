@@ -103,6 +103,7 @@ interface PendingSignal {
   triggerAmountUsd: number;
   queuedAt: number;
   priceAtDetection: number;
+  whaleWallet: string;
 }
 
 // ── Pending graduation type ───────────────────────────────────────────────────
@@ -294,7 +295,7 @@ export async function restoreWhalePositionsFromDB(): Promise<void> {
 async function enterWhalePosition(
   mint: string, name: string, symbol: string,
   sizePct: number, triggerAmountUsd: number,
-  priceAtDetection: number,
+  priceAtDetection: number, whaleWallet: string,
 ): Promise<void> {
   if (whalePositions.has(mint)) return;
 
@@ -376,6 +377,7 @@ async function enterWhalePosition(
     sizePct, sizeSol, entryPrice,
     whalePriceAtDetection: priceAtDetection,
     slippagePct: maxSlippage,
+    whaleWallet,
   }).catch(() => {});
 
   broadcastWhaleStatus();
@@ -383,9 +385,9 @@ async function enterWhalePosition(
 
 // ── Queue / slot management ───────────────────────────────────────────────────
 
-function enqueueSignal(mint: string, name: string, symbol: string, sizePct: number, amountUsd: number, priceAtDetection: number): void {
+function enqueueSignal(mint: string, name: string, symbol: string, sizePct: number, amountUsd: number, priceAtDetection: number, whaleWallet: string): void {
   if (signalQueue.find(s => s.mint === mint)) return;
-  signalQueue.push({ mint, name, symbol, sizePct, triggerAmountUsd: amountUsd, queuedAt: Date.now(), priceAtDetection });
+  signalQueue.push({ mint, name, symbol, sizePct, triggerAmountUsd: amountUsd, queuedAt: Date.now(), priceAtDetection, whaleWallet });
   logger.info({ mint, symbol, sizePct, reason: 'max 10 positions' }, 'Whale sniper: signal queued');
 }
 
@@ -395,7 +397,7 @@ async function processQueue(): Promise<void> {
     const tok  = trackedTokens.get(sig.mint);
     if (!tok || Date.now() > tok.expiresAt) continue;
     if (whalePositions.has(sig.mint)) continue;
-    await enterWhalePosition(sig.mint, sig.name, sig.symbol, sig.sizePct, sig.triggerAmountUsd, sig.priceAtDetection);
+    await enterWhalePosition(sig.mint, sig.name, sig.symbol, sig.sizePct, sig.triggerAmountUsd, sig.priceAtDetection, sig.whaleWallet);
   }
 }
 
@@ -423,13 +425,13 @@ async function handleWhaleBuy(
     entry.skipReason = 'Already entered this token';
   } else if (whalePositions.size >= MAX_POSITIONS) {
     entry.skipReason = 'Max positions — queued';
-    enqueueSignal(mint, tok.name, tok.symbol, tier.sizePct, amountUsd, priceAtDetection);
+    enqueueSignal(mint, tok.name, tok.symbol, tier.sizePct, amountUsd, priceAtDetection, wallet);
   } else {
     entry.entered = true;
     buyLog.unshift(entry);
     if (buyLog.length > MAX_BUY_LOG) buyLog.pop();
     broadcastWhaleStatus();
-    await enterWhalePosition(mint, tok.name, tok.symbol, tier.sizePct, amountUsd, priceAtDetection);
+    await enterWhalePosition(mint, tok.name, tok.symbol, tier.sizePct, amountUsd, priceAtDetection, wallet);
     return;
   }
 
