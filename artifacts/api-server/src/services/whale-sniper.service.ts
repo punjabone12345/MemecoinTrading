@@ -4,6 +4,7 @@ import { logger } from '../lib/logger.js';
 import { broadcast } from '../websocket/server.js';
 import { getBalance, setBalance, getSettings } from './settings.service.js';
 import { notifyWhaleTrade, notifyWhaleSkip } from '../lib/telegram.js';
+import { query } from '../lib/db.js';
 
 const MAX_TRACKING_MS       = 30 * 60 * 1_000;
 const MAX_POSITIONS         = 10;
@@ -219,6 +220,75 @@ function detectBuy(tx: any, targetMint: string): BuyInfo | null {
   return { wallet, solSpent: spent / 1e9 };
 }
 
+// ── DB persistence (survives Render free-tier spin-down / restarts) ───────────
+
+async function saveWhalePosition(pos: WhalePosition): Promise<void> {
+  try {
+    await query(
+      `INSERT INTO whale_positions
+        (id, mint, name, symbol, entry_price, entry_time, size_sol, size_pct,
+         peak_price, last_price, last_liquidity, baseline_liquidity, migration_time, pnl_pct, status)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'OPEN')
+       ON CONFLICT (id) DO UPDATE SET
+         peak_price = EXCLUDED.peak_price,
+         last_price = EXCLUDED.last_price,
+         last_liquidity = EXCLUDED.last_liquidity,
+         pnl_pct = EXCLUDED.pnl_pct`,
+      [pos.id, pos.mint, pos.name, pos.symbol, pos.entryPrice, pos.entryTime, pos.sizeSol, pos.sizePct,
+       pos.peakPrice, pos.lastPrice, pos.lastLiquidity, pos.baselineLiquidity, pos.migrationTime, pos.pnlPct],
+    );
+  } catch (err: any) {
+    logger.warn({ err: err?.message }, 'Whale sniper: failed to persist position');
+  }
+}
+
+async function closeWhalePositionInDB(id: string, closeReason: string, closePnlPct: number): Promise<void> {
+  try {
+    await query(
+      `UPDATE whale_positions SET status = 'CLOSED', close_time = $2, close_reason = $3, close_pnl_pct = $4 WHERE id = $1`,
+      [id, Date.now(), closeReason, closePnlPct],
+    );
+  } catch (err: any) {
+    logger.warn({ err: err?.message }, 'Whale sniper: failed to persist position close');
+  }
+}
+
+export async function restoreWhalePositionsFromDB(): Promise<void> {
+  try {
+    const rows = await query<any>(`SELECT * FROM whale_positions WHERE status = 'OPEN' ORDER BY entry_time ASC`);
+    for (const r of rows) {
+      const pos: WhalePosition = {
+        id: r.id, mint: r.mint, name: r.name, symbol: r.symbol,
+        entryPrice: Number(r.entry_price), entryTime: Number(r.entry_time),
+        sizeSol: Number(r.size_sol), sizePct: Number(r.size_pct),
+        peakPrice: Number(r.peak_price), lastPrice: Number(r.last_price),
+        lastLiquidity: Number(r.last_liquidity), baselineLiquidity: Number(r.baseline_liquidity),
+        migrationTime: Number(r.migration_time), pnlPct: Number(r.pnl_pct),
+      };
+      whalePositions.set(pos.mint, pos);
+    }
+    const closedRows = await query<any>(
+      `SELECT * FROM whale_positions WHERE status = 'CLOSED' ORDER BY close_time DESC LIMIT 20`,
+    );
+    for (const r of closedRows) {
+      closedPositions.push({
+        id: r.id, mint: r.mint, name: r.name, symbol: r.symbol,
+        entryPrice: Number(r.entry_price), entryTime: Number(r.entry_time),
+        sizeSol: Number(r.size_sol), sizePct: Number(r.size_pct),
+        peakPrice: Number(r.peak_price), lastPrice: Number(r.last_price),
+        lastLiquidity: Number(r.last_liquidity), baselineLiquidity: Number(r.baseline_liquidity),
+        migrationTime: Number(r.migration_time), pnlPct: Number(r.pnl_pct),
+        closeTime: Number(r.close_time), closeReason: r.close_reason ?? '', closePnlPct: Number(r.close_pnl_pct ?? 0),
+      });
+    }
+    if (rows.length > 0 || closedRows.length > 0) {
+      logger.info({ open: rows.length, closed: closedRows.length }, 'Whale sniper: restored positions from DB after restart');
+    }
+  } catch (err: any) {
+    logger.warn({ err: err?.message }, 'Whale sniper: failed to restore positions from DB');
+  }
+}
+
 // ── Position entry ────────────────────────────────────────────────────────────
 
 async function enterWhalePosition(
@@ -289,6 +359,7 @@ async function enterWhalePosition(
   };
 
   whalePositions.set(mint, pos);
+  void saveWhalePosition(pos);
 
   if (tok) tok.entryTriggered = true;
 
@@ -441,6 +512,7 @@ async function closeWhalePosition(pos: WhalePosition, reason: string): Promise<v
 
   closedPositions.unshift({ ...pos, closeTime: Date.now(), closeReason: reason, closePnlPct: pnlPct });
   if (closedPositions.length > 100) closedPositions.pop();
+  void closeWhalePositionInDB(pos.id, reason, pnlPct);
 
   logger.info({ mint: pos.mint, symbol: pos.symbol, pnlPct: pnlPct.toFixed(1), reason }, 'Whale sniper: CLOSED');
   broadcastWhaleStatus();
@@ -469,6 +541,7 @@ async function monitorPositions(): Promise<void> {
       pos.lastLiquidity = liquidity;
       pos.pnlPct        = ((price - pos.entryPrice) / pos.entryPrice) * 100;
       if (price > pos.peakPrice) pos.peakPrice = price;
+      void saveWhalePosition(pos);
 
       // TP: +100%
       if (price >= pos.entryPrice * 2) {
@@ -733,6 +806,8 @@ function scheduleMarketRefresh(): void {
 
 export function startWhaleSniper(): void {
   logger.info('Whale sniper: started (paper mode — following pump.fun graduations)');
+
+  void restoreWhalePositionsFromDB();
 
   setInterval(async () => {
     pruneExpiredTracking();

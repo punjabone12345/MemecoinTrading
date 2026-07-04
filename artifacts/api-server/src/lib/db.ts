@@ -82,6 +82,30 @@ export async function initDB(): Promise<void> {
   `);
 
   await query(`
+    CREATE TABLE IF NOT EXISTS whale_positions (
+      id TEXT PRIMARY KEY,
+      mint TEXT NOT NULL,
+      name TEXT NOT NULL,
+      symbol TEXT NOT NULL,
+      entry_price NUMERIC NOT NULL,
+      entry_time BIGINT NOT NULL,
+      size_sol NUMERIC NOT NULL,
+      size_pct NUMERIC NOT NULL,
+      peak_price NUMERIC NOT NULL,
+      last_price NUMERIC NOT NULL,
+      last_liquidity NUMERIC NOT NULL,
+      baseline_liquidity NUMERIC NOT NULL,
+      migration_time BIGINT NOT NULL,
+      pnl_pct NUMERIC NOT NULL DEFAULT 0,
+      status TEXT NOT NULL DEFAULT 'OPEN',
+      close_time BIGINT,
+      close_reason TEXT,
+      close_pnl_pct NUMERIC,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+
+  await query(`
     CREATE TABLE IF NOT EXISTS tokens (
       mint TEXT PRIMARY KEY,
       name TEXT NOT NULL,

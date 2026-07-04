@@ -441,7 +441,7 @@ async function _updatePositionPrice(id: string, currentPrice: number, freshBsr?:
       const n = (counts.get(key) ?? 0) + 1;
       counts.set(key, n);
       if (n < EMERGENCY_CONFIRM_TICKS) {
-        logger.info({ positionId: id, symbol: pos.symbol, signal: key, tick: n, required: EMERGENCY_CONFIRM_TICKS }, 'Emergency signal building — not yet confirmed');
+        logger.info({ positionId: id, symbol: pos!.symbol, signal: key, tick: n, required: EMERGENCY_CONFIRM_TICKS }, 'Emergency signal building — not yet confirmed');
         return false;
       }
       return true;
