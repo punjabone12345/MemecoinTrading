@@ -112,6 +112,34 @@ const C = {
   gray:   '#4a6080',
 };
 
+function dexUrl(mintOrPool: string): string {
+  return `https://dexscreener.com/solana/${mintOrPool}`;
+}
+
+function DexLink({ mint, pool }: { mint: string; pool?: string }) {
+  return (
+    <a
+      href={dexUrl(pool ?? mint)}
+      target="_blank"
+      rel="noopener noreferrer"
+      onClick={e => e.stopPropagation()}
+      style={{
+        display: 'inline-flex', alignItems: 'center', gap: 3,
+        fontSize: 8, fontWeight: 800, letterSpacing: '0.05em',
+        padding: '2px 6px', borderRadius: 4,
+        background: 'rgba(255,196,0,0.08)',
+        color: '#ffc400',
+        border: '1px solid rgba(255,196,0,0.25)',
+        textDecoration: 'none',
+        cursor: 'pointer',
+        flexShrink: 0,
+      }}
+    >
+      ↗ DEX
+    </a>
+  );
+}
+
 function StatPill({ label, value, color }: { label: string; value: string | number; color?: string }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2, minWidth: 54 }}>
@@ -142,8 +170,9 @@ function TrackedCard({ tok, tick }: { tok: TrackedToken; tick: number }) {
               <span style={{ fontSize: 8, fontWeight: 800, padding: '2px 6px', borderRadius: 4, background: 'rgba(0,255,136,0.12)', color: C.green, border: '1px solid rgba(0,255,136,0.3)' }}>ENTERED</span>
             )}
           </div>
-          <div style={{ fontSize: 9, color: C.gray, marginTop: 3, fontFamily: 'monospace' }}>
-            {shortAddr(tok.mint)}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 3 }}>
+            <span style={{ fontSize: 9, color: C.gray, fontFamily: 'monospace' }}>{shortAddr(tok.mint)}</span>
+            <DexLink mint={tok.mint} pool={tok.poolAddress} />
           </div>
         </div>
 
@@ -192,6 +221,7 @@ function WhaleBuyRow({ entry }: { entry: WhaleBuyLog }) {
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
           <span style={{ fontSize: 12, fontWeight: 900, color: C.whale }}>{fmtUsd(entry.amountUsd)}</span>
           <span style={{ fontSize: 10, color: '#e0e8ff', fontWeight: 700 }}>buy on {entry.symbol}</span>
+          <DexLink mint={entry.mint} />
           {entry.entered ? (
             <span style={{ fontSize: 8, fontWeight: 800, padding: '1px 5px', borderRadius: 3, background: 'rgba(0,255,136,0.12)', color: C.green, border: '1px solid rgba(0,255,136,0.25)' }}>
               ENTERED
@@ -223,6 +253,7 @@ function PositionCard({ pos }: { pos: WhalePosition }) {
           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
             <span style={{ fontSize: 13, fontWeight: 900, color: '#e0e8ff' }}>{pos.symbol}</span>
             <span style={{ fontSize: 9, color: C.gray }}>{pos.sizePct}% position</span>
+            <DexLink mint={pos.mint} />
           </div>
           <div style={{ fontSize: 9, color: C.gray, marginTop: 2 }}>
             Entry ${pos.entryPrice < 0.001 ? pos.entryPrice.toExponential(3) : pos.entryPrice.toFixed(6)} · {pos.sizeSol.toFixed(3)} SOL
@@ -256,8 +287,11 @@ function ClosedCard({ pos }: { pos: ClosedWhalePosition }) {
   return (
     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '7px 0', borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
       <div>
-        <span style={{ fontSize: 11, fontWeight: 800, color: '#c0c8e0' }}>{pos.symbol}</span>
-        <span style={{ fontSize: 9, color: C.gray, marginLeft: 6 }}>{pos.closeReason}</span>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <span style={{ fontSize: 11, fontWeight: 800, color: '#c0c8e0' }}>{pos.symbol}</span>
+          <DexLink mint={pos.mint} />
+        </div>
+        <span style={{ fontSize: 9, color: C.gray }}>{pos.closeReason}</span>
       </div>
       <div style={{ textAlign: 'right' }}>
         <div style={{ fontSize: 12, fontWeight: 900, color: pnlColor }}>{fmtPnl(pos.closePnlPct)}</div>
