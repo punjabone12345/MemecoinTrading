@@ -19,7 +19,8 @@ const WSOL_MINT             = 'So11111111111111111111111111111111111111112';
 // Post-graduation pool wait settings
 const POOL_WAIT_POLL_MS     = 15_000;  // check DexScreener every 15s
 const POOL_WAIT_TIMEOUT_MS  = 10 * 60_000; // give up after 10 min
-const MIN_POOL_LIQUIDITY    = 1_000;   // require at least $1k liquidity to activate
+const MIN_POOL_LIQUIDITY    = 5_000;   // require at least $5k liquidity (mid-migration pools seed ~$1-3k; full migration adds ~$12k)
+const MIN_POOL_AGE_MS       = 90_000;  // pool must be confirmed live for 90s before we trust it as fully migrated
 
 const PRICE_SL_PCT          = 0.3;    // -30% price stop loss from entry
 
@@ -801,6 +802,10 @@ async function waitForPoolAndActivate(mint: string): Promise<void> {
 
   const deadline = capturedPending.detectedAt + POOL_WAIT_TIMEOUT_MS;
 
+  // Tracks the first moment this pool passed the liquidity check — used for the
+  // MIN_POOL_AGE_MS stability gate that prevents activation on mid-migration pools.
+  let firstPoolSeen: number | null = null;
+
   // Helper: check DexScreener once and activate if pool is live; returns true if activated
   async function checkAndActivate(): Promise<boolean> {
     // Guard: bail if this specific pending entry was replaced or removed
@@ -818,6 +823,7 @@ async function waitForPoolAndActivate(mint: string): Promise<void> {
         .sort((a: any, b: any) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0));
 
       if (postGradPairs.length === 0) {
+        firstPoolSeen = null; // reset — pool vanished (liquidity removed during failed migration)
         logger.debug({ mint: mint.slice(0, 12) }, 'Whale sniper: no post-grad pairs yet — retrying');
         return false;
       }
@@ -826,6 +832,7 @@ async function waitForPoolAndActivate(mint: string): Promise<void> {
       const liquidity = best?.liquidity?.usd ?? 0;
 
       if (liquidity < MIN_POOL_LIQUIDITY) {
+        firstPoolSeen = null; // reset — liquidity too low; pool not yet fully seeded
         logger.debug(
           { mint: mint.slice(0, 12), dex: best?.dexId, liq: liquidity.toFixed(0) },
           'Whale sniper: pool found but liquidity too low — retrying',
@@ -833,7 +840,30 @@ async function waitForPoolAndActivate(mint: string): Promise<void> {
         return false;
       }
 
-      // Pool is confirmed live — activate tracking with real metadata
+      // Pool passes liquidity check — start or continue the stability clock.
+      // We require the pool to be live and above MIN_POOL_LIQUIDITY for MIN_POOL_AGE_MS
+      // before activating, to avoid entering mid-migration tokens where the pool is
+      // partially seeded but the migration transaction hasn't completed yet.
+      const now = Date.now();
+      if (firstPoolSeen === null) {
+        firstPoolSeen = now;
+        const waitSec = Math.round(MIN_POOL_AGE_MS / 1_000);
+        logger.info(
+          { mint: mint.slice(0, 12), dex: best?.dexId, liq: liquidity.toFixed(0) },
+          `Whale sniper: pool detected — waiting ${waitSec}s for migration to stabilise`,
+        );
+        return false;
+      }
+      const ageMs = now - firstPoolSeen;
+      if (ageMs < MIN_POOL_AGE_MS) {
+        logger.debug(
+          { mint: mint.slice(0, 12), ageSec: Math.round(ageMs / 1_000), needSec: Math.round(MIN_POOL_AGE_MS / 1_000) },
+          'Whale sniper: pool stable-check pending',
+        );
+        return false;
+      }
+
+      // Pool is confirmed fully live and stable — activate tracking with real metadata
       const poolAddress    = best?.pairAddress ?? capturedPending.poolAddress;
       const name           = best?.baseToken?.name   || mint.slice(0, 6) + '…';
       const symbol         = best?.baseToken?.symbol || mint.slice(0, 5).toUpperCase();

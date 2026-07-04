@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { Token, ScanStats, Settings, WhaleStatus, TrackedToken, WhaleBuyLog, WhalePosition, ClosedWhalePosition, PendingSignal } from '../lib/types.js';
+import { Token, ScanStats, Settings, WhaleStatus, TrackedToken, WhaleBuyLog, PendingSignal } from '../lib/types.js';
 
 // ── Props ─────────────────────────────────────────────────────────────────────
 
@@ -320,67 +320,6 @@ function WhaleBuyRow({ entry }: { entry: WhaleBuyLog }) {
   );
 }
 
-function PositionCard({ pos }: { pos: WhalePosition }) {
-  const pnlColor = pos.pnlPct >= 0 ? C.green : C.red;
-  const tpPct    = ((pos.lastPrice / pos.entryPrice) / 2) * 100; // progress toward +100%
-  return (
-    <div style={{
-      ...C.card, marginBottom: 8,
-      borderColor: pos.pnlPct >= 0 ? 'rgba(0,255,136,0.2)' : 'rgba(255,68,102,0.2)',
-    }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-        <div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-            <span style={{ fontSize: 13, fontWeight: 900, color: '#e0e8ff' }}>{pos.symbol}</span>
-            <span style={{ fontSize: 9, color: C.gray }}>{pos.sizePct}% position</span>
-            <DexLink mint={pos.mint} />
-          </div>
-          <div style={{ fontSize: 9, color: C.gray, marginTop: 2 }}>
-            Entry ${pos.entryPrice < 0.001 ? pos.entryPrice.toExponential(3) : pos.entryPrice.toFixed(6)} · {pos.sizeSol.toFixed(3)} SOL
-          </div>
-        </div>
-        <div style={{ textAlign: 'right' }}>
-          <div style={{ fontSize: 16, fontWeight: 900, color: pnlColor, fontVariantNumeric: 'tabular-nums' }}>{fmtPnl(pos.pnlPct)}</div>
-          <div style={{ fontSize: 8, color: C.gray }}>peak {fmtPnl(((pos.peakPrice - pos.entryPrice) / pos.entryPrice) * 100)}</div>
-        </div>
-      </div>
-      {/* TP progress bar */}
-      <div style={{ marginTop: 8 }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 3 }}>
-          <span style={{ fontSize: 8, color: C.gray }}>Progress to +100% TP</span>
-          <span style={{ fontSize: 8, color: pnlColor, fontWeight: 700 }}>{Math.min(100, Math.max(0, tpPct)).toFixed(0)}%</span>
-        </div>
-        <div style={{ height: 3, borderRadius: 2, background: 'rgba(255,255,255,0.06)', overflow: 'hidden' }}>
-          <div style={{ width: `${Math.min(100, Math.max(0, tpPct))}%`, height: '100%', borderRadius: 2, background: `linear-gradient(90deg,${C.whale},${C.green})` }} />
-        </div>
-      </div>
-      <div style={{ display: 'flex', gap: 12, marginTop: 7 }}>
-        <span style={{ fontSize: 8, color: C.gray }}>Liq ${pos.lastLiquidity >= 1000 ? (pos.lastLiquidity / 1000).toFixed(1) + 'k' : pos.lastLiquidity.toFixed(0)}</span>
-        <span style={{ fontSize: 8, color: C.gray }}>· {timeAgo(pos.entryTime)}</span>
-      </div>
-    </div>
-  );
-}
-
-function ClosedCard({ pos }: { pos: ClosedWhalePosition }) {
-  const pnlColor = pos.closePnlPct >= 0 ? C.green : C.red;
-  return (
-    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '7px 0', borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
-      <div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-          <span style={{ fontSize: 11, fontWeight: 800, color: '#c0c8e0' }}>{pos.symbol}</span>
-          <DexLink mint={pos.mint} />
-        </div>
-        <span style={{ fontSize: 9, color: C.gray }}>{pos.closeReason}</span>
-      </div>
-      <div style={{ textAlign: 'right' }}>
-        <div style={{ fontSize: 12, fontWeight: 900, color: pnlColor }}>{fmtPnl(pos.closePnlPct)}</div>
-        <div style={{ fontSize: 8, color: C.gray }}>{timeAgo(pos.closeTime)}</div>
-      </div>
-    </div>
-  );
-}
-
 // ── Source feed (graduation events) ──────────────────────────────────────────
 
 function GraduationFeed() {
@@ -432,9 +371,7 @@ export default function DiscoverPage({ whaleStatus: wsProp, wsConnected = false 
   }, []);
 
   const tracked  = status?.trackedTokens  ?? [];
-  const positions = status?.openPositions ?? [];
   const buyLogs  = status?.recentBuyLog   ?? [];
-  const closed   = status?.closedPositions ?? [];
   const queued   = status?.queuedSignals  ?? [];
   const stats    = status?.stats ?? { tracking: 0, positions: 0, queued: 0, pending: 0 };
 
@@ -478,14 +415,6 @@ export default function DiscoverPage({ whaleStatus: wsProp, wsConnected = false 
           ))}
         </div>
       </div>
-
-      {/* ── Open Positions ── */}
-      {positions.length > 0 && (
-        <div style={{ marginBottom: 16 }}>
-          <div style={{ ...C.label, marginBottom: 8 }}>OPEN POSITIONS ({positions.length}/10)</div>
-          {positions.map(pos => <PositionCard key={pos.id} pos={pos} />)}
-        </div>
-      )}
 
       {/* ── Queued signals ── */}
       {queued.length > 0 && (
@@ -532,14 +461,6 @@ export default function DiscoverPage({ whaleStatus: wsProp, wsConnected = false 
           buyLogs.map((log, i) => <WhaleBuyRow key={i} entry={log} />)
         )}
       </div>
-
-      {/* ── Recently Closed ── */}
-      {closed.length > 0 && (
-        <div style={{ ...C.card, marginBottom: 16 }}>
-          <div style={{ ...C.label, marginBottom: 8 }}>RECENTLY CLOSED</div>
-          {closed.slice(0, 10).map((pos, i) => <ClosedCard key={i} pos={pos} />)}
-        </div>
-      )}
 
       {/* ── Graduation source feed ── */}
       <GraduationFeed />
