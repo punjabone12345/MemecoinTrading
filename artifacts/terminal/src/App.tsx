@@ -144,6 +144,10 @@ export default function App() {
         setWsConnected(true);
         wsConnectedRef.current = true;
         reconnectDelay = 500;
+        // Re-fetch whale status on every reconnect — WS messages sent while
+        // the connection was down (app backgrounded, brief disconnect, etc.)
+        // are not replayed, so we pull the latest snapshot immediately.
+        api.getWhaleStatus().then(setWhaleStatus).catch(() => {});
       };
       ws.onclose = () => {
         setWsConnected(false);
@@ -184,17 +188,20 @@ export default function App() {
           setWhaleStatus(whaleData);
         }
 
-        // Scanner + analytics: refresh every 15s regardless of WS state
+        // Scanner + analytics + whale status: refresh every 15s regardless of WS state.
+        // Whale status here is a safety-net catch-up in case a WS message was missed.
         if (scannerTick % 5 === 0) {
-          const [scanData, analyticsData] = await Promise.all([
+          const [scanData, analyticsData, whaleData] = await Promise.all([
             api.getScanner(),
             api.getAnalytics(),
+            api.getWhaleStatus(),
           ]);
           startTransition(() => {
             setTokens(scanData.tokens);
             setScanStats(scanData.stats);
             setAnalytics(analyticsData);
           });
+          setWhaleStatus(whaleData);
         }
       } catch {
         // Silently ignore
