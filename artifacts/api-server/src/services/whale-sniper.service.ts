@@ -21,6 +21,8 @@ const POOL_WAIT_POLL_MS     = 15_000;  // check DexScreener every 15s
 const POOL_WAIT_TIMEOUT_MS  = 10 * 60_000; // give up after 10 min
 const MIN_POOL_LIQUIDITY    = 5_000;   // require at least $5k liquidity (mid-migration pools seed ~$1-3k; full migration adds ~$12k)
 const MIN_POOL_AGE_MS       = 90_000;  // pool must be confirmed live for 90s before we trust it as fully migrated
+// Graduations older than this are stale (e.g. backfill on restart) — skip them
+const MAX_GRAD_AGE_MS       = 5 * 60_000; // 5 minutes
 
 const PRICE_SL_PCT          = 0.3;    // -30% price stop loss from entry
 
@@ -935,6 +937,18 @@ async function waitForPoolAndActivate(mint: string): Promise<void> {
 // ── Public API ────────────────────────────────────────────────────────────────
 
 export function addGraduatedToken(ev: { mint: string; poolAddress?: string; ts: number }): void {
+  // Filter stale graduation events — on restart the backfill re-emits the last
+  // 15 historical transactions with their real blockTime.  Ignore anything older
+  // than MAX_GRAD_AGE_MS so we don't spam pending with long-ago graduated tokens.
+  const ageMs = Date.now() - ev.ts;
+  if (ageMs > MAX_GRAD_AGE_MS) {
+    logger.debug(
+      { mint: ev.mint.slice(0, 12), ageMin: (ageMs / 60_000).toFixed(1) },
+      'Whale sniper: skipping stale graduation (backfill) — too old',
+    );
+    return;
+  }
+
   if (trackedTokens.has(ev.mint) || pendingGraduations.has(ev.mint)) return;
 
   pendingGraduations.set(ev.mint, {

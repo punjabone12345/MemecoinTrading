@@ -180,9 +180,11 @@ async function trackMigrationWallet(): Promise<void> {
         if (!isNew) continue;
 
         added++;
-        pushFeed(pumpfunFeed, { mint, ts: Date.now(), txSig: sig, instructionType, poolAddress, creatorWallet });
+        // Use actual on-chain blockTime so the whale sniper can filter stale backfill events
+        const txTs = (tx.blockTime ?? 0) > 0 ? (tx.blockTime! * 1_000) : Date.now();
+        pushFeed(pumpfunFeed, { mint, ts: txTs, txSig: sig, instructionType, poolAddress, creatorWallet });
         if (onNewMint) onNewMint(mint);
-        if (onGraduation) onGraduation({ mint, poolAddress, ts: Date.now() });
+        if (onGraduation) onGraduation({ mint, poolAddress, ts: txTs });
 
         logger.info(
           { mint, sig: sig.slice(0, 16), instructionType, poolAddress, creatorWallet: creatorWallet.slice(0, 16) },
@@ -281,9 +283,10 @@ function startMigrationWalletWS(): void {
         const isNew = addMintSource(mint, 'pumpfun');
         if (!isNew) continue;
 
-        pushFeed(pumpfunFeed, { mint, ts: Date.now(), txSig: sig, instructionType, poolAddress, creatorWallet });
+        const wsTxTs = (tx.blockTime ?? 0) > 0 ? (tx.blockTime! * 1_000) : Date.now();
+        pushFeed(pumpfunFeed, { mint, ts: wsTxTs, txSig: sig, instructionType, poolAddress, creatorWallet });
         if (onNewMint) onNewMint(mint);
-        if (onGraduation) onGraduation({ mint, poolAddress, ts: Date.now() });
+        if (onGraduation) onGraduation({ mint, poolAddress, ts: wsTxTs });
 
         logger.info(
           { mint, sig: sig.slice(0, 16), instructionType, poolAddress: poolAddress?.slice(0, 16), source: 'helius_ws' },
