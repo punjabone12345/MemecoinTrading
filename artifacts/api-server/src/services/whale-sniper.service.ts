@@ -19,6 +19,8 @@ const POOL_WAIT_POLL_MS     = 15_000;  // check DexScreener every 15s
 const POOL_WAIT_TIMEOUT_MS  = 10 * 60_000; // give up after 10 min
 const MIN_POOL_LIQUIDITY    = 1_000;   // require at least $1k liquidity to activate
 
+const PRICE_SL_PCT          = 0.3;    // -30% price stop loss from entry
+
 const WHALE_TIERS = [
   { minUsd: 2_000, sizePct: 1.0 },
   { minUsd: 1_000, sizePct: 0.75 },
@@ -170,7 +172,7 @@ async function fetchTokenPrice(mint: string): Promise<DexMarketData> {
   try {
     const r     = await axios.get<any>(`${DEX_BASE}/latest/dex/tokens/${mint}`, { timeout: 6_000 });
     const pairs: any[] = (r.data?.pairs ?? [])
-      .filter((p: any) => !(p.dexId ?? '').toLowerCase().includes('pump'))
+      .filter((p: any) => (p.dexId ?? '').toLowerCase() !== 'pumpfun')
       .sort((a: any, b: any) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0));
     if (!pairs.length) return empty;
     const best  = pairs[0];
@@ -474,6 +476,12 @@ async function monitorPositions(): Promise<void> {
         continue;
       }
 
+      // SL: price dropped -30% from entry
+      if (price <= pos.entryPrice * (1 - PRICE_SL_PCT)) {
+        await closeWhalePosition(pos, `-${(PRICE_SL_PCT * 100).toFixed(0)}% stop loss`);
+        continue;
+      }
+
       // Emergency: liq dropped >40%
       if (pos.baselineLiquidity > 1 && liquidity > 0) {
         const drop = (pos.baselineLiquidity - liquidity) / pos.baselineLiquidity;
@@ -549,9 +557,10 @@ async function waitForPoolAndActivate(mint: string): Promise<void> {
       const r = await axios.get<any>(`${DEX_BASE}/latest/dex/tokens/${mint}`, { timeout: 8_000 });
       const allPairs: any[] = r.data?.pairs ?? [];
 
-      // Exclude all pump.fun bonding-curve variants by checking if dexId contains "pump"
+      // Exclude only the pump.fun bonding-curve pair itself — "pumpswap" IS the
+      // post-graduation AMM and must NOT be filtered out (its dexId also contains "pump").
       const postGradPairs = allPairs
-        .filter((p: any) => !(p.dexId ?? '').toLowerCase().includes('pump'))
+        .filter((p: any) => (p.dexId ?? '').toLowerCase() !== 'pumpfun')
         .sort((a: any, b: any) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0));
 
       if (postGradPairs.length === 0) {

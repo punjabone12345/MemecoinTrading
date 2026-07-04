@@ -470,6 +470,7 @@ export default function DiscoverPage({ whaleStatus: wsProp, wsConnected = false 
             { label: '≥$1k → 0.75%', color: 'rgba(0,191,255,0.22)' },
             { label: '≥$2k → 1%',    color: 'rgba(0,191,255,0.30)' },
             { label: 'TP +100%',      color: 'rgba(0,255,136,0.15)' },
+            { label: 'SL price -30%', color: 'rgba(255,68,102,0.12)' },
             { label: 'SL liq -40%',   color: 'rgba(255,68,102,0.12)' },
             { label: '30min window',  color: 'rgba(255,215,0,0.10)' },
           ].map(({ label, color }) => (
