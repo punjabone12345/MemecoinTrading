@@ -19,8 +19,8 @@ const WSOL_MINT             = 'So11111111111111111111111111111111111111112';
 // Post-graduation pool wait settings
 const POOL_WAIT_POLL_MS     = 15_000;  // check DexScreener every 15s
 const POOL_WAIT_TIMEOUT_MS  = 10 * 60_000; // give up after 10 min
-const MIN_POOL_LIQUIDITY    = 5_000;   // require at least $5k liquidity (mid-migration pools seed ~$1-3k; full migration adds ~$12k)
-const MIN_POOL_AGE_MS       = 90_000;  // pool must be confirmed live for 90s before we trust it as fully migrated
+const MIN_POOL_LIQUIDITY    = 1_000;   // require at least $1k liquidity (fresh pump.fun grads seed $1-3k; was $5k which kept most tokens pending)
+const MIN_POOL_AGE_MS       = 30_000;  // pool must be confirmed live for 30s (was 90s — too slow for early entry)
 // Graduations older than this are stale (e.g. backfill on restart) — skip them
 const MAX_GRAD_AGE_MS       = 5 * 60_000; // 5 minutes
 
@@ -362,7 +362,26 @@ function detectBuy(tx: any, targetMint: string): BuyInfo | null {
   });
   if (!gained) return null;
 
-  const spent = (preSol[0] ?? 0) - (postSol[0] ?? 0);
+  // Method 1: native SOL decrease at fee payer (index 0) — works for native SOL buyers
+  const nativeLamports = (preSol[0] ?? 0) - (postSol[0] ?? 0);
+
+  // Method 2: WSOL decrease on fee-payer-owned accounts only — catches whale wallets
+  // that fund swaps via pre-existing WSOL accounts. Restricting to fee-payer owner
+  // prevents inflating spend from third-party WSOL movements in routed/multi-leg swaps.
+  const feePayerAddr = keys[0]?.pubkey?.toString() ?? keys[0]?.toString() ?? '';
+  let wsolLamports = 0;
+  for (const pre of preTok) {
+    if (pre.mint !== WSOL_MINT) continue;
+    // Strict: only count WSOL from accounts provably owned by the fee payer.
+    // Missing owner = unknown ownership → skip to avoid inflation.
+    if (!pre.owner || pre.owner !== feePayerAddr) continue;
+    const post   = postTok.find((p: any) => p.accountIndex === pre.accountIndex && p.mint === WSOL_MINT);
+    const preRaw = parseInt(pre.uiTokenAmount?.amount  ?? '0', 10);
+    const postRaw= parseInt(post?.uiTokenAmount?.amount ?? '0', 10);
+    if (preRaw > postRaw) wsolLamports += (preRaw - postRaw);
+  }
+
+  const spent = Math.max(nativeLamports, wsolLamports);
   if (spent < 10_000) return null;
 
   const wallet = keys[0]?.pubkey?.toString() ?? keys[0]?.toString() ?? 'unknown';
@@ -835,7 +854,7 @@ async function waitForPoolAndActivate(mint: string): Promise<void> {
         .sort((a: any, b: any) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0));
 
       if (postGradPairs.length === 0) {
-        firstPoolSeen = null; // reset — pool vanished (liquidity removed during failed migration)
+        firstPoolSeen = null; // reset — no pairs on DexScreener yet (pool not indexed or failed migration)
         logger.debug({ mint: mint.slice(0, 12) }, 'Whale sniper: no post-grad pairs yet — retrying');
         return false;
       }
@@ -844,7 +863,7 @@ async function waitForPoolAndActivate(mint: string): Promise<void> {
       const liquidity = best?.liquidity?.usd ?? 0;
 
       if (liquidity < MIN_POOL_LIQUIDITY) {
-        firstPoolSeen = null; // reset — liquidity too low; pool not yet fully seeded
+        firstPoolSeen = null; // reset only on confirmed low-liquidity — pool not yet seeded
         logger.debug(
           { mint: mint.slice(0, 12), dex: best?.dexId, liq: liquidity.toFixed(0) },
           'Whale sniper: pool found but liquidity too low — retrying',
