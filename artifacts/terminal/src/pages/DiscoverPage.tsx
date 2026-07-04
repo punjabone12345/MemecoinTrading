@@ -356,7 +356,7 @@ export default function DiscoverPage({ whaleStatus: wsProp, wsConnected = false 
   const buyLogs  = status?.recentBuyLog   ?? [];
   const closed   = status?.closedPositions ?? [];
   const queued   = status?.queuedSignals  ?? [];
-  const stats    = status?.stats ?? { tracking: 0, positions: 0, queued: 0 };
+  const stats    = status?.stats ?? { tracking: 0, positions: 0, queued: 0, pending: 0 };
 
   return (
     <div>
@@ -374,6 +374,8 @@ export default function DiscoverPage({ whaleStatus: wsProp, wsConnected = false 
         </div>
 
         <div style={{ display: 'flex', justifyContent: 'space-around', padding: '10px 0', borderTop: '1px solid rgba(255,255,255,0.06)', borderBottom: '1px solid rgba(255,255,255,0.06)', margin: '0 -2px' }}>
+          <StatPill label="Pending" value={stats.pending ?? 0} color={(stats.pending ?? 0) > 0 ? C.whale : C.gray} />
+          <div style={{ width: 1, background: 'rgba(255,255,255,0.06)' }} />
           <StatPill label="Tracking" value={stats.tracking} />
           <div style={{ width: 1, background: 'rgba(255,255,255,0.06)' }} />
           <StatPill label={`Positions`} value={`${stats.positions}/10`} color={stats.positions >= 10 ? C.yellow : C.green} />

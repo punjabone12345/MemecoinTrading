@@ -5,14 +5,19 @@ import { broadcast } from '../websocket/server.js';
 import { getBalance, setBalance, getSettings } from './settings.service.js';
 import { notifyWhaleTrade, notifyWhaleSkip } from '../lib/telegram.js';
 
-const MAX_TRACKING_MS  = 30 * 60 * 1_000;
-const MAX_POSITIONS    = 10;
-const POLL_INTERVAL_MS = 5_000;
-const PRICE_CHECK_MS   = 3_000;
-const SOL_PRICE_TTL_MS = 60_000;
-const MAX_BUY_LOG      = 100;
-const DEX_BASE         = 'https://api.dexscreener.com';
-const WSOL_MINT        = 'So11111111111111111111111111111111111111112';
+const MAX_TRACKING_MS       = 30 * 60 * 1_000;
+const MAX_POSITIONS         = 10;
+const POLL_INTERVAL_MS      = 5_000;
+const PRICE_CHECK_MS        = 3_000;
+const SOL_PRICE_TTL_MS      = 60_000;
+const MAX_BUY_LOG           = 100;
+const DEX_BASE              = 'https://api.dexscreener.com';
+const WSOL_MINT             = 'So11111111111111111111111111111111111111112';
+
+// Post-graduation pool wait settings
+const POOL_WAIT_POLL_MS     = 15_000;  // check DexScreener every 15s
+const POOL_WAIT_TIMEOUT_MS  = 10 * 60_000; // give up after 10 min
+const MIN_POOL_LIQUIDITY    = 1_000;   // require at least $1k liquidity to activate
 
 const WHALE_TIERS = [
   { minUsd: 2_000, sizePct: 1.0 },
@@ -89,8 +94,17 @@ interface PendingSignal {
   priceAtDetection: number;
 }
 
+// ── Pending graduation type ───────────────────────────────────────────────────
+
+interface PendingGraduation {
+  mint: string;
+  poolAddress?: string;
+  detectedAt: number;
+}
+
 // ── In-memory state ───────────────────────────────────────────────────────────
 
+const pendingGraduations = new Map<string, PendingGraduation>();
 const trackedTokens  = new Map<string, TrackedToken>();
 const whalePositions = new Map<string, WhalePosition>();
 const buyLog: WhaleBuyLog[] = [];
@@ -461,6 +475,15 @@ async function monitorPositions(): Promise<void> {
 
 function pruneExpiredTracking(): void {
   const now = Date.now();
+
+  // Prune pending graduations that timed out
+  for (const [mint, pg] of pendingGraduations) {
+    if (now > pg.detectedAt + POOL_WAIT_TIMEOUT_MS) {
+      pendingGraduations.delete(mint);
+      logger.warn({ mint: mint.slice(0, 12) }, 'Whale sniper: pending graduation timed out — pool never went live');
+    }
+  }
+
   for (const [mint, tok] of trackedTokens) {
     if (now <= tok.expiresAt) continue;
     trackedTokens.delete(mint);
@@ -476,37 +499,140 @@ function pruneExpiredTracking(): void {
   signalQueue.splice(0, signalQueue.length, ...keep);
 }
 
+// ── Wait for post-graduation pool to go live, then activate tracking ──────────
+
+async function waitForPoolAndActivate(mint: string): Promise<void> {
+  // Capture identity reference — used to detect if this mint was re-added after removal
+  const capturedPending = pendingGraduations.get(mint);
+  if (!capturedPending) return;
+
+  const deadline = capturedPending.detectedAt + POOL_WAIT_TIMEOUT_MS;
+
+  // Helper: check DexScreener once and activate if pool is live; returns true if activated
+  async function checkAndActivate(): Promise<boolean> {
+    // Guard: bail if this specific pending entry was replaced or removed
+    if (pendingGraduations.get(mint) !== capturedPending) return false;
+    if (trackedTokens.has(mint)) { pendingGraduations.delete(mint); return true; }
+
+    try {
+      const r = await axios.get<any>(`${DEX_BASE}/latest/dex/tokens/${mint}`, { timeout: 8_000 });
+      const allPairs: any[] = r.data?.pairs ?? [];
+
+      // Exclude all pump.fun bonding-curve variants by checking if dexId contains "pump"
+      const postGradPairs = allPairs
+        .filter((p: any) => !(p.dexId ?? '').toLowerCase().includes('pump'))
+        .sort((a: any, b: any) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0));
+
+      if (postGradPairs.length === 0) {
+        logger.debug({ mint: mint.slice(0, 12) }, 'Whale sniper: no post-grad pairs yet — retrying');
+        return false;
+      }
+
+      const best      = postGradPairs[0];
+      const liquidity = best?.liquidity?.usd ?? 0;
+
+      if (liquidity < MIN_POOL_LIQUIDITY) {
+        logger.debug(
+          { mint: mint.slice(0, 12), dex: best?.dexId, liq: liquidity.toFixed(0) },
+          'Whale sniper: pool found but liquidity too low — retrying',
+        );
+        return false;
+      }
+
+      // Pool is confirmed live — activate tracking with real metadata
+      const poolAddress = best?.pairAddress ?? capturedPending.poolAddress;
+      const name        = best?.baseToken?.name   || mint.slice(0, 6) + '…';
+      const symbol      = best?.baseToken?.symbol || mint.slice(0, 5).toUpperCase();
+
+      // Final identity check before mutation
+      if (pendingGraduations.get(mint) !== capturedPending) return false;
+      pendingGraduations.delete(mint);
+
+      trackedTokens.set(mint, {
+        mint,
+        name,
+        symbol,
+        poolAddress,
+        migrationTime: capturedPending.detectedAt,
+        expiresAt:     capturedPending.detectedAt + MAX_TRACKING_MS,
+        entryTriggered: false,
+        whaleBuys: [],
+      });
+      seenTxns.set(mint, new Set());
+
+      logger.info(
+        {
+          mint:    mint.slice(0, 12),
+          symbol,
+          dex:     best?.dexId,
+          pool:    poolAddress?.slice(0, 16),
+          liq:     liquidity.toFixed(0),
+          waitSec: Math.round((Date.now() - capturedPending.detectedAt) / 1_000),
+        },
+        'Whale sniper: post-grad pool confirmed — tracking activated',
+      );
+      broadcastWhaleStatus();
+      return true;
+    } catch (err: any) {
+      logger.debug({ mint: mint.slice(0, 12), err: err?.message }, 'Whale sniper: pool-ready check error');
+      return false;
+    }
+  }
+
+  // First check immediately (pool may already be live if graduation was slightly delayed)
+  if (await checkAndActivate()) return;
+
+  // Then poll every POOL_WAIT_POLL_MS until deadline
+  while (Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, POOL_WAIT_POLL_MS));
+    // Guard: entry was removed by pruner or re-added (different identity)
+    if (pendingGraduations.get(mint) !== capturedPending) return;
+    if (await checkAndActivate()) return;
+  }
+
+  // Timed out without finding a live pool
+  if (pendingGraduations.get(mint) === capturedPending) {
+    pendingGraduations.delete(mint);
+    logger.warn({ mint: mint.slice(0, 12) }, 'Whale sniper: no live pool found within timeout — discarding');
+    broadcastWhaleStatus();
+  }
+}
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 export function addGraduatedToken(ev: { mint: string; poolAddress?: string; ts: number }): void {
-  if (trackedTokens.has(ev.mint)) return;
-  trackedTokens.set(ev.mint, {
-    mint: ev.mint,
-    name:   ev.mint.slice(0, 6) + '…pump',
-    symbol: ev.mint.slice(0, 5).toUpperCase(),
+  if (trackedTokens.has(ev.mint) || pendingGraduations.has(ev.mint)) return;
+
+  pendingGraduations.set(ev.mint, {
+    mint:       ev.mint,
     poolAddress: ev.poolAddress,
-    migrationTime: ev.ts,
-    expiresAt: ev.ts + MAX_TRACKING_MS,
-    entryTriggered: false,
-    whaleBuys: [],
+    detectedAt: ev.ts,
   });
-  seenTxns.set(ev.mint, new Set());
-  logger.info({ mint: ev.mint.slice(0, 16), pool: ev.poolAddress?.slice(0, 16) }, 'Whale sniper: tracking graduation');
+
+  logger.info(
+    { mint: ev.mint.slice(0, 16), pool: ev.poolAddress?.slice(0, 16) },
+    'Whale sniper: graduation detected — waiting for post-grad pool to go live',
+  );
   broadcastWhaleStatus();
+
+  // Start background wait — activates trackedTokens only once pool is live
+  void waitForPoolAndActivate(ev.mint);
 }
 
 export function getWhaleStatus() {
   return {
-    trackedTokens:  Array.from(trackedTokens.values()),
-    openPositions:  Array.from(whalePositions.values()),
-    closedPositions: closedPositions.slice(0, 20),
-    recentBuyLog:   buyLog.slice(0, 30),
-    queuedSignals:  [...signalQueue],
-    solPriceUsd:    cachedSolPrice,
+    trackedTokens:    Array.from(trackedTokens.values()),
+    openPositions:    Array.from(whalePositions.values()),
+    closedPositions:  closedPositions.slice(0, 20),
+    recentBuyLog:     buyLog.slice(0, 30),
+    queuedSignals:    [...signalQueue],
+    solPriceUsd:      cachedSolPrice,
+    pendingCount:     pendingGraduations.size,
     stats: {
       tracking:  trackedTokens.size,
       positions: whalePositions.size,
       queued:    signalQueue.length,
+      pending:   pendingGraduations.size,
     },
   };
 }

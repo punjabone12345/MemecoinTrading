@@ -208,7 +208,8 @@ export interface WhaleStatus {
   recentBuyLog: WhaleBuyLog[];
   queuedSignals: PendingSignal[];
   solPriceUsd: number;
-  stats: { tracking: number; positions: number; queued: number };
+  pendingCount: number;
+  stats: { tracking: number; positions: number; queued: number; pending: number };
 }
 
 export interface ScanStats {
