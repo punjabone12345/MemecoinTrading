@@ -69,6 +69,7 @@ export async function getSettings(): Promise<Settings> {
     priorityFeeSol: num('priorityFeeSol', 0.001),
     walletPublicKey: str('walletPublicKey', ''),
     whaleSlippagePct: num('whaleSlippagePct', 20),
+    whaleStagnationPct: num('whaleStagnationPct', 5),
     // Whale TP tier configs
     wt1Tp1Pct: num('wt1Tp1Pct', 50),   wt1Tp1Exit: num('wt1Tp1Exit', 30),
     wt1Tp2Pct: num('wt1Tp2Pct', 125),  wt1Tp2Exit: num('wt1Tp2Exit', 30),  wt1Tp2Trail: num('wt1Tp2Trail', 30),

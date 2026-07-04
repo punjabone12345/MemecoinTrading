@@ -897,8 +897,9 @@ async function monitorPositions(): Promise<void> {
         .sort((a: any, b: any) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0))[0];
 
       if (!best) continue;
-      const price     = parseFloat(best.priceUsd ?? '0');
-      const liquidity = best.liquidity?.usd ?? 0;
+      const price        = parseFloat(best.priceUsd ?? '0');
+      const liquidity    = best.liquidity?.usd ?? 0;
+      const priceChange1h: number | null = best?.priceChange?.h1 ?? null;
       if (price <= 0) continue;
 
       // Update live price & peak
@@ -986,9 +987,16 @@ async function monitorPositions(): Promise<void> {
         continue;
       }
 
-      // Time exit: 30min from migration (runner allowed to run beyond this)
-      if (pos.migrationTime && Date.now() - pos.migrationTime > MAX_TRACKING_MS) {
-        await closeWhalePosition(pos, '30min from migration — time exit');
+      // Stagnation exit: if price changed < whaleStagnationPct% in last 1h
+      // and position has been open for at least 1h — no time limit otherwise.
+      const stagnationPct = (settings as unknown as Record<string, number>)['whaleStagnationPct'] ?? 5;
+      if (
+        !tpHitThisCycle &&
+        posAgeMs >= 3_600_000 &&
+        priceChange1h !== null &&
+        Math.abs(priceChange1h) < stagnationPct
+      ) {
+        await closeWhalePosition(pos, `Stagnation: ${Math.abs(priceChange1h).toFixed(1)}% move in 1h (< ${stagnationPct}% threshold)`);
         continue;
       }
     }
@@ -1016,11 +1024,9 @@ function pruneExpiredTracking(): void {
     seenTxns.delete(mint);
     mintCheckpointed.delete(mint);
     wsUnsubscribeMint(mint);
-    const pos = whalePositions.get(mint);
-    if (pos) {
-      pos.lastPrice = pos.lastPrice || pos.entryPrice;
-      closeWhalePosition(pos, '30min window expired').catch(() => {});
-    }
+    // Do NOT close the position when tracking window expires — positions are
+    // held indefinitely and exited only by TP/SL/liquidity/stagnation rules.
+    // monitorPositions() continues to track the mint independently via whalePositions.
   }
   const keep = signalQueue.filter(s => trackedTokens.has(s.mint));
   signalQueue.splice(0, signalQueue.length, ...keep);

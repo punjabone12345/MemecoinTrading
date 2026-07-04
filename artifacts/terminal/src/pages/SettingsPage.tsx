@@ -41,7 +41,7 @@ export default function SettingsPage({ settings: init, onUpdate }: Props) {
   const [resetInput, setResetInput] = useState('');
 
   function update(key: keyof Settings, value: string) {
-    const numKeys = ['minMc','maxMc','minVolume24h','minAgeHours','maxAgeHours','scanFrequencyMs','minBuySellRatio','maxTopHolder','maxCreatorPct','minLiquidity','minEntryScore','trendChecksRequired','maxOpenPositions','sizeScore90','sizeScore80','sizeScore70','slPct','tp1Pct','tp1ClosePct','tp2Pct','tp2ClosePct','tp2TrailPct','tp3Pct','tp3ClosePct','trailingSLPct','trailActivatePct','maxDailyLossPct','startingBalanceSol','currentBalanceSol','slippagePct','priorityFeeSol','whaleSlippagePct','wt1Tp1Pct','wt1Tp1Exit','wt1Tp2Pct','wt1Tp2Exit','wt1Tp2Trail','wt1Tp3Pct','wt1Tp3Exit','wt1Tp3Trail','wt2Tp1Pct','wt2Tp1Exit','wt2Tp2Pct','wt2Tp2Exit','wt2Tp2Trail','wt2Tp3Pct','wt2Tp3Exit','wt2Tp3Trail','wt3Tp1Pct','wt3Tp1Exit','wt3Tp2Pct','wt3Tp2Exit','wt3Tp2Trail','wt3Tp3Pct','wt3Tp3Exit','wt3Tp3Trail'];
+    const numKeys = ['minMc','maxMc','minVolume24h','minAgeHours','maxAgeHours','scanFrequencyMs','minBuySellRatio','maxTopHolder','maxCreatorPct','minLiquidity','minEntryScore','trendChecksRequired','maxOpenPositions','sizeScore90','sizeScore80','sizeScore70','slPct','tp1Pct','tp1ClosePct','tp2Pct','tp2ClosePct','tp2TrailPct','tp3Pct','tp3ClosePct','trailingSLPct','trailActivatePct','maxDailyLossPct','startingBalanceSol','currentBalanceSol','slippagePct','priorityFeeSol','whaleSlippagePct','whaleStagnationPct','wt1Tp1Pct','wt1Tp1Exit','wt1Tp2Pct','wt1Tp2Exit','wt1Tp2Trail','wt1Tp3Pct','wt1Tp3Exit','wt1Tp3Trail','wt2Tp1Pct','wt2Tp1Exit','wt2Tp2Pct','wt2Tp2Exit','wt2Tp2Trail','wt2Tp3Pct','wt2Tp3Exit','wt2Tp3Trail','wt3Tp1Pct','wt3Tp1Exit','wt3Tp2Pct','wt3Tp2Exit','wt3Tp2Trail','wt3Tp3Pct','wt3Tp3Exit','wt3Tp3Trail'];
     const updated = { ...settings } as Record<string, unknown>;
     if (numKeys.includes(key)) updated[key] = parseFloat(value) || 0;
     else updated[key] = value;
@@ -75,7 +75,7 @@ export default function SettingsPage({ settings: init, onUpdate }: Props) {
       <div style={{ padding: '12px 14px', borderRadius: 12, background: 'rgba(0,191,255,0.06)', border: '1px solid rgba(0,191,255,0.18)', marginBottom: 14 }}>
         <div style={{ fontSize: 11, fontWeight: 800, color: '#00bfff', letterSpacing: '0.06em', marginBottom: 4 }}>🐋 WHALE SNIPER MODE</div>
         <div style={{ fontSize: 11, color: '#3a5070', lineHeight: 1.6 }}>
-          Entry size is determined by whale buy size ($500 → 0.5%, $1k → 0.75%, $2k → 1%). The position sizing below sets the <b style={{ color: '#c0c8e0' }}>base portfolio balance</b> those percentages apply to.
+          Entry size is determined by whale buy size ($500 → 0.5%, $1k → 0.75%, $2k → 1%). Positions are held <b style={{ color: '#c0c8e0' }}>indefinitely</b> — no time limit. Exit only via TP/SL, liquidity emergency, or stagnation (&lt;X% move in 1h).
         </div>
       </div>
 
@@ -170,7 +170,17 @@ export default function SettingsPage({ settings: init, onUpdate }: Props) {
           value={n('slPct')}
           onChange={(v) => update('slPct', v)}
           min={5} max={50} step={5} suffix="%"
-          sublabel="Whale sniper exits at +100% TP or emergency (liq -40%, liq=$0, 30min timeout). This hard SL applies to any legacy auto-trader positions."
+          sublabel="Applies to any legacy auto-trader positions only. Whale sniper uses its own per-tier SL/trailing rules."
+        />
+      </Section>
+
+      <Section title="Stagnation Exit" color="#ff6600">
+        <NumberInput
+          label="Max Flat Move in 1h"
+          value={n('whaleStagnationPct')}
+          onChange={(v) => update('whaleStagnationPct', v)}
+          min={1} max={30} step={1} suffix="%"
+          sublabel="Close a whale position if the absolute 1h price change is below this % and the position has been open for at least 1 hour. Keeps capital moving; no time-based exit otherwise."
         />
       </Section>
 

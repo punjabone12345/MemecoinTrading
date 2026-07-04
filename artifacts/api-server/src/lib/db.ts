@@ -203,6 +203,8 @@ export async function initDB(): Promise<void> {
     `ALTER TABLE whale_positions ADD COLUMN IF NOT EXISTS tp_tier INTEGER DEFAULT 1`,
     `ALTER TABLE whale_positions ADD COLUMN IF NOT EXISTS trigger_amount_usd NUMERIC DEFAULT 0`,
     `ALTER TABLE whale_positions ADD COLUMN IF NOT EXISTS current_sl_price NUMERIC DEFAULT 0`,
+    // Ensure whaleStagnationPct seed exists (no-op if already set by user)
+    `INSERT INTO settings (key, value) VALUES ('whaleStagnationPct', '5') ON CONFLICT (key) DO NOTHING`,
   ];
 
   for (const sql of migrations) {
