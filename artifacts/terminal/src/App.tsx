@@ -189,8 +189,9 @@ export default function App() {
         }
 
         // Scanner + analytics + whale status: refresh every 15s regardless of WS state.
-        // Whale status here is a safety-net catch-up in case a WS message was missed.
-        if (scannerTick % 5 === 0) {
+        // Also refresh on tick 1 (3s after mount) so restored-from-DB positions appear
+        // quickly even if the initial HTTP load raced ahead of the server's DB restore.
+        if (scannerTick === 1 || scannerTick % 5 === 0) {
           const [scanData, analyticsData, whaleData] = await Promise.all([
             api.getScanner(),
             api.getAnalytics(),

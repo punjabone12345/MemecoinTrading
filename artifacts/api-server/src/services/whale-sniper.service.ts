@@ -528,9 +528,11 @@ export async function restoreWhalePositionsFromDB(): Promise<void> {
         currentSLPrice: Number(r.current_sl_price ?? 0),
       });
     }
-    if (rows.length > 0 || closedRows.length > 0) {
-      logger.info({ open: rows.length, closed: closedRows.length }, 'Whale sniper: restored positions from DB after restart');
-    }
+    logger.info({ open: rows.length, closed: closedRows.length }, 'Whale sniper: restored positions from DB after restart');
+    // Push restored state to any frontend clients that connected before the DB
+    // restore completed. Without this broadcast, the frontend sees empty
+    // closedPositions on initial load and has no way to know it should refresh.
+    broadcastWhaleStatus();
   } catch (err: any) {
     logger.warn({ err: err?.message }, 'Whale sniper: failed to restore positions from DB');
   }
