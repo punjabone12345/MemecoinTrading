@@ -661,6 +661,16 @@ async function pollTokenBuys(mint: string): Promise<void> {
       const buy = detectBuy(tx, mint);
       if (!buy) continue;
       const amountUsd = buy.solSpent * cachedSolPrice;
+      // Hard minimum: ignore dust/fee-only transactions (< $10) that are not
+      // real buys — these are fee-payer deductions (~15k lamports) that happen
+      // to touch the token account and pass the gained-token check.
+      if (amountUsd < 10) {
+        logger.debug(
+          { mint: mint.slice(0, 12), wallet: buy.wallet.slice(0, 8), usd: amountUsd.toFixed(2), sig: toFetch[i].slice(0, 12) },
+          'Whale sniper: buy below $10 minimum — skipped',
+        );
+        continue;
+      }
       logger.info(
         { mint: mint.slice(0, 12), wallet: buy.wallet.slice(0, 8), usd: amountUsd.toFixed(0), sig: toFetch[i].slice(0, 12) },
         'Whale sniper: buy detected',
@@ -1005,18 +1015,20 @@ async function refreshTrackedTokensMarketData(): Promise<void> {
       // Re-read after await — token may have been pruned while we were fetching
       const tok = trackedTokens.get(mint);
       if (!tok) continue;
+      // Always advance the timestamp so the UI doesn't show a frozen "Xm ago".
+      // Only overwrite market values when DexScreener returned real data.
+      tok.lastMarketUpdate = Date.now();
       if (d.price > 0) {
-        tok.price            = d.price;
-        tok.mcap             = d.mcap;
-        tok.liquidity        = d.liquidity;
-        tok.priceChange5m    = d.priceChange5m;
-        tok.priceChange1h    = d.priceChange1h;
-        tok.volume5m         = d.volume5m;
-        tok.lastMarketUpdate = Date.now();
+        tok.price          = d.price;
+        tok.mcap           = d.mcap;
+        tok.liquidity      = d.liquidity;
+        tok.priceChange5m  = d.priceChange5m;
+        tok.priceChange1h  = d.priceChange1h;
+        tok.volume5m       = d.volume5m;
         // Backfill poolAddress from DexScreener if we didn't have it
         if (!tok.poolAddress && d.pairAddress) tok.poolAddress = d.pairAddress;
-        updated = true;
       }
+      updated = true;
     } catch { /* non-fatal — keep stale data */ }
     await new Promise(r => setTimeout(r, MARKET_REFRESH_STAGGER));
   }
