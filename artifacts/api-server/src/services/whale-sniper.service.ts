@@ -17,10 +17,10 @@ const DEX_BASE              = 'https://api.dexscreener.com';
 const WSOL_MINT             = 'So11111111111111111111111111111111111111112';
 
 // Post-graduation pool wait settings
-const POOL_WAIT_POLL_MS     = 15_000;  // check DexScreener every 15s
+const POOL_WAIT_POLL_MS     = 3_000;   // check DexScreener every 3s (was 15s — too slow, misses early whale window)
 const POOL_WAIT_TIMEOUT_MS  = 10 * 60_000; // give up after 10 min
 const MIN_POOL_LIQUIDITY    = 1_000;   // require at least $1k liquidity (fresh pump.fun grads seed $1-3k; was $5k which kept most tokens pending)
-const MIN_POOL_AGE_MS       = 30_000;  // pool must be confirmed live for 30s (was 90s — too slow for early entry)
+const MIN_POOL_AGE_MS       = 10_000;  // pool must be confirmed live for 10s (was 30s — too slow for early entry)
 // Graduations older than this are stale (e.g. backfill on restart) — skip them
 const MAX_GRAD_AGE_MS       = 5 * 60_000; // 5 minutes
 
@@ -742,7 +742,7 @@ async function pollTokenBuys(mint: string): Promise<void> {
   const seen = seenTxns.get(mint)!;
 
   try {
-    const sigs = await conn.getSignaturesForAddress(pk, { limit: 20 });
+    const sigs = await conn.getSignaturesForAddress(pk, { limit: 30 });
     if (!sigs.length) return;
 
     // First poll: baseline.
@@ -756,9 +756,9 @@ async function pollTokenBuys(mint: string): Promise<void> {
 
       const tok            = trackedTokens.get(mint);
       const migrationSec   = tok ? Math.floor(tok.migrationTime / 1_000) : 0;
-      const fiveMinAgoSec  = Math.floor(Date.now() / 1_000) - 5 * 60;
+      const tenMinAgoSec   = Math.floor(Date.now() / 1_000) - 10 * 60;
       const earlyWhales    = sigs.filter(
-        s => !s.err && s.blockTime != null && s.blockTime >= Math.max(migrationSec, fiveMinAgoSec),
+        s => !s.err && s.blockTime != null && s.blockTime >= Math.max(migrationSec, tenMinAgoSec),
       );
 
       if (earlyWhales.length === 0) return;
@@ -772,12 +772,14 @@ async function pollTokenBuys(mint: string): Promise<void> {
       let currentPrice = 0;
       try {
         const r     = await axios.get<any>(`${DEX_BASE}/latest/dex/tokens/${mint}`, { timeout: 5_000 });
-        const pairs: any[] = (r.data?.pairs ?? []).sort((a: any, b: any) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0));
+        const pairs: any[] = (r.data?.pairs ?? [])
+          .filter((p: any) => (p.dexId ?? '').toLowerCase() !== 'pumpfun')
+          .sort((a: any, b: any) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0));
         currentPrice = parseFloat(pairs[0]?.priceUsd ?? '0');
       } catch { /* use 0 */ }
 
       // Process from oldest → newest so we trigger on the FIRST qualifying buy
-      const toFetchEarly = earlyWhales.slice().reverse().slice(0, 5).map(s => s.signature);
+      const toFetchEarly = earlyWhales.slice().reverse().slice(0, 20).map(s => s.signature);
       const earlyTxns    = await Promise.all(
         toFetchEarly.map(sig =>
           conn.getParsedTransaction(sig, { maxSupportedTransactionVersion: 0 }).catch(() => null),
