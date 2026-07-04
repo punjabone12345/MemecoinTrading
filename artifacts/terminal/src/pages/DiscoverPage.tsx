@@ -1,79 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { Token, ScanStats, Settings } from '../lib/types.js';
-
-// ── Types (mirrors whale-sniper.service.ts) ───────────────────────────────────
-
-interface WhaleBuy {
-  wallet: string;
-  amountUsd: number;
-  timestamp: number;
-  txSig: string;
-}
-
-interface TrackedToken {
-  mint: string;
-  name: string;
-  symbol: string;
-  poolAddress?: string;
-  migrationTime: number;
-  expiresAt: number;
-  entryTriggered: boolean;
-  whaleBuys: WhaleBuy[];
-}
-
-interface WhalePosition {
-  id: string;
-  mint: string;
-  name: string;
-  symbol: string;
-  entryPrice: number;
-  entryTime: number;
-  sizeSol: number;
-  sizePct: number;
-  peakPrice: number;
-  lastPrice: number;
-  lastLiquidity: number;
-  baselineLiquidity: number;
-  migrationTime: number;
-  pnlPct: number;
-}
-
-interface ClosedWhalePosition extends WhalePosition {
-  closeTime: number;
-  closeReason: string;
-  closePnlPct: number;
-}
-
-interface WhaleBuyLog {
-  mint: string;
-  name: string;
-  symbol: string;
-  wallet: string;
-  amountUsd: number;
-  timestamp: number;
-  txSig: string;
-  entered: boolean;
-  skipReason?: string;
-}
-
-interface PendingSignal {
-  mint: string;
-  name: string;
-  symbol: string;
-  sizePct: number;
-  triggerAmountUsd: number;
-  queuedAt: number;
-}
-
-interface WhaleStatus {
-  trackedTokens: TrackedToken[];
-  openPositions: WhalePosition[];
-  closedPositions: ClosedWhalePosition[];
-  recentBuyLog: WhaleBuyLog[];
-  queuedSignals: PendingSignal[];
-  solPriceUsd: number;
-  stats: { tracking: number; positions: number; queued: number };
-}
+import { Token, ScanStats, Settings, WhaleStatus, TrackedToken, WhaleBuyLog, WhalePosition, ClosedWhalePosition, PendingSignal } from '../lib/types.js';
 
 // ── Props ─────────────────────────────────────────────────────────────────────
 
@@ -81,6 +7,10 @@ interface Props {
   tokens: Token[];
   scanStats: ScanStats;
   settings: Settings | null;
+  /** Real-time whale status pushed via App-level WebSocket. */
+  whaleStatus?: WhaleStatus | null;
+  /** True when the App-level WebSocket is connected. Polling resumes when false. */
+  wsConnected?: boolean;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -119,14 +49,13 @@ function shortAddr(addr: string): string {
   return addr.slice(0, 4) + '…' + addr.slice(-4);
 }
 
-// ── Whale status hook ─────────────────────────────────────────────────────────
+// ── Whale status hook (polling fallback when WS data is absent) ───────────────
 
-function useWhaleStatus() {
+function useWhaleStatusFallback(skip: boolean) {
   const [status, setStatus] = useState<WhaleStatus | null>(null);
-  const [tick, setTick] = useState(0);
 
-  // Poll API every 2s
   useEffect(() => {
+    if (skip) return;
     let cancelled = false;
     async function poll() {
       try {
@@ -137,17 +66,11 @@ function useWhaleStatus() {
       } catch { /* ignore */ }
     }
     poll();
-    const id = setInterval(poll, 2_000);
+    const id = setInterval(poll, 3_000);
     return () => { cancelled = true; clearInterval(id); };
-  }, []);
+  }, [skip]);
 
-  // Tick every second for countdown timers
-  useEffect(() => {
-    const id = setInterval(() => setTick(t => t + 1), 1_000);
-    return () => clearInterval(id);
-  }, []);
-
-  return { status, tick };
+  return status;
 }
 
 // ── Discovery source feed hook (graduation events) ───────────────────────────
@@ -383,8 +306,16 @@ function GraduationFeed() {
 
 // ── Main page ─────────────────────────────────────────────────────────────────
 
-export default function DiscoverPage(_props: Props) {
-  const { status, tick } = useWhaleStatus();
+export default function DiscoverPage({ whaleStatus: wsProp, wsConnected = false }: Props) {
+  // Poll only when WebSocket is offline; WS pushes whale_status in real time when connected
+  const polled = useWhaleStatusFallback(wsConnected);
+  const status = wsConnected ? (wsProp ?? polled) : (polled ?? wsProp);
+
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setTick(t => t + 1), 1_000);
+    return () => clearInterval(id);
+  }, []);
 
   const tracked  = status?.trackedTokens  ?? [];
   const positions = status?.openPositions ?? [];

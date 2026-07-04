@@ -188,10 +188,6 @@ async function enterWhalePosition(
 
   if (entryPrice === 0) {
     logger.warn({ mint }, 'Whale sniper: no price available at entry — skipped');
-    notifyWhaleSkip({
-      name, symbol, mint, whaleAmountUsd: triggerAmountUsd,
-      reason: 'No price available at entry',
-    }).catch(() => {});
     return;
   }
 
@@ -306,24 +302,12 @@ async function handleWhaleBuy(
   };
 
   if (!tier) {
-    entry.skipReason = `$${amountUsd.toFixed(0)} below $500 threshold`;
-    notifyWhaleSkip({
-      name: tok.name, symbol: tok.symbol, mint, whaleAmountUsd: amountUsd,
-      reason: entry.skipReason,
-    }).catch(() => {});
+    entry.skipReason = `${amountUsd.toFixed(0)} below $500 threshold`;
   } else if (whalePositions.has(mint) || tok.entryTriggered) {
     entry.skipReason = 'Already entered this token';
-    notifyWhaleSkip({
-      name: tok.name, symbol: tok.symbol, mint, whaleAmountUsd: amountUsd,
-      reason: entry.skipReason,
-    }).catch(() => {});
   } else if (whalePositions.size >= MAX_POSITIONS) {
     entry.skipReason = 'Max positions — queued';
     enqueueSignal(mint, tok.name, tok.symbol, tier.sizePct, amountUsd, priceAtDetection);
-    notifyWhaleSkip({
-      name: tok.name, symbol: tok.symbol, mint, whaleAmountUsd: amountUsd,
-      reason: 'Max 10 positions reached — queued for next slot',
-    }).catch(() => {});
   } else {
     entry.entered = true;
     buyLog.unshift(entry);

@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback, useTransition, memo } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
-import { Position, Token, Analytics, Settings, ScanStats } from './lib/types.js';
+import { Position, Token, Analytics, Settings, ScanStats, WhaleStatus } from './lib/types.js';
 import { api, createWS } from './lib/api.js';
 import DiscoverPage from './pages/DiscoverPage.js';
 import PositionsPage from './pages/PositionsPage.js';
@@ -58,6 +58,7 @@ export default function App() {
   const [analytics, setAnalytics] = useState<Analytics | null>(null);
   const [balance, setBalance] = useState<number>(10);
   const [settings, setSettings] = useState<Settings | null>(null);
+  const [whaleStatus, setWhaleStatus] = useState<WhaleStatus | null>(null);
   const [wsConnected, setWsConnected] = useState(false);
   const [dataLoaded, setDataLoaded] = useState(false);
   const [, startTransition] = useTransition();
@@ -124,6 +125,7 @@ export default function App() {
         if (msg.type === 'analytics') setAnalytics(msg.data as Analytics);
         if (msg.type === 'balance') setBalance((msg.data as { balance: number }).balance);
         if (msg.type === 'settings') setSettings(msg.data as Settings);
+        if (msg.type === 'whale_status') setWhaleStatus(msg.data as WhaleStatus);
       });
       if (destroyed) { ws.close(); return; }
       ws.onopen = () => {
@@ -293,7 +295,7 @@ export default function App() {
             transition={pageTrans}
             style={{ position: 'absolute', inset: 0, overflowY: 'auto', overflowX: 'hidden', WebkitOverflowScrolling: 'touch', padding: '16px 16px 12px' }}
           >
-            {tab === 'discover' && <MemoDiscover tokens={tokens} scanStats={scanStats} settings={settings} />}
+            {tab === 'discover' && <MemoDiscover tokens={tokens} scanStats={scanStats} settings={settings} whaleStatus={whaleStatus} wsConnected={wsConnected} />}
             {tab === 'positions' && (
               <MemoPositions
                 openPositions={openPositions} closedPositions={closedPositions}
@@ -324,7 +326,7 @@ export default function App() {
       }}>
         {NAV.map((t) => {
           const active = tab === t.id;
-          const badge = t.id === 'positions' ? openCount : t.id === 'watchlist' ? eligibleCount : 0;
+          const badge = t.id === 'positions' ? openCount : t.id === 'discover' ? eligibleCount : 0;
           return (
             <button
               key={t.id}
