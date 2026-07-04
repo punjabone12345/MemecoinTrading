@@ -6,12 +6,11 @@ import DiscoverPage from './pages/DiscoverPage.js';
 import PositionsPage from './pages/PositionsPage.js';
 import AnalyticsPage from './pages/AnalyticsPage.js';
 import SettingsPage from './pages/SettingsPage.js';
-import WatchlistPage from './pages/WatchlistPage.js';
 
 const TRADING_MODE = import.meta.env.VITE_TRADING_MODE || 'paper';
 
-type Tab = 'discover' | 'watchlist' | 'positions' | 'analytics' | 'settings';
-const TAB_ORDER: Tab[] = ['discover', 'watchlist', 'positions', 'analytics', 'settings'];
+type Tab = 'discover' | 'positions' | 'analytics' | 'settings';
+const TAB_ORDER: Tab[] = ['discover', 'positions', 'analytics', 'settings'];
 
 const DEFAULT_SETTINGS: Settings = {
   minMc: 500000, maxMc: 7000000, minVolume24h: 100000,
@@ -31,7 +30,6 @@ interface NavTab { id: Tab; label: string; color: string; icon: React.ReactNode 
 
 const NAV: NavTab[] = [
   { id: 'discover', label: 'Scan', color: '#00d4ff', icon: <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg> },
-  { id: 'watchlist', label: 'Watch', color: '#ffd700', icon: <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg> },
   { id: 'positions', label: 'Trades', color: '#00ff88', icon: <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 3v18h18"/><path d="m19 9-5 5-4-4-3 3"/></svg> },
   { id: 'analytics', label: 'Stats', color: '#9b59ff', icon: <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg> },
   { id: 'settings', label: 'Setup', color: '#8099bb', icon: <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round"><circle cx="12" cy="12" r="3"/><path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"/></svg> },
@@ -47,7 +45,6 @@ const pageTrans = { duration: 0.14, ease: 'easeOut' as const };
 
 // Memoized pages — only re-render when their own props change
 const MemoDiscover = memo(DiscoverPage);
-const MemoWatchlist = memo(WatchlistPage);
 const MemoPositions = memo(PositionsPage);
 const MemoAnalytics = memo(AnalyticsPage);
 const MemoSettings = memo(SettingsPage);
@@ -297,7 +294,6 @@ export default function App() {
             style={{ position: 'absolute', inset: 0, overflowY: 'auto', overflowX: 'hidden', WebkitOverflowScrolling: 'touch', padding: '16px 16px 12px' }}
           >
             {tab === 'discover' && <MemoDiscover tokens={tokens} scanStats={scanStats} settings={settings} />}
-            {tab === 'watchlist' && <MemoWatchlist tokens={tokens} />}
             {tab === 'positions' && (
               <MemoPositions
                 openPositions={openPositions} closedPositions={closedPositions}
