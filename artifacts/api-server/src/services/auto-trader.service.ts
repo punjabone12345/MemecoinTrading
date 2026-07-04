@@ -8,26 +8,50 @@ import { query } from '../lib/db.js';
 import { broadcastTokens } from '../websocket/server.js';
 
 /**
- * Fetch the live price for a specific pair from DexScreener right now.
- * Used at trade-entry time to avoid using a stale cached price (which can be
- * 15s+ old and cause 30-70% entry-price drift vs. actual market price).
- * Falls back to the cached price if the API call fails.
+ * Fetch the real-time entry price by MINT address at trade execution time.
+ *
+ * Why by mint, not pairAddress:
+ *   Querying by pairAddress can silently return the pumpfun bonding-curve pair
+ *   if that address was cached (price ~5-10x lower than the real market price).
+ *   Fetching by mint gives us ALL pairs for the token so we can:
+ *     1. Filter out every pumpfun bonding-curve pair (dexId='pumpfun')
+ *     2. Pick the most liquid remaining pair — highest confidence real price
+ *   This is the same logic DexScreener's own UI uses to display the "main" price.
+ *
+ * Returns { price, pairAddress } so the caller can also update the stored pair URL.
+ * Falls back to the cached price if the API call fails or returns no valid pairs.
  */
-async function fetchLivePairPrice(pairAddress: string, fallback: number): Promise<number> {
+async function fetchLiveEntryPrice(
+  mint: string,
+  fallback: number
+): Promise<{ price: number; pairAddress: string | null }> {
   try {
-    const res = await axios.get<{ pairs?: { priceUsd?: string; dexId?: string }[] }>(
-      `https://api.dexscreener.com/latest/dex/pairs/solana/${pairAddress}`,
-      { timeout: 5000 }
+    const res = await axios.get<{
+      pairs?: { priceUsd?: string; dexId?: string; pairAddress?: string; liquidity?: { usd?: number } }[];
+    }>(
+      `https://api.dexscreener.com/latest/dex/tokens/${mint}`,
+      { timeout: 6000 }
     );
-    const pairs = (res.data?.pairs ?? []).filter(
-      (p) => (p.dexId ?? '').toLowerCase() !== 'pumpfun'
-    );
-    const price = parseFloat(pairs[0]?.priceUsd ?? '0');
-    if (price > 0) return price;
+
+    const valid = (res.data?.pairs ?? [])
+      .filter((p) => (p.dexId ?? '').toLowerCase() !== 'pumpfun')
+      .filter((p) => parseFloat(p.priceUsd ?? '0') > 0)
+      // Most liquid pair = most reliable price (matches what DexScreener UI shows)
+      .sort((a, b) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0));
+
+    if (valid.length > 0) {
+      const best = valid[0];
+      const price = parseFloat(best.priceUsd!);
+      logger.info(
+        { mint, price, dexId: best.dexId, pairAddress: best.pairAddress, liquidity: best.liquidity?.usd },
+        'Live entry price fetched by mint'
+      );
+      return { price, pairAddress: best.pairAddress ?? null };
+    }
   } catch (err) {
-    logger.warn({ err, pairAddress }, 'Live price fetch before entry failed — using cached price');
+    logger.warn({ err, mint }, 'Live entry price fetch failed — using cached price');
   }
-  return fallback;
+  return { price: fallback, pairAddress: null };
 }
 
 // ── Two independent loops ────────────────────────────────────────────────────
@@ -270,19 +294,27 @@ async function checkEntries(): Promise<void> {
       continue;
     }
 
-    // Use pair-specific URL so the price monitor fallback fetcher can resolve
-    // the correct pool, and the DEX button links to the right pair page.
-    const dexUrl = `https://dexscreener.com/solana/${token.pairAddress || token.mint}`;
+    // Fetch a guaranteed real-time price by MINT right now — never use the cached
+    // price as entry. Fetching by mint ensures we always get the graduated
+    // Raydium/PumpSwap pair price (most liquid, highest confidence), never the
+    // pumpfun bonding-curve price (which is ~5-10x lower and causes wrong P&L).
+    const { price: livePrice, pairAddress: livePairAddress } = await fetchLiveEntryPrice(
+      token.mint,
+      token.price
+    );
 
-    // Fetch a guaranteed live price at the moment of entry — NOT the cached price.
-    // The token cache can be up to 15s stale (fetch loop interval), causing 30-70%
-    // entry-price drift vs. what DexScreener actually shows at trade time.
-    const livePrice = token.pairAddress
-      ? await fetchLivePairPrice(token.pairAddress, token.price)
-      : token.price;
+    // Use the freshly-fetched pair address if available — it's guaranteed to be
+    // the most liquid non-pumpfun pool. Fall back to cached pairAddress / mint.
+    const bestPairAddress = livePairAddress ?? token.pairAddress ?? token.mint;
+    const dexUrl = `https://dexscreener.com/solana/${bestPairAddress}`;
 
     logger.info(
-      { mint: token.mint, symbol: token.symbol, score: token.score, cachedPrice: token.price, livePrice, mc: token.marketCap, bsr: token.buySellRatio },
+      {
+        mint: token.mint, symbol: token.symbol, score: token.score,
+        cachedPrice: token.price, livePrice,
+        pairAddress: bestPairAddress,
+        mc: token.marketCap, bsr: token.buySellRatio,
+      },
       'ELIGIBLE token found — attempting to open position'
     );
     // Lock this mint immediately — before the async openPosition() call.
