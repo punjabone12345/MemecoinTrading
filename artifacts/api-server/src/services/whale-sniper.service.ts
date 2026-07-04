@@ -4,7 +4,7 @@ import { WebSocket } from 'ws';
 import { logger } from '../lib/logger.js';
 import { broadcast } from '../websocket/server.js';
 import { getBalance, setBalance, getSettings } from './settings.service.js';
-import { notifyWhaleTrade, notifyWhaleSkip } from '../lib/telegram.js';
+import { notifyWhaleTrade, notifyWhaleSkip, notifyWhaleClose } from '../lib/telegram.js';
 import { query } from '../lib/db.js';
 
 const MAX_TRACKING_MS       = 30 * 60 * 1_000;
@@ -724,6 +724,13 @@ async function closeWhalePosition(pos: WhalePosition, reason: string): Promise<v
     void closeWhalePositionInDB(pos.id, reason, pnlPct);
 
     logger.info({ mint: pos.mint, symbol: pos.symbol, pnlPct: pnlPct.toFixed(1), reason }, 'Whale sniper: CLOSED');
+
+    notifyWhaleClose({
+      name: pos.name, symbol: pos.symbol, mint: pos.mint,
+      pnlPct, pnlSol, reason,
+      entryPrice: pos.entryPrice, exitPrice: pos.lastPrice, sizeSol: pos.sizeSol,
+    }).catch(() => {});
+
     broadcastWhaleStatus();
     await processQueue();
   } finally {
@@ -755,11 +762,19 @@ async function monitorPositions(): Promise<void> {
       if (price > pos.peakPrice) pos.peakPrice = price;
       void saveWhalePosition(pos);
 
-      // TP: +100%
+      // TP: +100% (no grace period — capturing a 2x is always correct)
       if (price >= pos.entryPrice * 2) {
         await closeWhalePosition(pos, '+100% take profit');
         continue;
       }
+
+      // Grace period: skip SL/liquidity exits for the first 90s after entry.
+      // The entry price comes from a single-mint DexScreener fetch; monitorPositions
+      // uses a multi-mint query that can return a slightly different price, causing
+      // the SL to fire immediately on volatile tokens before the trade has a chance
+      // to develop. TP is still active during the grace window.
+      const posAgeMs = Date.now() - pos.entryTime;
+      if (posAgeMs < 90_000) continue;
 
       // SL: price dropped -30% from entry
       if (price <= pos.entryPrice * (1 - PRICE_SL_PCT)) {

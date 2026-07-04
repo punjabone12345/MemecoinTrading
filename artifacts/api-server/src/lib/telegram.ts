@@ -136,6 +136,24 @@ export async function notifyWhaleTrade(params: {
   );
 }
 
+export async function notifyWhaleClose(params: {
+  name: string; symbol: string; mint: string;
+  pnlPct: number; pnlSol: number; reason: string;
+  entryPrice: number; exitPrice: number; sizeSol: number;
+}): Promise<void> {
+  const { name, symbol, mint, pnlPct, pnlSol, reason, entryPrice, exitPrice, sizeSol } = params;
+  const emoji = pnlPct >= 0 ? '🟢' : '🔴';
+  await sendMessage(
+    `${emoji} <b>WHALE CLOSE — ${symbol}</b> (${name})\n` +
+    `Mint: <code>${mint.slice(0, 16)}…</code>\n` +
+    `PNL: ${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(1)}%  (${pnlSol >= 0 ? '+' : ''}${pnlSol.toFixed(4)} SOL)\n` +
+    `Entry: ${entryPrice.toFixed(8)}  →  Exit: ${exitPrice.toFixed(8)}\n` +
+    `Size: ${sizeSol.toFixed(3)} SOL\n` +
+    `Reason: ${reason}\n` +
+    `Time: ${toIST(new Date())}`
+  );
+}
+
 export async function notifyWhaleSkip(params: {
   name: string; symbol: string; mint: string;
   whaleAmountUsd: number; reason: string;
