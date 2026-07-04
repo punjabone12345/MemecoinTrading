@@ -122,6 +122,12 @@ const whalePositions = new Map<string, WhalePosition>();
 const buyLog: WhaleBuyLog[] = [];
 const signalQueue: PendingSignal[] = [];
 const closedPositions: ClosedWhalePosition[] = [];
+
+// Synchronous re-entrancy locks — prevent duplicate entries/closes when
+// overlapping poll cycles (or concurrent buy detections for the same mint)
+// race each other. Held for the entire duration of the async operation.
+const entryLocks = new Set<string>();
+const closeLocks = new Set<string>();
 const seenTxns = new Map<string, Set<string>>();
 const mintCheckpointed = new Set<string>();
 
@@ -297,90 +303,102 @@ async function enterWhalePosition(
   sizePct: number, triggerAmountUsd: number,
   priceAtDetection: number, whaleWallet: string,
 ): Promise<void> {
-  if (whalePositions.has(mint)) return;
+  // Synchronous reservation — no `await` happens between the check and the
+  // lock being taken, so two overlapping calls for the same mint (e.g. from
+  // an overlapping poll cycle) cannot both pass this guard.
+  if (whalePositions.has(mint) || entryLocks.has(mint)) return;
+  entryLocks.add(mint);
 
-  // Fetch current price & liquidity
-  const { price: entryPrice, liquidity, name: dexName, symbol: dexSymbol } = await fetchTokenPrice(mint);
-
-  if (entryPrice === 0) {
-    logger.warn({ mint }, 'Whale sniper: no price available at entry — skipped');
-    return;
-  }
-
-  // Enrich name/symbol from DexScreener if still placeholder
-  const tok = trackedTokens.get(mint);
-  if (tok) {
-    if (tok.name.endsWith('…') || !tok.symbol) {
-      tok.name   = dexName   || tok.name;
-      tok.symbol = dexSymbol || tok.symbol;
-      name   = tok.name;
-      symbol = tok.symbol;
-    }
-  }
-
-  // ── Slippage guard ─────────────────────────────────────────────────────────
-  // If price has moved more than whaleSlippagePct% above the whale's detection
-  // price, the opportunity has already pumped too much — skip it.
-  let maxSlippage = 20;
   try {
-    const s = await getSettings();
-    maxSlippage = s.whaleSlippagePct ?? 20;
-  } catch { /* use default */ }
+    // Fetch current price & liquidity
+    const { price: entryPrice, liquidity, name: dexName, symbol: dexSymbol } = await fetchTokenPrice(mint);
 
-  if (priceAtDetection > 0) {
-    const slipPct = ((entryPrice - priceAtDetection) / priceAtDetection) * 100;
-    if (slipPct > maxSlippage) {
-      logger.warn(
-        { mint: mint.slice(0, 12), symbol, slipPct: slipPct.toFixed(1), maxSlippage },
-        'Whale sniper: slippage exceeded — skipped',
-      );
-      notifyWhaleSkip({
-        name, symbol, mint, whaleAmountUsd: triggerAmountUsd,
-        reason: `Slippage ${slipPct.toFixed(1)}% > ${maxSlippage}% max`,
-        entryPrice, whalePriceAtDetection: priceAtDetection, maxSlippagePct: maxSlippage,
-      }).catch(() => {});
+    if (entryPrice === 0) {
+      logger.warn({ mint }, 'Whale sniper: no price available at entry — skipped');
       return;
     }
+
+    // Enrich name/symbol from DexScreener if still placeholder
+    const tok = trackedTokens.get(mint);
+    if (tok) {
+      if (tok.name.endsWith('…') || !tok.symbol) {
+        tok.name   = dexName   || tok.name;
+        tok.symbol = dexSymbol || tok.symbol;
+        name   = tok.name;
+        symbol = tok.symbol;
+      }
+    }
+
+    // ── Slippage guard ─────────────────────────────────────────────────────────
+    // If price has moved more than whaleSlippagePct% above the whale's detection
+    // price, the opportunity has already pumped too much — skip it.
+    let maxSlippage = 20;
+    try {
+      const s = await getSettings();
+      maxSlippage = s.whaleSlippagePct ?? 20;
+    } catch { /* use default */ }
+
+    if (priceAtDetection > 0) {
+      const slipPct = ((entryPrice - priceAtDetection) / priceAtDetection) * 100;
+      if (slipPct > maxSlippage) {
+        logger.warn(
+          { mint: mint.slice(0, 12), symbol, slipPct: slipPct.toFixed(1), maxSlippage },
+          'Whale sniper: slippage exceeded — skipped',
+        );
+        notifyWhaleSkip({
+          name, symbol, mint, whaleAmountUsd: triggerAmountUsd,
+          reason: `Slippage ${slipPct.toFixed(1)}% > ${maxSlippage}% max`,
+          entryPrice, whalePriceAtDetection: priceAtDetection, maxSlippagePct: maxSlippage,
+        }).catch(() => {});
+        return;
+      }
+    }
+
+    // Re-check after the async gaps above — belt-and-suspenders in case the
+    // lock was somehow bypassed (e.g. process restart mid-flight).
+    if (whalePositions.has(mint)) return;
+
+    const balance = await getBalance().catch(() => 10);
+    const sizeSol = balance * (sizePct / 100);
+
+    const pos: WhalePosition = {
+      id: `${mint}-${Date.now()}`,
+      mint, name, symbol,
+      entryPrice, entryTime: Date.now(),
+      sizeSol, sizePct,
+      peakPrice: entryPrice,
+      lastPrice: entryPrice,
+      lastLiquidity: liquidity,
+      baselineLiquidity: liquidity > 0 ? liquidity : 1,
+      migrationTime: trackedTokens.get(mint)?.migrationTime ?? Date.now(),
+      pnlPct: 0,
+    };
+
+    whalePositions.set(mint, pos);
+    void saveWhalePosition(pos);
+
+    if (tok) tok.entryTriggered = true;
+
+    await setBalance(Math.max(0, balance - sizeSol)).catch(() => {});
+
+    logger.info(
+      { mint, symbol, sizePct, sizeSol: sizeSol.toFixed(3), entryPrice, trigger: triggerAmountUsd.toFixed(0) },
+      'Whale sniper: ENTERED',
+    );
+
+    notifyWhaleTrade({
+      name, symbol, mint,
+      whaleAmountUsd: triggerAmountUsd,
+      sizePct, sizeSol, entryPrice,
+      whalePriceAtDetection: priceAtDetection,
+      slippagePct: maxSlippage,
+      whaleWallet,
+    }).catch(() => {});
+
+    broadcastWhaleStatus();
+  } finally {
+    entryLocks.delete(mint);
   }
-
-  const balance = await getBalance().catch(() => 10);
-  const sizeSol = balance * (sizePct / 100);
-
-  const pos: WhalePosition = {
-    id: `${mint}-${Date.now()}`,
-    mint, name, symbol,
-    entryPrice, entryTime: Date.now(),
-    sizeSol, sizePct,
-    peakPrice: entryPrice,
-    lastPrice: entryPrice,
-    lastLiquidity: liquidity,
-    baselineLiquidity: liquidity > 0 ? liquidity : 1,
-    migrationTime: trackedTokens.get(mint)?.migrationTime ?? Date.now(),
-    pnlPct: 0,
-  };
-
-  whalePositions.set(mint, pos);
-  void saveWhalePosition(pos);
-
-  if (tok) tok.entryTriggered = true;
-
-  await setBalance(Math.max(0, balance - sizeSol)).catch(() => {});
-
-  logger.info(
-    { mint, symbol, sizePct, sizeSol: sizeSol.toFixed(3), entryPrice, trigger: triggerAmountUsd.toFixed(0) },
-    'Whale sniper: ENTERED',
-  );
-
-  notifyWhaleTrade({
-    name, symbol, mint,
-    whaleAmountUsd: triggerAmountUsd,
-    sizePct, sizeSol, entryPrice,
-    whalePriceAtDetection: priceAtDetection,
-    slippagePct: maxSlippage,
-    whaleWallet,
-  }).catch(() => {});
-
-  broadcastWhaleStatus();
 }
 
 // ── Queue / slot management ───────────────────────────────────────────────────
@@ -505,20 +523,29 @@ async function pollTokenBuys(mint: string): Promise<void> {
 // ── Position exit monitoring ──────────────────────────────────────────────────
 
 async function closeWhalePosition(pos: WhalePosition, reason: string): Promise<void> {
+  // Synchronous reservation, same rationale as enterWhalePosition — prevents
+  // two overlapping monitor cycles from both closing (and double-crediting
+  // balance for) the same position.
+  if (closeLocks.has(pos.mint) || !whalePositions.has(pos.mint)) return;
+  closeLocks.add(pos.mint);
   whalePositions.delete(pos.mint);
 
-  const pnlPct  = ((pos.lastPrice - pos.entryPrice) / pos.entryPrice) * 100;
-  const pnlSol  = pos.sizeSol * (pnlPct / 100);
-  const newBal  = (await getBalance().catch(() => 0)) + pos.sizeSol + pnlSol;
-  await setBalance(Math.max(0, newBal)).catch(() => {});
+  try {
+    const pnlPct  = ((pos.lastPrice - pos.entryPrice) / pos.entryPrice) * 100;
+    const pnlSol  = pos.sizeSol * (pnlPct / 100);
+    const newBal  = (await getBalance().catch(() => 0)) + pos.sizeSol + pnlSol;
+    await setBalance(Math.max(0, newBal)).catch(() => {});
 
-  closedPositions.unshift({ ...pos, closeTime: Date.now(), closeReason: reason, closePnlPct: pnlPct });
-  if (closedPositions.length > 100) closedPositions.pop();
-  void closeWhalePositionInDB(pos.id, reason, pnlPct);
+    closedPositions.unshift({ ...pos, closeTime: Date.now(), closeReason: reason, closePnlPct: pnlPct });
+    if (closedPositions.length > 100) closedPositions.pop();
+    void closeWhalePositionInDB(pos.id, reason, pnlPct);
 
-  logger.info({ mint: pos.mint, symbol: pos.symbol, pnlPct: pnlPct.toFixed(1), reason }, 'Whale sniper: CLOSED');
-  broadcastWhaleStatus();
-  await processQueue();
+    logger.info({ mint: pos.mint, symbol: pos.symbol, pnlPct: pnlPct.toFixed(1), reason }, 'Whale sniper: CLOSED');
+    broadcastWhaleStatus();
+    await processQueue();
+  } finally {
+    closeLocks.delete(pos.mint);
+  }
 }
 
 async function monitorPositions(): Promise<void> {
@@ -806,23 +833,42 @@ function scheduleMarketRefresh(): void {
   }, MARKET_REFRESH_MS);
 }
 
+// Non-overlapping buy-poll loop: waits for the full sweep (including the
+// 300ms per-mint stagger) to finish before scheduling the next one. Using
+// setInterval here previously allowed cycles to overlap when a sweep took
+// longer than POLL_INTERVAL_MS, causing the same whale buy to be detected
+// and entered/alerted twice.
+function scheduleBuyPoll(): void {
+  setTimeout(async () => {
+    try {
+      pruneExpiredTracking();
+      for (const mint of Array.from(trackedTokens.keys())) {
+        await pollTokenBuys(mint);
+        await new Promise(r => setTimeout(r, 300));
+      }
+    } catch { /* non-fatal */ }
+    scheduleBuyPoll();
+  }, POLL_INTERVAL_MS);
+}
+
+// Non-overlapping position monitor loop — same rationale as scheduleBuyPoll.
+function schedulePositionMonitor(): void {
+  setTimeout(async () => {
+    try {
+      await monitorPositions();
+      broadcastWhaleStatus();
+    } catch { /* non-fatal */ }
+    schedulePositionMonitor();
+  }, PRICE_CHECK_MS);
+}
+
 export function startWhaleSniper(): void {
   logger.info('Whale sniper: started (paper mode — following pump.fun graduations)');
 
   void restoreWhalePositionsFromDB();
 
-  setInterval(async () => {
-    pruneExpiredTracking();
-    for (const mint of Array.from(trackedTokens.keys())) {
-      await pollTokenBuys(mint);
-      await new Promise(r => setTimeout(r, 300));
-    }
-  }, POLL_INTERVAL_MS);
-
-  setInterval(async () => {
-    await monitorPositions();
-    broadcastWhaleStatus();
-  }, PRICE_CHECK_MS);
+  scheduleBuyPoll();
+  schedulePositionMonitor();
 
   // Non-overlapping market data refresh for tracked tokens
   scheduleMarketRefresh();
