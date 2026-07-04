@@ -598,6 +598,22 @@ async function enterWhalePosition(
     // lock was somehow bypassed (e.g. process restart mid-flight).
     if (whalePositions.has(mint)) return;
 
+    // ── 2-second execution delay ────────────────────────────────────────────
+    // In real trading there is ~2s of latency between detecting the whale buy
+    // and the swap being confirmed on-chain.  Paper mode simulates this by
+    // waiting 2 s and re-fetching the live price as the true fill price.
+    await new Promise(r => setTimeout(r, 2000));
+    if (whalePositions.has(mint)) return;   // re-check in case another trigger fired
+
+    const { price: fillPrice } = await fetchTokenPrice(mint);
+    const finalEntryPrice = fillPrice > 0 ? fillPrice : entryPrice;
+
+    logger.info(
+      { mint: mint.slice(0, 12), symbol, priceAtDetection: entryPrice, fillPrice: finalEntryPrice,
+        slippagePct: entryPrice > 0 ? (((finalEntryPrice - entryPrice) / entryPrice) * 100).toFixed(2) : 'n/a' },
+      'Whale sniper: 2s fill price sampled',
+    );
+
     const balance = await getBalance().catch(() => 10);
     const sizeSol = balance * (sizePct / 100);
     const tpTier  = determineTier(triggerAmountUsd);
@@ -605,7 +621,7 @@ async function enterWhalePosition(
     const pos: WhalePosition = {
       id: `${mint}-${Date.now()}`,
       mint, name, symbol,
-      entryPrice, entryMcap: trackedTokens.get(mint)?.mcap ?? 0,
+      entryPrice: finalEntryPrice, entryMcap: trackedTokens.get(mint)?.mcap ?? 0,
       entryTime: Date.now(),
       sizeSol, sizePct,
       peakPrice: entryPrice,
