@@ -1,5 +1,6 @@
 import axios from 'axios';
 import { Connection, PublicKey } from '@solana/web3.js';
+import { WebSocket } from 'ws';
 import { logger } from '../lib/logger.js';
 import { broadcast } from '../websocket/server.js';
 import { getBalance, setBalance, getSettings } from './settings.service.js';
@@ -8,8 +9,8 @@ import { query } from '../lib/db.js';
 
 const MAX_TRACKING_MS       = 30 * 60 * 1_000;
 const MAX_POSITIONS         = 10;
-const POLL_INTERVAL_MS      = 5_000;
-const PRICE_CHECK_MS        = 3_000;
+const POLL_INTERVAL_MS      = 2_000;   // reduced from 5s for faster detection
+const PRICE_CHECK_MS        = 1_500;   // reduced from 3s for snappier live prices
 const SOL_PRICE_TTL_MS      = 60_000;
 const MAX_BUY_LOG           = 100;
 const DEX_BASE              = 'https://api.dexscreener.com';
@@ -63,6 +64,7 @@ export interface WhalePosition {
   name: string;
   symbol: string;
   entryPrice: number;
+  entryMcap: number;
   entryTime: number;
   sizeSol: number;
   sizePct: number;
@@ -114,6 +116,139 @@ interface PendingGraduation {
   detectedAt: number;
 }
 
+// ── Helius WebSocket — instant whale-buy detection per tracked mint ───────────
+
+let _whaleWs: WebSocket | null = null;
+let _whaleWsReady = false;
+let _whaleWsReqId = 100;
+const _pendingWsReqs = new Map<number, string>(); // reqId → mint (pre-confirm)
+const _mintToSubId   = new Map<string, number>(); // mint → confirmed subId
+const _subIdToMint   = new Map<number, string>(); // subId → mint
+let _whaleWsReconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
+function getHeliusWsUrl(): string | null {
+  const k = process.env.HELIUS_API_KEY;
+  return process.env.HELIUS_WS_URL ?? (k ? `wss://mainnet.helius-rpc.com/?api-key=${k}` : null);
+}
+
+function wsSubscribeMint(mint: string): void {
+  if (!_whaleWs || !_whaleWsReady) return;
+  if (_mintToSubId.has(mint) || Array.from(_pendingWsReqs.values()).includes(mint)) return;
+  const id = _whaleWsReqId++;
+  _pendingWsReqs.set(id, mint);
+  _whaleWs.send(JSON.stringify({
+    jsonrpc: '2.0', id,
+    method: 'logsSubscribe',
+    params: [{ mentions: [mint] }, { commitment: 'processed' }],
+  }));
+}
+
+function wsUnsubscribeMint(mint: string): void {
+  // Remove from pending (not yet confirmed) — prevents promotion on late confirmation
+  for (const [reqId, m] of _pendingWsReqs) {
+    if (m === mint) { _pendingWsReqs.delete(reqId); break; }
+  }
+  // Remove from confirmed maps
+  const subId = _mintToSubId.get(mint);
+  if (subId !== undefined) {
+    _mintToSubId.delete(mint);
+    _subIdToMint.delete(subId);
+    if (_whaleWs?.readyState === WebSocket.OPEN) {
+      _whaleWs.send(JSON.stringify({
+        jsonrpc: '2.0', id: _whaleWsReqId++,
+        method: 'logsUnsubscribe',
+        params: [subId],
+      }));
+    }
+  }
+}
+
+function connectWhaleWs(): void {
+  const wsUrl = getHeliusWsUrl();
+  if (!wsUrl) return;
+
+  if (_whaleWsReconnectTimer) { clearTimeout(_whaleWsReconnectTimer); _whaleWsReconnectTimer = null; }
+  if (_whaleWs) { _whaleWs.removeAllListeners(); try { _whaleWs.terminate(); } catch {} _whaleWs = null; }
+  _whaleWsReady = false;
+
+  const safeUrl = wsUrl.replace(/api-key=[^&?]+/, 'api-key=***');
+  logger.info({ url: safeUrl }, 'Whale sniper: Helius WS connecting…');
+  _whaleWs = new WebSocket(wsUrl);
+
+  let pingTimer: ReturnType<typeof setInterval> | null = null;
+
+  _whaleWs.on('open', () => {
+    _whaleWsReady = true;
+    logger.info('Whale sniper: Helius WS connected — subscribing active tracked mints');
+    for (const mint of trackedTokens.keys()) wsSubscribeMint(mint);
+    pingTimer = setInterval(() => {
+      if (_whaleWs?.readyState === WebSocket.OPEN) {
+        _whaleWs.send(JSON.stringify({ jsonrpc: '2.0', id: 99998, method: 'getHealth' }));
+      } else {
+        if (pingTimer) clearInterval(pingTimer);
+      }
+    }, 30_000);
+  });
+
+  _whaleWs.on('message', (raw: Buffer) => {
+    try {
+      const msg = JSON.parse(raw.toString());
+      // Subscription confirmation
+      if (typeof msg.result === 'number' && msg.id !== undefined) {
+        const mint = _pendingWsReqs.get(msg.id);
+        if (mint) {
+          _pendingWsReqs.delete(msg.id);
+          if (!trackedTokens.has(mint)) {
+            // Mint was pruned before confirmation arrived — immediately unsubscribe the orphan
+            if (_whaleWs?.readyState === WebSocket.OPEN) {
+              _whaleWs.send(JSON.stringify({ jsonrpc: '2.0', id: _whaleWsReqId++, method: 'logsUnsubscribe', params: [msg.result] }));
+            }
+            logger.debug({ mint: mint.slice(0, 12) }, 'Whale sniper: WS unsubscribed orphan (mint pruned before confirmation)');
+          } else {
+            _mintToSubId.set(mint, msg.result);
+            _subIdToMint.set(msg.result, mint);
+            logger.debug({ mint: mint.slice(0, 12), subId: msg.result }, 'Whale sniper: WS mint subscription confirmed');
+          }
+        }
+        return;
+      }
+      if (msg.method !== 'logsNotification') return;
+      const value = msg.params?.result?.value;
+      if (!value || value.err !== null) return;
+
+      // Find mint by subscription ID first, then scan logs as fallback
+      const subId: number = msg.params?.subscription;
+      let targetMint: string | undefined = _subIdToMint.get(subId);
+      if (!targetMint) {
+        const allText = (value.logs ?? []).join(' ');
+        for (const [mint] of trackedTokens) {
+          if (allText.includes(mint)) { targetMint = mint; break; }
+        }
+      }
+      if (!targetMint || !trackedTokens.has(targetMint)) return;
+
+      logger.debug(
+        { mint: targetMint.slice(0, 12), sig: (value.signature ?? '').slice(0, 12) },
+        'Whale sniper: WS event — triggering instant poll',
+      );
+      void pollTokenBuys(targetMint);
+    } catch { /* ignore */ }
+  });
+
+  _whaleWs.on('error', (err: Error) => {
+    logger.debug({ msg: err.message }, 'Whale sniper: Helius WS error');
+  });
+
+  _whaleWs.on('close', () => {
+    _whaleWsReady = false;
+    _whaleWs = null;
+    if (pingTimer) { clearInterval(pingTimer); pingTimer = null; }
+    _mintToSubId.clear(); _subIdToMint.clear(); _pendingWsReqs.clear();
+    logger.info('Whale sniper: Helius WS disconnected — reconnecting in 10s');
+    _whaleWsReconnectTimer = setTimeout(connectWhaleWs, 10_000);
+  });
+}
+
 // ── In-memory state ───────────────────────────────────────────────────────────
 
 const pendingGraduations = new Map<string, PendingGraduation>();
@@ -128,6 +263,10 @@ const closedPositions: ClosedWhalePosition[] = [];
 // race each other. Held for the entire duration of the async operation.
 const entryLocks = new Set<string>();
 const closeLocks = new Set<string>();
+// Per-mint poll lock: prevents WS-triggered instant polls and the scheduled
+// sweep from running pollTokenBuys concurrently for the same mint, which would
+// process overlapping signature windows and could produce duplicate buy events.
+const pollLocks  = new Set<string>();
 const seenTxns = new Map<string, Set<string>>();
 const mintCheckpointed = new Set<string>();
 
@@ -233,16 +372,17 @@ async function saveWhalePosition(pos: WhalePosition): Promise<void> {
   try {
     await query(
       `INSERT INTO whale_positions
-        (id, mint, name, symbol, entry_price, entry_time, size_sol, size_pct,
+        (id, mint, name, symbol, entry_price, entry_mcap, entry_time, size_sol, size_pct,
          peak_price, last_price, last_liquidity, baseline_liquidity, migration_time, pnl_pct, status)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'OPEN')
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,'OPEN')
        ON CONFLICT (id) DO UPDATE SET
          peak_price = EXCLUDED.peak_price,
          last_price = EXCLUDED.last_price,
          last_liquidity = EXCLUDED.last_liquidity,
          pnl_pct = EXCLUDED.pnl_pct`,
-      [pos.id, pos.mint, pos.name, pos.symbol, pos.entryPrice, pos.entryTime, pos.sizeSol, pos.sizePct,
-       pos.peakPrice, pos.lastPrice, pos.lastLiquidity, pos.baselineLiquidity, pos.migrationTime, pos.pnlPct],
+      [pos.id, pos.mint, pos.name, pos.symbol, pos.entryPrice, pos.entryMcap ?? 0, pos.entryTime,
+       pos.sizeSol, pos.sizePct, pos.peakPrice, pos.lastPrice, pos.lastLiquidity,
+       pos.baselineLiquidity, pos.migrationTime, pos.pnlPct],
     );
   } catch (err: any) {
     logger.warn({ err: err?.message }, 'Whale sniper: failed to persist position');
@@ -266,7 +406,8 @@ export async function restoreWhalePositionsFromDB(): Promise<void> {
     for (const r of rows) {
       const pos: WhalePosition = {
         id: r.id, mint: r.mint, name: r.name, symbol: r.symbol,
-        entryPrice: Number(r.entry_price), entryTime: Number(r.entry_time),
+        entryPrice: Number(r.entry_price), entryMcap: Number(r.entry_mcap ?? 0),
+        entryTime: Number(r.entry_time),
         sizeSol: Number(r.size_sol), sizePct: Number(r.size_pct),
         peakPrice: Number(r.peak_price), lastPrice: Number(r.last_price),
         lastLiquidity: Number(r.last_liquidity), baselineLiquidity: Number(r.baseline_liquidity),
@@ -280,7 +421,8 @@ export async function restoreWhalePositionsFromDB(): Promise<void> {
     for (const r of closedRows) {
       closedPositions.push({
         id: r.id, mint: r.mint, name: r.name, symbol: r.symbol,
-        entryPrice: Number(r.entry_price), entryTime: Number(r.entry_time),
+        entryPrice: Number(r.entry_price), entryMcap: Number(r.entry_mcap ?? 0),
+        entryTime: Number(r.entry_time),
         sizeSol: Number(r.size_sol), sizePct: Number(r.size_pct),
         peakPrice: Number(r.peak_price), lastPrice: Number(r.last_price),
         lastLiquidity: Number(r.last_liquidity), baselineLiquidity: Number(r.baseline_liquidity),
@@ -364,7 +506,8 @@ async function enterWhalePosition(
     const pos: WhalePosition = {
       id: `${mint}-${Date.now()}`,
       mint, name, symbol,
-      entryPrice, entryTime: Date.now(),
+      entryPrice, entryMcap: trackedTokens.get(mint)?.mcap ?? 0,
+      entryTime: Date.now(),
       sizeSol, sizePct,
       peakPrice: entryPrice,
       lastPrice: entryPrice,
@@ -461,6 +604,12 @@ async function handleWhaleBuy(
 // ── Buy polling ───────────────────────────────────────────────────────────────
 
 async function pollTokenBuys(mint: string): Promise<void> {
+  // Per-mint concurrency guard — WS-triggered and scheduled polls must not
+  // overlap for the same mint, or they'd both read the same "new" sigs before
+  // either has had a chance to mark them seen.
+  if (pollLocks.has(mint)) return;
+  pollLocks.add(mint);
+
   const conn = getConn();
   const pk   = new PublicKey(mint);
 
@@ -517,6 +666,8 @@ async function pollTokenBuys(mint: string): Promise<void> {
     }
   } catch (err: any) {
     logger.debug({ mint: mint.slice(0, 12), err: err?.message }, 'Whale sniper: poll error');
+  } finally {
+    pollLocks.delete(mint);
   }
 }
 
@@ -628,6 +779,7 @@ function pruneExpiredTracking(): void {
     trackedTokens.delete(mint);
     seenTxns.delete(mint);
     mintCheckpointed.delete(mint);
+    wsUnsubscribeMint(mint);
     const pos = whalePositions.get(mint);
     if (pos) {
       pos.lastPrice = pos.lastPrice || pos.entryPrice;
@@ -709,6 +861,8 @@ async function waitForPoolAndActivate(mint: string): Promise<void> {
         lastMarketUpdate: Date.now(),
       });
       seenTxns.set(mint, new Set());
+      // Subscribe to Helius WS for instant whale-buy detection on this mint
+      wsSubscribeMint(mint);
 
       logger.info(
         {
@@ -874,4 +1028,11 @@ export function startWhaleSniper(): void {
   scheduleMarketRefresh();
 
   void fetchSolPrice();
+
+  // Helius WS for near-instant whale buy detection (requires HELIUS_API_KEY)
+  if (getHeliusWsUrl()) {
+    connectWhaleWs();
+  } else {
+    logger.info('Whale sniper: no HELIUS_API_KEY — using poll-only mode (2s interval)');
+  }
 }

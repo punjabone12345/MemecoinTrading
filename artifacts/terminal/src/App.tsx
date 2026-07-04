@@ -301,6 +301,7 @@ export default function App() {
                 openPositions={openPositions} closedPositions={closedPositions}
                 balance={portfolioValue} analytics={analytics}
                 settings={settings}
+                whaleStatus={whaleStatus}
                 onRefresh={async () => { await loadInitial(); await refreshClosed(); }}
               />
             )}

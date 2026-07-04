@@ -167,6 +167,7 @@ export interface WhalePosition {
   name: string;
   symbol: string;
   entryPrice: number;
+  entryMcap: number;
   entryTime: number;
   sizeSol: number;
   sizePct: number;

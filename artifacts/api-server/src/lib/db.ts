@@ -88,6 +88,7 @@ export async function initDB(): Promise<void> {
       name TEXT NOT NULL,
       symbol TEXT NOT NULL,
       entry_price NUMERIC NOT NULL,
+      entry_mcap NUMERIC NOT NULL DEFAULT 0,
       entry_time BIGINT NOT NULL,
       size_sol NUMERIC NOT NULL,
       size_pct NUMERIC NOT NULL,
@@ -104,6 +105,8 @@ export async function initDB(): Promise<void> {
       created_at TIMESTAMPTZ DEFAULT NOW()
     )
   `);
+  // Migration: add entry_mcap column for existing DBs
+  await query(`ALTER TABLE whale_positions ADD COLUMN IF NOT EXISTS entry_mcap NUMERIC NOT NULL DEFAULT 0`).catch(() => {});
 
   await query(`
     CREATE TABLE IF NOT EXISTS tokens (
