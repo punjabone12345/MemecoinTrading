@@ -639,32 +639,38 @@ function ClosedWhaleCard({ pos, onRefresh }: { pos: ClosedWhalePosition; onRefre
 // ── Main page ─────────────────────────────────────────────────────────────────
 
 export default function PositionsPage({ openPositions, closedPositions, balance, analytics, settings, whaleStatus, onRefresh }: Props) {
-  const unrealized = openPositions.reduce((s, p) => {
-    const current = p.currentPrice ?? p.entryPrice;
-    const pct = (current - p.entryPrice) / p.entryPrice;
-    return s + p.sizeSol * pct;
-  }, 0);
-
   const whaleOpen   = whaleStatus?.openPositions   ?? [];
   const whaleClosed = whaleStatus?.closedPositions  ?? [];
   const solPrice    = whaleStatus?.solPriceUsd ?? 0;
+  void openPositions; void closedPositions; void balance; void analytics; // kept for API compat
 
-  // Unrealized from whale positions — use initialSizeSol (like card-level P&L calculation)
+  // Whale unrealized PnL (pnlPct accounts for banked partial closes)
   const whaleUnrealized = whaleOpen.reduce((s, p) => {
     const initSize = p.initialSizeSol > 0 ? p.initialSizeSol : p.sizeSol;
     return s + initSize * (p.pnlPct / 100);
   }, 0);
-  const totalOpenCount  = openPositions.length + whaleOpen.length;
+
+  // Whale today's P&L
+  const todayStr = new Date().toDateString();
+  const whaleDailyPnl = whaleClosed.reduce((sum, p) => {
+    if (new Date(p.closeTime).toDateString() !== todayStr) return sum;
+    const initSize = p.initialSizeSol > 0 ? p.initialSizeSol : p.sizeSol;
+    return sum + initSize * (p.closePnlPct / 100);
+  }, 0);
+
+  // Whale win rate
+  const whaleWins = whaleClosed.filter(p => p.closePnlPct > 0).length;
+  const whaleWinRate = whaleClosed.length > 0 ? (whaleWins / whaleClosed.length) * 100 : 0;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
       {/* Summary stats */}
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
         {[
-          { label: 'Open Positions', value: String(totalOpenCount), color: '#00d4ff' },
-          { label: 'Unrealized PNL', value: `${(unrealized + whaleUnrealized) >= 0 ? '+' : ''}${(unrealized + whaleUnrealized).toFixed(4)} SOL`, color: (unrealized + whaleUnrealized) >= 0 ? '#00ff88' : '#ff4466' },
-          { label: "Today's PNL", value: `${(analytics?.dailyPnl ?? 0) >= 0 ? '+' : ''}${(analytics?.dailyPnl ?? 0).toFixed(4)} SOL`, color: (analytics?.dailyPnl ?? 0) >= 0 ? '#00ff88' : '#ff4466' },
-          { label: 'Win Rate', value: `${(analytics?.winRate ?? 0).toFixed(1)}%`, color: '#ffd700' },
+          { label: 'Open Positions', value: String(whaleOpen.length), color: '#00d4ff' },
+          { label: 'Unrealized PNL', value: `${whaleUnrealized >= 0 ? '+' : ''}${whaleUnrealized.toFixed(4)} SOL`, color: whaleUnrealized >= 0 ? '#00ff88' : '#ff4466' },
+          { label: "Today's PNL", value: `${whaleDailyPnl >= 0 ? '+' : ''}${whaleDailyPnl.toFixed(4)} SOL`, color: whaleDailyPnl >= 0 ? '#00ff88' : '#ff4466' },
+          { label: 'Win Rate', value: `${whaleWinRate.toFixed(1)}%`, color: '#ffd700' },
         ].map((s) => (
           <div key={s.label} className="card" style={{ padding: '14px 16px' }}>
             <div style={{ fontSize: 17, fontWeight: 900, color: s.color, lineHeight: 1.1 }}>{s.value}</div>
@@ -674,7 +680,7 @@ export default function PositionsPage({ openPositions, closedPositions, balance,
       </div>
 
       {/* Live feed badge */}
-      {totalOpenCount > 0 && (
+      {whaleOpen.length > 0 && (
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 14px', borderRadius: 8, background: 'rgba(0,255,136,0.04)', border: '1px solid rgba(0,255,136,0.1)', fontSize: 10 }}>
           <span style={{ display: 'inline-block', width: 6, height: 6, borderRadius: '50%', background: '#00ff88', boxShadow: '0 0 6px #00ff88', animation: 'pulse-dot 0.8s ease-in-out infinite' }} />
           <span style={{ color: '#00ff88', fontWeight: 800 }}>LIVE</span>
@@ -682,23 +688,8 @@ export default function PositionsPage({ openPositions, closedPositions, balance,
         </div>
       )}
 
-      {/* ── Auto-trader open positions ── */}
-      <div className="section-label" style={{ marginTop: 4 }}>Auto-Trader Positions ({openPositions.length})</div>
-
-      {openPositions.length === 0 ? (
-        <div className="card" style={{ padding: '28px 20px', textAlign: 'center', color: '#3a5070' }}>
-          <div style={{ fontSize: 32, marginBottom: 8 }}>📊</div>
-          <div style={{ fontWeight: 700, color: '#7090b0', marginBottom: 4 }}>No auto-trader positions</div>
-          <div style={{ fontSize: 12 }}>Scanner is looking for entries...</div>
-        </div>
-      ) : (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-          {openPositions.map((p) => <PositionCard key={p.id} pos={p} settings={settings} onRefresh={onRefresh} />)}
-        </div>
-      )}
-
       {/* ── Whale Sniper open positions ── */}
-      <div className="section-label" style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 8 }}>
+      <div className="section-label" style={{ marginTop: 4, display: 'flex', alignItems: 'center', gap: 8 }}>
         <span>🐋 Whale Sniper Positions ({whaleOpen.length})</span>
         {whaleStatus && (
           <span style={{ fontSize: 10, color: '#3a5070', fontWeight: 500 }}>
@@ -721,41 +712,6 @@ export default function PositionsPage({ openPositions, closedPositions, balance,
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
           {whaleOpen.map((p) => <WhalePositionCard key={p.id} pos={p} solPrice={solPrice} onRefresh={onRefresh} />)}
         </div>
-      )}
-
-      {/* ── Auto-trader closed positions ── */}
-      {closedPositions.length > 0 && (
-        <>
-          <div className="section-label" style={{ marginTop: 8 }}>Closed Positions ({closedPositions.length})</div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-            {closedPositions.slice(0, 20).map((p) => {
-              const pnlPos = (p.pnlSol ?? 0) >= 0;
-              return (
-                <div key={p.id} className="card" style={{ padding: '14px 16px', borderColor: pnlPos ? 'rgba(0,255,136,0.1)' : 'rgba(255,68,102,0.1)' }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-                    <div>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
-                        <span style={{ fontWeight: 800, fontSize: 14, color: '#d4e0f0' }}>{p.symbol}</span>
-                        <span style={{ fontSize: 10, color: '#3a5070' }}>{p.name}</span>
-                      </div>
-                      <div style={{ fontSize: 10, color: '#3a5070', marginBottom: 3 }}>{toIST(p.entryTime)} → {p.exitTime ? toIST(p.exitTime) : '—'}</div>
-                      {p.closeReason && <div style={{ fontSize: 10, color: '#7090b0', fontStyle: 'italic' }}>{p.closeReason}</div>}
-                    </div>
-                    <div style={{ textAlign: 'right' }}>
-                      <div style={{ fontWeight: 900, fontSize: 14, color: pnlPos ? '#00ff88' : '#ff4466' }}>{formatSOL(p.pnlSol ?? 0)}</div>
-                      <div style={{ fontSize: 11, color: pnlPos ? '#00ff8899' : '#ff446699' }}>{formatPct(p.pnlPct ?? 0)}</div>
-                    </div>
-                  </div>
-                  <div style={{ display: 'flex', gap: 16, marginTop: 8, fontSize: 11 }}>
-                    <span style={{ color: '#3a5070' }}>Entry <b style={{ color: '#7090b0' }}>${formatPrice(p.entryPrice)}</b></span>
-                    <span style={{ color: '#3a5070' }}>Exit <b style={{ color: '#7090b0' }}>${formatPrice(p.exitPrice ?? 0)}</b></span>
-                    <span style={{ color: '#3a5070' }}>Size <b style={{ color: '#7090b0' }}>{p.sizeSol.toFixed(3)} SOL</b></span>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </>
       )}
 
       {/* ── Whale closed positions ── */}

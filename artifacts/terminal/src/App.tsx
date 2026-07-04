@@ -213,27 +213,37 @@ export default function App() {
     startTransition(() => setTab(t));
   }, [tab]);
 
-  const openCount = openPositions.length;
+  const whaleOpen = whaleStatus?.openPositions ?? [];
+
+  // Nav badge: total open = auto-trader + whale sniper
+  const openCount = openPositions.length + whaleOpen.length;
   const eligibleCount = tokens.filter((t) => t.status === 'ELIGIBLE').length;
   const effectiveSettings = settings ?? DEFAULT_SETTINGS;
 
-  // Unrealized PnL across all open positions — uses live currentPrice from price monitor WS ticks.
-  // Falls back to entryPrice (zero gain) only when no live price has arrived yet.
-  const unrealizedPnl = openPositions.reduce((sum, p) => {
-    const current = p.currentPrice ?? p.entryPrice;
-    const pct = (current - p.entryPrice) / p.entryPrice;
-    return sum + p.sizeSol * pct;
+  // Whale unrealized PnL — pnlPct from the monitor already accounts for banked partial TP returns.
+  // Only used for the ▲▼ header indicator (not for portfolio value, which uses balance directly).
+  const whaleUnrealizedPnl = whaleOpen.reduce((sum, p) => {
+    const initSize = p.initialSizeSol > 0 ? p.initialSizeSol : p.sizeSol;
+    return sum + initSize * (p.pnlPct / 100);
   }, 0);
 
-  // Portfolio value = starting balance + all realised P&L from closed trades + live unrealised P&L.
-  // This formula is always correct regardless of any free-cash tracking drift in the DB.
-  const startingBalance = effectiveSettings.startingBalanceSol;
-  const realizedPnl = analytics?.totalPnlSol ?? 0;
-  const portfolioValue = startingBalance + realizedPnl + unrealizedPnl;
+  // `balance` (= currentBalanceSol from settings) is the authoritative free cash.
+  // The whale service calls setBalance() on every partial-TP and full close, so it
+  // already embeds ALL historical realized P&L — no need to re-sum closed history.
+  //
+  // Portfolio value = free cash + current market value of remaining open whale positions.
+  const deployedWhaleValue = whaleOpen.reduce((sum, p) => {
+    const remaining = p.remainingSizeSol > 0 ? p.remainingSizeSol : p.sizeSol;
+    const priceRatio = p.entryPrice > 0 && p.lastPrice > 0 ? p.lastPrice / p.entryPrice : 1;
+    return sum + remaining * priceRatio;
+  }, 0);
+  const portfolioValue = balance + deployedWhaleValue;
 
-  // Free balance = total equity minus capital currently deployed in open positions
-  const deployedCapital = openPositions.reduce((s, p) => s + p.sizeSol, 0);
-  const freeBalance = startingBalance + realizedPnl - deployedCapital;
+  // totalUnrealized only for the ▲▼ display in the header
+  const totalUnrealized = whaleUnrealizedPnl;
+
+  // freeBalance = the free cash itself (balance already excludes deployed capital)
+  const freeBalance = balance;
 
   return (
     <div style={{ height: '100dvh', display: 'flex', flexDirection: 'column', background: '#080d1a', overflow: 'hidden' }}>
@@ -271,16 +281,16 @@ export default function App() {
         <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
           <div style={{ textAlign: 'right' }}>
             <div style={{ fontSize: 8, color: '#4a6080', letterSpacing: '0.1em', fontWeight: 700 }}>
-              PORTFOLIO{openPositions.length > 0 && (
-                <span style={{ marginLeft: 4, color: unrealizedPnl >= 0 ? '#00ff88' : '#ff4466' }}>
-                  {unrealizedPnl >= 0 ? '▲' : '▼'}{Math.abs(unrealizedPnl).toFixed(3)}
+              PORTFOLIO{(openPositions.length > 0 || whaleOpen.length > 0) && (
+                <span style={{ marginLeft: 4, color: totalUnrealized >= 0 ? '#00ff88' : '#ff4466' }}>
+                  {totalUnrealized >= 0 ? '▲' : '▼'}{Math.abs(totalUnrealized).toFixed(3)}
                 </span>
               )}
             </div>
             <div style={{ fontSize: 16, fontWeight: 900, color: '#00d4ff', letterSpacing: '-0.01em', fontVariantNumeric: 'tabular-nums' }}>
               {portfolioValue.toFixed(3)}<span style={{ fontSize: 9, opacity: 0.6, marginLeft: 3 }}>SOL</span>
             </div>
-            {openPositions.length > 0 && (
+            {(openPositions.length > 0 || whaleOpen.length > 0) && (
               <div style={{ fontSize: 8, color: '#3a5070', marginTop: 1 }}>{freeBalance.toFixed(3)} free</div>
             )}
           </div>

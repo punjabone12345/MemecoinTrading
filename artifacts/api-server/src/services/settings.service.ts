@@ -123,6 +123,7 @@ export async function setBalance(sol: number): Promise<void> {
 
 export async function resetAllData(): Promise<void> {
   await query(`DELETE FROM positions`);
+  await query(`DELETE FROM whale_positions`);
   const rows = await query<{ value: string }>(`SELECT value FROM settings WHERE key = 'startingBalanceSol'`);
   const start = parseFloat(rows[0]?.value ?? '10');
   balanceCache = start;

@@ -506,7 +506,7 @@ export async function restoreWhalePositionsFromDB(): Promise<void> {
       whalePositions.set(pos.mint, pos);
     }
     const closedRows = await query<any>(
-      `SELECT * FROM whale_positions WHERE status = 'CLOSED' ORDER BY close_time DESC LIMIT 20`,
+      `SELECT * FROM whale_positions WHERE status = 'CLOSED' ORDER BY close_time DESC LIMIT 200`,
     );
     for (const r of closedRows) {
       const rawSize = Number(r.size_sol);
@@ -862,7 +862,7 @@ async function closeWhalePosition(pos: WhalePosition, reason: string): Promise<v
     await setBalance(Math.max(0, newBal)).catch(() => {});
 
     closedPositions.unshift({ ...pos, closeTime: Date.now(), closeReason: reason, closePnlPct: pnlPct });
-    if (closedPositions.length > 100) closedPositions.pop();
+    if (closedPositions.length > 200) closedPositions.pop();
     void closeWhalePositionInDB(pos.id, reason, pnlPct);
 
     logger.info({ mint: pos.mint, symbol: pos.symbol, pnlPct: pnlPct.toFixed(1), pnlSol: pnlSol.toFixed(4), reason }, 'Whale sniper: CLOSED');
@@ -1210,7 +1210,7 @@ export function getWhaleStatus() {
   return {
     trackedTokens:    Array.from(trackedTokens.values()),
     openPositions:    Array.from(whalePositions.values()),
-    closedPositions:  closedPositions.slice(0, 20),
+    closedPositions:  closedPositions.slice(0, 200),   // full history for accurate stats
     recentBuyLog:     buyLog.slice(0, 30),
     queuedSignals:    [...signalQueue],
     solPriceUsd:      cachedSolPrice,
@@ -1390,6 +1390,25 @@ export async function deleteClosedWhalePositionById(id: string): Promise<boolean
   await query(`DELETE FROM whale_positions WHERE id = $1`, [id]).catch(() => {});
   broadcastWhaleStatus();
   return true;
+}
+
+/** Reset all in-memory whale state — called on full data reset */
+export function resetWhaleState(): void {
+  pendingGraduations.clear();
+  trackedTokens.clear();
+  whalePositions.clear();
+  buyLog.splice(0, buyLog.length);
+  signalQueue.splice(0, signalQueue.length);
+  closedPositions.splice(0, closedPositions.length);
+  entryLocks.clear();
+  closeLocks.clear();
+  pollLocks.clear();
+  seenTxns.clear();
+  mintCheckpointed.clear();
+  // Unsubscribe all Helius WS mints
+  for (const mint of Array.from(_mintToSubId.keys())) wsUnsubscribeMint(mint);
+  broadcastWhaleStatus();
+  logger.info('Whale sniper: state reset (all positions and tracking cleared)');
 }
 
 export function startWhaleSniper(): void {
