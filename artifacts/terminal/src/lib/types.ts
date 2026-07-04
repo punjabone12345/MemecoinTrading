@@ -151,6 +151,14 @@ export interface TrackedToken {
   expiresAt: number;
   entryTriggered: boolean;
   whaleBuys: WhaleBuy[];
+  // Live market data (refreshed every 30s by the server)
+  price?: number;
+  mcap?: number;
+  liquidity?: number;
+  priceChange5m?: number;
+  priceChange1h?: number;
+  volume5m?: number;
+  lastMarketUpdate?: number;
 }
 
 export interface WhalePosition {

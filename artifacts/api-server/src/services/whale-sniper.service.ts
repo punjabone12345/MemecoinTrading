@@ -44,6 +44,14 @@ export interface TrackedToken {
   expiresAt: number;
   entryTriggered: boolean;
   whaleBuys: WhaleBuy[];
+  // Live market data (refreshed every 30s)
+  price?: number;
+  mcap?: number;
+  liquidity?: number;
+  priceChange5m?: number;
+  priceChange1h?: number;
+  volume5m?: number;
+  lastMarketUpdate?: number;
 }
 
 export interface WhalePosition {
@@ -145,19 +153,40 @@ async function fetchSolPrice(): Promise<void> {
 
 // ── Fetch token price from DexScreener ────────────────────────────────────────
 
-async function fetchTokenPrice(mint: string): Promise<{ price: number; liquidity: number; name: string; symbol: string }> {
+interface DexMarketData {
+  price: number;
+  liquidity: number;
+  mcap: number;
+  priceChange5m: number;
+  priceChange1h: number;
+  volume5m: number;
+  name: string;
+  symbol: string;
+  pairAddress: string;
+}
+
+async function fetchTokenPrice(mint: string): Promise<DexMarketData> {
+  const empty: DexMarketData = { price: 0, liquidity: 0, mcap: 0, priceChange5m: 0, priceChange1h: 0, volume5m: 0, name: '', symbol: '', pairAddress: '' };
   try {
     const r     = await axios.get<any>(`${DEX_BASE}/latest/dex/tokens/${mint}`, { timeout: 6_000 });
-    const pairs: any[] = (r.data?.pairs ?? []).sort((a: any, b: any) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0));
+    const pairs: any[] = (r.data?.pairs ?? [])
+      .filter((p: any) => !(p.dexId ?? '').toLowerCase().includes('pump'))
+      .sort((a: any, b: any) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0));
+    if (!pairs.length) return empty;
     const best  = pairs[0];
     return {
-      price:     parseFloat(best?.priceUsd ?? '0'),
-      liquidity: best?.liquidity?.usd ?? 0,
-      name:      best?.baseToken?.name   ?? '',
-      symbol:    best?.baseToken?.symbol ?? '',
+      price:          parseFloat(best?.priceUsd ?? '0'),
+      liquidity:      best?.liquidity?.usd ?? 0,
+      mcap:           best?.marketCap ?? best?.fdv ?? 0,
+      priceChange5m:  best?.priceChange?.m5  ?? 0,
+      priceChange1h:  best?.priceChange?.h1  ?? 0,
+      volume5m:       best?.volume?.m5        ?? 0,
+      name:           best?.baseToken?.name   ?? '',
+      symbol:         best?.baseToken?.symbol ?? '',
+      pairAddress:    best?.pairAddress        ?? '',
     };
   } catch {
-    return { price: 0, liquidity: 0, name: '', symbol: '' };
+    return empty;
   }
 }
 
@@ -502,9 +531,11 @@ function pruneExpiredTracking(): void {
 // ── Wait for post-graduation pool to go live, then activate tracking ──────────
 
 async function waitForPoolAndActivate(mint: string): Promise<void> {
-  // Capture identity reference — used to detect if this mint was re-added after removal
-  const capturedPending = pendingGraduations.get(mint);
-  if (!capturedPending) return;
+  // Capture identity reference — used to detect if this mint was re-added after removal.
+  // Assigned to a typed non-optional local so TypeScript can narrow it inside closures.
+  const pending: PendingGraduation | undefined = pendingGraduations.get(mint);
+  if (!pending) return;
+  const capturedPending: PendingGraduation = pending;
 
   const deadline = capturedPending.detectedAt + POOL_WAIT_TIMEOUT_MS;
 
@@ -540,9 +571,9 @@ async function waitForPoolAndActivate(mint: string): Promise<void> {
       }
 
       // Pool is confirmed live — activate tracking with real metadata
-      const poolAddress = best?.pairAddress ?? capturedPending.poolAddress;
-      const name        = best?.baseToken?.name   || mint.slice(0, 6) + '…';
-      const symbol      = best?.baseToken?.symbol || mint.slice(0, 5).toUpperCase();
+      const poolAddress    = best?.pairAddress ?? capturedPending.poolAddress;
+      const name           = best?.baseToken?.name   || mint.slice(0, 6) + '…';
+      const symbol         = best?.baseToken?.symbol || mint.slice(0, 5).toUpperCase();
 
       // Final identity check before mutation
       if (pendingGraduations.get(mint) !== capturedPending) return false;
@@ -553,10 +584,18 @@ async function waitForPoolAndActivate(mint: string): Promise<void> {
         name,
         symbol,
         poolAddress,
-        migrationTime: capturedPending.detectedAt,
-        expiresAt:     capturedPending.detectedAt + MAX_TRACKING_MS,
+        migrationTime:  capturedPending.detectedAt,
+        expiresAt:      capturedPending.detectedAt + MAX_TRACKING_MS,
         entryTriggered: false,
-        whaleBuys: [],
+        whaleBuys:      [],
+        // Market data from the activation fetch
+        price:          parseFloat(best?.priceUsd ?? '0'),
+        mcap:           best?.marketCap ?? best?.fdv ?? 0,
+        liquidity,
+        priceChange5m:  best?.priceChange?.m5 ?? 0,
+        priceChange1h:  best?.priceChange?.h1 ?? 0,
+        volume5m:       best?.volume?.m5       ?? 0,
+        lastMarketUpdate: Date.now(),
       });
       seenTxns.set(mint, new Set());
 
@@ -643,6 +682,46 @@ function broadcastWhaleStatus(): void {
   } catch { /* non-fatal */ }
 }
 
+// ── Periodic market data refresh for active tracked tokens ────────────────────
+
+const MARKET_REFRESH_MS     = 30_000; // refresh every 30s
+const MARKET_REFRESH_STAGGER = 500;   // ms between each token to avoid rate-limit spikes
+
+async function refreshTrackedTokensMarketData(): Promise<void> {
+  const mints = Array.from(trackedTokens.keys());
+  let updated = false;
+  for (const mint of mints) {
+    try {
+      const d = await fetchTokenPrice(mint);
+      // Re-read after await — token may have been pruned while we were fetching
+      const tok = trackedTokens.get(mint);
+      if (!tok) continue;
+      if (d.price > 0) {
+        tok.price            = d.price;
+        tok.mcap             = d.mcap;
+        tok.liquidity        = d.liquidity;
+        tok.priceChange5m    = d.priceChange5m;
+        tok.priceChange1h    = d.priceChange1h;
+        tok.volume5m         = d.volume5m;
+        tok.lastMarketUpdate = Date.now();
+        // Backfill poolAddress from DexScreener if we didn't have it
+        if (!tok.poolAddress && d.pairAddress) tok.poolAddress = d.pairAddress;
+        updated = true;
+      }
+    } catch { /* non-fatal — keep stale data */ }
+    await new Promise(r => setTimeout(r, MARKET_REFRESH_STAGGER));
+  }
+  if (updated) broadcastWhaleStatus();
+}
+
+// Non-overlapping market refresh: waits for each run to finish before scheduling the next
+function scheduleMarketRefresh(): void {
+  setTimeout(async () => {
+    try { await refreshTrackedTokensMarketData(); } catch { /* non-fatal */ }
+    scheduleMarketRefresh();
+  }, MARKET_REFRESH_MS);
+}
+
 export function startWhaleSniper(): void {
   logger.info('Whale sniper: started (paper mode — following pump.fun graduations)');
 
@@ -658,6 +737,9 @@ export function startWhaleSniper(): void {
     await monitorPositions();
     broadcastWhaleStatus();
   }, PRICE_CHECK_MS);
+
+  // Non-overlapping market data refresh for tracked tokens
+  scheduleMarketRefresh();
 
   void fetchSolPrice();
 }

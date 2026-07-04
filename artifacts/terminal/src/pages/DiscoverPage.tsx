@@ -149,18 +149,53 @@ function StatPill({ label, value, color }: { label: string; value: string | numb
   );
 }
 
+// ── Market-data helpers ───────────────────────────────────────────────────────
+
+function fmtCompact(n?: number): string {
+  if (!n) return '—';
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
+  if (n >= 1_000)     return `${(n / 1_000).toFixed(1)}K`;
+  return `${n.toFixed(2)}`;
+}
+
+function fmtPrice(p?: number): string {
+  if (!p) return '—';
+  if (p < 0.000001) return `${p.toExponential(2)}`;
+  if (p < 0.01)     return `${p.toFixed(6)}`;
+  if (p < 1)        return `${p.toFixed(4)}`;
+  return `${p.toFixed(2)}`;
+}
+
+function PctBadge({ value, label }: { value?: number; label: string }) {
+  if (value == null) return null;
+  const pos = value >= 0;
+  return (
+    <div style={{ textAlign: 'center' }}>
+      <div style={{ fontSize: 10, fontWeight: 800, fontVariantNumeric: 'tabular-nums', color: pos ? C.green : C.red }}>
+        {pos ? '+' : ''}{value.toFixed(1)}%
+      </div>
+      <div style={{ fontSize: 8, color: C.gray }}>{label}</div>
+    </div>
+  );
+}
+
+// ── TrackedCard ───────────────────────────────────────────────────────────────
+
 function TrackedCard({ tok, tick }: { tok: TrackedToken; tick: number }) {
   void tick;
-  const pct       = countdownPct(tok.migrationTime, tok.expiresAt);
-  const remaining = countdown(tok.expiresAt);
-  const expired   = tok.expiresAt <= Date.now();
+  const pct        = countdownPct(tok.migrationTime, tok.expiresAt);
+  const remaining  = countdown(tok.expiresAt);
+  const expired    = tok.expiresAt <= Date.now();
   const biggestBuy = tok.whaleBuys.reduce((max, b) => b.amountUsd > max ? b.amountUsd : max, 0);
+  const hasMarket  = (tok.price ?? 0) > 0;
 
   return (
     <div style={{
       ...C.card, marginBottom: 8,
       borderColor: tok.entryTriggered ? 'rgba(0,255,136,0.25)' : biggestBuy >= 500 ? 'rgba(0,191,255,0.3)' : 'rgba(255,255,255,0.07)',
     }}>
+
+      {/* ── Header ── */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
         <div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -175,7 +210,6 @@ function TrackedCard({ tok, tick }: { tok: TrackedToken; tick: number }) {
             <DexLink mint={tok.mint} pool={tok.poolAddress} />
           </div>
         </div>
-
         <div style={{ textAlign: 'right' }}>
           <div style={{ fontSize: 13, fontWeight: 900, fontVariantNumeric: 'tabular-nums', color: expired ? C.red : pct > 80 ? C.yellow : '#00d4ff' }}>
             {remaining}
@@ -184,15 +218,58 @@ function TrackedCard({ tok, tick }: { tok: TrackedToken; tick: number }) {
         </div>
       </div>
 
-      {/* Progress bar */}
-      <div style={{ margin: '8px 0 6px', height: 3, borderRadius: 2, background: 'rgba(255,255,255,0.06)', overflow: 'hidden' }}>
+      {/* ── Market stats grid ── */}
+      {hasMarket ? (
+        <div style={{
+          display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)',
+          gap: 6, margin: '10px 0 6px', padding: '8px 10px',
+          borderRadius: 8, background: 'rgba(0,191,255,0.04)',
+          border: '1px solid rgba(0,191,255,0.08)',
+        }}>
+          <div style={{ textAlign: 'center' }}>
+            <div style={{ fontSize: 10, fontWeight: 800, color: '#e0e8ff', fontVariantNumeric: 'tabular-nums' }}>{fmtPrice(tok.price)}</div>
+            <div style={{ fontSize: 8, color: C.gray }}>price</div>
+          </div>
+          <div style={{ textAlign: 'center' }}>
+            <div style={{ fontSize: 10, fontWeight: 800, color: '#e0e8ff' }}>{fmtCompact(tok.mcap)}</div>
+            <div style={{ fontSize: 8, color: C.gray }}>mcap</div>
+          </div>
+          <div style={{ textAlign: 'center' }}>
+            <div style={{ fontSize: 10, fontWeight: 800, color: '#e0e8ff' }}>{fmtCompact(tok.liquidity)}</div>
+            <div style={{ fontSize: 8, color: C.gray }}>liq</div>
+          </div>
+          <div style={{ textAlign: 'center' }}>
+            <div style={{ fontSize: 10, fontWeight: 800, color: '#e0e8ff' }}>{fmtCompact(tok.volume5m)}</div>
+            <div style={{ fontSize: 8, color: C.gray }}>vol 5m</div>
+          </div>
+          <PctBadge value={tok.priceChange5m} label="5m chg" />
+          <PctBadge value={tok.priceChange1h} label="1h chg" />
+          <div style={{ textAlign: 'center' }}>
+            <div style={{ fontSize: 10, fontWeight: 800, color: tok.whaleBuys.length > 0 ? C.whale : C.gray }}>
+              {tok.whaleBuys.length}
+            </div>
+            <div style={{ fontSize: 8, color: C.gray }}>🐋 buys</div>
+          </div>
+          <div style={{ textAlign: 'center' }}>
+            <div style={{ fontSize: 9, color: C.gray }}>
+              {tok.lastMarketUpdate ? timeAgo(tok.lastMarketUpdate) : '—'}
+            </div>
+            <div style={{ fontSize: 8, color: C.gray }}>updated</div>
+          </div>
+        </div>
+      ) : (
+        <div style={{ fontSize: 9, color: C.gray, margin: '8px 0 4px', fontStyle: 'italic' }}>
+          Fetching market data…
+        </div>
+      )}
+
+      {/* ── Progress bar ── */}
+      <div style={{ margin: '6px 0 6px', height: 3, borderRadius: 2, background: 'rgba(255,255,255,0.06)', overflow: 'hidden' }}>
         <div style={{ width: `${pct}%`, height: '100%', borderRadius: 2, background: expired ? C.red : pct > 80 ? `linear-gradient(90deg,${C.yellow},${C.red})` : `linear-gradient(90deg,${C.whale},#7b5ea7)`, transition: 'width 1s linear' }} />
       </div>
 
-      {/* Whale buys on this token */}
-      {tok.whaleBuys.length === 0 ? (
-        <div style={{ fontSize: 9, color: C.gray, marginTop: 2 }}>Monitoring for whale buys…</div>
-      ) : (
+      {/* ── Whale buy chips ── */}
+      {tok.whaleBuys.length > 0 && (
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 2 }}>
           {tok.whaleBuys.slice(0, 5).map((b, i) => (
             <span key={i} style={{
@@ -204,6 +281,9 @@ function TrackedCard({ tok, tick }: { tok: TrackedToken; tick: number }) {
             </span>
           ))}
         </div>
+      )}
+      {!hasMarket && tok.whaleBuys.length === 0 && (
+        <div style={{ fontSize: 9, color: C.gray }}>Monitoring for whale buys…</div>
       )}
     </div>
   );
