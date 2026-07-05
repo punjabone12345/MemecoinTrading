@@ -1,7 +1,7 @@
 import { Connection, PublicKey } from '@solana/web3.js';
 import { logger } from '../lib/logger.js';
 import { query } from '../lib/db.js';
-import { withHeliusLimit, isHeliusCoolingDown } from '../lib/helius-limiter.js';
+import { withHeliusLimit, isHeliusCoolingDown, isRateLimitedError } from '../lib/helius-limiter.js';
 import { subscribeLogs, isHeliusWsConfigured } from '../lib/helius-ws-shared.js';
 
 // ── Source registry ───────────────────────────────────────────────────────────
@@ -88,6 +88,7 @@ let lastSeenSig: string | null = null;
 let lastPollSuccess = Date.now();
 let consecutivePollFailures = 0;
 let isBootstrap = true; // only true on first server start — never set back to true
+let lastPollError: string | null = null; // last error message for diagnostics
 let connection: Connection | null = null;
 
 // ── Poll backoff state ────────────────────────────────────────────────────────
@@ -129,10 +130,45 @@ function detectMigrationInstructionType(logs: string[]): string {
   return 'migration';
 }
 
+// Direct JSON-RPC fetch for getSignaturesForAddress — bypasses the
+// @solana/web3.js Connection object which has been observed to fail
+// consistently on some Render deployments while direct fetch() works fine.
+async function rpcGetSignatures(
+  opts: { limit: number; until?: string },
+): Promise<Array<{ signature: string; err: unknown; blockTime?: number | null }>> {
+  const heliusKey = process.env.HELIUS_API_KEY;
+  const endpoint  = process.env.RPC_ENDPOINT
+    ?? (heliusKey ? `https://mainnet.helius-rpc.com/?api-key=${heliusKey}` : 'https://api.mainnet-beta.solana.com');
+
+  const params: any[] = [MIGRATION_WALLET, { limit: opts.limit, commitment: 'confirmed' }];
+  if (opts.until) params[1].until = opts.until;
+
+  const res = await fetch(endpoint, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getSignaturesForAddress', params }),
+    signal: AbortSignal.timeout(15_000),
+  });
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    if (res.status === 429) throw Object.assign(new Error(`429: ${text}`), { code: -32429 });
+    throw new Error(`HTTP ${res.status}: ${text.slice(0, 200)}`);
+  }
+
+  const json: any = await res.json();
+  if (json.error) {
+    if (json.error.code === -32429 || String(json.error.message).includes('429')) {
+      throw Object.assign(new Error(`RPC 429: ${json.error.message}`), { code: -32429 });
+    }
+    throw new Error(`RPC error ${json.error.code}: ${json.error.message}`);
+  }
+
+  return json.result ?? [];
+}
+
 async function trackMigrationWallet(): Promise<void> {
-  // Watchdog: if poll has been failing for >90s, reset cursor + Connection.
-  // NOTE: isBootstrap is intentionally NOT reset here — after a watchdog recovery
-  // we want to PROCESS any migrations we missed, not skip them.
+  // Watchdog: if poll has been failing for >90s, reset cursor.
   if (consecutivePollFailures > 0 && Date.now() - lastPollSuccess > 90_000) {
     logger.warn(
       { failures: consecutivePollFailures, staleSec: Math.round((Date.now() - lastPollSuccess) / 1_000) },
@@ -142,29 +178,24 @@ async function trackMigrationWallet(): Promise<void> {
     connection = null;
   }
 
-  // Helpers to detect Helius rate-limit responses (HTTP 429 / JSON-RPC -32429)
+  // Helpers to detect Helius rate-limit responses
   const is429 = (err: any): boolean =>
+    isRateLimitedError(err) ||
     String(err?.message ?? '').includes('429') ||
-    err?.code === -32429 ||
-    String(err?.message ?? '').toLowerCase().includes('max usage');
+    err?.code === -32429;
 
-  // Skip this cycle entirely while the shared Helius cooldown is active —
-  // avoids adding to the pile-up that caused the 429 in the first place.
+  // Skip this cycle entirely while the shared Helius cooldown is active.
   if (isHeliusCoolingDown()) return;
 
   try {
-    const conn = getConnection();
-    const pk = new PublicKey(MIGRATION_WALLET);
-
-    // Fetch sigs since the last checkpoint.
+    // Fetch sigs since the last checkpoint via direct fetch() (more reliable
+    // than @solana/web3.js Connection on some Render deployments).
     // When we have a cursor (lastSeenSig), use `until` so we get EVERY sig since
-    // then — no hard limit means AMM: Buy bursts cannot push migrate_v2 out of
-    // a fixed window.  On the very first bootstrap poll (lastSeenSig===null) we
-    // just grab the latest 50 to establish the cursor without flooding the RPC.
+    // then — AMM: Buy bursts cannot push migrate_v2 out of a fixed window.
     const sigOpts = lastSeenSig
       ? { until: lastSeenSig, limit: 200 }
       : { limit: 50 };
-    const sigs = await withHeliusLimit(() => conn.getSignaturesForAddress(pk, sigOpts));
+    const sigs = await rpcGetSignatures(sigOpts);
 
     // Mark poll as successful regardless of whether there are new sigs
     lastPollSuccess = Date.now();
@@ -204,6 +235,7 @@ async function trackMigrationWallet(): Promise<void> {
     // If sig[i] returns null, sig[i] and everything newer is retried next poll.
     const toFetch = [...newSigs].reverse(); // oldest-first, full batch (no slice limit)
 
+    const conn = getConnection();
     const txns = await Promise.all(
       toFetch.map((sig) =>
         withHeliusLimit(() => conn.getParsedTransaction(sig, { maxSupportedTransactionVersion: 0 }))
@@ -291,6 +323,7 @@ async function trackMigrationWallet(): Promise<void> {
     pollDelayMs = POLL_NORMAL_MS;
   } catch (err: any) {
     consecutivePollFailures++;
+    lastPollError = String(err?.message ?? err ?? 'unknown');
     const staleSec = Math.round((Date.now() - lastPollSuccess) / 1_000);
 
     // Detect Helius 429 / rate-limit and back off aggressively.
@@ -301,7 +334,8 @@ async function trackMigrationWallet(): Promise<void> {
         { msg: err?.message, failures: consecutivePollFailures, staleSec, nextPollSec: Math.round(pollDelayMs / 1_000) },
         'PumpFun wallet: RPC 429 rate-limited — backing off poll',
       );
-    } else if (consecutivePollFailures === 1 || consecutivePollFailures % 6 === 0) {
+    } else {
+      // Log EVERY failure (not just 1st and every 6th) so we can diagnose
       pollDelayMs = Math.min(pollDelayMs * 2, POLL_MAX_MS);
       logger.warn(
         { msg: err?.message, failures: consecutivePollFailures, staleSec, nextPollSec: Math.round(pollDelayMs / 1_000) },
@@ -438,6 +472,7 @@ export function getTrenchesDiagnostics() {
     lastPollSuccessMs: lastPollSuccess,
     lastPollAgoSec: Math.round((Date.now() - lastPollSuccess) / 1_000),
     consecutivePollFailures,
+    lastPollError,
     pollDelayMs,
     pumpfunMintsTotal: pumpfunMints.size,
     heliusWsConfigured: isHeliusWsConfigured(),

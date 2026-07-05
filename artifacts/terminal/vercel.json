@@ -3,7 +3,7 @@
   "outputDirectory": "dist/public",
   "framework": null,
   "env": {
-    "VITE_API_URL": "https://aimemecointrading.onrender.com"
+    "VITE_API_URL": "https://memecointrading-thpe.onrender.com"
   },
   "rewrites": [
     { "source": "/(.*)", "destination": "/index.html" }

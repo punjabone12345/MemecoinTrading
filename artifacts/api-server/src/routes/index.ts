@@ -22,6 +22,7 @@ router.get('/debug', (_req, res) => {
       lastSeenSig: d.lastSeenSig,
       lastPollAgoSec: d.lastPollAgoSec,
       consecutiveFailures: d.consecutivePollFailures,
+      lastError: d.lastPollError,
       currentDelayMs: d.pollDelayMs,
     },
     graduations: {
