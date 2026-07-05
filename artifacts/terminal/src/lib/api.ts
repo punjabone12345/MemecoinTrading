@@ -39,6 +39,7 @@ export const api = {
 
   // ── Whale sniper — read ───────────────────────────────────────────────────
   getWhaleStatus: () => apiFetch<WhaleStatus>('/whale/status'),
+  getScannerSources: () => apiFetch<{ pumpfun: { total: number; recent: { mint: string; ts: number; txSig?: string; instructionType?: string }[] }; meteora: { total: number; recent: { mint: string; ts: number; txSig?: string; instructionType?: string }[] } }>('/scanner/sources'),
 
   // ── Whale sniper — open position management ───────────────────────────────
   closeWhalePosition: (id: string, reason?: string) =>

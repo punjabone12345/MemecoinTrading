@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { Token, ScanStats, Settings, WhaleStatus, TrackedToken, WhaleBuyLog, PendingSignal } from '../lib/types.js';
+import { api } from '../lib/api.js';
 
 // ── Props ─────────────────────────────────────────────────────────────────────
 
@@ -59,9 +60,7 @@ function useWhaleStatusFallback(skip: boolean) {
     let cancelled = false;
     async function poll() {
       try {
-        const r = await fetch('/api/whale/status');
-        if (!r.ok) return;
-        const data: WhaleStatus = await r.json();
+        const data = await api.getWhaleStatus();
         if (!cancelled) setStatus(data);
       } catch { /* ignore */ }
     }
@@ -86,9 +85,7 @@ function useSourceActivity() {
     let cancelled = false;
     async function poll() {
       try {
-        const r = await fetch('/api/scanner/sources');
-        if (!r.ok) return;
-        const json = await r.json();
+        const json = await api.getScannerSources();
         if (!cancelled) setStatus(json);
       } catch { /* ignore */ }
       function setStatus(d: SourceActivity) { if (!cancelled) setData(d); }
