@@ -430,6 +430,23 @@ function startMigrationWalletWS(): void {
   logger.info('PumpFun WS: subscribed to migration wallet logs via shared connection');
 }
 
+// ── Diagnostics (for /api/debug) ─────────────────────────────────────────────
+export function getTrenchesDiagnostics() {
+  return {
+    isBootstrap,
+    lastSeenSig: lastSeenSig ? lastSeenSig.slice(0, 16) + '…' : null,
+    lastPollSuccessMs: lastPollSuccess,
+    lastPollAgoSec: Math.round((Date.now() - lastPollSuccess) / 1_000),
+    consecutivePollFailures,
+    pollDelayMs,
+    pumpfunMintsTotal: pumpfunMints.size,
+    heliusWsConfigured: isHeliusWsConfigured(),
+    heliusApiKeySet: !!process.env.HELIUS_API_KEY,
+    rpcEndpoint: process.env.RPC_ENDPOINT ?? (process.env.HELIUS_API_KEY ? 'helius-http' : 'public-mainnet'),
+    recentFeed: pumpfunFeed.slice(0, 5).map(e => ({ mint: e.mint.slice(0, 12), instructionType: e.instructionType, ts: e.ts })),
+  };
+}
+
 export function startTrenchesScanner(): void {
   if (started) return;
   started = true;
