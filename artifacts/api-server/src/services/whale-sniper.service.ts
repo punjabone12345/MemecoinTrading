@@ -243,11 +243,20 @@ function getConn(): Connection {
 }
 
 // ── SOL price ─────────────────────────────────────────────────────────────────
+// Primary source: Jupiter Price API v2 (always accurate, reflects real-time AMM)
+// Fallback: DexScreener (may lag 30-120s but better than nothing)
 
 async function fetchSolPrice(): Promise<void> {
   if (Date.now() - lastSolPriceFetch < SOL_PRICE_TTL_MS) return;
+  // Jupiter Price API v2 — most accurate for SOL
   try {
-    const r = await axios.get<any>(`${DEX_BASE}/latest/dex/tokens/${WSOL_MINT}`, { timeout: 5_000 });
+    const r     = await axios.get<any>(`https://lite-api.jup.ag/price/v2?ids=${WSOL_MINT}`, { timeout: 4_000 });
+    const price = parseFloat(r.data?.data?.[WSOL_MINT]?.price ?? '0');
+    if (price > 10) { cachedSolPrice = price; lastSolPriceFetch = Date.now(); return; }
+  } catch { /* fall through */ }
+  // DexScreener fallback
+  try {
+    const r     = await axios.get<any>(`${DEX_BASE}/latest/dex/tokens/${WSOL_MINT}`, { timeout: 5_000 });
     const pairs: any[] = r.data?.pairs ?? [];
     const pair  = pairs.find((p: any) => ['USDC', 'USDT'].includes(p.quoteToken?.symbol)) ?? pairs[0];
     const price = parseFloat(pair?.priceUsd ?? '0');
@@ -306,8 +315,24 @@ async function fetchTokenPrice(mint: string): Promise<DexMarketData> {
 const PUMP_TOKEN_DECIMALS = 6;
 const WSOL_QUOTE_AMOUNT   = 10_000_000; // 0.01 SOL in lamports — small to avoid price impact
 
+// fetchPriceFresh: Jupiter Quote API → derive price from outAmount × SOL/USD.
+//
+// WHY NOT swapUsdValue:
+//   swapUsdValue is often 0 or null for freshly-graduated tokens on lite-api.jup.ag
+//   because Jupiter's oracle hasn't indexed them yet. When that happens the old code
+//   silently fell back to DexScreener (30-120s stale) and recorded a completely wrong
+//   entry price.
+//
+// CORRECT approach:
+//   1. Ensure SOL/USD is fresh (Jupiter Price API v2, < 60s TTL).
+//   2. Quote 0.01 SOL → TOKEN on Jupiter to get the actual tokens received.
+//   3. price = (0.01 SOL × SOL_USD) / tokens_received  ← always real on-chain
+//   4. Only fall back to DexScreener if Jupiter quote itself fails (network/timeout).
 async function fetchPriceFresh(mint: string, _pairAddress?: string): Promise<number> {
-  // 1. Jupiter Quote API — buys the token with 0.01 SOL; derives price from USD value
+  // Always ensure a fresh SOL price before calculating token price.
+  await fetchSolPrice();
+
+  // 1. Jupiter Quote API — real on-chain reserve ratio, always current.
   try {
     const r = await axios.get<any>(
       `https://lite-api.jup.ag/swap/v1/quote` +
@@ -315,24 +340,40 @@ async function fetchPriceFresh(mint: string, _pairAddress?: string): Promise<num
       `&outputMint=${mint}` +
       `&amount=${WSOL_QUOTE_AMOUNT}` +
       `&slippageBps=1000`,
-      { timeout: 4_000 },
+      { timeout: 5_000 },
     );
-    const swapUsdValue = parseFloat(r.data?.swapUsdValue ?? '0');
-    const outAmount    = parseInt(r.data?.outAmount ?? '0', 10);
-    if (swapUsdValue > 0 && outAmount > 0) {
+    const outAmount = parseInt(r.data?.outAmount ?? '0', 10);
+
+    if (outAmount > 0 && cachedSolPrice > 0) {
       const tokensReceived = outAmount / Math.pow(10, PUMP_TOKEN_DECIMALS);
-      const price = swapUsdValue / tokensReceived;
+      const inputSolUsd    = (WSOL_QUOTE_AMOUNT / 1e9) * cachedSolPrice; // e.g. 0.01 SOL × $150 = $1.50
+      const price          = inputSolUsd / tokensReceived;
       if (price > 0) {
         logger.info(
-          { mint: mint.slice(0, 12), price, swapUsdValue, tokensReceived: tokensReceived.toFixed(2), source: 'jupiter-quote' },
+          { mint: mint.slice(0, 12), price, solPrice: cachedSolPrice,
+            tokensReceived: tokensReceived.toFixed(2), source: 'jupiter-quote' },
           'Whale sniper: spot price',
+        );
+        return price;
+      }
+    }
+
+    // Edge-case: SOL price not cached yet — try swapUsdValue as last resort
+    const swapUsdValue = parseFloat(r.data?.swapUsdValue ?? '0');
+    if (swapUsdValue > 0 && outAmount > 0) {
+      const tokensReceived = outAmount / Math.pow(10, PUMP_TOKEN_DECIMALS);
+      const price          = swapUsdValue / tokensReceived;
+      if (price > 0) {
+        logger.info(
+          { mint: mint.slice(0, 12), price, swapUsdValue, source: 'jupiter-quote-swapUsd' },
+          'Whale sniper: spot price (swapUsdValue fallback)',
         );
         return price;
       }
     }
   } catch { /* fall through to DexScreener */ }
 
-  // 2. DexScreener token aggregator — fallback (may lag 30-120s for fresh tokens)
+  // 2. DexScreener — last resort only (may lag 30-120s for fresh tokens)
   try {
     const r = await axios.get<any>(`${DEX_BASE}/latest/dex/tokens/${mint}`, { timeout: 6_000 });
     const pairs: any[] = (r.data?.pairs ?? [])
@@ -341,7 +382,7 @@ async function fetchPriceFresh(mint: string, _pairAddress?: string): Promise<num
     if (pairs.length) {
       const price = parseFloat(pairs[0]?.priceUsd ?? '0');
       if (price > 0) {
-        logger.debug({ mint: mint.slice(0, 12), price, source: 'dex-token' }, 'Whale sniper: spot price (fallback)');
+        logger.warn({ mint: mint.slice(0, 12), price, source: 'dexscreener-fallback' }, 'Whale sniper: spot price (DexScreener fallback — may be stale)');
         return price;
       }
     }
@@ -745,15 +786,8 @@ async function pollTokenBuys(mint: string): Promise<void> {
         'Whale sniper: baseline — scanning recent txns for early whale buys',
       );
 
-      await fetchSolPrice();
-      let currentPrice = 0;
-      try {
-        const r     = await axios.get<any>(`${DEX_BASE}/latest/dex/tokens/${mint}`, { timeout: 5_000 });
-        const pairs: any[] = (r.data?.pairs ?? [])
-          .filter((p: any) => (p.dexId ?? '').toLowerCase() !== 'pumpfun')
-          .sort((a: any, b: any) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0));
-        currentPrice = parseFloat(pairs[0]?.priceUsd ?? '0');
-      } catch { /* use 0 */ }
+      // Use Jupiter for priceAtDetection — DexScreener lags 30-120s for fresh tokens
+      const currentPrice = await fetchPriceFresh(mint).catch(() => 0);
 
       // Process from oldest → newest so we trigger on the FIRST qualifying buy.
       // Sequential (not parallel) to avoid hammering the public RPC and getting 429s.
@@ -788,15 +822,9 @@ async function pollTokenBuys(mint: string): Promise<void> {
     for (const s of newSigs) seen.add(s);
     if (newSigs.length === 0) return;
 
-    await fetchSolPrice();
-
-    // Fetch current token price for slippage reference
-    let currentPrice = 0;
-    try {
-      const r     = await axios.get<any>(`${DEX_BASE}/latest/dex/tokens/${mint}`, { timeout: 5_000 });
-      const pairs: any[] = (r.data?.pairs ?? []).sort((a: any, b: any) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0));
-      currentPrice = parseFloat(pairs[0]?.priceUsd ?? '0');
-    } catch { /* use 0 as fallback */ }
+    // Use Jupiter for priceAtDetection — DexScreener lags 30-120s for fresh tokens.
+    // fetchPriceFresh internally calls fetchSolPrice() so no separate call needed.
+    const currentPrice = await fetchPriceFresh(mint).catch(() => 0);
 
     // Fetch up to 5 new txns in parallel
     const toFetch = newSigs.slice(0, 5);
