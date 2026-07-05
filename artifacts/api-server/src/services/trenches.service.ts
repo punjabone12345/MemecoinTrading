@@ -130,16 +130,18 @@ function detectMigrationInstructionType(logs: string[]): string {
   return 'migration';
 }
 
-// Direct JSON-RPC fetch for getSignaturesForAddress — bypasses the
-// @solana/web3.js Connection object which has been observed to fail
-// consistently on some Render deployments while direct fetch() works fine.
-async function rpcGetSignatures(
+// Direct JSON-RPC fetch for getSignaturesForAddress.
+// Uses direct fetch() (bypasses @solana/web3.js Connection bugs on Render).
+// Tries Helius first; on 429 / credit exhaustion falls back to public RPC
+// so the trenches poll still works even if the Helius key is rate-limited.
+// This call is very light (1 request every ~5s on a single address), so the
+// public RPC can handle it without trouble.
+const PUBLIC_RPC = 'https://api.mainnet-beta.solana.com';
+
+async function rpcGetSignaturesOnce(
+  endpoint: string,
   opts: { limit: number; until?: string },
 ): Promise<Array<{ signature: string; err: unknown; blockTime?: number | null }>> {
-  const heliusKey = process.env.HELIUS_API_KEY;
-  const endpoint  = process.env.RPC_ENDPOINT
-    ?? (heliusKey ? `https://mainnet.helius-rpc.com/?api-key=${heliusKey}` : 'https://api.mainnet-beta.solana.com');
-
   const params: any[] = [MIGRATION_WALLET, { limit: opts.limit, commitment: 'confirmed' }];
   if (opts.until) params[1].until = opts.until;
 
@@ -158,13 +160,43 @@ async function rpcGetSignatures(
 
   const json: any = await res.json();
   if (json.error) {
-    if (json.error.code === -32429 || String(json.error.message).includes('429')) {
-      throw Object.assign(new Error(`RPC 429: ${json.error.message}`), { code: -32429 });
+    const msg = String(json.error.message ?? '');
+    if (json.error.code === -32429 || msg.includes('429') || msg.includes('max usage')) {
+      throw Object.assign(new Error(`RPC 429: ${msg}`), { code: -32429 });
     }
-    throw new Error(`RPC error ${json.error.code}: ${json.error.message}`);
+    throw new Error(`RPC error ${json.error.code}: ${msg}`);
   }
 
   return json.result ?? [];
+}
+
+async function rpcGetSignatures(
+  opts: { limit: number; until?: string },
+): Promise<Array<{ signature: string; err: unknown; blockTime?: number | null }>> {
+  const heliusKey = process.env.HELIUS_API_KEY;
+  const primary   = process.env.RPC_ENDPOINT
+    ?? (heliusKey ? `https://mainnet.helius-rpc.com/?api-key=${heliusKey}` : PUBLIC_RPC);
+
+  try {
+    return await rpcGetSignaturesOnce(primary, opts);
+  } catch (err: any) {
+    // On 429 / credit exhaustion from Helius, fall back to public RPC.
+    // This keeps the graduation poll running even when the Helius key is
+    // consumed by other services (whale sniper, Meteora watcher).
+    const is429 = (e: any) =>
+      e?.code === -32429 ||
+      String(e?.message ?? '').includes('429') ||
+      String(e?.message ?? '').toLowerCase().includes('max usage');
+
+    if (is429(err) && primary !== PUBLIC_RPC) {
+      logger.warn(
+        { msg: err?.message?.slice(0, 80) },
+        'PumpFun poll: Helius 429 — falling back to public RPC for getSignaturesForAddress',
+      );
+      return rpcGetSignaturesOnce(PUBLIC_RPC, opts);
+    }
+    throw err;
+  }
 }
 
 async function trackMigrationWallet(): Promise<void> {
@@ -195,7 +227,9 @@ async function trackMigrationWallet(): Promise<void> {
     const sigOpts = lastSeenSig
       ? { until: lastSeenSig, limit: 200 }
       : { limit: 50 };
-    const sigs = await rpcGetSignatures(sigOpts);
+    // Wrap in withHeliusLimit so a 429 from this call triggers the shared
+    // global cooldown and pauses all other Helius HTTP calls too.
+    const sigs = await withHeliusLimit(() => rpcGetSignatures(sigOpts));
 
     // Mark poll as successful regardless of whether there are new sigs
     lastPollSuccess = Date.now();
