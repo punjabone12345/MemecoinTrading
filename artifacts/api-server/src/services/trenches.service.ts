@@ -156,9 +156,15 @@ async function trackMigrationWallet(): Promise<void> {
     const conn = getConnection();
     const pk = new PublicKey(MIGRATION_WALLET);
 
-    // Always fetch the latest 20 sigs — no `until` param (unreliable on public RPC,
-    // causes 429 errors immediately after startup on free-tier endpoints).
-    const sigs = await withHeliusLimit(() => conn.getSignaturesForAddress(pk, { limit: 20 }));
+    // Fetch sigs since the last checkpoint.
+    // When we have a cursor (lastSeenSig), use `until` so we get EVERY sig since
+    // then — no hard limit means AMM: Buy bursts cannot push migrate_v2 out of
+    // a fixed window.  On the very first bootstrap poll (lastSeenSig===null) we
+    // just grab the latest 50 to establish the cursor without flooding the RPC.
+    const sigOpts = lastSeenSig
+      ? { until: lastSeenSig, limit: 200 }
+      : { limit: 50 };
+    const sigs = await withHeliusLimit(() => conn.getSignaturesForAddress(pk, sigOpts));
 
     // Mark poll as successful regardless of whether there are new sigs
     lastPollSuccess = Date.now();
@@ -179,20 +185,15 @@ async function trackMigrationWallet(): Promise<void> {
       return;
     }
 
-    // ── Normal poll: find sigs newer than our last checkpoint ─────────────────
-    const newSigs: string[] = [];
-    for (const sig of sigs) {
-      if (sig.signature === lastSeenSig) break; // reached already-seen boundary
-      if (!sig.err) newSigs.push(sig.signature);
-    }
-    // NOTE: do NOT advance lastSeenSig here. We advance it below only after
-    // confirming tx fetches so that any rate-limited null response never
-    // permanently skips a migration (the cursor would already be past it).
+    // ── Normal poll: all returned sigs are newer than lastSeenSig (until param) ─
+    // When using `until`, the RPC never includes lastSeenSig itself, so every
+    // entry in `sigs` is guaranteed to be a new transaction.
+    const newSigs: string[] = sigs.filter(s => !s.err).map(s => s.signature);
 
     if (!newSigs.length) {
-      // No new sigs but poll succeeded — park cursor at the current head so
-      // we don't re-scan the full window on the next tick.
-      lastSeenSig = sigs[0].signature;
+      // No new non-errored sigs — advance cursor to the current head so the
+      // next poll uses `until: sigs[0]` and doesn't re-scan the same window.
+      if (sigs.length) lastSeenSig = sigs[0].signature;
       return;
     }
 
@@ -418,17 +419,11 @@ function startMigrationWalletWS(): void {
     if (value.err !== null) return;
 
     const sig: string = value.signature;
-    const logs: string[] = value.logs ?? [];
 
-    // Quick pre-filter: skip if no migration keyword in raw logs
-    const logText = logs.join(' ').toLowerCase();
-    const hasMigration =
-      logText.includes('migrate') ||
-      logText.includes('pool_create') ||
-      logText.includes('poolcreate') ||
-      logText.includes('createpool');
-    if (!hasMigration) return;
-
+    // No keyword pre-filter here — the migration wallet is dedicated to
+    // migrations and we must not silently drop events whose log format
+    // differs from what we expect (e.g. new PumpSwap instruction names).
+    // processMigrationSig already validates the tx content before emitting.
     processMigrationSig(sig).catch(() => {});
   }, 'confirmed');
 
