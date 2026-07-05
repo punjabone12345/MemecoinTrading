@@ -84,6 +84,8 @@ const MIGRATION_WALLET = '39azUYFWPz3VHgKCf3VChUwbpURdCHRxjWVowf5jUJjg';
 const MIGRATION_KEYWORDS = ['migrate', 'Migrate', 'MigrateV2', 'migrateV2', 'migrate_v2', 'PoolCreate', 'pool_create', 'CreatePool'];
 
 let lastSeenSig: string | null = null;
+let lastPollSuccess = Date.now();
+let consecutivePollFailures = 0;
 let connection: Connection | null = null;
 
 function getConnection(): Connection {
@@ -119,21 +121,37 @@ function detectMigrationInstructionType(logs: string[]): string {
 }
 
 async function trackMigrationWallet(): Promise<void> {
+  // Watchdog: if poll has been failing for >90s, reset the cursor so next success
+  // does a full refetch (prevents permanent stall from a bad cursor).
+  if (consecutivePollFailures > 0 && Date.now() - lastPollSuccess > 90_000) {
+    logger.warn(
+      { failures: consecutivePollFailures, staleSec: Math.round((Date.now() - lastPollSuccess) / 1_000) },
+      'PumpFun wallet: poll stalled — resetting cursor to force full refetch',
+    );
+    lastSeenSig = null;
+    connection = null; // also reset Connection in case it's wedged
+  }
+
   try {
     const conn = getConnection();
     const pk = new PublicKey(MIGRATION_WALLET);
 
-    // Fetch the latest 15 signatures for this wallet
-    const sigs = await conn.getSignaturesForAddress(pk, { limit: 15 });
-    if (!sigs.length) return;
-
-    // Find new signatures since our last checkpoint
-    const newSigs: string[] = [];
-    for (const sig of sigs) {
-      if (sig.signature === lastSeenSig) break;
-      if (!sig.err) newSigs.push(sig.signature);
+    // Fetch only NEW signatures since our last checkpoint.
+    // Using `until` avoids re-reading already-seen sigs and reduces RPC pressure.
+    const opts: { limit: number; until?: string } = { limit: 20 };
+    if (lastSeenSig) opts.until = lastSeenSig;
+    const sigs = await conn.getSignaturesForAddress(pk, opts);
+    if (!sigs.length) {
+      lastPollSuccess = Date.now();
+      consecutivePollFailures = 0;
+      return;
     }
-    lastSeenSig = sigs[0].signature;
+
+    // Collect non-errored signatures (newest first from RPC)
+    const newSigs = sigs.filter(s => !s.err).map(s => s.signature);
+    lastSeenSig = sigs[0].signature; // advance cursor to newest
+    lastPollSuccess = Date.now();
+    consecutivePollFailures = 0;
 
     if (!newSigs.length) return;
 
@@ -207,7 +225,15 @@ async function trackMigrationWallet(): Promise<void> {
 
     if (added > 0) logger.info({ added, newTxns: newSigs.length, total: pumpfunMints.size }, 'PumpFun wallet: new migration mints');
   } catch (err: any) {
-    logger.debug({ msg: err?.message }, 'PumpFun wallet: RPC poll failed (will retry)');
+    consecutivePollFailures++;
+    const staleSec = Math.round((Date.now() - lastPollSuccess) / 1_000);
+    if (consecutivePollFailures === 1 || consecutivePollFailures % 6 === 0) {
+      // Log immediately on first failure, then every ~30s (6 × 5s interval)
+      logger.warn(
+        { msg: err?.message, failures: consecutivePollFailures, staleSec },
+        'PumpFun wallet: RPC poll failed — migration detection paused',
+      );
+    }
   }
 }
 

@@ -846,7 +846,10 @@ async function pollTokenBuys(mint: string): Promise<void> {
       // Process from oldest → newest so we trigger on the FIRST qualifying buy.
       // Sequential (not parallel) to avoid hammering the public RPC and getting 429s.
       // Stop as soon as we enter a position — no need to scan the rest.
-      const toFetchEarly = earlyWhales.slice().reverse().slice(0, 20).map(s => s.signature);
+      // Limit backfill depth: public RPC (no HELIUS_API_KEY) saturates quickly;
+      // Helius can handle more concurrent traffic so allow full 20.
+      const backfillDepth = process.env.HELIUS_API_KEY ? 20 : 10;
+      const toFetchEarly = earlyWhales.slice().reverse().slice(0, backfillDepth).map(s => s.signature);
       for (let i = 0; i < toFetchEarly.length; i++) {
         const sig = toFetchEarly[i];
         const tx  = await conn.getParsedTransaction(sig, { maxSupportedTransactionVersion: 0 }).catch(() => null);
