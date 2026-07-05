@@ -39,17 +39,17 @@ export async function initDB(): Promise<void> {
 
   // Guard: if a stale pg_type entry for 'positions' exists without a matching table
   // (can happen from a previous failed CREATE TABLE), drop the orphaned type first.
-  await query(`
-    DO $
-    BEGIN
-      IF NOT EXISTS (
-        SELECT 1 FROM information_schema.tables
-        WHERE table_schema = 'public' AND table_name = 'positions'
-      ) THEN
-        DROP TYPE IF EXISTS positions CASCADE;
-      END IF;
-    END $
-  `).catch(() => {}); // non-fatal — if type doesn't exist this is a no-op
+  {
+    const tableExists = await query<{ exists: string }>(
+      `SELECT EXISTS (
+         SELECT 1 FROM information_schema.tables
+         WHERE table_schema = 'public' AND table_name = 'positions'
+       )::text AS exists`,
+    );
+    if (tableExists[0]?.exists !== 'true') {
+      await query(`DROP TYPE IF EXISTS positions CASCADE`).catch(() => {});
+    }
+  }
 
   await query(`
     CREATE TABLE IF NOT EXISTS positions (
