@@ -174,6 +174,14 @@ const _mintToSubId   = new Map<string, number>(); // mint → confirmed subId
 const _subIdToMint   = new Map<number, string>(); // subId → mint
 let _whaleWsReconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
+// Exponential backoff for whale WS reconnects
+const WHALE_WS_BACKOFF_NORMAL_MIN = 5_000;
+const WHALE_WS_BACKOFF_NORMAL_MAX = 60_000;
+const WHALE_WS_BACKOFF_429_MIN    = 60_000;
+const WHALE_WS_BACKOFF_429_MAX    = 300_000;
+let _whaleWsReconnectDelay = WHALE_WS_BACKOFF_NORMAL_MIN;
+let _whaleWsLast429 = false;
+
 function getHeliusWsUrl(): string | null {
   const k = process.env.HELIUS_API_KEY;
   return process.env.HELIUS_WS_URL ?? (k ? `wss://mainnet.helius-rpc.com/?api-key=${k}` : null);
@@ -227,6 +235,9 @@ function connectWhaleWs(): void {
 
   _whaleWs.on('open', () => {
     _whaleWsReady = true;
+    // Successful connection — reset backoff to minimum
+    _whaleWsReconnectDelay = WHALE_WS_BACKOFF_NORMAL_MIN;
+    _whaleWsLast429 = false;
     logger.info('Whale sniper: Helius WS connected — subscribing active tracked mints');
     for (const mint of trackedTokens.keys()) wsSubscribeMint(mint);
     pingTimer = setInterval(() => {
@@ -284,7 +295,13 @@ function connectWhaleWs(): void {
   });
 
   _whaleWs.on('error', (err: Error) => {
-    logger.debug({ msg: err.message }, 'Whale sniper: Helius WS error');
+    const msg = err.message ?? '';
+    if (msg.includes('429') || msg.toLowerCase().includes('max usage')) {
+      _whaleWsLast429 = true;
+      logger.warn({ msg }, 'Whale sniper: Helius WS 429 rate-limited — will back off before reconnect');
+    } else {
+      logger.debug({ msg }, 'Whale sniper: Helius WS error');
+    }
   });
 
   _whaleWs.on('close', () => {
@@ -292,8 +309,19 @@ function connectWhaleWs(): void {
     _whaleWs = null;
     if (pingTimer) { clearInterval(pingTimer); pingTimer = null; }
     _mintToSubId.clear(); _subIdToMint.clear(); _pendingWsReqs.clear();
-    logger.info('Whale sniper: Helius WS disconnected — reconnecting in 10s');
-    _whaleWsReconnectTimer = setTimeout(connectWhaleWs, 10_000);
+
+    // Apply exponential backoff — longer delay if the failure was a 429
+    if (_whaleWsLast429) {
+      _whaleWsReconnectDelay = Math.min(Math.max(_whaleWsReconnectDelay * 2, WHALE_WS_BACKOFF_429_MIN), WHALE_WS_BACKOFF_429_MAX);
+      _whaleWsLast429 = false;
+    } else {
+      _whaleWsReconnectDelay = Math.min(_whaleWsReconnectDelay * 2, WHALE_WS_BACKOFF_NORMAL_MAX);
+    }
+    logger.info(
+      { delaySec: Math.round(_whaleWsReconnectDelay / 1_000) },
+      'Whale sniper: Helius WS disconnected — reconnecting after backoff',
+    );
+    _whaleWsReconnectTimer = setTimeout(connectWhaleWs, _whaleWsReconnectDelay);
   });
 }
 

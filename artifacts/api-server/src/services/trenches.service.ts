@@ -89,6 +89,13 @@ let consecutivePollFailures = 0;
 let isBootstrap = true; // only true on first server start — never set back to true
 let connection: Connection | null = null;
 
+// ── Poll backoff state ────────────────────────────────────────────────────────
+// Dynamic scheduling: backs off on 429/failures, resets to 5s on success.
+const POLL_NORMAL_MS = 5_000;
+const POLL_MAX_MS    = 120_000;
+let   pollDelayMs    = POLL_NORMAL_MS;
+let   pollTimer: ReturnType<typeof setTimeout> | null = null;
+
 function getConnection(): Connection {
   if (!connection) {
     // Prefer Helius HTTP RPC to avoid public RPC rate limits.
@@ -133,6 +140,12 @@ async function trackMigrationWallet(): Promise<void> {
     lastSeenSig = null;
     connection = null;
   }
+
+  // Helpers to detect Helius rate-limit responses (HTTP 429 / JSON-RPC -32429)
+  const is429 = (err: any): boolean =>
+    String(err?.message ?? '').includes('429') ||
+    err?.code === -32429 ||
+    String(err?.message ?? '').toLowerCase().includes('max usage');
 
   try {
     const conn = getConnection();
@@ -268,17 +281,36 @@ async function trackMigrationWallet(): Promise<void> {
     }
 
     if (added > 0) logger.info({ added, newTxns: newSigs.length, total: pumpfunMints.size }, 'PumpFun wallet: new migration mints');
+    // On success: reset poll delay to normal cadence
+    pollDelayMs = POLL_NORMAL_MS;
   } catch (err: any) {
     consecutivePollFailures++;
     const staleSec = Math.round((Date.now() - lastPollSuccess) / 1_000);
-    if (consecutivePollFailures === 1 || consecutivePollFailures % 6 === 0) {
-      // Log immediately on first failure, then every ~30s (6 × 5s interval)
+
+    // Detect Helius 429 / rate-limit and back off aggressively.
+    // Normal failures use a gentler exponential ramp.
+    if (is429(err)) {
+      pollDelayMs = Math.min(pollDelayMs * 2, POLL_MAX_MS);
       logger.warn(
-        { msg: err?.message, failures: consecutivePollFailures, staleSec },
-        'PumpFun wallet: RPC poll failed — migration detection paused',
+        { msg: err?.message, failures: consecutivePollFailures, staleSec, nextPollSec: Math.round(pollDelayMs / 1_000) },
+        'PumpFun wallet: RPC 429 rate-limited — backing off poll',
+      );
+    } else if (consecutivePollFailures === 1 || consecutivePollFailures % 6 === 0) {
+      pollDelayMs = Math.min(pollDelayMs * 2, POLL_MAX_MS);
+      logger.warn(
+        { msg: err?.message, failures: consecutivePollFailures, staleSec, nextPollSec: Math.round(pollDelayMs / 1_000) },
+        'PumpFun wallet: RPC poll failed — backing off',
       );
     }
   }
+}
+
+function schedulePoll(): void {
+  if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+  pollTimer = setTimeout(async () => {
+    await trackMigrationWallet();
+    schedulePoll(); // reschedule after each run (uses current pollDelayMs)
+  }, pollDelayMs);
 }
 
 // ── Scanner lifecycle ─────────────────────────────────────────────────────────
@@ -306,6 +338,16 @@ function startMigrationWalletWS(): void {
   let pingTimer: ReturnType<typeof setInterval> | null = null;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   let reqId = 1;
+
+  // Exponential backoff for reconnects.
+  // 429 rate-limit: start at 60s and cap at 300s.
+  // Normal disconnect: start at 5s and cap at 60s.
+  const WS_BACKOFF_NORMAL_MIN = 5_000;
+  const WS_BACKOFF_NORMAL_MAX = 60_000;
+  const WS_BACKOFF_429_MIN    = 60_000;
+  const WS_BACKOFF_429_MAX    = 300_000;
+  let wsReconnectDelay = WS_BACKOFF_NORMAL_MIN;
+  let last429 = false; // tracks whether last failure was a 429
 
   async function processMigrationSig(sig: string): Promise<void> {
     if (wsSeen.has(sig)) return;
@@ -391,6 +433,10 @@ function startMigrationWalletWS(): void {
     ws = new WebSocket(wsUrl!);
 
     ws.on('open', () => {
+      // Successful connection — reset backoff to minimum
+      wsReconnectDelay = WS_BACKOFF_NORMAL_MIN;
+      last429 = false;
+
       // Subscribe to logs for the migration wallet
       ws!.send(JSON.stringify({
         jsonrpc: '2.0', id: reqId++,
@@ -436,14 +482,32 @@ function startMigrationWalletWS(): void {
     });
 
     ws.on('error', (err: Error) => {
-      logger.warn({ msg: err.message }, 'PumpFun WS: connection error');
+      // Detect 429 rate-limit so close handler can apply a longer backoff
+      const msg = err.message ?? '';
+      if (msg.includes('429') || msg.toLowerCase().includes('max usage')) {
+        last429 = true;
+        logger.warn({ msg }, 'PumpFun WS: 429 rate-limited — will back off before reconnect');
+      } else {
+        logger.warn({ msg }, 'PumpFun WS: connection error');
+      }
     });
 
     ws.on('close', () => {
-      logger.info('PumpFun WS: disconnected — reconnecting in 15s');
       if (pingTimer) { clearInterval(pingTimer); pingTimer = null; }
       ws = null;
-      reconnectTimer = setTimeout(connect, 15_000);
+
+      // Choose backoff range based on whether last error was a 429
+      if (last429) {
+        wsReconnectDelay = Math.min(Math.max(wsReconnectDelay * 2, WS_BACKOFF_429_MIN), WS_BACKOFF_429_MAX);
+        last429 = false;
+      } else {
+        wsReconnectDelay = Math.min(wsReconnectDelay * 2, WS_BACKOFF_NORMAL_MAX);
+      }
+      logger.info(
+        { delaySec: Math.round(wsReconnectDelay / 1_000) },
+        'PumpFun WS: disconnected — reconnecting after backoff',
+      );
+      reconnectTimer = setTimeout(connect, wsReconnectDelay);
     });
   }
 
@@ -457,9 +521,10 @@ export function startTrenchesScanner(): void {
   // Real-time WebSocket subscription (primary, instant)
   startMigrationWalletWS();
 
-  // Polling fallback (catches any WS gaps)
-  void trackMigrationWallet();
-  setInterval(() => { void trackMigrationWallet(); }, 5_000);
+  // Polling fallback — dynamic scheduling with exponential backoff on failures.
+  // pollDelayMs starts at 5s, backs off to 120s on repeated 429s, resets on success.
+  const runFirstPoll = async () => { await trackMigrationWallet(); schedulePoll(); };
+  void runFirstPoll();
 
-  logger.info('PumpFun migration wallet tracker started (real-time WS + 5s poll fallback)');
+  logger.info('PumpFun migration wallet tracker started (real-time WS + dynamic-poll fallback)');
 }
