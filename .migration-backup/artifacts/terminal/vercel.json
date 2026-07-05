@@ -1,8 +1,0 @@
-{
-  "rewrites": [
-    {
-      "source": "/api/(.*)",
-      "destination": "https://memecointrading.onrender.com/api/$1"
-    }
-  ]
-}

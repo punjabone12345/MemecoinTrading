@@ -3,6 +3,7 @@ import { Connection } from '@solana/web3.js';
 import { logger } from '../lib/logger.js';
 import { query } from '../lib/db.js';
 import { addMintSource } from './trenches.service.js';
+import { withHeliusLimit, isHeliusCoolingDown } from '../lib/helius-limiter.js';
 
 // ── Meteora program IDs ───────────────────────────────────────────────────────
 const METEORA_DLMM  = 'LBUZKhRxPF3XUpBCjp4YzTKgLLjggiJmzeWAzdm2dvDk';
@@ -104,7 +105,8 @@ async function processSignature(
   onMint: (mint: string) => void,
 ): Promise<void> {
   try {
-    const tx = await getConn().getParsedTransaction(sig, { maxSupportedTransactionVersion: 0 });
+    if (isHeliusCoolingDown()) return;
+    const tx = await withHeliusLimit(() => getConn().getParsedTransaction(sig, { maxSupportedTransactionVersion: 0 }));
     if (!tx) return;
 
     const accountKeys: any[] = (tx.transaction.message as any).accountKeys ?? [];

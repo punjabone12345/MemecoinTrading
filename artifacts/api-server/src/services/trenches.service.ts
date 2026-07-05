@@ -2,6 +2,7 @@ import { Connection, PublicKey } from '@solana/web3.js';
 import { WebSocket } from 'ws';
 import { logger } from '../lib/logger.js';
 import { query } from '../lib/db.js';
+import { withHeliusLimit, isHeliusCoolingDown } from '../lib/helius-limiter.js';
 
 // ── Source registry ───────────────────────────────────────────────────────────
 // Global map: mint → set of discovery sources
@@ -147,13 +148,17 @@ async function trackMigrationWallet(): Promise<void> {
     err?.code === -32429 ||
     String(err?.message ?? '').toLowerCase().includes('max usage');
 
+  // Skip this cycle entirely while the shared Helius cooldown is active —
+  // avoids adding to the pile-up that caused the 429 in the first place.
+  if (isHeliusCoolingDown()) return;
+
   try {
     const conn = getConnection();
     const pk = new PublicKey(MIGRATION_WALLET);
 
     // Always fetch the latest 20 sigs — no `until` param (unreliable on public RPC,
     // causes 429 errors immediately after startup on free-tier endpoints).
-    const sigs = await conn.getSignaturesForAddress(pk, { limit: 20 });
+    const sigs = await withHeliusLimit(() => conn.getSignaturesForAddress(pk, { limit: 20 }));
 
     // Mark poll as successful regardless of whether there are new sigs
     lastPollSuccess = Date.now();
@@ -200,7 +205,7 @@ async function trackMigrationWallet(): Promise<void> {
 
     const txns = await Promise.all(
       toFetch.map((sig) =>
-        conn.getParsedTransaction(sig, { maxSupportedTransactionVersion: 0 })
+        withHeliusLimit(() => conn.getParsedTransaction(sig, { maxSupportedTransactionVersion: 0 }))
           .catch(() => null),
       ),
     );
@@ -358,8 +363,9 @@ function startMigrationWalletWS(): void {
     }
 
     try {
+      if (isHeliusCoolingDown()) { wsSeen.delete(sig); return; }
       const conn = getConnection();
-      const tx   = await conn.getParsedTransaction(sig, { maxSupportedTransactionVersion: 0 });
+      const tx   = await withHeliusLimit(() => conn.getParsedTransaction(sig, { maxSupportedTransactionVersion: 0 }));
       if (!tx) {
         // null means the RPC couldn't return the tx yet (rate-limited or not yet propagated).
         // Remove from wsSeen so the 5s poll fallback can retry it on the next tick.

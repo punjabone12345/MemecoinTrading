@@ -22,3 +22,5 @@
 - [Whale sniper architecture](whale-sniper-arch.md) — completely separate service from auto-trader; in-memory state only; buy detection via getSignaturesForAddress polling; setOnGraduation hook in trenches.service.ts
 - [Whale position live display](whale-position-live-display.md) — whale positions shown in Trades tab via whaleStatus prop; poll 2s, monitor 1.5s; Helius WS logsSubscribe per mint when key set
 - [Whale position management](whale-position-management.md) — full CRUD via /whale/:id + /whale/closed/:id routes; loadInitial must fetch whaleStatus or paper-mode positions never appear; $ in JSX string arrays corrupts via WriteFile tool — use python3 replace instead
+- [Helius RPC shared rate limiter](helius-shared-rate-limiter.md) — 3 services independently hit Helius, causing continuous 429s; centralized token-bucket + global cooldown fixes it
+- [Artifact-managed workflow port conflicts](artifact-workflow-port-conflicts.md) — this project has platform-managed "artifacts/*" workflows that duplicate custom .replit workflows and can't be deleted; conflicts must be resolved by removing/adjusting the custom side

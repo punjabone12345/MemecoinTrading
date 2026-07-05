@@ -6,6 +6,7 @@ import { broadcast } from '../websocket/server.js';
 import { getBalance, setBalance, getSettings } from './settings.service.js';
 import { notifyWhaleTrade, notifyWhaleSkip, notifyWhaleClose, notifyWhaleTP } from '../lib/telegram.js';
 import { query } from '../lib/db.js';
+import { withHeliusLimit, isHeliusCoolingDown } from '../lib/helius-limiter.js';
 
 const MAX_TRACKING_MS       = 30 * 60 * 1_000;
 const MAX_POSITIONS         = 10;
@@ -831,6 +832,8 @@ async function pollTokenBuys(mint: string): Promise<void> {
   if (pollLocks.has(mint)) return;
   pollLocks.add(mint);
 
+  if (isHeliusCoolingDown()) { pollLocks.delete(mint); return; }
+
   const conn = getConn();
   const pk   = new PublicKey(mint);
 
@@ -838,7 +841,7 @@ async function pollTokenBuys(mint: string): Promise<void> {
   const seen = seenTxns.get(mint)!;
 
   try {
-    const sigs = await conn.getSignaturesForAddress(pk, { limit: 30 });
+    const sigs = await withHeliusLimit(() => conn.getSignaturesForAddress(pk, { limit: 30 }));
     if (!sigs.length) return;
 
     // First poll: baseline.
@@ -883,7 +886,7 @@ async function pollTokenBuys(mint: string): Promise<void> {
       const toFetchEarly = earlyWhales.slice().reverse().slice(0, backfillDepth).map(s => s.signature);
       for (let i = 0; i < toFetchEarly.length; i++) {
         const sig = toFetchEarly[i];
-        const tx  = await conn.getParsedTransaction(sig, { maxSupportedTransactionVersion: 0 }).catch(() => null);
+        const tx  = await withHeliusLimit(() => conn.getParsedTransaction(sig, { maxSupportedTransactionVersion: 0 })).catch(() => null);
         if (!tx) { await new Promise(r => setTimeout(r, 300)); continue; }
         const buy = detectBuy(tx, mint);
         if (!buy) { await new Promise(r => setTimeout(r, 250)); continue; }
@@ -921,7 +924,7 @@ async function pollTokenBuys(mint: string): Promise<void> {
     const toFetch = newSigs.slice(0, 5);
     const txns    = await Promise.all(
       toFetch.map(sig =>
-        conn.getParsedTransaction(sig, { maxSupportedTransactionVersion: 0 }).catch(() => null),
+        withHeliusLimit(() => conn.getParsedTransaction(sig, { maxSupportedTransactionVersion: 0 })).catch(() => null),
       ),
     );
 
