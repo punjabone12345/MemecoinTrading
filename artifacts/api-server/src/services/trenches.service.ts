@@ -86,6 +86,7 @@ const MIGRATION_KEYWORDS = ['migrate', 'Migrate', 'MigrateV2', 'migrateV2', 'mig
 let lastSeenSig: string | null = null;
 let lastPollSuccess = Date.now();
 let consecutivePollFailures = 0;
+let isBootstrap = true; // only true on first server start — never set back to true
 let connection: Connection | null = null;
 
 function getConnection(): Connection {
@@ -121,38 +122,38 @@ function detectMigrationInstructionType(logs: string[]): string {
 }
 
 async function trackMigrationWallet(): Promise<void> {
-  // Watchdog: if poll has been failing for >90s, reset the cursor so next success
-  // does a full refetch (prevents permanent stall from a bad cursor).
+  // Watchdog: if poll has been failing for >90s, reset cursor + Connection.
+  // NOTE: isBootstrap is intentionally NOT reset here — after a watchdog recovery
+  // we want to PROCESS any migrations we missed, not skip them.
   if (consecutivePollFailures > 0 && Date.now() - lastPollSuccess > 90_000) {
     logger.warn(
       { failures: consecutivePollFailures, staleSec: Math.round((Date.now() - lastPollSuccess) / 1_000) },
       'PumpFun wallet: poll stalled — resetting cursor to force full refetch',
     );
     lastSeenSig = null;
-    connection = null; // also reset Connection in case it's wedged
+    connection = null;
   }
 
   try {
     const conn = getConnection();
     const pk = new PublicKey(MIGRATION_WALLET);
 
-    // Fetch only NEW signatures since our last checkpoint.
-    // Using `until` avoids re-reading already-seen sigs and reduces RPC pressure.
-    const opts: { limit: number; until?: string } = { limit: 20 };
-    if (lastSeenSig) opts.until = lastSeenSig;
-    const sigs = await conn.getSignaturesForAddress(pk, opts);
-    if (!sigs.length) {
-      lastPollSuccess = Date.now();
-      consecutivePollFailures = 0;
-      return;
-    }
+    // Always fetch the latest 20 sigs — no `until` param (unreliable on public RPC,
+    // causes 429 errors immediately after startup on free-tier endpoints).
+    const sigs = await conn.getSignaturesForAddress(pk, { limit: 20 });
 
-    // First-ever poll: just set the cursor to "now" and don't process any
-    // historical migrations. Only transactions that arrive AFTER startup are tracked.
-    if (!lastSeenSig) {
+    // Mark poll as successful regardless of whether there are new sigs
+    lastPollSuccess = Date.now();
+    consecutivePollFailures = 0;
+
+    if (!sigs.length) return;
+
+    // ── Bootstrap: first call after server startup ────────────────────────────
+    // Set the cursor to "now" without processing any historical migrations.
+    // Only new migrations that arrive AFTER startup will be tracked.
+    if (isBootstrap) {
+      isBootstrap = false;
       lastSeenSig = sigs[0].signature;
-      lastPollSuccess = Date.now();
-      consecutivePollFailures = 0;
       logger.info(
         { cursor: lastSeenSig.slice(0, 16) },
         'PumpFun wallet: cursor initialised — tracking new migrations from this point forward',
@@ -160,11 +161,13 @@ async function trackMigrationWallet(): Promise<void> {
       return;
     }
 
-    // Collect non-errored signatures (newest first from RPC)
-    const newSigs = sigs.filter(s => !s.err).map(s => s.signature);
+    // ── Normal poll: find sigs newer than our last checkpoint ─────────────────
+    const newSigs: string[] = [];
+    for (const sig of sigs) {
+      if (sig.signature === lastSeenSig) break; // reached already-seen boundary
+      if (!sig.err) newSigs.push(sig.signature);
+    }
     lastSeenSig = sigs[0].signature; // advance cursor to newest
-    lastPollSuccess = Date.now();
-    consecutivePollFailures = 0;
 
     if (!newSigs.length) return;
 
