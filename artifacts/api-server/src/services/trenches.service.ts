@@ -180,9 +180,10 @@ async function trackMigrationWallet(): Promise<void> {
 
     // newSigs is newest-first. Reverse to oldest-first so we can advance the
     // cursor through a contiguous block starting from the oldest new sig.
-    // This ensures: if sig[i] returns null, sig[i] and everything newer
-    // (indices >i) is retried next poll — no migration is ever skipped.
-    const toFetch = newSigs.slice(0, 5).reverse(); // oldest-first within the batch
+    // Process ALL new sigs (not just 5) so overflow from burst activity or
+    // post-restart catch-up is never silently dropped.
+    // If sig[i] returns null, sig[i] and everything newer is retried next poll.
+    const toFetch = [...newSigs].reverse(); // oldest-first, full batch (no slice limit)
 
     const txns = await Promise.all(
       toFetch.map((sig) =>
@@ -317,7 +318,13 @@ function startMigrationWalletWS(): void {
     try {
       const conn = getConnection();
       const tx   = await conn.getParsedTransaction(sig, { maxSupportedTransactionVersion: 0 });
-      if (!tx || tx.meta?.err) return;
+      if (!tx) {
+        // null means the RPC couldn't return the tx yet (rate-limited or not yet propagated).
+        // Remove from wsSeen so the 5s poll fallback can retry it on the next tick.
+        wsSeen.delete(sig);
+        return;
+      }
+      if (tx.meta?.err) return;
 
       const logs            = tx.meta?.logMessages ?? [];
       const instructionType = detectMigrationInstructionType(logs);

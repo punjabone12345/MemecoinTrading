@@ -21,8 +21,11 @@ const POOL_WAIT_POLL_MS     = 3_000;   // check DexScreener every 3s (was 15s �
 const POOL_WAIT_TIMEOUT_MS  = 10 * 60_000; // give up after 10 min
 const MIN_POOL_LIQUIDITY    = 1_000;   // require at least $1k liquidity (fresh pump.fun grads seed $1-3k; was $5k which kept most tokens pending)
 const MIN_POOL_AGE_MS       = 10_000;  // pool must be confirmed live for 10s (was 30s — too slow for early entry)
-// Graduations older than this are stale (e.g. backfill on restart) — skip them
-const MAX_GRAD_AGE_MS       = 5 * 60_000; // 5 minutes
+// Server start time — used to filter genuinely pre-startup graduation events
+// without rejecting real events that were slow to process due to rate limiting.
+const SERVER_START_MS       = Date.now();
+// Grace period: accept events that happened slightly before startup (clock skew / boot lag)
+const STALE_GRAD_GRACE_MS   = 2 * 60_000; // 2 minutes before server start
 
 const PRICE_SL_PCT          = 0.3;    // -30% price stop loss from entry
 
@@ -1312,24 +1315,30 @@ async function waitForPoolAndActivate(mint: string): Promise<void> {
 // ── Public API ────────────────────────────────────────────────────────────────
 
 export function addGraduatedToken(ev: { mint: string; poolAddress?: string; ts: number }): void {
-  // Filter stale graduation events — on restart the backfill re-emits the last
-  // 15 historical transactions with their real blockTime.  Ignore anything older
-  // than MAX_GRAD_AGE_MS so we don't spam pending with long-ago graduated tokens.
-  const ageMs = Date.now() - ev.ts;
-  if (ageMs > MAX_GRAD_AGE_MS) {
+  // Filter genuinely pre-startup graduation events (e.g. historical backfill that
+  // somehow leaked through). We do NOT use a fixed time window (the old 5-min limit)
+  // because rate-limited polling retries can legitimately take many minutes to process
+  // a real graduation — a fixed window would silently drop those real events.
+  const cutoff = SERVER_START_MS - STALE_GRAD_GRACE_MS;
+  if (ev.ts < cutoff) {
     logger.debug(
-      { mint: ev.mint.slice(0, 12), ageMin: (ageMs / 60_000).toFixed(1) },
-      'Whale sniper: skipping stale graduation (backfill) — too old',
+      { mint: ev.mint.slice(0, 12), ageMin: ((Date.now() - ev.ts) / 60_000).toFixed(1) },
+      'Whale sniper: skipping pre-startup graduation — predates this server session',
     );
     return;
   }
 
   if (trackedTokens.has(ev.mint) || pendingGraduations.has(ev.mint)) return;
 
+  // Use Date.now() as detectedAt (not the on-chain blockTime) so that the pool-wait
+  // deadline and 30-min tracking window start from when WE detected it — not from when
+  // the block was mined, which could be several minutes earlier after rate-limited retries.
+  const detectedAt = Date.now();
+
   pendingGraduations.set(ev.mint, {
     mint:       ev.mint,
     poolAddress: ev.poolAddress,
-    detectedAt: ev.ts,
+    detectedAt,
   });
 
   logger.info(
