@@ -345,7 +345,7 @@ async function fetchSolPrice(): Promise<void> {
   } catch { /* keep cached value */ }
 }
 
-// ── Fetch token price from DexScreener ────────────────────────────────────────
+// ── Fetch token market data from DexScreener (liquidity, mcap, metadata) ──────
 
 interface DexMarketData {
   price: number;
@@ -382,6 +382,62 @@ async function fetchTokenPrice(mint: string): Promise<DexMarketData> {
   } catch {
     return empty;
   }
+}
+
+// ── Real-time spot price: Jupiter Quote (primary) → DexScreener (fallback) ────
+//
+// DexScreener caches data 30-120s for freshly-graduated tokens. Meme coins can
+// pump 50-100%+ in that window, making DexScreener prices completely wrong at entry.
+//
+// Jupiter's Quote API reads on-chain pool reserve ratios directly — always real-time.
+// Strategy: quote 0.01 SOL → token, derive price from swapUsdValue ÷ tokensReceived.
+// All pump.fun tokens have 6 decimals, so tokensReceived = outAmount / 1e6.
+//
+const PUMP_TOKEN_DECIMALS = 6;
+const WSOL_QUOTE_AMOUNT   = 10_000_000; // 0.01 SOL in lamports — small to avoid price impact
+
+async function fetchPriceFresh(mint: string, _pairAddress?: string): Promise<number> {
+  // 1. Jupiter Quote API — buys the token with 0.01 SOL; derives price from USD value
+  try {
+    const r = await axios.get<any>(
+      `https://lite-api.jup.ag/swap/v1/quote` +
+      `?inputMint=${WSOL_MINT}` +
+      `&outputMint=${mint}` +
+      `&amount=${WSOL_QUOTE_AMOUNT}` +
+      `&slippageBps=1000`,
+      { timeout: 4_000 },
+    );
+    const swapUsdValue = parseFloat(r.data?.swapUsdValue ?? '0');
+    const outAmount    = parseInt(r.data?.outAmount ?? '0', 10);
+    if (swapUsdValue > 0 && outAmount > 0) {
+      const tokensReceived = outAmount / Math.pow(10, PUMP_TOKEN_DECIMALS);
+      const price = swapUsdValue / tokensReceived;
+      if (price > 0) {
+        logger.info(
+          { mint: mint.slice(0, 12), price, swapUsdValue, tokensReceived: tokensReceived.toFixed(2), source: 'jupiter-quote' },
+          'Whale sniper: spot price',
+        );
+        return price;
+      }
+    }
+  } catch { /* fall through to DexScreener */ }
+
+  // 2. DexScreener token aggregator — fallback (may lag 30-120s for fresh tokens)
+  try {
+    const r = await axios.get<any>(`${DEX_BASE}/latest/dex/tokens/${mint}`, { timeout: 6_000 });
+    const pairs: any[] = (r.data?.pairs ?? [])
+      .filter((p: any) => (p.dexId ?? '').toLowerCase() !== 'pumpfun')
+      .sort((a: any, b: any) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0));
+    if (pairs.length) {
+      const price = parseFloat(pairs[0]?.priceUsd ?? '0');
+      if (price > 0) {
+        logger.debug({ mint: mint.slice(0, 12), price, source: 'dex-token' }, 'Whale sniper: spot price (fallback)');
+        return price;
+      }
+    }
+  } catch { /* fall through */ }
+
+  return 0;
 }
 
 // ── Buy detection from a parsed Solana transaction ───────────────────────────
@@ -552,8 +608,15 @@ async function enterWhalePosition(
   entryLocks.add(mint);
 
   try {
-    // Fetch current price & liquidity
-    const { price: entryPrice, liquidity, name: dexName, symbol: dexSymbol } = await fetchTokenPrice(mint);
+    // Fetch market metadata (liquidity, mcap, name, symbol) from DexScreener
+    const marketData = await fetchTokenPrice(mint);
+
+    // Get accurate real-time spot price from Jupiter first, fall back to DexScreener
+    // DexScreener can lag 30-120s for fresh meme coins — Jupiter reads on-chain reserves
+    const tok = trackedTokens.get(mint);
+    const pairAddr = tok?.poolAddress;
+    const spotPrice = await fetchPriceFresh(mint, pairAddr);
+    const entryPrice = spotPrice > 0 ? spotPrice : marketData.price;
 
     if (entryPrice === 0) {
       logger.warn({ mint }, 'Whale sniper: no price available at entry — skipped');
@@ -561,11 +624,10 @@ async function enterWhalePosition(
     }
 
     // Enrich name/symbol from DexScreener if still placeholder
-    const tok = trackedTokens.get(mint);
     if (tok) {
       if (tok.name.endsWith('…') || !tok.symbol) {
-        tok.name   = dexName   || tok.name;
-        tok.symbol = dexSymbol || tok.symbol;
+        tok.name   = marketData.name   || tok.name;
+        tok.symbol = marketData.symbol || tok.symbol;
         name   = tok.name;
         symbol = tok.symbol;
       }
@@ -601,36 +663,39 @@ async function enterWhalePosition(
     if (whalePositions.has(mint)) return;
 
     // ── 2-second execution delay ────────────────────────────────────────────
-    // In real trading there is ~2s of latency between detecting the whale buy
-    // and the swap being confirmed on-chain.  Paper mode simulates this by
-    // waiting 2 s and re-fetching the live price as the true fill price.
+    // Simulates swap confirmation latency. Re-fetch price via Jupiter so the
+    // fill price reflects the actual market state at execution time.
     await new Promise(r => setTimeout(r, 2000));
     if (whalePositions.has(mint)) return;   // re-check in case another trigger fired
 
-    const { price: fillPrice } = await fetchTokenPrice(mint);
+    // Fill price: Jupiter again for accuracy (DexScreener still possibly stale)
+    const fillPrice = await fetchPriceFresh(mint, pairAddr);
     const finalEntryPrice = fillPrice > 0 ? fillPrice : entryPrice;
 
     logger.info(
-      { mint: mint.slice(0, 12), symbol, priceAtDetection: entryPrice, fillPrice: finalEntryPrice,
-        slippagePct: entryPrice > 0 ? (((finalEntryPrice - entryPrice) / entryPrice) * 100).toFixed(2) : 'n/a' },
-      'Whale sniper: 2s fill price sampled',
+      { mint: mint.slice(0, 12), symbol,
+        spotPrice: entryPrice, fillPrice: finalEntryPrice,
+        priceMoveAfter2s: entryPrice > 0 ? (((finalEntryPrice - entryPrice) / entryPrice) * 100).toFixed(2) + '%' : 'n/a',
+        priceSource: spotPrice > 0 ? 'jupiter' : 'dexscreener' },
+      'Whale sniper: entry price confirmed',
     );
 
     const balance = await getBalance().catch(() => 10);
     const sizeSol = balance * (sizePct / 100);
     const tpTier  = determineTier(triggerAmountUsd);
+    const liquidity = marketData.liquidity;
 
     const pos: WhalePosition = {
       id: `${mint}-${Date.now()}`,
       mint, name, symbol,
-      entryPrice: finalEntryPrice, entryMcap: trackedTokens.get(mint)?.mcap ?? 0,
+      entryPrice: finalEntryPrice, entryMcap: tok?.mcap ?? marketData.mcap ?? 0,
       entryTime: Date.now(),
       sizeSol, sizePct,
-      peakPrice: entryPrice,
-      lastPrice: entryPrice,
+      peakPrice:   finalEntryPrice,   // FIX: was using stale pre-fill price
+      lastPrice:   finalEntryPrice,   // FIX: same — ensures P&L starts at 0%
       lastLiquidity: liquidity,
       baselineLiquidity: liquidity > 0 ? liquidity : 1,
-      migrationTime: trackedTokens.get(mint)?.migrationTime ?? Date.now(),
+      migrationTime: tok?.migrationTime ?? Date.now(),
       pnlPct: 0,
       // Multi-stage TP
       tp1Hit: false, tp2Hit: false, tp3Hit: false,
@@ -639,7 +704,7 @@ async function enterWhalePosition(
       bankedSol:         0,
       tpTier,
       triggerAmountUsd,
-      currentSLPrice:    entryPrice * (1 - PRICE_SL_PCT),
+      currentSLPrice:    finalEntryPrice * (1 - PRICE_SL_PCT),  // FIX: was using stale price
     };
 
     whalePositions.set(mint, pos);
@@ -650,14 +715,14 @@ async function enterWhalePosition(
     await setBalance(Math.max(0, balance - sizeSol)).catch(() => {});
 
     logger.info(
-      { mint, symbol, sizePct, sizeSol: sizeSol.toFixed(3), entryPrice, trigger: triggerAmountUsd.toFixed(0) },
+      { mint, symbol, sizePct, sizeSol: sizeSol.toFixed(3), entryPrice: finalEntryPrice, trigger: triggerAmountUsd.toFixed(0) },
       'Whale sniper: ENTERED',
     );
 
     notifyWhaleTrade({
       name, symbol, mint,
       whaleAmountUsd: triggerAmountUsd,
-      sizePct, sizeSol, entryPrice,
+      sizePct, sizeSol, entryPrice: finalEntryPrice,
       whalePriceAtDetection: priceAtDetection,
       slippagePct: maxSlippage,
       whaleWallet,
@@ -778,26 +843,25 @@ async function pollTokenBuys(mint: string): Promise<void> {
         currentPrice = parseFloat(pairs[0]?.priceUsd ?? '0');
       } catch { /* use 0 */ }
 
-      // Process from oldest → newest so we trigger on the FIRST qualifying buy
+      // Process from oldest → newest so we trigger on the FIRST qualifying buy.
+      // Sequential (not parallel) to avoid hammering the public RPC and getting 429s.
+      // Stop as soon as we enter a position — no need to scan the rest.
       const toFetchEarly = earlyWhales.slice().reverse().slice(0, 20).map(s => s.signature);
-      const earlyTxns    = await Promise.all(
-        toFetchEarly.map(sig =>
-          conn.getParsedTransaction(sig, { maxSupportedTransactionVersion: 0 }).catch(() => null),
-        ),
-      );
-      for (let i = 0; i < earlyTxns.length; i++) {
-        const tx = earlyTxns[i];
-        if (!tx) continue;
+      for (let i = 0; i < toFetchEarly.length; i++) {
+        const sig = toFetchEarly[i];
+        const tx  = await conn.getParsedTransaction(sig, { maxSupportedTransactionVersion: 0 }).catch(() => null);
+        if (!tx) { await new Promise(r => setTimeout(r, 300)); continue; }
         const buy = detectBuy(tx, mint);
-        if (!buy) continue;
+        if (!buy) { await new Promise(r => setTimeout(r, 250)); continue; }
         const amountUsd = buy.solSpent * cachedSolPrice;
-        if (amountUsd < 10) continue;
+        if (amountUsd < 10) { await new Promise(r => setTimeout(r, 250)); continue; }
         logger.info(
-          { mint: mint.slice(0, 12), wallet: buy.wallet.slice(0, 8), usd: amountUsd.toFixed(0), sig: toFetchEarly[i].slice(0, 12) },
+          { mint: mint.slice(0, 12), wallet: buy.wallet.slice(0, 8), usd: amountUsd.toFixed(0), sig: sig.slice(0, 12) },
           'Whale sniper: baseline — early whale buy found',
         );
-        await handleWhaleBuy(mint, buy.wallet, amountUsd, toFetchEarly[i], currentPrice);
+        await handleWhaleBuy(mint, buy.wallet, amountUsd, sig, currentPrice);
         if (trackedTokens.get(mint)?.entryTriggered) break; // entered — stop scanning
+        await new Promise(r => setTimeout(r, 150)); // gentle pacing between non-whale txns
       }
       return;
     }
