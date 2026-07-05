@@ -167,18 +167,45 @@ async function trackMigrationWallet(): Promise<void> {
       if (sig.signature === lastSeenSig) break; // reached already-seen boundary
       if (!sig.err) newSigs.push(sig.signature);
     }
-    lastSeenSig = sigs[0].signature; // advance cursor to newest
+    // NOTE: do NOT advance lastSeenSig here. We advance it below only after
+    // confirming tx fetches so that any rate-limited null response never
+    // permanently skips a migration (the cursor would already be past it).
 
-    if (!newSigs.length) return;
+    if (!newSigs.length) {
+      // No new sigs but poll succeeded — park cursor at the current head so
+      // we don't re-scan the full window on the next tick.
+      lastSeenSig = sigs[0].signature;
+      return;
+    }
 
-    // Fetch up to 5 parsed transactions in parallel
-    const toFetch = newSigs.slice(0, 5);
+    // newSigs is newest-first. Reverse to oldest-first so we can advance the
+    // cursor through a contiguous block starting from the oldest new sig.
+    // This ensures: if sig[i] returns null, sig[i] and everything newer
+    // (indices >i) is retried next poll — no migration is ever skipped.
+    const toFetch = newSigs.slice(0, 5).reverse(); // oldest-first within the batch
+
     const txns = await Promise.all(
       toFetch.map((sig) =>
         conn.getParsedTransaction(sig, { maxSupportedTransactionVersion: 0 })
           .catch(() => null),
       ),
     );
+
+    // Advance cursor through the contiguous leading block of successful fetches
+    // (oldest-first). Stop at the first null — that sig and every newer sig in
+    // this batch will be retried on the next poll because the cursor stops
+    // *before* them. Setting lastSeenSig to an older sig keeps those newer sigs
+    // in the "newer than cursor" window on the next getSignaturesForAddress call.
+    for (let i = 0; i < toFetch.length; i++) {
+      if (txns[i] === null) {
+        logger.debug(
+          { sig: toFetch[i].slice(0, 16), stoppedAt: i },
+          'PumpFun poll: tx fetch null (rate-limited?) — cursor held before this sig, will retry',
+        );
+        break;
+      }
+      lastSeenSig = toFetch[i]; // oldest-first → cursor advances toward newest
+    }
 
     let added = 0;
     for (let i = 0; i < txns.length; i++) {
