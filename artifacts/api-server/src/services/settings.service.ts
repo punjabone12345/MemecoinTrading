@@ -121,6 +121,38 @@ export async function setBalance(sol: number): Promise<void> {
   await updateSetting('currentBalanceSol', String(sol));
 }
 
+// Serializes all balance read-modify-write operations so concurrent callers
+// (auto-trader position.service.ts, whale-sniper.service.ts) can never race
+// and silently clobber each other's balance updates.
+let balanceMutex: Promise<unknown> = Promise.resolve();
+
+function withBalanceLock<T>(fn: () => Promise<T>): Promise<T> {
+  const run = balanceMutex.then(fn, fn);
+  // Swallow errors here so a failed op doesn't permanently block the queue;
+  // the actual error still propagates to the caller via `run`.
+  balanceMutex = run.catch(() => undefined);
+  return run;
+}
+
+/**
+ * Atomically adjusts the current balance by `deltaSol` (positive or negative),
+ * always reading the freshest DB value (bypassing the cache) under a lock so
+ * concurrent adjustments never overwrite each other. Returns the new balance.
+ * If `floorAtZero` is true (default), the result is clamped to >= 0.
+ */
+export async function adjustBalance(deltaSol: number, floorAtZero = true): Promise<number> {
+  return withBalanceLock(async () => {
+    const rows = await query<{ value: string }>(`SELECT value FROM settings WHERE key = 'currentBalanceSol'`);
+    const current = parseFloat(rows[0]?.value ?? '10');
+    let next = current + deltaSol;
+    if (floorAtZero) next = Math.max(0, next);
+    balanceCache = next;
+    balanceCacheAt = Date.now();
+    await updateSetting('currentBalanceSol', String(next));
+    return next;
+  });
+}
+
 export async function resetAllData(): Promise<void> {
   await query(`DELETE FROM positions`);
   await query(`DELETE FROM whale_positions`);

@@ -3,7 +3,7 @@ import { Connection, PublicKey } from '@solana/web3.js';
 import { WebSocket } from 'ws';
 import { logger } from '../lib/logger.js';
 import { broadcast } from '../websocket/server.js';
-import { getBalance, setBalance, getSettings } from './settings.service.js';
+import { getBalance, adjustBalance, getSettings } from './settings.service.js';
 import { notifyWhaleTrade, notifyWhaleSkip, notifyWhaleClose, notifyWhaleTP } from '../lib/telegram.js';
 import { query } from '../lib/db.js';
 import { withHeliusLimit, isHeliusCoolingDown } from '../lib/helius-limiter.js';
@@ -744,7 +744,7 @@ async function enterWhalePosition(
 
     if (tok) tok.entryTriggered = true;
 
-    await setBalance(Math.max(0, balance - sizeSol)).catch(() => {});
+    await adjustBalance(-sizeSol).catch(() => {});
 
     logger.info(
       { mint, symbol, sizePct, sizeSol: sizeSol.toFixed(3), entryPrice: finalEntryPrice, trigger: triggerAmountUsd.toFixed(0) },
@@ -979,8 +979,7 @@ async function partialCloseWhaleTP(
   pos.currentSLPrice    = newSLPrice;
 
   // Credit returned SOL to balance immediately
-  const bal = await getBalance().catch(() => 0);
-  await setBalance(bal + returnedSol).catch(() => {});
+  await adjustBalance(returnedSol).catch(() => {});
 
   void saveWhalePosition(pos);
   broadcastWhaleStatus();
@@ -1027,8 +1026,7 @@ async function closeWhalePosition(pos: WhalePosition, reason: string): Promise<v
     const pnlPct       = (pnlSol / initSize) * 100;
 
     // Only add runner's return — banked portions already credited
-    const newBal = (await getBalance().catch(() => 0)) + runnerReturn;
-    await setBalance(Math.max(0, newBal)).catch(() => {});
+    await adjustBalance(runnerReturn).catch(() => {});
 
     closedPositions.unshift({ ...pos, closeTime: Date.now(), closeReason: reason, closePnlPct: pnlPct });
     if (closedPositions.length > 200) closedPositions.pop();
@@ -1531,8 +1529,7 @@ export async function deleteWhalePositionById(id: string): Promise<boolean> {
   closeLocks.add(pos.mint);
   whalePositions.delete(pos.mint);
   try {
-    const bal = await getBalance().catch(() => 0);
-    await setBalance(Math.max(0, bal + pos.remainingSizeSol)).catch(() => {});
+    await adjustBalance(pos.remainingSizeSol).catch(() => {});
     await query(`DELETE FROM whale_positions WHERE id = $1`, [pos.id]).catch(() => {});
     broadcastWhaleStatus();
     await processQueue();

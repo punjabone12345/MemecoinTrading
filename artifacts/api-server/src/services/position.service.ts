@@ -1,6 +1,6 @@
 import { query } from '../lib/db.js';
 import { Position } from '../types/index.js';
-import { getSettings, getBalance, setBalance } from './settings.service.js';
+import { getSettings, getBalance, adjustBalance } from './settings.service.js';
 import { markTokenEntered, markTokenAvailable, getTokenByMint } from './scanner.service.js';
 import { notifyBought, notifyClosed, notifyEmergencyExit } from '../lib/telegram.js';
 import { logger } from '../lib/logger.js';
@@ -257,7 +257,7 @@ export async function openPosition(params: {
   }
 
   const position = rowToPosition(rows[0]);
-  await setBalance(balance - sizeSol);
+  await adjustBalance(-sizeSol);
   markTokenEntered(params.mint);
 
   await notifyBought({ name: params.name, symbol: params.symbol, price: params.price, mc: params.mc, score: params.score, sizeSol });
@@ -299,8 +299,7 @@ export async function closePosition(id: string, currentPrice: number, reason: st
 
   // Return only runner capital + runner PnL — TP profits were already credited
   // to the balance during each partialClose() call.
-  const balance = await getBalance();
-  await setBalance(balance + pos.sizeSol + runnerPnl);
+  await adjustBalance(pos.sizeSol + runnerPnl);
   markTokenAvailable(pos.mint);
 
   // Clean up per-position exit state so it doesn't persist after close
@@ -527,8 +526,7 @@ export async function deletePosition(id: string): Promise<void> {
   if (!pos) return;
 
   if (pos.status === 'OPEN') {
-    const balance = await getBalance();
-    await setBalance(balance + pos.sizeSol);
+    await adjustBalance(pos.sizeSol);
     markTokenAvailable(pos.mint);
   }
 
