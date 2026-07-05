@@ -1,12 +1,12 @@
 import axios from 'axios';
 import { Connection, PublicKey } from '@solana/web3.js';
-import { WebSocket } from 'ws';
 import { logger } from '../lib/logger.js';
 import { broadcast } from '../websocket/server.js';
 import { getBalance, adjustBalance, getSettings } from './settings.service.js';
 import { notifyWhaleTrade, notifyWhaleSkip, notifyWhaleClose, notifyWhaleTP } from '../lib/telegram.js';
 import { query } from '../lib/db.js';
 import { withHeliusLimit, isHeliusCoolingDown } from '../lib/helius-limiter.js';
+import { subscribeLogs, isHeliusWsConfigured } from '../lib/helius-ws-shared.js';
 
 const MAX_TRACKING_MS       = 30 * 60 * 1_000;
 const MAX_POSITIONS         = 10;
@@ -166,164 +166,42 @@ interface PendingGraduation {
 }
 
 // ── Helius WebSocket — instant whale-buy detection per tracked mint ───────────
+// Uses the shared Helius WS connection (helius-ws-shared.ts) instead of a
+// dedicated socket — Helius keys allow only one concurrent WS connection, so a
+// separate socket per service caused a 429 reconnect storm across services.
 
-let _whaleWs: WebSocket | null = null;
-let _whaleWsReady = false;
-let _whaleWsReqId = 100;
-const _pendingWsReqs = new Map<number, string>(); // reqId → mint (pre-confirm)
-const _mintToSubId   = new Map<string, number>(); // mint → confirmed subId
-const _subIdToMint   = new Map<number, string>(); // subId → mint
-let _whaleWsReconnectTimer: ReturnType<typeof setTimeout> | null = null;
-
-// Exponential backoff for whale WS reconnects
-const WHALE_WS_BACKOFF_NORMAL_MIN = 5_000;
-const WHALE_WS_BACKOFF_NORMAL_MAX = 60_000;
-const WHALE_WS_BACKOFF_429_MIN    = 60_000;
-const WHALE_WS_BACKOFF_429_MAX    = 300_000;
-let _whaleWsReconnectDelay = WHALE_WS_BACKOFF_NORMAL_MIN;
-let _whaleWsLast429 = false;
-
-function getHeliusWsUrl(): string | null {
-  const k = process.env.HELIUS_API_KEY;
-  return process.env.HELIUS_WS_URL ?? (k ? `wss://mainnet.helius-rpc.com/?api-key=${k}` : null);
-}
+const _mintUnsubscribe = new Map<string, () => void>(); // mint → unsubscribe fn
 
 function wsSubscribeMint(mint: string): void {
-  if (!_whaleWs || !_whaleWsReady) return;
-  if (_mintToSubId.has(mint) || Array.from(_pendingWsReqs.values()).includes(mint)) return;
-  const id = _whaleWsReqId++;
-  _pendingWsReqs.set(id, mint);
-  _whaleWs.send(JSON.stringify({
-    jsonrpc: '2.0', id,
-    method: 'logsSubscribe',
-    params: [{ mentions: [mint] }, { commitment: 'processed' }],
-  }));
+  if (_mintUnsubscribe.has(mint)) return;
+  const unsub = subscribeLogs([mint], (value) => {
+    if (value.err !== null) return;
+    if (!trackedTokens.has(mint)) return;
+
+    logger.debug(
+      { mint: mint.slice(0, 12), sig: (value.signature ?? '').slice(0, 12) },
+      'Whale sniper: WS event — triggering instant poll',
+    );
+    void pollTokenBuys(mint);
+  }, 'processed');
+  _mintUnsubscribe.set(mint, unsub);
 }
 
 function wsUnsubscribeMint(mint: string): void {
-  // Remove from pending (not yet confirmed) — prevents promotion on late confirmation
-  for (const [reqId, m] of _pendingWsReqs) {
-    if (m === mint) { _pendingWsReqs.delete(reqId); break; }
-  }
-  // Remove from confirmed maps
-  const subId = _mintToSubId.get(mint);
-  if (subId !== undefined) {
-    _mintToSubId.delete(mint);
-    _subIdToMint.delete(subId);
-    if (_whaleWs?.readyState === WebSocket.OPEN) {
-      _whaleWs.send(JSON.stringify({
-        jsonrpc: '2.0', id: _whaleWsReqId++,
-        method: 'logsUnsubscribe',
-        params: [subId],
-      }));
-    }
+  const unsub = _mintUnsubscribe.get(mint);
+  if (unsub) {
+    _mintUnsubscribe.delete(mint);
+    unsub();
   }
 }
 
 function connectWhaleWs(): void {
-  const wsUrl = getHeliusWsUrl();
-  if (!wsUrl) return;
-
-  if (_whaleWsReconnectTimer) { clearTimeout(_whaleWsReconnectTimer); _whaleWsReconnectTimer = null; }
-  if (_whaleWs) { _whaleWs.removeAllListeners(); try { _whaleWs.terminate(); } catch {} _whaleWs = null; }
-  _whaleWsReady = false;
-
-  const safeUrl = wsUrl.replace(/api-key=[^&?]+/, 'api-key=***');
-  logger.info({ url: safeUrl }, 'Whale sniper: Helius WS connecting…');
-  _whaleWs = new WebSocket(wsUrl);
-
-  let pingTimer: ReturnType<typeof setInterval> | null = null;
-
-  _whaleWs.on('open', () => {
-    _whaleWsReady = true;
-    // Successful connection — reset backoff to minimum
-    _whaleWsReconnectDelay = WHALE_WS_BACKOFF_NORMAL_MIN;
-    _whaleWsLast429 = false;
-    logger.info('Whale sniper: Helius WS connected — subscribing active tracked mints');
-    for (const mint of trackedTokens.keys()) wsSubscribeMint(mint);
-    pingTimer = setInterval(() => {
-      if (_whaleWs?.readyState === WebSocket.OPEN) {
-        _whaleWs.send(JSON.stringify({ jsonrpc: '2.0', id: 99998, method: 'getHealth' }));
-      } else {
-        if (pingTimer) clearInterval(pingTimer);
-      }
-    }, 30_000);
-  });
-
-  _whaleWs.on('message', (raw: Buffer) => {
-    try {
-      const msg = JSON.parse(raw.toString());
-      // Subscription confirmation
-      if (typeof msg.result === 'number' && msg.id !== undefined) {
-        const mint = _pendingWsReqs.get(msg.id);
-        if (mint) {
-          _pendingWsReqs.delete(msg.id);
-          if (!trackedTokens.has(mint)) {
-            // Mint was pruned before confirmation arrived — immediately unsubscribe the orphan
-            if (_whaleWs?.readyState === WebSocket.OPEN) {
-              _whaleWs.send(JSON.stringify({ jsonrpc: '2.0', id: _whaleWsReqId++, method: 'logsUnsubscribe', params: [msg.result] }));
-            }
-            logger.debug({ mint: mint.slice(0, 12) }, 'Whale sniper: WS unsubscribed orphan (mint pruned before confirmation)');
-          } else {
-            _mintToSubId.set(mint, msg.result);
-            _subIdToMint.set(msg.result, mint);
-            logger.debug({ mint: mint.slice(0, 12), subId: msg.result }, 'Whale sniper: WS mint subscription confirmed');
-          }
-        }
-        return;
-      }
-      if (msg.method !== 'logsNotification') return;
-      const value = msg.params?.result?.value;
-      if (!value || value.err !== null) return;
-
-      // Find mint by subscription ID first, then scan logs as fallback
-      const subId: number = msg.params?.subscription;
-      let targetMint: string | undefined = _subIdToMint.get(subId);
-      if (!targetMint) {
-        const allText = (value.logs ?? []).join(' ');
-        for (const [mint] of trackedTokens) {
-          if (allText.includes(mint)) { targetMint = mint; break; }
-        }
-      }
-      if (!targetMint || !trackedTokens.has(targetMint)) return;
-
-      logger.debug(
-        { mint: targetMint.slice(0, 12), sig: (value.signature ?? '').slice(0, 12) },
-        'Whale sniper: WS event — triggering instant poll',
-      );
-      void pollTokenBuys(targetMint);
-    } catch { /* ignore */ }
-  });
-
-  _whaleWs.on('error', (err: Error) => {
-    const msg = err.message ?? '';
-    if (msg.includes('429') || msg.toLowerCase().includes('max usage')) {
-      _whaleWsLast429 = true;
-      logger.warn({ msg }, 'Whale sniper: Helius WS 429 rate-limited — will back off before reconnect');
-    } else {
-      logger.debug({ msg }, 'Whale sniper: Helius WS error');
-    }
-  });
-
-  _whaleWs.on('close', () => {
-    _whaleWsReady = false;
-    _whaleWs = null;
-    if (pingTimer) { clearInterval(pingTimer); pingTimer = null; }
-    _mintToSubId.clear(); _subIdToMint.clear(); _pendingWsReqs.clear();
-
-    // Apply exponential backoff — longer delay if the failure was a 429
-    if (_whaleWsLast429) {
-      _whaleWsReconnectDelay = Math.min(Math.max(_whaleWsReconnectDelay * 2, WHALE_WS_BACKOFF_429_MIN), WHALE_WS_BACKOFF_429_MAX);
-      _whaleWsLast429 = false;
-    } else {
-      _whaleWsReconnectDelay = Math.min(_whaleWsReconnectDelay * 2, WHALE_WS_BACKOFF_NORMAL_MAX);
-    }
-    logger.info(
-      { delaySec: Math.round(_whaleWsReconnectDelay / 1_000) },
-      'Whale sniper: Helius WS disconnected — reconnecting after backoff',
-    );
-    _whaleWsReconnectTimer = setTimeout(connectWhaleWs, _whaleWsReconnectDelay);
-  });
+  if (!isHeliusWsConfigured()) return;
+  // Ensure the shared connection is started and (re)subscribe to all currently
+  // tracked mints — subscribeLogs auto-resubscribes on reconnect internally,
+  // but on first start we still need to register each tracked mint here.
+  for (const mint of trackedTokens.keys()) wsSubscribeMint(mint);
+  logger.info({ mints: trackedTokens.size }, 'Whale sniper: subscribed tracked mints via shared Helius WS');
 }
 
 // ── In-memory state ───────────────────────────────────────────────────────────
@@ -1579,7 +1457,7 @@ export function resetWhaleState(): void {
   seenTxns.clear();
   mintCheckpointed.clear();
   // Unsubscribe all Helius WS mints
-  for (const mint of Array.from(_mintToSubId.keys())) wsUnsubscribeMint(mint);
+  for (const mint of Array.from(_mintUnsubscribe.keys())) wsUnsubscribeMint(mint);
   broadcastWhaleStatus();
   logger.info('Whale sniper: state reset (all positions and tracking cleared)');
 }
@@ -1598,7 +1476,7 @@ export function startWhaleSniper(): void {
   void fetchSolPrice();
 
   // Helius WS for near-instant whale buy detection (requires HELIUS_API_KEY)
-  if (getHeliusWsUrl()) {
+  if (isHeliusWsConfigured()) {
     connectWhaleWs();
   } else {
     logger.info('Whale sniper: no HELIUS_API_KEY — using poll-only mode (2s interval)');

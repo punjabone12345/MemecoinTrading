@@ -1,9 +1,9 @@
-import { WebSocket } from 'ws';
 import { Connection } from '@solana/web3.js';
 import { logger } from '../lib/logger.js';
 import { query } from '../lib/db.js';
 import { addMintSource } from './trenches.service.js';
 import { withHeliusLimit, isHeliusCoolingDown } from '../lib/helius-limiter.js';
+import { subscribeLogs, isHeliusWsConfigured } from '../lib/helius-ws-shared.js';
 
 // ── Meteora program IDs ───────────────────────────────────────────────────────
 const METEORA_DLMM  = 'LBUZKhRxPF3XUpBCjp4YzTKgLLjggiJmzeWAzdm2dvDk';
@@ -242,95 +242,32 @@ async function processSignature(
 }
 
 // ── Main watcher ──────────────────────────────────────────────────────────────
+// Uses the shared Helius WS connection (helius-ws-shared.ts) instead of opening
+// its own socket — Helius keys allow only one concurrent WS connection, so a
+// dedicated socket per service caused a 429 reconnect storm.
 export function startHeliusWatcher(onMint: (mint: string) => void): void {
-  const apiKey = process.env.HELIUS_API_KEY;
-  const wsUrl = process.env.HELIUS_WS_URL
-    ?? (apiKey ? `wss://mainnet.helius-rpc.com/?api-key=${apiKey}` : null);
-
-  if (!wsUrl) {
+  if (!isHeliusWsConfigured()) {
     logger.warn(
       'Helius WS: no HELIUS_API_KEY / HELIUS_WS_URL — Meteora watcher disabled (set key on Render to enable)',
     );
     return;
   }
 
-  const safeUrl = wsUrl.replace(/api-key=[^&?]+/, 'api-key=***');
-  let ws: WebSocket | null = null;
-  let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-  let reqId = 1;
+  for (const programId of [METEORA_DLMM, METEORA_DAMM, METEORA_DAMM2]) {
+    subscribeLogs([programId], (value) => {
+      if (value.err !== null) return; // skip failed transactions
 
-  // Keep-alive ping every 30s
-  let pingTimer: ReturnType<typeof setInterval> | null = null;
+      const sig = value.signature;
+      const logs = value.logs ?? [];
 
-  function connect(): void {
-    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
-    if (pingTimer) { clearInterval(pingTimer); pingTimer = null; }
-    if (ws) { ws.removeAllListeners(); try { ws.terminate(); } catch {} ws = null; }
+      const isDlmm  = logs.some((l) => l.includes(METEORA_DLMM));
+      const isDamm2 = logs.some((l) => l.includes(METEORA_DAMM2));
+      const source: MeteoraEvent['source'] = isDlmm ? 'meteora_dlmm'
+        : isDamm2 ? 'meteora_damm2' : 'meteora_damm';
 
-    logger.info({ url: safeUrl }, 'Helius WS: connecting…');
-    ws = new WebSocket(wsUrl!);
-
-    ws.on('open', () => {
-      logger.info('Helius WS: connected — subscribing to Meteora DLMM + DAMM + DAMM-v2');
-
-      // Subscribe to all three Meteora programs
-      for (const programId of [METEORA_DLMM, METEORA_DAMM, METEORA_DAMM2]) {
-        ws!.send(JSON.stringify({
-          jsonrpc: '2.0', id: reqId++,
-          method: 'logsSubscribe',
-          params: [{ mentions: [programId] }, { commitment: 'confirmed' }],
-        }));
-      }
-
-      // Keep-alive ping
-      pingTimer = setInterval(() => {
-        if (ws?.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ jsonrpc: '2.0', id: 99999, method: 'getHealth' }));
-        }
-      }, 30_000);
-    });
-
-    ws.on('message', (raw: Buffer) => {
-      try {
-        const msg = JSON.parse(raw.toString());
-
-        // Subscription confirmations
-        if (msg.result !== undefined && typeof msg.result === 'number') {
-          logger.info({ subId: msg.result, reqId: msg.id }, 'Helius WS: subscription confirmed');
-          return;
-        }
-
-        if (msg.method !== 'logsNotification') return;
-        const value = msg.params?.result?.value;
-        // Skip failed transactions
-        if (!value || value.err !== null) return;
-
-        const sig: string = value.signature;
-        const logs: string[] = value.logs ?? [];
-
-        // Detect which program triggered this notification
-        const isDlmm  = logs.some((l) => l.includes(METEORA_DLMM));
-        const isDamm2 = logs.some((l) => l.includes(METEORA_DAMM2));
-        const source: MeteoraEvent['source'] = isDlmm ? 'meteora_dlmm'
-          : isDamm2 ? 'meteora_damm2' : 'meteora_damm';
-
-        // Queue for async processing (no keyword filter — structural guard in processSignature)
-        enqueue(sig, source, onMint);
-      } catch { /* ignore parse errors */ }
-    });
-
-    ws.on('error', (err: Error) => {
-      logger.warn({ msg: err.message }, 'Helius WS: connection error');
-    });
-
-    ws.on('close', () => {
-      logger.info('Helius WS: disconnected — reconnecting in 10s');
-      if (pingTimer) { clearInterval(pingTimer); pingTimer = null; }
-      ws = null;
-      reconnectTimer = setTimeout(connect, 10_000);
-    });
+      enqueue(sig, source, onMint);
+    }, 'confirmed');
   }
 
-  connect();
-  logger.info('Helius WS watcher started (Meteora DLMM + DAMM + DAMM-v2)');
+  logger.info('Helius WS watcher started (Meteora DLMM + DAMM + DAMM-v2) via shared connection');
 }

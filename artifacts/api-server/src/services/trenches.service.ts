@@ -1,8 +1,8 @@
 import { Connection, PublicKey } from '@solana/web3.js';
-import { WebSocket } from 'ws';
 import { logger } from '../lib/logger.js';
 import { query } from '../lib/db.js';
 import { withHeliusLimit, isHeliusCoolingDown } from '../lib/helius-limiter.js';
+import { subscribeLogs, isHeliusWsConfigured } from '../lib/helius-ws-shared.js';
 
 // ── Source registry ───────────────────────────────────────────────────────────
 // Global map: mint → set of discovery sources
@@ -330,29 +330,10 @@ let started = false;
 const wsSeen = new Set<string>();
 
 function startMigrationWalletWS(): void {
-  const apiKey = process.env.HELIUS_API_KEY;
-  const wsUrl  = process.env.HELIUS_WS_URL
-    ?? (apiKey ? `wss://mainnet.helius-rpc.com/?api-key=${apiKey}` : null);
-
-  if (!wsUrl) {
+  if (!isHeliusWsConfigured()) {
     logger.info('PumpFun WS: no HELIUS_API_KEY — real-time migration wallet subscription disabled (polling only)');
     return;
   }
-
-  let ws: WebSocket | null  = null;
-  let pingTimer: ReturnType<typeof setInterval> | null = null;
-  let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-  let reqId = 1;
-
-  // Exponential backoff for reconnects.
-  // 429 rate-limit: start at 60s and cap at 300s.
-  // Normal disconnect: start at 5s and cap at 60s.
-  const WS_BACKOFF_NORMAL_MIN = 5_000;
-  const WS_BACKOFF_NORMAL_MAX = 60_000;
-  const WS_BACKOFF_429_MIN    = 60_000;
-  const WS_BACKOFF_429_MAX    = 300_000;
-  let wsReconnectDelay = WS_BACKOFF_NORMAL_MIN;
-  let last429 = false; // tracks whether last failure was a 429
 
   async function processMigrationSig(sig: string): Promise<void> {
     if (wsSeen.has(sig)) return;
@@ -430,94 +411,28 @@ function startMigrationWalletWS(): void {
     }
   }
 
-  function connect(): void {
-    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
-    if (pingTimer)      { clearInterval(pingTimer); pingTimer = null; }
-    if (ws)             { ws.removeAllListeners(); try { ws.terminate(); } catch {} ws = null; }
+  // Subscribe to migration-wallet logs via the shared Helius WS connection
+  // (avoids opening a second dedicated socket that competes for the single
+  // concurrent-connection slot Helius allows per API key).
+  subscribeLogs([MIGRATION_WALLET], (value) => {
+    if (value.err !== null) return;
 
-    logger.info('PumpFun WS: connecting to Helius for real-time migration wallet monitoring…');
-    ws = new WebSocket(wsUrl!);
+    const sig: string = value.signature;
+    const logs: string[] = value.logs ?? [];
 
-    ws.on('open', () => {
-      // Successful connection — reset backoff to minimum
-      wsReconnectDelay = WS_BACKOFF_NORMAL_MIN;
-      last429 = false;
+    // Quick pre-filter: skip if no migration keyword in raw logs
+    const logText = logs.join(' ').toLowerCase();
+    const hasMigration =
+      logText.includes('migrate') ||
+      logText.includes('pool_create') ||
+      logText.includes('poolcreate') ||
+      logText.includes('createpool');
+    if (!hasMigration) return;
 
-      // Subscribe to logs for the migration wallet
-      ws!.send(JSON.stringify({
-        jsonrpc: '2.0', id: reqId++,
-        method: 'logsSubscribe',
-        params: [{ mentions: [MIGRATION_WALLET] }, { commitment: 'confirmed' }],
-      }));
+    processMigrationSig(sig).catch(() => {});
+  }, 'confirmed');
 
-      // Keep-alive ping
-      pingTimer = setInterval(() => {
-        if (ws?.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ jsonrpc: '2.0', id: 99998, method: 'getHealth' }));
-        }
-      }, 30_000);
-
-      logger.info('PumpFun WS: subscribed to migration wallet logs');
-    });
-
-    ws.on('message', (raw: Buffer) => {
-      try {
-        const msg = JSON.parse(raw.toString());
-        if (msg.result !== undefined && typeof msg.result === 'number') {
-          logger.info({ subId: msg.result }, 'PumpFun WS: subscription confirmed');
-          return;
-        }
-        if (msg.method !== 'logsNotification') return;
-        const value = msg.params?.result?.value;
-        if (!value || value.err !== null) return;
-
-        const sig: string  = value.signature;
-        const logs: string[] = value.logs ?? [];
-
-        // Quick pre-filter: skip if no migration keyword in raw logs
-        const logText = logs.join(' ').toLowerCase();
-        const hasMigration =
-          logText.includes('migrate') ||
-          logText.includes('pool_create') ||
-          logText.includes('poolcreate') ||
-          logText.includes('createpool');
-        if (!hasMigration) return;
-
-        processMigrationSig(sig).catch(() => {});
-      } catch { /* ignore parse errors */ }
-    });
-
-    ws.on('error', (err: Error) => {
-      // Detect 429 rate-limit so close handler can apply a longer backoff
-      const msg = err.message ?? '';
-      if (msg.includes('429') || msg.toLowerCase().includes('max usage')) {
-        last429 = true;
-        logger.warn({ msg }, 'PumpFun WS: 429 rate-limited — will back off before reconnect');
-      } else {
-        logger.warn({ msg }, 'PumpFun WS: connection error');
-      }
-    });
-
-    ws.on('close', () => {
-      if (pingTimer) { clearInterval(pingTimer); pingTimer = null; }
-      ws = null;
-
-      // Choose backoff range based on whether last error was a 429
-      if (last429) {
-        wsReconnectDelay = Math.min(Math.max(wsReconnectDelay * 2, WS_BACKOFF_429_MIN), WS_BACKOFF_429_MAX);
-        last429 = false;
-      } else {
-        wsReconnectDelay = Math.min(wsReconnectDelay * 2, WS_BACKOFF_NORMAL_MAX);
-      }
-      logger.info(
-        { delaySec: Math.round(wsReconnectDelay / 1_000) },
-        'PumpFun WS: disconnected — reconnecting after backoff',
-      );
-      reconnectTimer = setTimeout(connect, wsReconnectDelay);
-    });
-  }
-
-  connect();
+  logger.info('PumpFun WS: subscribed to migration wallet logs via shared connection');
 }
 
 export function startTrenchesScanner(): void {

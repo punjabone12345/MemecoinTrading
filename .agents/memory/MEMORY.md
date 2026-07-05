@@ -23,4 +23,5 @@
 - [Whale position live display](whale-position-live-display.md) — whale positions shown in Trades tab via whaleStatus prop; poll 2s, monitor 1.5s; Helius WS logsSubscribe per mint when key set
 - [Whale position management](whale-position-management.md) — full CRUD via /whale/:id + /whale/closed/:id routes; loadInitial must fetch whaleStatus or paper-mode positions never appear; $ in JSX string arrays corrupts via WriteFile tool — use python3 replace instead
 - [Helius RPC shared rate limiter](helius-shared-rate-limiter.md) — 3 services independently hit Helius, causing continuous 429s; centralized token-bucket + global cooldown fixes it
+- [Helius shared WS connection](helius-shared-ws-connection.md) — Helius allows only 1 concurrent WS; 3 services each opened their own → 429 reconnect storm; consolidated into one shared multiplexed connection
 - [Artifact-managed workflow port conflicts](artifact-workflow-port-conflicts.md) — this project has platform-managed "artifacts/*" workflows that duplicate custom .replit workflows and can't be deleted; conflicts must be resolved by removing/adjusting the custom side
