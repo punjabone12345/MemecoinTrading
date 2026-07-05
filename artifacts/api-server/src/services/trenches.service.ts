@@ -147,6 +147,19 @@ async function trackMigrationWallet(): Promise<void> {
       return;
     }
 
+    // First-ever poll: just set the cursor to "now" and don't process any
+    // historical migrations. Only transactions that arrive AFTER startup are tracked.
+    if (!lastSeenSig) {
+      lastSeenSig = sigs[0].signature;
+      lastPollSuccess = Date.now();
+      consecutivePollFailures = 0;
+      logger.info(
+        { cursor: lastSeenSig.slice(0, 16) },
+        'PumpFun wallet: cursor initialised — tracking new migrations from this point forward',
+      );
+      return;
+    }
+
     // Collect non-errored signatures (newest first from RPC)
     const newSigs = sigs.filter(s => !s.err).map(s => s.signature);
     lastSeenSig = sigs[0].signature; // advance cursor to newest
