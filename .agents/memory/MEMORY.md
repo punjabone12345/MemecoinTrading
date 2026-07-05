@@ -25,3 +25,5 @@
 - [Helius RPC shared rate limiter](helius-shared-rate-limiter.md) — 3 services independently hit Helius, causing continuous 429s; centralized token-bucket + global cooldown fixes it
 - [Helius shared WS connection](helius-shared-ws-connection.md) — Helius allows only 1 concurrent WS; 3 services each opened their own → 429 reconnect storm; consolidated into one shared multiplexed connection
 - [Artifact-managed workflow port conflicts](artifact-workflow-port-conflicts.md) — this project has platform-managed "artifacts/*" workflows that duplicate custom .replit workflows and can't be deleted; conflicts must be resolved by removing/adjusting the custom side
+- [Whale sniper Jupiter price formula](whale-sniper-jupiter-price.md) — price = (0.01 SOL × SOL_USD) / (outAmount / 1e6); never rely on swapUsdValue (zero for fresh tokens); SOL price from Jupiter Price API v2 not DexScreener
+- [Trenches poll Helius 429 / public RPC fallback](trenches-poll-rpc.md) — @solana/web3.js Connection.getSignaturesForAddress fails on Render with Helius 429; use direct fetch() + public RPC fallback; wrap in withHeliusLimit
