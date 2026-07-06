@@ -42,10 +42,17 @@ export default function SettingsPage({ settings: init, onUpdate }: Props) {
 
   function update(key: keyof Settings, value: string) {
     const numKeys = ['minMc','maxMc','minVolume24h','minAgeHours','maxAgeHours','scanFrequencyMs','minBuySellRatio','maxTopHolder','maxCreatorPct','minLiquidity','minEntryScore','trendChecksRequired','maxOpenPositions','sizeScore90','sizeScore80','sizeScore70','slPct','tp1Pct','tp1ClosePct','tp2Pct','tp2ClosePct','tp2TrailPct','tp3Pct','tp3ClosePct','trailingSLPct','trailActivatePct','maxDailyLossPct','startingBalanceSol','currentBalanceSol','slippagePct','priorityFeeSol','whaleSlippagePct','whaleStagnationPct','wt1Tp1Pct','wt1Tp1Exit','wt1Tp2Pct','wt1Tp2Exit','wt1Tp2Trail','wt1Tp3Pct','wt1Tp3Exit','wt1Tp3Trail','wt2Tp1Pct','wt2Tp1Exit','wt2Tp2Pct','wt2Tp2Exit','wt2Tp2Trail','wt2Tp3Pct','wt2Tp3Exit','wt2Tp3Trail','wt3Tp1Pct','wt3Tp1Exit','wt3Tp2Pct','wt3Tp2Exit','wt3Tp2Trail','wt3Tp3Pct','wt3Tp3Exit','wt3Tp3Trail'];
+    const boolKeys = ['autoTraderEnabled', 'rugcheckEnabled'];
     const updated = { ...settings } as Record<string, unknown>;
     if (numKeys.includes(key)) updated[key] = parseFloat(value) || 0;
+    else if (boolKeys.includes(key)) updated[key] = value === 'true';
     else updated[key] = value;
     setSettings((updated as unknown) as Settings);
+  }
+
+  function toggleBool(key: keyof Settings) {
+    const updated = { ...settings, [key]: !(settings[key] as boolean) };
+    setSettings(updated);
   }
 
   async function save() {
@@ -70,6 +77,62 @@ export default function SettingsPage({ settings: init, onUpdate }: Props) {
 
   return (
     <div style={{ maxWidth: 520, paddingBottom: 20 }}>
+
+      {/* ── Trading Mode Toggle ─────────────────────────────────────────── */}
+      <div className="card" style={{ marginBottom: 14, overflow: 'hidden' }}>
+        <div style={{ padding: '14px 16px', borderBottom: '1px solid rgba(255,255,255,0.05)', display: 'flex', alignItems: 'center', gap: 10 }}>
+          <div style={{ width: 3, height: 14, borderRadius: 2, background: '#00ff88' }} />
+          <span style={{ fontSize: 12, fontWeight: 800, letterSpacing: '0.08em', textTransform: 'uppercase', color: '#d4e0f0' }}>Trading Mode</span>
+        </div>
+        <div style={{ padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 12 }}>
+
+          {/* Whale Sniper — always on */}
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <div>
+              <div style={{ fontSize: 13, fontWeight: 700, color: '#00bfff' }}>🐋 Whale Sniper</div>
+              <div style={{ fontSize: 11, color: '#3a5070', marginTop: 2 }}>Follows pump.fun graduations · copies $500+ whale buys</div>
+            </div>
+            <div style={{ padding: '4px 10px', borderRadius: 8, background: 'rgba(0,191,255,0.15)', border: '1px solid rgba(0,191,255,0.3)', fontSize: 11, fontWeight: 800, color: '#00bfff', letterSpacing: '0.04em' }}>
+              ALWAYS ON
+            </div>
+          </div>
+
+          <div style={{ height: 1, background: 'rgba(255,255,255,0.05)' }} />
+
+          {/* AI Auto-Trader — toggleable */}
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <div style={{ flex: 1, marginRight: 16 }}>
+              <div style={{ fontSize: 13, fontWeight: 700, color: settings.autoTraderEnabled ? '#00ff88' : '#3a5070' }}>
+                🤖 AI Auto-Trader
+              </div>
+              <div style={{ fontSize: 11, color: '#3a5070', marginTop: 2, lineHeight: 1.5 }}>
+                Scanner-based entries using score/filters. {settings.autoTraderEnabled ? 'Active — will open positions independently.' : 'Disabled — only Whale Sniper trades.'}
+              </div>
+            </div>
+            {/* Toggle switch */}
+            <button
+              onClick={() => toggleBool('autoTraderEnabled')}
+              style={{
+                position: 'relative', width: 48, height: 26, borderRadius: 13, border: 'none', cursor: 'pointer',
+                background: settings.autoTraderEnabled ? '#00ff88' : 'rgba(255,255,255,0.1)',
+                transition: 'background 0.2s', flexShrink: 0,
+              }}
+            >
+              <div style={{
+                position: 'absolute', top: 3, left: settings.autoTraderEnabled ? 25 : 3,
+                width: 20, height: 20, borderRadius: '50%', background: '#fff',
+                transition: 'left 0.2s', boxShadow: '0 1px 4px rgba(0,0,0,0.4)',
+              }} />
+            </button>
+          </div>
+
+          {settings.autoTraderEnabled && (
+            <div style={{ padding: '8px 12px', borderRadius: 8, background: 'rgba(255,180,0,0.07)', border: '1px solid rgba(255,180,0,0.2)', fontSize: 11, color: '#ffaa00', lineHeight: 1.5 }}>
+              ⚠️ AI Auto-Trader is ON. It will enter trades independently of whale signals, using the scanner filters below.
+            </div>
+          )}
+        </div>
+      </div>
 
       {/* Whale sniper context banner */}
       <div style={{ padding: '12px 14px', borderRadius: 12, background: 'rgba(0,191,255,0.06)', border: '1px solid rgba(0,191,255,0.18)', marginBottom: 14 }}>

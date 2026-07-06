@@ -133,6 +133,7 @@ export interface Settings {
   walletPublicKey: string;
   whaleSlippagePct: number;
   whaleStagnationPct: number;  // exit if |priceChange1h| < this %, after 1h open
+  autoTraderEnabled: boolean;  // when false, only Whale Sniper runs
   // Whale TP tier configs ($500-$999 / $1000-$1999 / $2000+)
   wt1Tp1Pct: number;  wt1Tp1Exit: number;
   wt1Tp2Pct: number;  wt1Tp2Exit: number;  wt1Tp2Trail: number;

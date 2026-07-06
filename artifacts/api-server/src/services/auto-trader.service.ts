@@ -206,6 +206,10 @@ export function startAutoTrader(): void {
 
 async function checkEntries(): Promise<void> {
   const settings = await getSettings();
+
+  // Auto-trader is OFF — only whale sniper is active
+  if (!settings.autoTraderEnabled) return;
+
   const balance = await getBalance();
   const nowMs = Date.now();
 
