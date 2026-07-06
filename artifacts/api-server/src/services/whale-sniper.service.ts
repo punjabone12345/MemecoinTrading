@@ -760,14 +760,16 @@ async function pollTokenBuys(mint: string): Promise<void> {
   const seen = seenTxns.get(mint)!;
 
   try {
-    const sigs = await withHeliusLimit(() => conn.getSignaturesForAddress(pk, { limit: 30 }));
+    // First poll: fetch more sigs so we catch whales who bought in the first seconds
+    // after graduation (before DexScreener even indexed the pool).
+    const sigLimit = mintCheckpointed.has(mint) ? 30 : 100;
+    const sigs = await withHeliusLimit(() => conn.getSignaturesForAddress(pk, { limit: sigLimit }));
     if (!sigs.length) return;
 
     // First poll: baseline.
     // Mark all existing sigs as seen so we don't re-process them on future polls.
-    // BUT also scan any that are RECENT (≤5 min old, after migration) — this catches
-    // whales who bought during the pool-activation delay (30s stability wait) that
-    // would otherwise be silently discarded.
+    // Also scan any that are RECENT (≤10 min old, after migration) — catches whales
+    // who bought in the seconds after graduation while DexScreener was still catching up.
     if (!mintCheckpointed.has(mint)) {
       mintCheckpointed.add(mint);
       for (const s of sigs) seen.add(s.signature);
@@ -789,28 +791,36 @@ async function pollTokenBuys(mint: string): Promise<void> {
       // Use Jupiter for priceAtDetection — DexScreener lags 30-120s for fresh tokens
       const currentPrice = await fetchPriceFresh(mint).catch(() => 0);
 
-      // Process from oldest → newest so we trigger on the FIRST qualifying buy.
-      // Sequential (not parallel) to avoid hammering the public RPC and getting 429s.
-      // Stop as soon as we enter a position — no need to scan the rest.
-      // Limit backfill depth: public RPC (no HELIUS_API_KEY) saturates quickly;
-      // Helius can handle more concurrent traffic so allow full 20.
-      const backfillDepth = process.env.HELIUS_API_KEY ? 20 : 10;
-      const toFetchEarly = earlyWhales.slice().reverse().slice(0, backfillDepth).map(s => s.signature);
-      for (let i = 0; i < toFetchEarly.length; i++) {
-        const sig = toFetchEarly[i];
-        const tx  = await withHeliusLimit(() => conn.getParsedTransaction(sig, { maxSupportedTransactionVersion: 0 })).catch(() => null);
-        if (!tx) { await new Promise(r => setTimeout(r, 300)); continue; }
-        const buy = detectBuy(tx, mint);
-        if (!buy) { await new Promise(r => setTimeout(r, 250)); continue; }
-        const amountUsd = buy.solSpent * cachedSolPrice;
-        if (amountUsd < 10) { await new Promise(r => setTimeout(r, 250)); continue; }
-        logger.info(
-          { mint: mint.slice(0, 12), wallet: buy.wallet.slice(0, 8), usd: amountUsd.toFixed(0), sig: sig.slice(0, 12) },
-          'Whale sniper: baseline — early whale buy found',
+      // Process from oldest → newest to trigger on the FIRST qualifying buy.
+      // Batch in groups of 5 (parallel) to maximise speed. Stop as soon as we enter.
+      // Limit: Helius can handle 50 concurrent; public RPC saturates faster → cap at 20.
+      const backfillDepth = process.env.HELIUS_API_KEY ? 50 : 20;
+      const toFetchEarly  = earlyWhales.slice().reverse().slice(0, backfillDepth).map(s => s.signature);
+
+      const BATCH = 5;
+      outer:
+      for (let i = 0; i < toFetchEarly.length; i += BATCH) {
+        const batch = toFetchEarly.slice(i, i + BATCH);
+        const txns  = await Promise.all(
+          batch.map(sig =>
+            withHeliusLimit(() => conn.getParsedTransaction(sig, { maxSupportedTransactionVersion: 0 })).catch(() => null),
+          ),
         );
-        await handleWhaleBuy(mint, buy.wallet, amountUsd, sig, currentPrice);
-        if (trackedTokens.get(mint)?.entryTriggered) break; // entered — stop scanning
-        await new Promise(r => setTimeout(r, 150)); // gentle pacing between non-whale txns
+        for (let j = 0; j < txns.length; j++) {
+          const tx = txns[j];
+          if (!tx) continue;
+          const buy = detectBuy(tx, mint);
+          if (!buy) continue;
+          const amountUsd = buy.solSpent * cachedSolPrice;
+          if (amountUsd < 10) continue;
+          logger.info(
+            { mint: mint.slice(0, 12), wallet: buy.wallet.slice(0, 8), usd: amountUsd.toFixed(0), sig: batch[j].slice(0, 12) },
+            'Whale sniper: baseline — early whale buy found',
+          );
+          await handleWhaleBuy(mint, buy.wallet, amountUsd, batch[j], currentPrice);
+          if (trackedTokens.get(mint)?.entryTriggered) break outer;
+        }
+        if (i + BATCH < toFetchEarly.length) await new Promise(r => setTimeout(r, 50)); // brief pause between batches
       }
       return;
     }
@@ -1106,145 +1116,104 @@ function pruneExpiredTracking(): void {
   signalQueue.splice(0, signalQueue.length, ...keep);
 }
 
-// ── Wait for post-graduation pool to go live, then activate tracking ──────────
+// ── Immediate tracking activation on graduation ───────────────────────────────
+//
+// Old flow: wait 30-120s for DexScreener to index the pool, then add a 10s
+// stability delay → first poll fires ~2 minutes after graduation → whale window closed.
+//
+// New flow: activate tracking IMMEDIATELY using the mint + poolAddress from the
+// graduation TX (already available). Kick off background DexScreener enrichment
+// to fill in name/symbol/liquidity once DexScreener catches up. Polling starts
+// within 2s of graduation, catching whales in the first block.
 
-async function waitForPoolAndActivate(mint: string): Promise<void> {
-  // Capture identity reference — used to detect if this mint was re-added after removal.
-  // Assigned to a typed non-optional local so TypeScript can narrow it inside closures.
+async function activateTrackingNow(mint: string): Promise<void> {
   const pending: PendingGraduation | undefined = pendingGraduations.get(mint);
   if (!pending) return;
-  const capturedPending: PendingGraduation = pending;
+  if (trackedTokens.has(mint)) { pendingGraduations.delete(mint); return; }
 
-  const deadline = capturedPending.detectedAt + POOL_WAIT_TIMEOUT_MS;
+  // Activate immediately with placeholder metadata — DexScreener enriches these async
+  pendingGraduations.delete(mint);
+  trackedTokens.set(mint, {
+    mint,
+    name:          mint.slice(0, 6) + '…',
+    symbol:        mint.slice(0, 4).toUpperCase(),
+    poolAddress:   pending.poolAddress,
+    migrationTime: pending.detectedAt,
+    expiresAt:     pending.detectedAt + MAX_TRACKING_MS,
+    entryTriggered: false,
+    whaleBuys:     [],
+  });
+  seenTxns.set(mint, new Set());
 
-  // Tracks the first moment this pool passed the liquidity check — used for the
-  // MIN_POOL_AGE_MS stability gate that prevents activation on mid-migration pools.
-  let firstPoolSeen: number | null = null;
+  // Subscribe to Helius WS for instant whale-buy detection on this mint
+  wsSubscribeMint(mint);
 
-  // Helper: check DexScreener once and activate if pool is live; returns true if activated
-  async function checkAndActivate(): Promise<boolean> {
-    // Guard: bail if this specific pending entry was replaced or removed
-    if (pendingGraduations.get(mint) !== capturedPending) return false;
-    if (trackedTokens.has(mint)) { pendingGraduations.delete(mint); return true; }
+  logger.info(
+    { mint: mint.slice(0, 12), pool: pending.poolAddress?.slice(0, 16) },
+    'Whale sniper: tracking activated immediately on graduation (polling within 2s)',
+  );
+  broadcastWhaleStatus();
+
+  // Background: enrich name/symbol/market data from DexScreener once it indexes the pool
+  void enrichTokenMetadataAsync(mint, pending.detectedAt);
+}
+
+// Polls DexScreener until it has indexed the post-graduation pool, then updates
+// the already-active tracked token's metadata (name, symbol, liquidity, price).
+// Does NOT gate trading — polling is already running in parallel.
+async function enrichTokenMetadataAsync(mint: string, activatedAt: number): Promise<void> {
+  const deadline = activatedAt + POOL_WAIT_TIMEOUT_MS;
+
+  while (Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, POOL_WAIT_POLL_MS));
+
+    const tok = trackedTokens.get(mint);
+    if (!tok) return; // token was pruned
+
+    // Already enriched (name no longer a placeholder)
+    if (!tok.name.endsWith('…') && tok.liquidity && tok.liquidity > 0) return;
 
     try {
       const r = await axios.get<any>(`${DEX_BASE}/latest/dex/tokens/${mint}`, { timeout: 8_000 });
       const allPairs: any[] = r.data?.pairs ?? [];
-
-      // Exclude only the pump.fun bonding-curve pair itself — "pumpswap" IS the
-      // post-graduation AMM and must NOT be filtered out (its dexId also contains "pump").
       const postGradPairs = allPairs
         .filter((p: any) => (p.dexId ?? '').toLowerCase() !== 'pumpfun')
         .sort((a: any, b: any) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0));
 
-      if (postGradPairs.length === 0) {
-        firstPoolSeen = null; // reset — no pairs on DexScreener yet (pool not indexed or failed migration)
-        logger.debug({ mint: mint.slice(0, 12) }, 'Whale sniper: no post-grad pairs yet — retrying');
-        return false;
-      }
+      if (postGradPairs.length === 0) continue; // not indexed yet — keep retrying
 
       const best      = postGradPairs[0];
-      const liquidity = best?.liquidity?.usd ?? 0;
+      const name      = best?.baseToken?.name   ?? '';
+      const symbol    = best?.baseToken?.symbol ?? '';
+      const liquidity = best?.liquidity?.usd    ?? 0;
+      if (!name) continue; // metadata not populated yet
 
-      if (liquidity < MIN_POOL_LIQUIDITY) {
-        firstPoolSeen = null; // reset only on confirmed low-liquidity — pool not yet seeded
-        logger.debug(
-          { mint: mint.slice(0, 12), dex: best?.dexId, liq: liquidity.toFixed(0) },
-          'Whale sniper: pool found but liquidity too low — retrying',
-        );
-        return false;
-      }
+      // Re-read tok in case it was replaced while we were awaiting
+      const tokNow = trackedTokens.get(mint);
+      if (!tokNow) return;
 
-      // Pool passes liquidity check — start or continue the stability clock.
-      // We require the pool to be live and above MIN_POOL_LIQUIDITY for MIN_POOL_AGE_MS
-      // before activating, to avoid entering mid-migration tokens where the pool is
-      // partially seeded but the migration transaction hasn't completed yet.
-      const now = Date.now();
-      if (firstPoolSeen === null) {
-        firstPoolSeen = now;
-        const waitSec = Math.round(MIN_POOL_AGE_MS / 1_000);
-        logger.info(
-          { mint: mint.slice(0, 12), dex: best?.dexId, liq: liquidity.toFixed(0) },
-          `Whale sniper: pool detected — waiting ${waitSec}s for migration to stabilise`,
-        );
-        return false;
-      }
-      const ageMs = now - firstPoolSeen;
-      if (ageMs < MIN_POOL_AGE_MS) {
-        logger.debug(
-          { mint: mint.slice(0, 12), ageSec: Math.round(ageMs / 1_000), needSec: Math.round(MIN_POOL_AGE_MS / 1_000) },
-          'Whale sniper: pool stable-check pending',
-        );
-        return false;
-      }
-
-      // Pool is confirmed fully live and stable — activate tracking with real metadata
-      const poolAddress    = best?.pairAddress ?? capturedPending.poolAddress;
-      const name           = best?.baseToken?.name   || mint.slice(0, 6) + '…';
-      const symbol         = best?.baseToken?.symbol || mint.slice(0, 5).toUpperCase();
-
-      // Final identity check before mutation
-      if (pendingGraduations.get(mint) !== capturedPending) return false;
-      pendingGraduations.delete(mint);
-
-      trackedTokens.set(mint, {
-        mint,
-        name,
-        symbol,
-        poolAddress,
-        migrationTime:  capturedPending.detectedAt,
-        expiresAt:      capturedPending.detectedAt + MAX_TRACKING_MS,
-        entryTriggered: false,
-        whaleBuys:      [],
-        // Market data from the activation fetch
-        price:          parseFloat(best?.priceUsd ?? '0'),
-        mcap:           best?.marketCap ?? best?.fdv ?? 0,
-        liquidity,
-        priceChange5m:  best?.priceChange?.m5 ?? 0,
-        priceChange1h:  best?.priceChange?.h1 ?? 0,
-        volume5m:       best?.volume?.m5       ?? 0,
-        lastMarketUpdate: Date.now(),
-      });
-      seenTxns.set(mint, new Set());
-      // Subscribe to Helius WS for instant whale-buy detection on this mint
-      wsSubscribeMint(mint);
+      tokNow.name          = name;
+      tokNow.symbol        = symbol;
+      tokNow.poolAddress   = tokNow.poolAddress ?? best?.pairAddress;
+      tokNow.price         = parseFloat(best?.priceUsd ?? '0');
+      tokNow.mcap          = best?.marketCap ?? best?.fdv ?? 0;
+      tokNow.liquidity     = liquidity;
+      tokNow.priceChange5m = best?.priceChange?.m5 ?? 0;
+      tokNow.priceChange1h = best?.priceChange?.h1 ?? 0;
+      tokNow.volume5m      = best?.volume?.m5       ?? 0;
+      tokNow.lastMarketUpdate = Date.now();
 
       logger.info(
-        {
-          mint:    mint.slice(0, 12),
-          symbol,
-          dex:     best?.dexId,
-          pool:    poolAddress?.slice(0, 16),
-          liq:     liquidity.toFixed(0),
-          waitSec: Math.round((Date.now() - capturedPending.detectedAt) / 1_000),
-        },
-        'Whale sniper: post-grad pool confirmed — tracking activated',
+        { mint: mint.slice(0, 12), symbol, dex: best?.dexId, liq: liquidity.toFixed(0),
+          enrichSec: Math.round((Date.now() - activatedAt) / 1_000) },
+        'Whale sniper: token metadata enriched from DexScreener',
       );
       broadcastWhaleStatus();
-      return true;
-    } catch (err: any) {
-      logger.debug({ mint: mint.slice(0, 12), err: err?.message }, 'Whale sniper: pool-ready check error');
-      return false;
-    }
+      return; // done
+    } catch { /* non-fatal — keep retrying */ }
   }
 
-  // First check immediately (pool may already be live if graduation was slightly delayed)
-  if (await checkAndActivate()) return;
-
-  // Then poll every POOL_WAIT_POLL_MS until deadline
-  while (Date.now() < deadline) {
-    await new Promise(r => setTimeout(r, POOL_WAIT_POLL_MS));
-    // Guard: entry was removed by pruner or re-added (different identity)
-    if (pendingGraduations.get(mint) !== capturedPending) return;
-    if (await checkAndActivate()) return;
-  }
-
-  // Timed out without finding a live pool
-  if (pendingGraduations.get(mint) === capturedPending) {
-    pendingGraduations.delete(mint);
-    logger.warn({ mint: mint.slice(0, 12) }, 'Whale sniper: no live pool found within timeout — discarding');
-    broadcastWhaleStatus();
-  }
+  logger.debug({ mint: mint.slice(0, 12) }, 'Whale sniper: metadata enrichment timed out (token tracked with placeholder name)');
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -1278,12 +1247,12 @@ export function addGraduatedToken(ev: { mint: string; poolAddress?: string; ts: 
 
   logger.info(
     { mint: ev.mint.slice(0, 16), pool: ev.poolAddress?.slice(0, 16) },
-    'Whale sniper: graduation detected — waiting for post-grad pool to go live',
+    'Whale sniper: graduation detected — activating tracking immediately',
   );
   broadcastWhaleStatus();
 
-  // Start background wait — activates trackedTokens only once pool is live
-  void waitForPoolAndActivate(ev.mint);
+  // Activate tracking immediately; metadata enriched from DexScreener in background
+  void activateTrackingNow(ev.mint);
 }
 
 export function getWhaleStatus() {
