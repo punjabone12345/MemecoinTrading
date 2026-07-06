@@ -1213,7 +1213,7 @@ async function enrichTokenMetadataAsync(mint: string, activatedAt: number): Prom
     } catch { /* non-fatal — keep retrying */ }
   }
 
-  logger.debug({ mint: mint.slice(0, 12) }, 'Whale sniper: metadata enrichment timed out (token tracked with placeholder name)');
+  logger.warn({ mint: mint.slice(0, 12) }, 'Whale sniper: metadata enrichment timed out — token tracked with placeholder name (trading still active)');
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -1305,6 +1305,8 @@ async function refreshTrackedTokensMarketData(): Promise<void> {
         tok.volume5m       = d.volume5m;
         // Backfill poolAddress from DexScreener if we didn't have it
         if (!tok.poolAddress && d.pairAddress) tok.poolAddress = d.pairAddress;
+        // Backfill name/symbol if still on placeholder (enrichMetadataAsync may have timed out)
+        if (tok.name.endsWith('…') && d.name) { tok.name = d.name; tok.symbol = d.symbol; }
       }
       updated = true;
     } catch { /* non-fatal — keep stale data */ }
