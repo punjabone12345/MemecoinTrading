@@ -1126,6 +1126,14 @@ function pruneExpiredTracking(): void {
 // to fill in name/symbol/liquidity once DexScreener catches up. Polling starts
 // within 2s of graduation, catching whales in the first block.
 
+// Minimum post-grad pool liquidity required to keep a token tracked.
+// Tokens that never reach this (micro/seeded grads, false detections) are pruned after
+// VALIDATION_DELAY_MS. Real pump.fun grads seed ~$1-3k liquidity — $500 is conservative.
+const MIN_POOL_LIQUIDITY_USD = 500;
+const VALIDATION_DELAY_MS   = 20_000; // wait 20s before first quality check
+const VALIDATION_TIMEOUT_MS = 60_000; // prune if not validated within 60s of activation
+const VALIDATION_POLL_MS    = 5_000;  // retry DexScreener every 5s during validation
+
 async function activateTrackingNow(mint: string): Promise<void> {
   const pending: PendingGraduation | undefined = pendingGraduations.get(mint);
   if (!pending) return;
@@ -1154,8 +1162,75 @@ async function activateTrackingNow(mint: string): Promise<void> {
   );
   broadcastWhaleStatus();
 
-  // Background: enrich name/symbol/market data from DexScreener once it indexes the pool
+  // Background tasks — run in parallel, do NOT await
   void enrichTokenMetadataAsync(mint, pending.detectedAt);
+  void validateOrPrune(mint, pending.detectedAt);
+}
+
+// Quality gate: after VALIDATION_DELAY_MS, check DexScreener for a real post-grad pool.
+// If the pool has < MIN_POOL_LIQUIDITY_USD (e.g. micro/seeded grads, false detections),
+// prune the token so it never shows on the UI or accepts entries.
+// Real graduates (~$1-3k seed liquidity) clear the bar well within the timeout.
+// Whale buys can still be detected and entered during the 20s window — in practice
+// nobody can buy $500+ into a $2-liquidity pool, so no false entries occur.
+async function validateOrPrune(mint: string, activatedAt: number): Promise<void> {
+  // Wait before first check — real pools take ~5-15s to appear on DexScreener
+  await new Promise(r => setTimeout(r, VALIDATION_DELAY_MS));
+
+  const deadline = activatedAt + VALIDATION_TIMEOUT_MS;
+
+  while (Date.now() < deadline) {
+    const tok = trackedTokens.get(mint);
+    if (!tok) return; // already pruned externally
+
+    // Never prune a token where we've already entered a position
+    if (tok.entryTriggered || whalePositions.has(mint)) return;
+
+    try {
+      const r = await axios.get<any>(`${DEX_BASE}/latest/dex/tokens/${mint}`, { timeout: 8_000 });
+      const allPairs: any[] = r.data?.pairs ?? [];
+      const postGradPairs = allPairs
+        .filter((p: any) => (p.dexId ?? '').toLowerCase() !== 'pumpfun')
+        .sort((a: any, b: any) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0));
+
+      if (postGradPairs.length > 0) {
+        const liq = postGradPairs[0]?.liquidity?.usd ?? 0;
+        if (liq >= MIN_POOL_LIQUIDITY_USD) {
+          // Pool qualifies — token is a real graduate
+          logger.info(
+            { mint: mint.slice(0, 12), liq: liq.toFixed(0) },
+            'Whale sniper: pool quality validated — keeping token',
+          );
+          return; // enrichMetadataAsync will continue updating market data
+        }
+        // Pool exists but liquidity is too low → prune now (no point retrying)
+        logger.warn(
+          { mint: mint.slice(0, 12), liq: liq.toFixed(0), minLiq: MIN_POOL_LIQUIDITY_USD },
+          'Whale sniper: pool liquidity below minimum — pruning token (micro/seeded grad)',
+        );
+        pruneToken(mint);
+        return;
+      }
+      // No post-grad pair yet — keep retrying until deadline
+    } catch { /* non-fatal — retry */ }
+
+    await new Promise(r => setTimeout(r, VALIDATION_POLL_MS));
+  }
+
+  // Deadline reached: no qualified pool found → prune
+  const tok = trackedTokens.get(mint);
+  if (tok && !tok.entryTriggered && !whalePositions.has(mint)) {
+    logger.warn({ mint: mint.slice(0, 12) }, 'Whale sniper: no qualified post-grad pool within 60s — pruning token');
+    pruneToken(mint);
+  }
+}
+
+function pruneToken(mint: string): void {
+  trackedTokens.delete(mint);
+  seenTxns.delete(mint);
+  mintCheckpointed.delete(mint);
+  wsUnsubscribeMint(mint);
+  broadcastWhaleStatus();
 }
 
 // Polls DexScreener until it has indexed the post-graduation pool, then updates
