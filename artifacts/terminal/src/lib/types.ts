@@ -72,6 +72,9 @@ export interface WhalePosition {
   tpTier: 1 | 2 | 3;
   triggerAmountUsd: number;
   currentSLPrice: number;
+  // Timing: when whale bought vs when we entered
+  whaleBuyTimestamp?: number;
+  entryDelayMs?: number;
 }
 
 export interface ClosedWhalePosition extends WhalePosition {

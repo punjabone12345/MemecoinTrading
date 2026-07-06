@@ -11,6 +11,7 @@ import { subscribeLogs, isHeliusWsConfigured } from '../lib/helius-ws-shared.js'
 const MAX_TRACKING_MS       = 30 * 60 * 1_000;
 const MAX_POSITIONS         = 10;
 const POLL_INTERVAL_MS      = 2_000;   // reduced from 5s for faster detection
+const ENTRY_DELAY_MS        = 2_000;   // wait 2s after whale detection before entering
 const PRICE_CHECK_MS        = 1_500;   // reduced from 3s for snappier live prices
 const SOL_PRICE_TTL_MS      = 60_000;
 const MAX_BUY_LOG           = 100;
@@ -91,6 +92,9 @@ export interface WhalePosition {
   tpTier: 1 | 2 | 3;
   triggerAmountUsd: number;
   currentSLPrice: number;    // hard SL → breakeven → trailing
+  // Timing: when the whale bought vs when we entered
+  whaleBuyTimestamp?: number;  // ms since epoch — when whale tx was detected
+  entryDelayMs?: number;       // how many ms after whale detection we entered
 }
 
 // ── Tier config ───────────────────────────────────────────────────────────────
@@ -155,6 +159,7 @@ interface PendingSignal {
   queuedAt: number;
   priceAtDetection: number;
   whaleWallet: string;
+  whaleBuyTimestamp: number;
 }
 
 // ── Pending graduation type ───────────────────────────────────────────────────
@@ -541,8 +546,8 @@ async function saveWhalePosition(pos: WhalePosition): Promise<void> {
         (id, mint, name, symbol, entry_price, entry_mcap, entry_time, size_sol, size_pct,
          peak_price, last_price, last_liquidity, baseline_liquidity, migration_time, pnl_pct,
          tp1_hit, tp2_hit, tp3_hit, initial_size_sol, remaining_size_sol, banked_sol,
-         tp_tier, trigger_amount_usd, current_sl_price, status)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,'OPEN')
+         tp_tier, trigger_amount_usd, current_sl_price, whale_buy_timestamp, entry_delay_ms, status)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,'OPEN')
        ON CONFLICT (id) DO UPDATE SET
          peak_price        = EXCLUDED.peak_price,
          last_price        = EXCLUDED.last_price,
@@ -560,7 +565,8 @@ async function saveWhalePosition(pos: WhalePosition): Promise<void> {
        pos.baselineLiquidity, pos.migrationTime, pos.pnlPct,
        pos.tp1Hit, pos.tp2Hit, pos.tp3Hit,
        pos.initialSizeSol, pos.remainingSizeSol, pos.bankedSol,
-       pos.tpTier, pos.triggerAmountUsd, pos.currentSLPrice],
+       pos.tpTier, pos.triggerAmountUsd, pos.currentSLPrice,
+       pos.whaleBuyTimestamp ?? null, pos.entryDelayMs ?? null],
     );
   } catch (err: any) {
     logger.warn({ err: err?.message }, 'Whale sniper: failed to persist position');
@@ -604,6 +610,8 @@ export async function restoreWhalePositionsFromDB(): Promise<void> {
         tpTier:           (Number(r.tp_tier ?? 1) as 1 | 2 | 3),
         triggerAmountUsd: Number(r.trigger_amount_usd ?? 0),
         currentSLPrice:   storedSL > 0 ? storedSL : entryP * (1 - PRICE_SL_PCT),
+        whaleBuyTimestamp: r.whale_buy_timestamp ? Number(r.whale_buy_timestamp) : undefined,
+        entryDelayMs:      r.entry_delay_ms ? Number(r.entry_delay_ms) : undefined,
       };
       whalePositions.set(pos.mint, pos);
     }
@@ -628,6 +636,8 @@ export async function restoreWhalePositionsFromDB(): Promise<void> {
         tpTier: (Number(r.tp_tier ?? 1) as 1 | 2 | 3),
         triggerAmountUsd: Number(r.trigger_amount_usd ?? 0),
         currentSLPrice: Number(r.current_sl_price ?? 0),
+        whaleBuyTimestamp: r.whale_buy_timestamp ? Number(r.whale_buy_timestamp) : undefined,
+        entryDelayMs:      r.entry_delay_ms ? Number(r.entry_delay_ms) : undefined,
       });
     }
     logger.info({ open: rows.length, closed: closedRows.length }, 'Whale sniper: restored positions from DB after restart');
@@ -646,6 +656,7 @@ async function enterWhalePosition(
   mint: string, name: string, symbol: string,
   sizePct: number, triggerAmountUsd: number,
   priceAtDetection: number, whaleWallet: string,
+  whaleBuyTimestamp: number,
 ): Promise<void> {
   // Synchronous reservation — no `await` happens between the check and the
   // lock being taken, so two overlapping calls for the same mint (e.g. from
@@ -710,54 +721,48 @@ async function enterWhalePosition(
     // lock was somehow bypassed (e.g. process restart mid-flight).
     if (whalePositions.has(mint)) return;
 
-    // ── Price stabilization loop ─────────────────────────────────────────────
-    // Problem: Jupiter caches pool reserves for 3-10s after a large on-chain buy.
-    // A freshly graduated PumpSwap token that pumped 30-40% will show the PRE-pump
-    // price until Jupiter's route cache catches up — causing entry price to be
-    // recorded completely wrong (e.g. $0.000036 when market is at $0.000056).
-    //
-    // Solution: wait 5s upfront (covers most Jupiter cache refresh cycles), then
-    // poll up to 4 more times with 3s gaps, always taking the HIGHEST price seen.
-    // The real market price is always at or above any stale cache value.
-    // Total max wait: 5 + 4×3 = 17s — fast enough to ride the whale momentum.
-    //
-    const STABILIZE_INITIAL_WAIT_MS = 5_000;
-    const STABILIZE_POLL_INTERVAL_MS = 3_000;
-    const STABILIZE_MAX_POLLS = 4;
-    const STABILIZE_TOLERANCE = 0.015; // stop early if two consecutive fetches agree within 1.5%
-
-    await new Promise(r => setTimeout(r, STABILIZE_INITIAL_WAIT_MS));
+    // ── 2-second entry delay ─────────────────────────────────────────────────
+    // Wait ENTRY_DELAY_MS after whale detection, then fetch a fresh market price.
+    // This ensures our entry price reflects the real market 2s after the whale
+    // pumped — not the whale's own buy price — and keeps timing tight.
+    await new Promise(r => setTimeout(r, ENTRY_DELAY_MS));
     if (whalePositions.has(mint)) return;
 
-    let bestPrice = entryPrice;  // carry forward the pre-delay price as the floor
-    let prevFetch = 0;
+    const delayedPrice = await fetchPriceFresh(mint, pairAddr);
+    const finalEntryPrice = delayedPrice > 0 ? delayedPrice : entryPrice;
 
-    for (let poll = 0; poll < STABILIZE_MAX_POLLS; poll++) {
-      const p = await fetchPriceFresh(mint, pairAddr);
-      if (p > 0) {
-        const wasStable = prevFetch > 0 && Math.abs(p - prevFetch) / prevFetch < STABILIZE_TOLERANCE;
-        prevFetch = p;
-        if (p > bestPrice) bestPrice = p;
+    const entryTimestamp = Date.now();
+    const entryDelayMs   = entryTimestamp - whaleBuyTimestamp;
 
-        logger.info(
-          { mint: mint.slice(0, 12), symbol, poll: poll + 1, fetched: p, best: bestPrice, stable: wasStable },
-          'Whale sniper: price stabilization poll',
+    // ── Post-delay slippage re-check ─────────────────────────────────────────
+    // Price may have moved further during the 2s wait — re-validate against the
+    // actual entry price before committing. This is the real enforcement point.
+    if (priceAtDetection > 0) {
+      const finalSlipPct = ((finalEntryPrice - priceAtDetection) / priceAtDetection) * 100;
+      if (finalSlipPct > maxSlippage) {
+        logger.warn(
+          { mint: mint.slice(0, 12), symbol, finalSlipPct: finalSlipPct.toFixed(1), maxSlippage },
+          'Whale sniper: post-delay slippage exceeded — skipped',
         );
-
-        // Stop early once price has converged (two consecutive reads agree within 1.5%)
-        if (wasStable) break;
+        notifyWhaleSkip({
+          name, symbol, mint, whaleAmountUsd: triggerAmountUsd,
+          reason: `Post-delay slippage ${finalSlipPct.toFixed(1)}% > ${maxSlippage}% max`,
+          entryPrice: finalEntryPrice, whalePriceAtDetection: priceAtDetection, maxSlippagePct: maxSlippage,
+        }).catch(() => {});
+        return;
       }
-      if (whalePositions.has(mint)) return;
-      if (poll < STABILIZE_MAX_POLLS - 1) await new Promise(r => setTimeout(r, STABILIZE_POLL_INTERVAL_MS));
     }
-
-    const finalEntryPrice = bestPrice > 0 ? bestPrice : entryPrice;
 
     logger.info(
       { mint: mint.slice(0, 12), symbol,
-        initialSpot: entryPrice, finalEntryPrice,
-        totalPriceMoveUp: entryPrice > 0 ? (((finalEntryPrice - entryPrice) / entryPrice) * 100).toFixed(2) + '%' : 'n/a' },
-      'Whale sniper: entry price stabilized',
+        whalePrice: priceAtDetection, ourEntryPrice: finalEntryPrice,
+        priceDeltaPct: priceAtDetection > 0
+          ? (((finalEntryPrice - priceAtDetection) / priceAtDetection) * 100).toFixed(2) + '%'
+          : 'n/a',
+        whaleBuyAt: new Date(whaleBuyTimestamp).toISOString(),
+        ourEntryAt: new Date(entryTimestamp).toISOString(),
+        entryDelayMs },
+      'Whale sniper: entering 2s after whale — price fetched fresh',
     );
 
     const balance = await getBalance().catch(() => 10);
@@ -769,10 +774,10 @@ async function enterWhalePosition(
       id: `${mint}-${Date.now()}`,
       mint, name, symbol,
       entryPrice: finalEntryPrice, entryMcap: tok?.mcap ?? marketData.mcap ?? 0,
-      entryTime: Date.now(),
+      entryTime: entryTimestamp,
       sizeSol, sizePct,
-      peakPrice:   finalEntryPrice,   // FIX: was using stale pre-fill price
-      lastPrice:   finalEntryPrice,   // FIX: same — ensures P&L starts at 0%
+      peakPrice:   finalEntryPrice,
+      lastPrice:   finalEntryPrice,
       lastLiquidity: liquidity,
       baselineLiquidity: liquidity > 0 ? liquidity : 1,
       migrationTime: tok?.migrationTime ?? Date.now(),
@@ -784,7 +789,10 @@ async function enterWhalePosition(
       bankedSol:         0,
       tpTier,
       triggerAmountUsd,
-      currentSLPrice:    finalEntryPrice * (1 - PRICE_SL_PCT),  // FIX: was using stale price
+      currentSLPrice:    finalEntryPrice * (1 - PRICE_SL_PCT),
+      // Timing
+      whaleBuyTimestamp,
+      entryDelayMs,
     };
 
     whalePositions.set(mint, pos);
@@ -817,10 +825,10 @@ async function enterWhalePosition(
 
 // ── Queue / slot management ───────────────────────────────────────────────────
 
-function enqueueSignal(mint: string, name: string, symbol: string, sizePct: number, amountUsd: number, priceAtDetection: number, whaleWallet: string): void {
+function enqueueSignal(mint: string, name: string, symbol: string, sizePct: number, amountUsd: number, priceAtDetection: number, whaleWallet: string, whaleBuyTimestamp: number): void {
   if (everTradedMints.has(mint)) return;
   if (signalQueue.find(s => s.mint === mint)) return;
-  signalQueue.push({ mint, name, symbol, sizePct, triggerAmountUsd: amountUsd, queuedAt: Date.now(), priceAtDetection, whaleWallet });
+  signalQueue.push({ mint, name, symbol, sizePct, triggerAmountUsd: amountUsd, queuedAt: Date.now(), priceAtDetection, whaleWallet, whaleBuyTimestamp });
   logger.info({ mint, symbol, sizePct, reason: 'max 10 positions' }, 'Whale sniper: signal queued');
 }
 
@@ -830,7 +838,7 @@ async function processQueue(): Promise<void> {
     const tok  = trackedTokens.get(sig.mint);
     if (!tok || Date.now() > tok.expiresAt) continue;
     if (whalePositions.has(sig.mint) || everTradedMints.has(sig.mint)) continue;
-    await enterWhalePosition(sig.mint, sig.name, sig.symbol, sig.sizePct, sig.triggerAmountUsd, sig.priceAtDetection, sig.whaleWallet);
+    await enterWhalePosition(sig.mint, sig.name, sig.symbol, sig.sizePct, sig.triggerAmountUsd, sig.priceAtDetection, sig.whaleWallet, sig.whaleBuyTimestamp);
   }
 }
 
@@ -842,13 +850,14 @@ async function handleWhaleBuy(
   const tok = trackedTokens.get(mint);
   if (!tok) return;
 
-  tok.whaleBuys.push({ wallet, amountUsd, timestamp: Date.now(), txSig, priceAtDetection });
+  const whaleBuyTimestamp = Date.now();
+  tok.whaleBuys.push({ wallet, amountUsd, timestamp: whaleBuyTimestamp, txSig, priceAtDetection });
 
   const tier = WHALE_TIERS.find(t => amountUsd >= t.minUsd);
 
   const entry: WhaleBuyLog = {
     mint, name: tok.name, symbol: tok.symbol,
-    wallet, amountUsd, timestamp: Date.now(), txSig,
+    wallet, amountUsd, timestamp: whaleBuyTimestamp, txSig,
     entered: false, priceAtDetection,
   };
 
@@ -858,13 +867,13 @@ async function handleWhaleBuy(
     entry.skipReason = 'Already traded this token (lifetime — never re-entered)';
   } else if (whalePositions.size >= MAX_POSITIONS) {
     entry.skipReason = 'Max positions — queued';
-    enqueueSignal(mint, tok.name, tok.symbol, tier.sizePct, amountUsd, priceAtDetection, wallet);
+    enqueueSignal(mint, tok.name, tok.symbol, tier.sizePct, amountUsd, priceAtDetection, wallet, whaleBuyTimestamp);
   } else {
     entry.entered = true;
     buyLog.unshift(entry);
     if (buyLog.length > MAX_BUY_LOG) buyLog.pop();
     broadcastWhaleStatus();
-    await enterWhalePosition(mint, tok.name, tok.symbol, tier.sizePct, amountUsd, priceAtDetection, wallet);
+    await enterWhalePosition(mint, tok.name, tok.symbol, tier.sizePct, amountUsd, priceAtDetection, wallet, whaleBuyTimestamp);
     return;
   }
 

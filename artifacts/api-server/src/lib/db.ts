@@ -121,6 +121,9 @@ export async function initDB(): Promise<void> {
   `);
   // Migration: add entry_mcap column for existing DBs
   await query(`ALTER TABLE whale_positions ADD COLUMN IF NOT EXISTS entry_mcap NUMERIC NOT NULL DEFAULT 0`).catch(() => {});
+  // Migration: add timing columns (whale buy timestamp + how long after whale we entered)
+  await query(`ALTER TABLE whale_positions ADD COLUMN IF NOT EXISTS whale_buy_timestamp BIGINT`).catch(() => {});
+  await query(`ALTER TABLE whale_positions ADD COLUMN IF NOT EXISTS entry_delay_ms BIGINT`).catch(() => {});
 
   await query(`
     CREATE TABLE IF NOT EXISTS tokens (

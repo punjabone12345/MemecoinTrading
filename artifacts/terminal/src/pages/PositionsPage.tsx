@@ -276,6 +276,11 @@ function WhalePositionCard({ pos, solPrice, onRefresh }: { pos: WhalePosition; s
             <div style={{ fontSize: 11, color: '#3a5070' }}>
               {new Date(pos.entryTime).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', second: '2-digit' })} IST
               {' · '}${(pos.triggerAmountUsd).toFixed(0)} whale buy
+              {pos.entryDelayMs != null && (
+                <span style={{ marginLeft: 4, color: '#00d4ff', fontWeight: 700 }}>
+                  +{(pos.entryDelayMs / 1000).toFixed(1)}s after whale
+                </span>
+              )}
             </div>
           </div>
           <div style={{ flexShrink: 0 }}>
