@@ -632,22 +632,54 @@ async function enterWhalePosition(
     // lock was somehow bypassed (e.g. process restart mid-flight).
     if (whalePositions.has(mint)) return;
 
-    // ── 2-second execution delay ────────────────────────────────────────────
-    // Simulates swap confirmation latency. Re-fetch price via Jupiter so the
-    // fill price reflects the actual market state at execution time.
-    await new Promise(r => setTimeout(r, 2000));
-    if (whalePositions.has(mint)) return;   // re-check in case another trigger fired
+    // ── Price stabilization loop ─────────────────────────────────────────────
+    // Problem: Jupiter caches pool reserves for 3-10s after a large on-chain buy.
+    // A freshly graduated PumpSwap token that pumped 30-40% will show the PRE-pump
+    // price until Jupiter's route cache catches up — causing entry price to be
+    // recorded completely wrong (e.g. $0.000036 when market is at $0.000056).
+    //
+    // Solution: wait 5s upfront (covers most Jupiter cache refresh cycles), then
+    // poll up to 4 more times with 3s gaps, always taking the HIGHEST price seen.
+    // The real market price is always at or above any stale cache value.
+    // Total max wait: 5 + 4×3 = 17s — fast enough to ride the whale momentum.
+    //
+    const STABILIZE_INITIAL_WAIT_MS = 5_000;
+    const STABILIZE_POLL_INTERVAL_MS = 3_000;
+    const STABILIZE_MAX_POLLS = 4;
+    const STABILIZE_TOLERANCE = 0.015; // stop early if two consecutive fetches agree within 1.5%
 
-    // Fill price: Jupiter again for accuracy (DexScreener still possibly stale)
-    const fillPrice = await fetchPriceFresh(mint, pairAddr);
-    const finalEntryPrice = fillPrice > 0 ? fillPrice : entryPrice;
+    await new Promise(r => setTimeout(r, STABILIZE_INITIAL_WAIT_MS));
+    if (whalePositions.has(mint)) return;
+
+    let bestPrice = entryPrice;  // carry forward the pre-delay price as the floor
+    let prevFetch = 0;
+
+    for (let poll = 0; poll < STABILIZE_MAX_POLLS; poll++) {
+      const p = await fetchPriceFresh(mint, pairAddr);
+      if (p > 0) {
+        const wasStable = prevFetch > 0 && Math.abs(p - prevFetch) / prevFetch < STABILIZE_TOLERANCE;
+        prevFetch = p;
+        if (p > bestPrice) bestPrice = p;
+
+        logger.info(
+          { mint: mint.slice(0, 12), symbol, poll: poll + 1, fetched: p, best: bestPrice, stable: wasStable },
+          'Whale sniper: price stabilization poll',
+        );
+
+        // Stop early once price has converged (two consecutive reads agree within 1.5%)
+        if (wasStable) break;
+      }
+      if (whalePositions.has(mint)) return;
+      if (poll < STABILIZE_MAX_POLLS - 1) await new Promise(r => setTimeout(r, STABILIZE_POLL_INTERVAL_MS));
+    }
+
+    const finalEntryPrice = bestPrice > 0 ? bestPrice : entryPrice;
 
     logger.info(
       { mint: mint.slice(0, 12), symbol,
-        spotPrice: entryPrice, fillPrice: finalEntryPrice,
-        priceMoveAfter2s: entryPrice > 0 ? (((finalEntryPrice - entryPrice) / entryPrice) * 100).toFixed(2) + '%' : 'n/a',
-        priceSource: spotPrice > 0 ? 'jupiter' : 'dexscreener' },
-      'Whale sniper: entry price confirmed',
+        initialSpot: entryPrice, finalEntryPrice,
+        totalPriceMoveUp: entryPrice > 0 ? (((finalEntryPrice - entryPrice) / entryPrice) * 100).toFixed(2) + '%' : 'n/a' },
+      'Whale sniper: entry price stabilized',
     );
 
     const balance = await getBalance().catch(() => 10);
