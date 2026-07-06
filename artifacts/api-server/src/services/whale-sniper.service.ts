@@ -283,7 +283,7 @@ async function fetchTokenPrice(mint: string): Promise<DexMarketData> {
   try {
     const r     = await axios.get<any>(`${DEX_BASE}/latest/dex/tokens/${mint}`, { timeout: 6_000 });
     const pairs: any[] = (r.data?.pairs ?? [])
-      .filter((p: any) => (p.dexId ?? '').toLowerCase() !== 'pumpfun')
+      .filter((p: any) => (p.dexId ?? '').toLowerCase() === 'pumpswap')
       .sort((a: any, b: any) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0));
     if (!pairs.length) return empty;
     const best  = pairs[0];
@@ -315,97 +315,142 @@ async function fetchTokenPrice(mint: string): Promise<DexMarketData> {
 const PUMP_TOKEN_DECIMALS = 6;
 const WSOL_QUOTE_AMOUNT   = 10_000_000; // 0.01 SOL in lamports — small to avoid price impact
 
-// fetchPriceFresh: Run Jupiter Quote API and DexScreener IN PARALLEL — return the HIGHER price.
+// ── On-chain PumpSwap pool reserve-ratio price (ground truth) ────────────────
 //
-// WHY PARALLEL + MAX, not Jupiter-primary:
-//   Jupiter reads on-chain pool reserves but for freshly-graduated PumpSwap tokens it
-//   sometimes returns the initial seeding price (e.g. 0.000036) before it has routed
-//   through the live pool, while actual trades on PumpSwap are already happening at the
-//   real market price (e.g. 0.000056). Taking only Jupiter produced entry prices ~35%
-//   below the real market, destroying P&L accuracy.
+// PumpSwap pool accounts are keypair-based (NOT PDAs) — the pool address must
+// come from the migration tx or DexScreener's `pairAddress`, never derived.
+// Layout (confirmed against live pools):
+//   [139-170] pool_base_token_account  (32 bytes) — token vault
+//   [171-202] pool_quote_token_account (32 bytes) — WSOL vault
+// price = (wsolVaultBalance * solPriceUsd) / baseVaultBalance
 //
-//   DexScreener reflects actual on-chain transactions and shows the real trading price
-//   once it has indexed the pool (typically within 60-120s). After that point it is the
-//   more accurate source. Running both in parallel and taking max() gives us:
-//     • Pre-DexScreener-index window: Jupiter wins (DexScreener shows 0)
-//     • Post-index window:            DexScreener wins when Jupiter is stale
-//     • Both valid and agree:         Same price → no change
+// This reads the ACTUAL on-chain reserves at the moment of the call — it is
+// not a heuristic/estimate like Jupiter quotes (which can lag pool-cache
+// refreshes) or DexScreener (which lags 30-120s for fresh pools).
+const POOL_BASE_VAULT_OFFSET  = 139;
+const POOL_QUOTE_VAULT_OFFSET = 171;
+const POOL_VAULT_LEN          = 32;
+const POOL_MIN_ACCOUNT_BYTES  = 203;
+
+const pumpswapVaultCache = new Map<string, { baseVault: PublicKey; quoteVault: PublicKey }>();
+
+async function fetchOnChainReservePrice(poolAddress: string, solPriceUsd: number): Promise<number> {
+  if (!poolAddress || solPriceUsd <= 0) return 0;
+  try {
+    const conn = getConn();
+    let vaults = pumpswapVaultCache.get(poolAddress);
+
+    if (!vaults) {
+      const poolPk = new PublicKey(poolAddress);
+      const info = await withHeliusLimit(() => conn.getAccountInfo(poolPk));
+      if (!info || info.data.length < POOL_MIN_ACCOUNT_BYTES) return 0;
+      const baseVault  = new PublicKey(info.data.subarray(POOL_BASE_VAULT_OFFSET, POOL_BASE_VAULT_OFFSET + POOL_VAULT_LEN));
+      const quoteVault = new PublicKey(info.data.subarray(POOL_QUOTE_VAULT_OFFSET, POOL_QUOTE_VAULT_OFFSET + POOL_VAULT_LEN));
+      vaults = { baseVault, quoteVault };
+      pumpswapVaultCache.set(poolAddress, vaults);
+    }
+
+    const [baseBal, quoteBal] = await Promise.all([
+      withHeliusLimit(() => conn.getTokenAccountBalance(vaults!.baseVault)).catch(() => null),
+      withHeliusLimit(() => conn.getTokenAccountBalance(vaults!.quoteVault)).catch(() => null),
+    ]);
+
+    const baseAmount  = baseBal?.value?.uiAmount ?? 0;
+    const quoteAmount = quoteBal?.value?.uiAmount ?? 0; // WSOL reserve
+    if (baseAmount <= 0 || quoteAmount <= 0) return 0;
+
+    const price = (quoteAmount * solPriceUsd) / baseAmount;
+    return price > 0 ? price : 0;
+  } catch {
+    // Wrong/stale pool address (e.g. heuristic-extracted from migration tx) — invalidate cache
+    // entry so a later call with a corrected pairAddress can retry cleanly.
+    pumpswapVaultCache.delete(poolAddress);
+    return 0;
+  }
+}
+
+// fetchPriceFresh: genuine on-chain reserve-ratio price is the SOURCE OF TRUTH.
 //
-// CORRECT approach:
-//   1. Ensure SOL/USD is fresh (Jupiter Price API v2, < 60s TTL).
-//   2. Quote 0.01 SOL → TOKEN on Jupiter to get actual tokens received.
-//   3. Fetch DexScreener price (most-liquid non-pumpfun pair) in parallel.
-//   4. price = max(jupiterPrice, dexPrice) — real market is at the higher of the two.
-async function fetchPriceFresh(mint: string, _pairAddress?: string): Promise<number> {
+// WHY on-chain, not Jupiter/DexScreener max():
+//   The previous approach quoted Jupiter and DexScreener in parallel and took
+//   whichever was higher. That is a heuristic guess, not a calculation — it
+//   produced entry prices 10-60% off the real market because Jupiter can return
+//   a stale cached route and DexScreener can lag 30-120s on freshly-graduated
+//   pools. Reading the pool's actual token vault balances and computing
+//   quoteReserve/baseReserve directly is unambiguous ground truth — it cannot
+//   be stale because it *is* the current reserve state.
+//
+// Fallback order (only used when the on-chain read is unavailable, e.g. pool
+// address not yet known / RPC hiccup):
+//   1. On-chain reserve ratio via the confirmed PumpSwap pool account (best).
+//   2. Jupiter Quote API (reads live routes, still on-chain-derived).
+//   3. DexScreener priceUsd (last resort — may lag).
+async function fetchPriceFresh(mint: string, pairAddress?: string): Promise<number> {
   // Always ensure a fresh SOL price before calculating token price.
   await fetchSolPrice();
 
-  // Run Jupiter and DexScreener concurrently — whichever gives the higher price wins.
-  const [jupiterPrice, dexPrice] = await Promise.all([
-    // ── Jupiter Quote API ────────────────────────────────────────────────────
-    (async (): Promise<number> => {
-      try {
-        const r = await axios.get<any>(
-          `https://lite-api.jup.ag/swap/v1/quote` +
-          `?inputMint=${WSOL_MINT}` +
-          `&outputMint=${mint}` +
-          `&amount=${WSOL_QUOTE_AMOUNT}` +
-          `&slippageBps=1000`,
-          { timeout: 5_000 },
-        );
-        const outAmount = parseInt(r.data?.outAmount ?? '0', 10);
-
-        if (outAmount > 0 && cachedSolPrice > 0) {
-          // Use actual output decimals from Jupiter if provided; fall back to pump.fun standard (6).
-          const decimals       = parseInt(r.data?.outputDecimals ?? String(PUMP_TOKEN_DECIMALS), 10);
-          const tokensReceived = outAmount / Math.pow(10, decimals);
-          const inputSolUsd    = (WSOL_QUOTE_AMOUNT / 1e9) * cachedSolPrice;
-          const price          = inputSolUsd / tokensReceived;
-          if (price > 0) return price;
-        }
-
-        // Edge-case: SOL price not cached — try swapUsdValue
-        const swapUsdValue = parseFloat(r.data?.swapUsdValue ?? '0');
-        if (swapUsdValue > 0 && parseInt(r.data?.outAmount ?? '0', 10) > 0) {
-          const decimals       = parseInt(r.data?.outputDecimals ?? String(PUMP_TOKEN_DECIMALS), 10);
-          const tokensReceived = parseInt(r.data.outAmount, 10) / Math.pow(10, decimals);
-          const price          = swapUsdValue / tokensReceived;
-          if (price > 0) return price;
-        }
-      } catch { /* non-fatal */ }
-      return 0;
-    })(),
-
-    // ── DexScreener (most liquid non-pumpfun pair) ───────────────────────────
-    (async (): Promise<number> => {
-      try {
-        const r = await axios.get<any>(`${DEX_BASE}/latest/dex/tokens/${mint}`, { timeout: 6_000 });
-        const pairs: any[] = (r.data?.pairs ?? [])
-          .filter((p: any) => (p.dexId ?? '').toLowerCase() !== 'pumpfun')
-          .sort((a: any, b: any) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0));
-        if (pairs.length) {
-          const price = parseFloat(pairs[0]?.priceUsd ?? '0');
-          if (price > 0) return price;
-        }
-      } catch { /* non-fatal */ }
-      return 0;
-    })(),
-  ]);
-
-  const price = Math.max(jupiterPrice, dexPrice);
-
-  if (price > 0) {
-    const source =
-      jupiterPrice > 0 && dexPrice > 0
-        ? (dexPrice >= jupiterPrice ? 'dexscreener-won' : 'jupiter-won')
-        : jupiterPrice > 0 ? 'jupiter-only'
-        : 'dexscreener-only';
-    logger.info(
-      { mint: mint.slice(0, 12), price, jupiterPrice, dexPrice, solPrice: cachedSolPrice, source },
-      'Whale sniper: spot price (parallel fetch)',
-    );
-    return price;
+  if (pairAddress) {
+    const onChainPrice = await fetchOnChainReservePrice(pairAddress, cachedSolPrice);
+    if (onChainPrice > 0) {
+      logger.info(
+        { mint: mint.slice(0, 12), price: onChainPrice, pairAddress: pairAddress.slice(0, 12), source: 'onchain-reserve-ratio' },
+        'Whale sniper: spot price (on-chain reserve ratio)',
+      );
+      return onChainPrice;
+    }
   }
+
+  // ── Fallback: Jupiter Quote API ─────────────────────────────────────────
+  const jupiterPrice = await (async (): Promise<number> => {
+    try {
+      const r = await axios.get<any>(
+        `https://lite-api.jup.ag/swap/v1/quote` +
+        `?inputMint=${WSOL_MINT}` +
+        `&outputMint=${mint}` +
+        `&amount=${WSOL_QUOTE_AMOUNT}` +
+        `&slippageBps=1000`,
+        { timeout: 5_000 },
+      );
+      const outAmount = parseInt(r.data?.outAmount ?? '0', 10);
+
+      if (outAmount > 0 && cachedSolPrice > 0) {
+        const decimals       = parseInt(r.data?.outputDecimals ?? String(PUMP_TOKEN_DECIMALS), 10);
+        const tokensReceived = outAmount / Math.pow(10, decimals);
+        const inputSolUsd    = (WSOL_QUOTE_AMOUNT / 1e9) * cachedSolPrice;
+        const price          = inputSolUsd / tokensReceived;
+        if (price > 0) return price;
+      }
+
+      const swapUsdValue = parseFloat(r.data?.swapUsdValue ?? '0');
+      if (swapUsdValue > 0 && parseInt(r.data?.outAmount ?? '0', 10) > 0) {
+        const decimals       = parseInt(r.data?.outputDecimals ?? String(PUMP_TOKEN_DECIMALS), 10);
+        const tokensReceived = parseInt(r.data.outAmount, 10) / Math.pow(10, decimals);
+        const price          = swapUsdValue / tokensReceived;
+        if (price > 0) return price;
+      }
+    } catch { /* non-fatal */ }
+    return 0;
+  })();
+
+  if (jupiterPrice > 0) {
+    logger.info({ mint: mint.slice(0, 12), price: jupiterPrice, source: 'jupiter-fallback' }, 'Whale sniper: spot price (jupiter fallback)');
+    return jupiterPrice;
+  }
+
+  // ── Last resort: DexScreener confirmed-pumpswap pair ─────────────────────
+  try {
+    const r = await axios.get<any>(`${DEX_BASE}/latest/dex/tokens/${mint}`, { timeout: 6_000 });
+    const pairs: any[] = (r.data?.pairs ?? [])
+      .filter((p: any) => (p.dexId ?? '').toLowerCase() === 'pumpswap')
+      .sort((a: any, b: any) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0));
+    if (pairs.length) {
+      const price = parseFloat(pairs[0]?.priceUsd ?? '0');
+      if (price > 0) {
+        logger.info({ mint: mint.slice(0, 12), price, source: 'dexscreener-last-resort' }, 'Whale sniper: spot price (dexscreener last resort)');
+        return price;
+      }
+    }
+  } catch { /* non-fatal */ }
 
   return 0;
 }
@@ -810,10 +855,16 @@ async function pollTokenBuys(mint: string): Promise<void> {
   if (!seenTxns.has(mint)) seenTxns.set(mint, new Set());
   const seen = seenTxns.get(mint)!;
 
+  const tok = trackedTokens.get(mint);
+  const pairAddr = tok?.poolAddress;
+
   try {
-    // First poll: fetch more sigs so we catch whales who bought in the first seconds
-    // after graduation (before DexScreener even indexed the pool).
-    const sigLimit = mintCheckpointed.has(mint) ? 30 : 100;
+    // First poll: fetch a much larger window of sigs so we never truncate before
+    // reaching the graduation moment — a delayed first poll (e.g. after Helius
+    // rate-limit backoff) can otherwise have >100 sigs already posted, silently
+    // hiding the earliest (and most important) whale buys beyond the fetch window.
+    // 1000 is the RPC's max per-call limit for getSignaturesForAddress.
+    const sigLimit = mintCheckpointed.has(mint) ? 30 : 1_000;
     const sigs = await withHeliusLimit(() => conn.getSignaturesForAddress(pk, { limit: sigLimit }));
     if (!sigs.length) return;
 
@@ -825,12 +876,32 @@ async function pollTokenBuys(mint: string): Promise<void> {
       mintCheckpointed.add(mint);
       for (const s of sigs) seen.add(s.signature);
 
-      const tok            = trackedTokens.get(mint);
       const migrationSec   = tok ? Math.floor(tok.migrationTime / 1_000) : 0;
       const tenMinAgoSec   = Math.floor(Date.now() / 1_000) - 10 * 60;
       const earlyWhales    = sigs.filter(
         s => !s.err && s.blockTime != null && s.blockTime >= Math.max(migrationSec, tenMinAgoSec),
       );
+
+      // Fetch signatures may have hit the RPC page limit without reaching the
+      // migration timestamp — that means there is unseen history further back.
+      // Rather than silently missing it, page backwards with `before` until we
+      // reach the migration time or run out of history.
+      if (sigs.length === sigLimit) {
+        let before = sigs[sigs.length - 1].signature;
+        for (let page = 0; page < 5; page++) {
+          const older = await withHeliusLimit(() => conn.getSignaturesForAddress(pk, { limit: 1_000, before })).catch(() => []);
+          if (!older.length) break;
+          for (const s of older) seen.add(s.signature);
+          const olderEarly = older.filter(
+            s => !s.err && s.blockTime != null && s.blockTime >= migrationSec,
+          );
+          earlyWhales.push(...olderEarly);
+          const oldestBlockTime = older[older.length - 1]?.blockTime ?? 0;
+          before = older[older.length - 1].signature;
+          if (oldestBlockTime > 0 && oldestBlockTime < migrationSec) break; // reached pre-migration history
+          if (older.length < 1_000) break; // no more pages
+        }
+      }
 
       if (earlyWhales.length === 0) return;
 
@@ -839,14 +910,17 @@ async function pollTokenBuys(mint: string): Promise<void> {
         'Whale sniper: baseline — scanning recent txns for early whale buys',
       );
 
-      // Use Jupiter for priceAtDetection — DexScreener lags 30-120s for fresh tokens
-      const currentPrice = await fetchPriceFresh(mint).catch(() => 0);
+      // Use on-chain reserve ratio (falls back to Jupiter/DexScreener) for priceAtDetection.
+      const currentPrice = await fetchPriceFresh(mint, pairAddr).catch(() => 0);
 
       // Process from oldest → newest to trigger on the FIRST qualifying buy.
       // Batch in groups of 5 (parallel) to maximise speed. Stop as soon as we enter.
-      // Limit: Helius can handle 50 concurrent; public RPC saturates faster → cap at 20.
-      const backfillDepth = process.env.HELIUS_API_KEY ? 50 : 20;
-      const toFetchEarly  = earlyWhales.slice().reverse().slice(0, backfillDepth).map(s => s.signature);
+      // NOTE: no artificial depth cap here — capping silently dropped candidate
+      // whale buys that occurred after the cutoff, which could BE the first
+      // qualifying buy. The loop already breaks out immediately on entry, so the
+      // real-world cost is bounded by however many non-qualifying buys preceded
+      // the first whale buy, not by an arbitrary constant.
+      const toFetchEarly = earlyWhales.slice().reverse().map(s => s.signature);
 
       const BATCH = 5;
       outer:
@@ -883,9 +957,8 @@ async function pollTokenBuys(mint: string): Promise<void> {
     for (const s of newSigs) seen.add(s);
     if (newSigs.length === 0) return;
 
-    // Use Jupiter for priceAtDetection — DexScreener lags 30-120s for fresh tokens.
-    // fetchPriceFresh internally calls fetchSolPrice() so no separate call needed.
-    const currentPrice = await fetchPriceFresh(mint).catch(() => 0);
+    // On-chain reserve ratio (falls back to Jupiter/DexScreener) for priceAtDetection.
+    const currentPrice = await fetchPriceFresh(mint, pairAddr).catch(() => 0);
 
     // Fetch up to 5 new txns in parallel
     const toFetch = newSigs.slice(0, 5);
@@ -1028,7 +1101,7 @@ async function monitorPositions(): Promise<void> {
     for (const pos of Array.from(whalePositions.values())) {
       const best = (pairs as any[])
         .filter((p: any) => p.baseToken?.address === pos.mint)
-        .filter((p: any) => (p.dexId ?? '').toLowerCase() !== 'pumpfun')
+        .filter((p: any) => (p.dexId ?? '').toLowerCase() === 'pumpswap')
         .sort((a: any, b: any) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0))[0];
 
       if (!best) continue;
@@ -1241,7 +1314,7 @@ async function validateOrPrune(mint: string, activatedAt: number): Promise<void>
       const r = await axios.get<any>(`${DEX_BASE}/latest/dex/tokens/${mint}`, { timeout: 8_000 });
       const allPairs: any[] = r.data?.pairs ?? [];
       const postGradPairs = allPairs
-        .filter((p: any) => (p.dexId ?? '').toLowerCase() !== 'pumpfun')
+        .filter((p: any) => (p.dexId ?? '').toLowerCase() === 'pumpswap')
         .sort((a: any, b: any) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0));
 
       if (postGradPairs.length > 0) {
@@ -1309,7 +1382,7 @@ async function enrichTokenMetadataAsync(mint: string, activatedAt: number): Prom
       const r = await axios.get<any>(`${DEX_BASE}/latest/dex/tokens/${mint}`, { timeout: 8_000 });
       const allPairs: any[] = r.data?.pairs ?? [];
       const postGradPairs = allPairs
-        .filter((p: any) => (p.dexId ?? '').toLowerCase() !== 'pumpfun')
+        .filter((p: any) => (p.dexId ?? '').toLowerCase() === 'pumpswap')
         .sort((a: any, b: any) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0));
 
       if (postGradPairs.length === 0) continue; // not indexed yet — keep retrying

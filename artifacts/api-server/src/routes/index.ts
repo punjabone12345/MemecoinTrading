@@ -1,5 +1,4 @@
 import { Router } from 'express';
-import positionsRouter from './positions.js';
 import scannerRouter from './scanner.js';
 import settingsRouter from './settings.js';
 import whaleSniperRouter from './whale-sniper.js';
@@ -44,7 +43,6 @@ router.get('/config', (_req, res) => {
   res.json({ wsUrl });
 });
 
-router.use('/positions', positionsRouter);
 router.use('/scanner', scannerRouter);
 router.use('/settings', settingsRouter);
 router.use('/whale', whaleSniperRouter);

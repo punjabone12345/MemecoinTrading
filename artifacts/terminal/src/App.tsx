@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback, useTransition, memo } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
-import { Position, Token, Analytics, Settings, ScanStats, WhaleStatus } from './lib/types.js';
+import { Settings, WhaleStatus } from './lib/types.js';
 import { api, createWS } from './lib/api.js';
 import DiscoverPage from './pages/DiscoverPage.js';
 import PositionsPage from './pages/PositionsPage.js';
@@ -13,15 +13,7 @@ type Tab = 'discover' | 'positions' | 'analytics' | 'settings';
 const TAB_ORDER: Tab[] = ['discover', 'positions', 'analytics', 'settings'];
 
 const DEFAULT_SETTINGS: Settings = {
-  minMc: 500000, maxMc: 7000000, minVolume24h: 100000,
-  minAgeHours: 0, maxAgeHours: 720, scanFrequencyMs: 30000,
-  minBuySellRatio: 1.1, maxTopHolder: 25, maxCreatorPct: 15,
-  minLiquidity: 20000, rugcheckEnabled: false, minEntryScore: 50,
-  trendChecksRequired: 2, maxOpenPositions: 5,
-  sizeScore90: 1, sizeScore80: 0.75, sizeScore70: 0.5,
-  slPct: 25, tp1Pct: 70, tp1ClosePct: 30, tp2Pct: 150,
-  tp2ClosePct: 30, tp2TrailPct: 30, tp3Pct: 300, tp3ClosePct: 20, trailingSLPct: 20, trailActivatePct: 50,
-  maxDailyLossPct: 5, startingBalanceSol: 10, currentBalanceSol: 10,
+  startingBalanceSol: 10, currentBalanceSol: 10,
   rpcEndpoint: 'https://api.mainnet-beta.solana.com',
   slippagePct: 1, priorityFeeSol: 0.001, walletPublicKey: '',
   whaleSlippagePct: 20, whaleStagnationPct: 5,
@@ -61,11 +53,6 @@ const MemoSettings = memo(SettingsPage);
 
 export default function App() {
   const [tab, setTab] = useState<Tab>('discover');
-  const [tokens, setTokens] = useState<Token[]>([]);
-  const [scanStats, setScanStats] = useState<ScanStats>({ scanning: 0, passed: 0, eligible: 0 });
-  const [openPositions, setOpenPositions] = useState<Position[]>([]);
-  const [closedPositions, setClosedPositions] = useState<Position[]>([]);
-  const [analytics, setAnalytics] = useState<Analytics | null>(null);
   const [balance, setBalance] = useState<number>(10);
   const [settings, setSettings] = useState<Settings | null>(null);
   const [whaleStatus, setWhaleStatus] = useState<WhaleStatus | null>(null);
@@ -80,20 +67,12 @@ export default function App() {
 
   const loadInitial = useCallback(async () => {
     try {
-      const [posData, scanData, settingsData, analyticsData, whaleData] = await Promise.all([
-        api.getPositions(),
-        api.getScanner(),
+      const [settingsData, whaleData] = await Promise.all([
         api.getSettings(),
-        api.getAnalytics(),
         api.getWhaleStatus(),
       ]);
-      setOpenPositions(posData.open);
-      setClosedPositions(posData.closed);
-      setTokens(scanData.tokens);
-      setScanStats(scanData.stats);
       setSettings(settingsData);
       setBalance(settingsData.currentBalanceSol);
-      setAnalytics(analyticsData);
       setWhaleStatus(whaleData);
       setDataLoaded(true);
     } catch {
@@ -116,25 +95,6 @@ export default function App() {
       const ws = await createWS((msg) => {
         // All setState calls inside a single WS message handler are auto-batched
         // by React 18 — no extra work needed.
-        if (msg.type === 'positions') {
-          const p = msg.data as { open: Position[]; closed: Position[] } | Position[];
-          if (Array.isArray(p)) {
-            setOpenPositions(p.filter((x) => x.status === 'OPEN'));
-          } else {
-            setOpenPositions(p.open);
-            setClosedPositions(p.closed);
-          }
-        }
-        if (msg.type === 'tokens') {
-          const d = msg.data as { tokens: Token[]; stats: ScanStats };
-          // Wrap in startTransition so heavy token list re-render doesn't
-          // block urgent input/animation frames
-          startTransition(() => {
-            setTokens(d.tokens);
-            setScanStats(d.stats);
-          });
-        }
-        if (msg.type === 'analytics') setAnalytics(msg.data as Analytics);
         if (msg.type === 'balance') setBalance((msg.data as { balance: number }).balance);
         if (msg.type === 'settings') setSettings(msg.data as Settings);
         if (msg.type === 'whale_status') setWhaleStatus(msg.data as WhaleStatus);
@@ -163,45 +123,18 @@ export default function App() {
     return () => { destroyed = true; wsRef.current?.close(); };
   }, []);
 
-  // Fallback poll — two responsibilities:
-  // 1. When WS is OFFLINE: keep positions + balance fresh via HTTP every 3s.
-  //    (Never overwrite positions when WS is live — WS sends price-enriched data
-  //     with real currentPrice/pnlPct; the HTTP API returns raw DB rows with pnlPct=null)
-  // 2. Always: refresh scanner + analytics every 15s as a safety net.
+  // Fallback poll — keeps settings/balance/whale status fresh via HTTP
+  // whenever the WebSocket connection is offline.
   useEffect(() => {
-    let scannerTick = 0;
     const poll = async () => {
       try {
-        scannerTick++;
         const wsLive = wsConnectedRef.current;
-
         if (!wsLive) {
-          // WS offline — pull positions + balance + whale status from HTTP
-          const [posData, settingsData, whaleData] = await Promise.all([
-            api.getPositions(),
+          const [settingsData, whaleData] = await Promise.all([
             api.getSettings(),
             api.getWhaleStatus(),
           ]);
-          setOpenPositions(posData.open);
-          setClosedPositions(posData.closed);
           setBalance(settingsData.currentBalanceSol);
-          setWhaleStatus(whaleData);
-        }
-
-        // Scanner + analytics + whale status: refresh every 15s regardless of WS state.
-        // Also refresh on tick 1 (3s after mount) so restored-from-DB positions appear
-        // quickly even if the initial HTTP load raced ahead of the server's DB restore.
-        if (scannerTick === 1 || scannerTick % 5 === 0) {
-          const [scanData, analyticsData, whaleData] = await Promise.all([
-            api.getScanner(),
-            api.getAnalytics(),
-            api.getWhaleStatus(),
-          ]);
-          startTransition(() => {
-            setTokens(scanData.tokens);
-            setScanStats(scanData.stats);
-            setAnalytics(analyticsData);
-          });
           setWhaleStatus(whaleData);
         }
       } catch {
@@ -212,9 +145,9 @@ export default function App() {
     return () => clearInterval(id);
   }, []);
 
-  const refreshClosed = useCallback(async () => {
-    try { setClosedPositions(await api.getClosedPositions()); } catch {}
-  }, []);
+  const refreshAll = useCallback(async () => {
+    await loadInitial();
+  }, [loadInitial]);
 
   const handleTab = useCallback((t: Tab) => {
     if (t === tab) return;
@@ -223,9 +156,8 @@ export default function App() {
 
   const whaleOpen = whaleStatus?.openPositions ?? [];
 
-  // Nav badge: total open = auto-trader + whale sniper
-  const openCount = openPositions.length + whaleOpen.length;
-  const eligibleCount = tokens.filter((t) => t.status === 'ELIGIBLE').length;
+  // Nav badge: open whale positions
+  const openCount = whaleOpen.length;
   const effectiveSettings = settings ?? DEFAULT_SETTINGS;
 
   // Whale unrealized PnL — pnlPct from the monitor already accounts for banked partial TP returns.
@@ -252,6 +184,9 @@ export default function App() {
 
   // freeBalance = the free cash itself (balance already excludes deployed capital)
   const freeBalance = balance;
+
+  void dataLoaded;
+  void TAB_ORDER;
 
   return (
     <div style={{ height: '100dvh', display: 'flex', flexDirection: 'column', background: '#080d1a', overflow: 'hidden' }}>
@@ -289,7 +224,7 @@ export default function App() {
         <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
           <div style={{ textAlign: 'right' }}>
             <div style={{ fontSize: 8, color: '#4a6080', letterSpacing: '0.1em', fontWeight: 700 }}>
-              PORTFOLIO{(openPositions.length > 0 || whaleOpen.length > 0) && (
+              PORTFOLIO{whaleOpen.length > 0 && (
                 <span style={{ marginLeft: 4, color: totalUnrealized >= 0 ? '#00ff88' : '#ff4466' }}>
                   {totalUnrealized >= 0 ? '▲' : '▼'}{Math.abs(totalUnrealized).toFixed(3)}
                 </span>
@@ -298,7 +233,7 @@ export default function App() {
             <div style={{ fontSize: 16, fontWeight: 900, color: '#00d4ff', letterSpacing: '-0.01em', fontVariantNumeric: 'tabular-nums' }}>
               {portfolioValue.toFixed(3)}<span style={{ fontSize: 9, opacity: 0.6, marginLeft: 3 }}>SOL</span>
             </div>
-            {(openPositions.length > 0 || whaleOpen.length > 0) && (
+            {whaleOpen.length > 0 && (
               <div style={{ fontSize: 8, color: '#3a5070', marginTop: 1 }}>{freeBalance.toFixed(3)} free</div>
             )}
           </div>
@@ -327,18 +262,15 @@ export default function App() {
             transition={pageTrans}
             style={{ position: 'absolute', inset: 0, overflowY: 'auto', overflowX: 'hidden', WebkitOverflowScrolling: 'touch', padding: '16px 16px 12px' }}
           >
-            {tab === 'discover' && <MemoDiscover tokens={tokens} scanStats={scanStats} settings={settings} whaleStatus={whaleStatus} wsConnected={wsConnected} />}
+            {tab === 'discover' && <MemoDiscover whaleStatus={whaleStatus} wsConnected={wsConnected} />}
             {tab === 'positions' && (
               <MemoPositions
-                openPositions={openPositions} closedPositions={closedPositions}
-                balance={portfolioValue} analytics={analytics}
-                settings={settings}
                 whaleStatus={whaleStatus}
-                onRefresh={async () => { await loadInitial(); await refreshClosed(); }}
+                onRefresh={refreshAll}
               />
             )}
             {tab === 'analytics' && (
-              <MemoAnalytics analytics={analytics} closedPositions={closedPositions} balance={portfolioValue} onRefresh={refreshClosed} whaleStatus={whaleStatus} />
+              <MemoAnalytics balance={portfolioValue} onRefresh={refreshAll} whaleStatus={whaleStatus} />
             )}
             {tab === 'settings' && (
               <MemoSettings settings={effectiveSettings} onUpdate={(s) => setSettings(s)} />
@@ -359,7 +291,7 @@ export default function App() {
       }}>
         {NAV.map((t) => {
           const active = tab === t.id;
-          const badge = t.id === 'positions' ? openCount : t.id === 'discover' ? eligibleCount : 0;
+          const badge = t.id === 'positions' ? openCount : 0;
           return (
             <button
               key={t.id}

@@ -17,23 +17,18 @@ export function initWebSocket(server: Server): void {
 
     // Push current state immediately so the UI doesn't wait for the next broadcast cycle
     try {
-      const { getOpenPositions, getClosedPositions, getAnalytics } = await import('../services/position.service.js');
-      const { getAllTokens, getScanStats } = await import('../services/scanner.service.js');
-      const { getBalance } = await import('../services/settings.service.js');
+      const { getWhaleStatus } = await import('../services/whale-sniper.service.js');
+      const { getBalance, getSettings } = await import('../services/settings.service.js');
 
-      const [open, closed, analytics, balance] = await Promise.all([
-        getOpenPositions(),
-        getClosedPositions(),
-        getAnalytics(),
+      const [whaleStatus, balance, settings] = await Promise.all([
+        Promise.resolve(getWhaleStatus()),
         getBalance(),
+        getSettings(),
       ]);
-      const tokens = getAllTokens();
-      const stats = getScanStats();
 
-      safeSend(ws, { type: 'positions', data: { open, closed } });
-      safeSend(ws, { type: 'analytics', data: analytics });
+      safeSend(ws, { type: 'whale_status' as any, data: whaleStatus });
       safeSend(ws, { type: 'balance', data: { balance } });
-      safeSend(ws, { type: 'tokens', data: { tokens, stats } });
+      safeSend(ws, { type: 'settings', data: settings });
     } catch (err) {
       logger.warn({ err }, 'WS initial state push failed');
     }
@@ -72,26 +67,10 @@ export function broadcast(msg: WSMessage): void {
   }
 }
 
-export async function broadcastPositions(): Promise<void> {
-  // Imported lazily to avoid circular deps
-  const { getOpenPositions, getClosedPositions, getAnalytics } = await import('../services/position.service.js');
-  const [open, closed, analytics] = await Promise.all([getOpenPositions(), getClosedPositions(), getAnalytics()]);
-  // Send both open + closed so the frontend never needs to poll for closed trades
-  broadcast({ type: 'positions', data: { open, closed } });
-  broadcast({ type: 'analytics', data: analytics });
-}
-
 export async function broadcastBalance(): Promise<void> {
   const { getBalance } = await import('../services/settings.service.js');
   const balance = await getBalance();
   broadcast({ type: 'balance', data: { balance } });
-}
-
-export async function broadcastTokens(): Promise<void> {
-  const { getAllTokens, getScanStats } = await import('../services/scanner.service.js');
-  const tokens = getAllTokens();
-  const stats = getScanStats();
-  broadcast({ type: 'tokens', data: { tokens, stats } });
 }
 
 export async function broadcastSettings(): Promise<void> {

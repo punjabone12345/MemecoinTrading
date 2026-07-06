@@ -1,4 +1,4 @@
-import { Position, Analytics, Settings, Token, ScanStats, WhaleStatus, WhalePosition, ClosedWhalePosition } from './types.js';
+import { Settings, WhaleStatus, WhalePosition, ClosedWhalePosition } from './types.js';
 
 // In local dev VITE_API_URL is empty — Vite proxy forwards /api → :8080.
 // On Vercel set VITE_API_URL=https://your-app.onrender.com so the static
@@ -17,29 +17,18 @@ async function apiFetch<T>(path: string, opts?: RequestInit): Promise<T> {
 }
 
 export const api = {
-  // ── Auto-trader positions ─────────────────────────────────────────────────
-  getPositions:     () => apiFetch<{ open: Position[]; closed: Position[] }>('/positions'),
-  getOpenPositions: () => apiFetch<Position[]>('/positions/open'),
-  getClosedPositions: () => apiFetch<Position[]>('/positions/closed'),
-  getAnalytics:     () => apiFetch<Analytics>('/positions/analytics'),
-  closePosition:    (id: string, currentPrice: number, reason?: string) =>
-    apiFetch<Position>(`/positions/${id}/close`, { method: 'POST', body: JSON.stringify({ currentPrice, reason }) }),
-  editPosition:     (id: string, updates: Partial<Position>) =>
-    apiFetch<Position>(`/positions/${id}`, { method: 'PATCH', body: JSON.stringify(updates) }),
-  deletePosition:   (id: string) =>
-    apiFetch<{ success: boolean }>(`/positions/${id}`, { method: 'DELETE' }),
-
-  // ── Scanner / settings ────────────────────────────────────────────────────
-  getScanner:       () => apiFetch<{ tokens: Token[]; stats: ScanStats }>('/scanner'),
+  // ── Settings ───────────────────────────────────────────────────────────────
   getSettings:      () => apiFetch<Settings>('/settings'),
   updateSettings:   (updates: Partial<Settings>) =>
     apiFetch<Settings>('/settings', { method: 'PATCH', body: JSON.stringify(updates) }),
   resetAll:         () => apiFetch<{ success: boolean; balance: number }>('/settings/reset', { method: 'POST' }),
   getConfig:        () => apiFetch<{ wsUrl: string | null }>('/config'),
 
+  // ── Discovery ──────────────────────────────────────────────────────────────
+  getScannerSources: () => apiFetch<{ pumpfun: { total: number; recent: { mint: string; ts: number; txSig?: string; instructionType?: string }[] } }>('/scanner/sources'),
+
   // ── Whale sniper — read ───────────────────────────────────────────────────
   getWhaleStatus: () => apiFetch<WhaleStatus>('/whale/status'),
-  getScannerSources: () => apiFetch<{ pumpfun: { total: number; recent: { mint: string; ts: number; txSig?: string; instructionType?: string }[] }; meteora: { total: number; recent: { mint: string; ts: number; txSig?: string; instructionType?: string }[] } }>('/scanner/sources'),
 
   // ── Whale sniper — open position management ───────────────────────────────
   closeWhalePosition: (id: string, reason?: string) =>

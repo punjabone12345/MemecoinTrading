@@ -34,34 +34,6 @@ export async function getSettings(): Promise<Settings> {
   const str = (k: string, def: string) => map[k] ?? def;
 
   const settings: Settings = {
-    minMc: num('minMc', 250000),
-    maxMc: num('maxMc', 5000000),
-    minVolume24h: num('minVolume24h', 25000),
-    minAgeHours: num('minAgeHours', 1),
-    maxAgeHours: num('maxAgeHours', 24),
-    scanFrequencyMs: num('scanFrequencyMs', 15000),
-    minBuySellRatio: num('minBuySellRatio', 2),
-    maxTopHolder: num('maxTopHolder', 20),
-    maxCreatorPct: num('maxCreatorPct', 5),
-    minLiquidity: num('minLiquidity', 75000),
-    rugcheckEnabled: bool('rugcheckEnabled', true),
-    minEntryScore: num('minEntryScore', 80),
-    trendChecksRequired: num('trendChecksRequired', 3),
-    maxOpenPositions: num('maxOpenPositions', 5),
-    sizeScore90: num('sizeScore90', 1),
-    sizeScore80: num('sizeScore80', 1),
-    sizeScore70: num('sizeScore70', 1),
-    slPct: num('slPct', 20),
-    tp1Pct: num('tp1Pct', 70),
-    tp1ClosePct: num('tp1ClosePct', 30),
-    tp2Pct: num('tp2Pct', 150),
-    tp2ClosePct: num('tp2ClosePct', 30),
-    tp2TrailPct: num('tp2TrailPct', 30),
-    tp3Pct: num('tp3Pct', 300),
-    tp3ClosePct: num('tp3ClosePct', 20),
-    trailingSLPct: num('trailingSLPct', 20),
-    trailActivatePct: num('trailActivatePct', 70),
-    maxDailyLossPct: num('maxDailyLossPct', 3),
     startingBalanceSol: num('startingBalanceSol', 10),
     currentBalanceSol: num('currentBalanceSol', 10),
     rpcEndpoint: str('rpcEndpoint', 'https://api.mainnet-beta.solana.com'),
@@ -70,7 +42,6 @@ export async function getSettings(): Promise<Settings> {
     walletPublicKey: str('walletPublicKey', ''),
     whaleSlippagePct: num('whaleSlippagePct', 20),
     whaleStagnationPct: num('whaleStagnationPct', 5),
-    autoTraderEnabled: bool('autoTraderEnabled', false),
     // Whale TP tier configs
     wt1Tp1Pct: num('wt1Tp1Pct', 50),   wt1Tp1Exit: num('wt1Tp1Exit', 30),
     wt1Tp2Pct: num('wt1Tp2Pct', 125),  wt1Tp2Exit: num('wt1Tp2Exit', 30),  wt1Tp2Trail: num('wt1Tp2Trail', 30),
@@ -123,8 +94,8 @@ export async function setBalance(sol: number): Promise<void> {
 }
 
 // Serializes all balance read-modify-write operations so concurrent callers
-// (auto-trader position.service.ts, whale-sniper.service.ts) can never race
-// and silently clobber each other's balance updates.
+// (whale-sniper.service.ts) can never race and silently clobber each other's
+// balance updates.
 let balanceMutex: Promise<unknown> = Promise.resolve();
 
 function withBalanceLock<T>(fn: () => Promise<T>): Promise<T> {
@@ -155,7 +126,6 @@ export async function adjustBalance(deltaSol: number, floorAtZero = true): Promi
 }
 
 export async function resetAllData(): Promise<void> {
-  await query(`DELETE FROM positions`);
   await query(`DELETE FROM whale_positions`);
   const rows = await query<{ value: string }>(`SELECT value FROM settings WHERE key = 'startingBalanceSol'`);
   const start = parseFloat(rows[0]?.value ?? '10');

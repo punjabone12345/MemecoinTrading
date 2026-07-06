@@ -1,13 +1,10 @@
 import { useState, useEffect, useRef } from 'react';
-import { Token, ScanStats, Settings, WhaleStatus, TrackedToken, WhaleBuyLog, PendingSignal } from '../lib/types.js';
+import { WhaleStatus, TrackedToken, WhaleBuyLog, PendingSignal } from '../lib/types.js';
 import { api } from '../lib/api.js';
 
 // ── Props ─────────────────────────────────────────────────────────────────────
 
 interface Props {
-  tokens: Token[];
-  scanStats: ScanStats;
-  settings: Settings | null;
   /** Real-time whale status pushed via App-level WebSocket. */
   whaleStatus?: WhaleStatus | null;
   /** True when the App-level WebSocket is connected. Polling resumes when false. */

@@ -1,28 +1,14 @@
 import { Router } from 'express';
-import { getAllTokens, getScanStats } from '../services/scanner.service.js';
-import { getSourceActivity, getPumpfunMints, getPumpfunFeed } from '../services/trenches.service.js';
-import { getMeteoraFeed, getMeteoraMintsCount } from '../services/helius-ws.service.js';
+import { getPumpfunMints, getPumpfunFeed } from '../services/trenches.service.js';
 import { query } from '../lib/db.js';
 
 const router = Router();
 
-router.get('/', (_req, res) => {
-  const tokens = getAllTokens();
-  const stats = getScanStats();
-  res.json({ tokens, stats });
-});
-
-router.get('/stats', (_req, res) => {
-  res.json(getScanStats());
-});
-
 router.get('/sources', (_req, res) => {
-  // Use the same counters as the dashboard tiles (getPumpfunMints().size and
-  // getMeteoraMintsCount()) so live-feed totals always match the tile numbers.
+  // Use the same counter as the dashboard tiles (getPumpfunMints().size) so
+  // live-feed totals always match the tile numbers.
   const pumpfunTotal = getPumpfunMints().size;
   let pumpfunFeedItems = getPumpfunFeed();
-  const meteoraFeed  = getMeteoraFeed();
-  const meteoraTotal = getMeteoraMintsCount();
 
   // Fallback: if the in-memory feed is empty but mints exist (e.g. after an
   // incomplete restart cycle), synthesise placeholder entries from the mint set
@@ -38,15 +24,6 @@ router.get('/sources', (_req, res) => {
     pumpfun: {
       total: pumpfunTotal,
       recent: pumpfunFeedItems,
-    },
-    meteora: {
-      total: meteoraTotal,
-      recent: meteoraFeed.map((e) => ({
-        mint: e.mint,
-        ts: e.ts,
-        txSig: e.txSig,
-        instructionType: e.instructionType,
-      })),
     },
   });
 });

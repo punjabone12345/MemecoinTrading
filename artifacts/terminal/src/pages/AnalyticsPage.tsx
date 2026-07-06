@@ -1,9 +1,9 @@
 import { useState } from 'react';
-import { Position, Analytics, WhaleStatus, ClosedWhalePosition } from '../lib/types.js';
+import { WhaleStatus, ClosedWhalePosition } from '../lib/types.js';
 import { api } from '../lib/api.js';
 import { formatPrice } from '../lib/utils.js';
 
-interface Props { analytics: Analytics | null; closedPositions: Position[]; balance: number; onRefresh: () => Promise<void>; whaleStatus?: WhaleStatus | null }
+interface Props { balance: number; onRefresh: () => Promise<void>; whaleStatus?: WhaleStatus | null }
 
 function StatCard({ label, value, color, sub }: { label: string; value: string; color?: string; sub?: string }) {
   return (
@@ -52,11 +52,10 @@ function WhalePnlChart({ positions }: { positions: ClosedWhalePosition[] }) {
   );
 }
 
-export default function AnalyticsPage({ analytics: _a, balance, onRefresh, whaleStatus }: Props) {
+export default function AnalyticsPage({ balance, onRefresh, whaleStatus }: Props) {
   // All stats derived from whale sniper data
   const whaleClosed = whaleStatus?.closedPositions ?? [];
   const whaleOpen   = whaleStatus?.openPositions   ?? [];
-  void _a;
 
   const whaleTotalPnlSol = whaleClosed.reduce((sum, p) => {
     const initSize = p.initialSizeSol > 0 ? p.initialSizeSol : p.sizeSol;

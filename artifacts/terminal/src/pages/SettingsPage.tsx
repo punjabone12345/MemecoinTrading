@@ -41,18 +41,11 @@ export default function SettingsPage({ settings: init, onUpdate }: Props) {
   const [resetInput, setResetInput] = useState('');
 
   function update(key: keyof Settings, value: string) {
-    const numKeys = ['minMc','maxMc','minVolume24h','minAgeHours','maxAgeHours','scanFrequencyMs','minBuySellRatio','maxTopHolder','maxCreatorPct','minLiquidity','minEntryScore','trendChecksRequired','maxOpenPositions','sizeScore90','sizeScore80','sizeScore70','slPct','tp1Pct','tp1ClosePct','tp2Pct','tp2ClosePct','tp2TrailPct','tp3Pct','tp3ClosePct','trailingSLPct','trailActivatePct','maxDailyLossPct','startingBalanceSol','currentBalanceSol','slippagePct','priorityFeeSol','whaleSlippagePct','whaleStagnationPct','wt1Tp1Pct','wt1Tp1Exit','wt1Tp2Pct','wt1Tp2Exit','wt1Tp2Trail','wt1Tp3Pct','wt1Tp3Exit','wt1Tp3Trail','wt2Tp1Pct','wt2Tp1Exit','wt2Tp2Pct','wt2Tp2Exit','wt2Tp2Trail','wt2Tp3Pct','wt2Tp3Exit','wt2Tp3Trail','wt3Tp1Pct','wt3Tp1Exit','wt3Tp2Pct','wt3Tp2Exit','wt3Tp2Trail','wt3Tp3Pct','wt3Tp3Exit','wt3Tp3Trail'];
-    const boolKeys = ['autoTraderEnabled', 'rugcheckEnabled'];
+    const strKeys = ['rpcEndpoint', 'walletPublicKey'];
     const updated = { ...settings } as Record<string, unknown>;
-    if (numKeys.includes(key)) updated[key] = parseFloat(value) || 0;
-    else if (boolKeys.includes(key)) updated[key] = value === 'true';
-    else updated[key] = value;
+    if (strKeys.includes(key)) updated[key] = value;
+    else updated[key] = parseFloat(value) || 0;
     setSettings((updated as unknown) as Settings);
-  }
-
-  function toggleBool(key: keyof Settings) {
-    const updated = { ...settings, [key]: !(settings[key] as boolean) };
-    setSettings(updated);
   }
 
   async function save() {
@@ -97,40 +90,6 @@ export default function SettingsPage({ settings: init, onUpdate }: Props) {
             </div>
           </div>
 
-          <div style={{ height: 1, background: 'rgba(255,255,255,0.05)' }} />
-
-          {/* AI Auto-Trader — toggleable */}
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-            <div style={{ flex: 1, marginRight: 16 }}>
-              <div style={{ fontSize: 13, fontWeight: 700, color: settings.autoTraderEnabled ? '#00ff88' : '#3a5070' }}>
-                🤖 AI Auto-Trader
-              </div>
-              <div style={{ fontSize: 11, color: '#3a5070', marginTop: 2, lineHeight: 1.5 }}>
-                Scanner-based entries using score/filters. {settings.autoTraderEnabled ? 'Active — will open positions independently.' : 'Disabled — only Whale Sniper trades.'}
-              </div>
-            </div>
-            {/* Toggle switch */}
-            <button
-              onClick={() => toggleBool('autoTraderEnabled')}
-              style={{
-                position: 'relative', width: 48, height: 26, borderRadius: 13, border: 'none', cursor: 'pointer',
-                background: settings.autoTraderEnabled ? '#00ff88' : 'rgba(255,255,255,0.1)',
-                transition: 'background 0.2s', flexShrink: 0,
-              }}
-            >
-              <div style={{
-                position: 'absolute', top: 3, left: settings.autoTraderEnabled ? 25 : 3,
-                width: 20, height: 20, borderRadius: '50%', background: '#fff',
-                transition: 'left 0.2s', boxShadow: '0 1px 4px rgba(0,0,0,0.4)',
-              }} />
-            </button>
-          </div>
-
-          {settings.autoTraderEnabled && (
-            <div style={{ padding: '8px 12px', borderRadius: 8, background: 'rgba(255,180,0,0.07)', border: '1px solid rgba(255,180,0,0.2)', fontSize: 11, color: '#ffaa00', lineHeight: 1.5 }}>
-              ⚠️ AI Auto-Trader is ON. It will enter trades independently of whale signals, using the scanner filters below.
-            </div>
-          )}
         </div>
       </div>
 
@@ -225,16 +184,6 @@ export default function SettingsPage({ settings: init, onUpdate }: Props) {
             </div>
           </div>
         ))}
-      </Section>
-
-      <Section title="Stop Loss" color="#ff4466">
-        <NumberInput
-          label="Hard Stop Loss"
-          value={n('slPct')}
-          onChange={(v) => update('slPct', v)}
-          min={5} max={50} step={5} suffix="%"
-          sublabel="Applies to any legacy auto-trader positions only. Whale sniper uses its own per-tier SL/trailing rules."
-        />
       </Section>
 
       <Section title="Stagnation Exit" color="#ff6600">
