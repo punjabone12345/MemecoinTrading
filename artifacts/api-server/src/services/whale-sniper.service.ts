@@ -1203,7 +1203,9 @@ async function validateOrPrune(mint: string, activatedAt: number): Promise<void>
           );
           return; // enrichMetadataAsync will continue updating market data
         }
-        // Pool exists but liquidity is too low → prune now (no point retrying)
+        // Pool exists but liquidity is too low → re-check entry state AFTER the await
+        // before pruning (entry may have started while DexScreener responded)
+        if (trackedTokens.get(mint)?.entryTriggered || whalePositions.has(mint)) return;
         logger.warn(
           { mint: mint.slice(0, 12), liq: liq.toFixed(0), minLiq: MIN_POOL_LIQUIDITY_USD },
           'Whale sniper: pool liquidity below minimum — pruning token (micro/seeded grad)',
@@ -1217,15 +1219,19 @@ async function validateOrPrune(mint: string, activatedAt: number): Promise<void>
     await new Promise(r => setTimeout(r, VALIDATION_POLL_MS));
   }
 
-  // Deadline reached: no qualified pool found → prune
-  const tok = trackedTokens.get(mint);
-  if (tok && !tok.entryTriggered && !whalePositions.has(mint)) {
+  // Deadline reached: no qualified pool found → re-check entry state before pruning
+  if (!trackedTokens.get(mint)?.entryTriggered && !whalePositions.has(mint)) {
     logger.warn({ mint: mint.slice(0, 12) }, 'Whale sniper: no qualified post-grad pool within 60s — pruning token');
     pruneToken(mint);
   }
 }
 
+// pruneToken: remove a tracked token completely. Guards against pruning after entry
+// so the invariant "never remove tracking state for an active position" is enforced
+// centrally and not just at each call site.
 function pruneToken(mint: string): void {
+  // Final safety: never prune if a position is already open or entry has started
+  if (whalePositions.has(mint) || trackedTokens.get(mint)?.entryTriggered) return;
   trackedTokens.delete(mint);
   seenTxns.delete(mint);
   mintCheckpointed.delete(mint);
