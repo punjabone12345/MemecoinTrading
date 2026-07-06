@@ -315,78 +315,97 @@ async function fetchTokenPrice(mint: string): Promise<DexMarketData> {
 const PUMP_TOKEN_DECIMALS = 6;
 const WSOL_QUOTE_AMOUNT   = 10_000_000; // 0.01 SOL in lamports — small to avoid price impact
 
-// fetchPriceFresh: Jupiter Quote API → derive price from outAmount × SOL/USD.
+// fetchPriceFresh: Run Jupiter Quote API and DexScreener IN PARALLEL — return the HIGHER price.
 //
-// WHY NOT swapUsdValue:
-//   swapUsdValue is often 0 or null for freshly-graduated tokens on lite-api.jup.ag
-//   because Jupiter's oracle hasn't indexed them yet. When that happens the old code
-//   silently fell back to DexScreener (30-120s stale) and recorded a completely wrong
-//   entry price.
+// WHY PARALLEL + MAX, not Jupiter-primary:
+//   Jupiter reads on-chain pool reserves but for freshly-graduated PumpSwap tokens it
+//   sometimes returns the initial seeding price (e.g. 0.000036) before it has routed
+//   through the live pool, while actual trades on PumpSwap are already happening at the
+//   real market price (e.g. 0.000056). Taking only Jupiter produced entry prices ~35%
+//   below the real market, destroying P&L accuracy.
+//
+//   DexScreener reflects actual on-chain transactions and shows the real trading price
+//   once it has indexed the pool (typically within 60-120s). After that point it is the
+//   more accurate source. Running both in parallel and taking max() gives us:
+//     • Pre-DexScreener-index window: Jupiter wins (DexScreener shows 0)
+//     • Post-index window:            DexScreener wins when Jupiter is stale
+//     • Both valid and agree:         Same price → no change
 //
 // CORRECT approach:
 //   1. Ensure SOL/USD is fresh (Jupiter Price API v2, < 60s TTL).
-//   2. Quote 0.01 SOL → TOKEN on Jupiter to get the actual tokens received.
-//   3. price = (0.01 SOL × SOL_USD) / tokens_received  ← always real on-chain
-//   4. Only fall back to DexScreener if Jupiter quote itself fails (network/timeout).
+//   2. Quote 0.01 SOL → TOKEN on Jupiter to get actual tokens received.
+//   3. Fetch DexScreener price (most-liquid non-pumpfun pair) in parallel.
+//   4. price = max(jupiterPrice, dexPrice) — real market is at the higher of the two.
 async function fetchPriceFresh(mint: string, _pairAddress?: string): Promise<number> {
   // Always ensure a fresh SOL price before calculating token price.
   await fetchSolPrice();
 
-  // 1. Jupiter Quote API — real on-chain reserve ratio, always current.
-  try {
-    const r = await axios.get<any>(
-      `https://lite-api.jup.ag/swap/v1/quote` +
-      `?inputMint=${WSOL_MINT}` +
-      `&outputMint=${mint}` +
-      `&amount=${WSOL_QUOTE_AMOUNT}` +
-      `&slippageBps=1000`,
-      { timeout: 5_000 },
+  // Run Jupiter and DexScreener concurrently — whichever gives the higher price wins.
+  const [jupiterPrice, dexPrice] = await Promise.all([
+    // ── Jupiter Quote API ────────────────────────────────────────────────────
+    (async (): Promise<number> => {
+      try {
+        const r = await axios.get<any>(
+          `https://lite-api.jup.ag/swap/v1/quote` +
+          `?inputMint=${WSOL_MINT}` +
+          `&outputMint=${mint}` +
+          `&amount=${WSOL_QUOTE_AMOUNT}` +
+          `&slippageBps=1000`,
+          { timeout: 5_000 },
+        );
+        const outAmount = parseInt(r.data?.outAmount ?? '0', 10);
+
+        if (outAmount > 0 && cachedSolPrice > 0) {
+          // Use actual output decimals from Jupiter if provided; fall back to pump.fun standard (6).
+          const decimals       = parseInt(r.data?.outputDecimals ?? String(PUMP_TOKEN_DECIMALS), 10);
+          const tokensReceived = outAmount / Math.pow(10, decimals);
+          const inputSolUsd    = (WSOL_QUOTE_AMOUNT / 1e9) * cachedSolPrice;
+          const price          = inputSolUsd / tokensReceived;
+          if (price > 0) return price;
+        }
+
+        // Edge-case: SOL price not cached — try swapUsdValue
+        const swapUsdValue = parseFloat(r.data?.swapUsdValue ?? '0');
+        if (swapUsdValue > 0 && parseInt(r.data?.outAmount ?? '0', 10) > 0) {
+          const decimals       = parseInt(r.data?.outputDecimals ?? String(PUMP_TOKEN_DECIMALS), 10);
+          const tokensReceived = parseInt(r.data.outAmount, 10) / Math.pow(10, decimals);
+          const price          = swapUsdValue / tokensReceived;
+          if (price > 0) return price;
+        }
+      } catch { /* non-fatal */ }
+      return 0;
+    })(),
+
+    // ── DexScreener (most liquid non-pumpfun pair) ───────────────────────────
+    (async (): Promise<number> => {
+      try {
+        const r = await axios.get<any>(`${DEX_BASE}/latest/dex/tokens/${mint}`, { timeout: 6_000 });
+        const pairs: any[] = (r.data?.pairs ?? [])
+          .filter((p: any) => (p.dexId ?? '').toLowerCase() !== 'pumpfun')
+          .sort((a: any, b: any) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0));
+        if (pairs.length) {
+          const price = parseFloat(pairs[0]?.priceUsd ?? '0');
+          if (price > 0) return price;
+        }
+      } catch { /* non-fatal */ }
+      return 0;
+    })(),
+  ]);
+
+  const price = Math.max(jupiterPrice, dexPrice);
+
+  if (price > 0) {
+    const source =
+      jupiterPrice > 0 && dexPrice > 0
+        ? (dexPrice >= jupiterPrice ? 'dexscreener-won' : 'jupiter-won')
+        : jupiterPrice > 0 ? 'jupiter-only'
+        : 'dexscreener-only';
+    logger.info(
+      { mint: mint.slice(0, 12), price, jupiterPrice, dexPrice, solPrice: cachedSolPrice, source },
+      'Whale sniper: spot price (parallel fetch)',
     );
-    const outAmount = parseInt(r.data?.outAmount ?? '0', 10);
-
-    if (outAmount > 0 && cachedSolPrice > 0) {
-      const tokensReceived = outAmount / Math.pow(10, PUMP_TOKEN_DECIMALS);
-      const inputSolUsd    = (WSOL_QUOTE_AMOUNT / 1e9) * cachedSolPrice; // e.g. 0.01 SOL × $150 = $1.50
-      const price          = inputSolUsd / tokensReceived;
-      if (price > 0) {
-        logger.info(
-          { mint: mint.slice(0, 12), price, solPrice: cachedSolPrice,
-            tokensReceived: tokensReceived.toFixed(2), source: 'jupiter-quote' },
-          'Whale sniper: spot price',
-        );
-        return price;
-      }
-    }
-
-    // Edge-case: SOL price not cached yet — try swapUsdValue as last resort
-    const swapUsdValue = parseFloat(r.data?.swapUsdValue ?? '0');
-    if (swapUsdValue > 0 && outAmount > 0) {
-      const tokensReceived = outAmount / Math.pow(10, PUMP_TOKEN_DECIMALS);
-      const price          = swapUsdValue / tokensReceived;
-      if (price > 0) {
-        logger.info(
-          { mint: mint.slice(0, 12), price, swapUsdValue, source: 'jupiter-quote-swapUsd' },
-          'Whale sniper: spot price (swapUsdValue fallback)',
-        );
-        return price;
-      }
-    }
-  } catch { /* fall through to DexScreener */ }
-
-  // 2. DexScreener — last resort only (may lag 30-120s for fresh tokens)
-  try {
-    const r = await axios.get<any>(`${DEX_BASE}/latest/dex/tokens/${mint}`, { timeout: 6_000 });
-    const pairs: any[] = (r.data?.pairs ?? [])
-      .filter((p: any) => (p.dexId ?? '').toLowerCase() !== 'pumpfun')
-      .sort((a: any, b: any) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0));
-    if (pairs.length) {
-      const price = parseFloat(pairs[0]?.priceUsd ?? '0');
-      if (price > 0) {
-        logger.warn({ mint: mint.slice(0, 12), price, source: 'dexscreener-fallback' }, 'Whale sniper: spot price (DexScreener fallback — may be stale)');
-        return price;
-      }
-    }
-  } catch { /* fall through */ }
+    return price;
+  }
 
   return 0;
 }
@@ -1130,9 +1149,9 @@ function pruneExpiredTracking(): void {
 // Tokens that never reach this (micro/seeded grads, false detections) are pruned after
 // VALIDATION_DELAY_MS. Real pump.fun grads seed ~$1-3k liquidity — $500 is conservative.
 const MIN_POOL_LIQUIDITY_USD = 500;
-const VALIDATION_DELAY_MS   = 20_000; // wait 20s before first quality check
-const VALIDATION_TIMEOUT_MS = 60_000; // prune if not validated within 60s of activation
-const VALIDATION_POLL_MS    = 5_000;  // retry DexScreener every 5s during validation
+const VALIDATION_DELAY_MS   = 20_000;      // wait 20s before first quality check
+const VALIDATION_TIMEOUT_MS = 5 * 60_000;  // prune if not validated within 5 min of activation (was 60s — too short for PumpSwap pools which take 2-5 min to index on DexScreener)
+const VALIDATION_POLL_MS    = 5_000;       // retry DexScreener every 5s during validation
 
 async function activateTrackingNow(mint: string): Promise<void> {
   const pending: PendingGraduation | undefined = pendingGraduations.get(mint);
