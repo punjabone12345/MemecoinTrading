@@ -127,6 +127,7 @@ export async function adjustBalance(deltaSol: number, floorAtZero = true): Promi
 
 export async function resetAllData(): Promise<void> {
   await query(`DELETE FROM whale_positions`);
+  await query(`DELETE FROM whale_traded_mints`).catch(() => {});
   const rows = await query<{ value: string }>(`SELECT value FROM settings WHERE key = 'startingBalanceSol'`);
   const start = parseFloat(rows[0]?.value ?? '10');
   balanceCache = start;

@@ -437,5 +437,16 @@ export async function initDB(): Promise<void> {
   await query(`CREATE INDEX IF NOT EXISTS idx_migrations_detected_at ON detected_migrations (detected_at DESC)`);
   await query(`CREATE INDEX IF NOT EXISTS idx_migrations_mint ON detected_migrations (mint)`);
 
+  // ── whale_traded_mints: permanent lifetime record of every mint that has ever
+  // been entered by the whale sniper. Checked BEFORE every entry so a mint can
+  // never be traded more than once, even across restarts, re-detected
+  // graduations, or re-tracking after the 30-min window expires.
+  await query(`
+    CREATE TABLE IF NOT EXISTS whale_traded_mints (
+      mint       TEXT PRIMARY KEY,
+      traded_at  BIGINT NOT NULL
+    )
+  `);
+
   logger.info('Database initialized');
 }

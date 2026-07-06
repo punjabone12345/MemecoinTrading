@@ -225,6 +225,37 @@ const pollLocks  = new Set<string>();
 const seenTxns = new Map<string, Set<string>>();
 const mintCheckpointed = new Set<string>();
 
+// Permanent, DB-backed lifetime registry of every mint ever traded by the
+// whale sniper. `whalePositions` only reflects currently-OPEN positions, so
+// once a position closes the mint would otherwise become tradeable again if
+// the same graduation got re-detected (backfill re-scan, restart, duplicate
+// WS event, etc). This set is checked before EVERY entry and is never
+// cleared for a mint once it's added — a token can be entered at most once
+// for the lifetime of the bot.
+const everTradedMints = new Set<string>();
+
+async function loadTradedMintsFromDB(): Promise<void> {
+  try {
+    const rows = await query<any>(`SELECT mint FROM whale_traded_mints`);
+    for (const r of rows) everTradedMints.add(r.mint);
+    logger.info({ count: everTradedMints.size }, 'Whale sniper: loaded lifetime traded-mint registry');
+  } catch (err: any) {
+    logger.warn({ err: err?.message }, 'Whale sniper: failed to load traded-mint registry');
+  }
+}
+
+async function markMintTraded(mint: string): Promise<void> {
+  everTradedMints.add(mint);
+  try {
+    await query(
+      `INSERT INTO whale_traded_mints (mint, traded_at) VALUES ($1, $2) ON CONFLICT (mint) DO NOTHING`,
+      [mint, Date.now()],
+    );
+  } catch (err: any) {
+    logger.warn({ err: err?.message, mint }, 'Whale sniper: failed to persist traded-mint record');
+  }
+}
+
 // SOL price cache
 let cachedSolPrice    = 200;
 let lastSolPriceFetch = 0;
@@ -619,7 +650,9 @@ async function enterWhalePosition(
   // Synchronous reservation — no `await` happens between the check and the
   // lock being taken, so two overlapping calls for the same mint (e.g. from
   // an overlapping poll cycle) cannot both pass this guard.
-  if (whalePositions.has(mint) || entryLocks.has(mint)) return;
+  // `everTradedMints` is the lifetime gate: a mint that has EVER been entered
+  // (open or closed, this session or a previous one) can never be entered again.
+  if (whalePositions.has(mint) || entryLocks.has(mint) || everTradedMints.has(mint)) return;
   entryLocks.add(mint);
 
   try {
@@ -756,6 +789,7 @@ async function enterWhalePosition(
 
     whalePositions.set(mint, pos);
     void saveWhalePosition(pos);
+    void markMintTraded(mint);
 
     if (tok) tok.entryTriggered = true;
 
@@ -784,6 +818,7 @@ async function enterWhalePosition(
 // ── Queue / slot management ───────────────────────────────────────────────────
 
 function enqueueSignal(mint: string, name: string, symbol: string, sizePct: number, amountUsd: number, priceAtDetection: number, whaleWallet: string): void {
+  if (everTradedMints.has(mint)) return;
   if (signalQueue.find(s => s.mint === mint)) return;
   signalQueue.push({ mint, name, symbol, sizePct, triggerAmountUsd: amountUsd, queuedAt: Date.now(), priceAtDetection, whaleWallet });
   logger.info({ mint, symbol, sizePct, reason: 'max 10 positions' }, 'Whale sniper: signal queued');
@@ -794,7 +829,7 @@ async function processQueue(): Promise<void> {
     const sig = signalQueue.shift()!;
     const tok  = trackedTokens.get(sig.mint);
     if (!tok || Date.now() > tok.expiresAt) continue;
-    if (whalePositions.has(sig.mint)) continue;
+    if (whalePositions.has(sig.mint) || everTradedMints.has(sig.mint)) continue;
     await enterWhalePosition(sig.mint, sig.name, sig.symbol, sig.sizePct, sig.triggerAmountUsd, sig.priceAtDetection, sig.whaleWallet);
   }
 }
@@ -819,8 +854,8 @@ async function handleWhaleBuy(
 
   if (!tier) {
     entry.skipReason = `${amountUsd.toFixed(0)} below $500 threshold`;
-  } else if (whalePositions.has(mint) || tok.entryTriggered) {
-    entry.skipReason = 'Already entered this token';
+  } else if (whalePositions.has(mint) || tok.entryTriggered || everTradedMints.has(mint)) {
+    entry.skipReason = 'Already traded this token (lifetime — never re-entered)';
   } else if (whalePositions.size >= MAX_POSITIONS) {
     entry.skipReason = 'Max positions — queued';
     enqueueSignal(mint, tok.name, tok.symbol, tier.sizePct, amountUsd, priceAtDetection, wallet);
@@ -1262,6 +1297,14 @@ async function activateTrackingNow(mint: string): Promise<void> {
   const pending: PendingGraduation | undefined = pendingGraduations.get(mint);
   if (!pending) return;
   if (trackedTokens.has(mint)) { pendingGraduations.delete(mint); return; }
+  // Lifetime guard: never re-track (let alone re-enter) a mint that has ever
+  // been traded before, even if it "graduates" again due to a duplicate or
+  // re-detected on-chain event.
+  if (everTradedMints.has(mint)) {
+    pendingGraduations.delete(mint);
+    logger.info({ mint: mint.slice(0, 12) }, 'Whale sniper: ignoring re-graduation of already-traded mint');
+    return;
+  }
 
   // Activate immediately with placeholder metadata — DexScreener enriches these async
   pendingGraduations.delete(mint);
@@ -1438,6 +1481,10 @@ export function addGraduatedToken(ev: { mint: string; poolAddress?: string; ts: 
   }
 
   if (trackedTokens.has(ev.mint) || pendingGraduations.has(ev.mint)) return;
+  if (everTradedMints.has(ev.mint)) {
+    logger.debug({ mint: ev.mint.slice(0, 12) }, 'Whale sniper: ignoring graduation of already-traded mint');
+    return;
+  }
 
   // Use Date.now() as detectedAt (not the on-chain blockTime) so that the pool-wait
   // deadline and 30-min tracking window start from when WE detected it — not from when
@@ -1660,6 +1707,10 @@ export function resetWhaleState(): void {
   pollLocks.clear();
   seenTxns.clear();
   mintCheckpointed.clear();
+  // Only cleared here because this is invoked by the explicit "reset all data"
+  // admin action (which also wipes whale_traded_mints in the DB) — a real
+  // fresh start. It is never cleared as a side effect of normal trading.
+  everTradedMints.clear();
   // Unsubscribe all Helius WS mints
   for (const mint of Array.from(_mintUnsubscribe.keys())) wsUnsubscribeMint(mint);
   broadcastWhaleStatus();
@@ -1669,6 +1720,7 @@ export function resetWhaleState(): void {
 export function startWhaleSniper(): void {
   logger.info('Whale sniper: started (paper mode — following pump.fun graduations)');
 
+  void loadTradedMintsFromDB();
   void restoreWhalePositionsFromDB();
 
   scheduleBuyPoll();
