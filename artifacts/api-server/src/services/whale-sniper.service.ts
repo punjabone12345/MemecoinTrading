@@ -493,7 +493,7 @@ async function fetchPriceFresh(mint: string, pairAddress?: string): Promise<numb
 
 // ── Buy detection from a parsed Solana transaction ───────────────────────────
 
-interface BuyInfo { wallet: string; solSpent: number; }
+interface BuyInfo { wallet: string; solSpent: number; tokensReceived: number; }
 
 function detectBuy(tx: any, targetMint: string): BuyInfo | null {
   const preTok: any[]     = tx.meta?.preTokenBalances  ?? [];
@@ -502,14 +502,17 @@ function detectBuy(tx: any, targetMint: string): BuyInfo | null {
   const postSol: number[] = tx.meta?.postBalances ?? [];
   const keys: any[]       = (tx.transaction?.message as any)?.accountKeys ?? [];
 
-  const gained = postTok.some((post: any) => {
-    if (post.mint !== targetMint) return false;
-    const pre      = preTok.find((p: any) => p.accountIndex === post.accountIndex && p.mint === targetMint);
-    const preAmt   = pre?.uiTokenAmount?.uiAmount ?? 0;
-    const postAmt  = post.uiTokenAmount?.uiAmount ?? 0;
-    return postAmt > preAmt;
-  });
-  if (!gained) return null;
+  // Sum all token balance increases for this mint — the total tokens the buyer received.
+  // Using uiAmount (decimal-adjusted) so division by decimals is already done.
+  let tokensReceived = 0;
+  for (const post of postTok) {
+    if (post.mint !== targetMint) continue;
+    const pre    = preTok.find((p: any) => p.accountIndex === post.accountIndex && p.mint === targetMint);
+    const preAmt = pre?.uiTokenAmount?.uiAmount ?? 0;
+    const postAmt= post.uiTokenAmount?.uiAmount ?? 0;
+    if (postAmt > preAmt) tokensReceived += (postAmt - preAmt);
+  }
+  if (tokensReceived <= 0) return null;
 
   // Method 1: native SOL decrease at fee payer (index 0) — works for native SOL buyers
   const nativeLamports = (preSol[0] ?? 0) - (postSol[0] ?? 0);
@@ -534,7 +537,7 @@ function detectBuy(tx: any, targetMint: string): BuyInfo | null {
   if (spent < 10_000) return null;
 
   const wallet = keys[0]?.pubkey?.toString() ?? keys[0]?.toString() ?? 'unknown';
-  return { wallet, solSpent: spent / 1e9 };
+  return { wallet, solSpent: spent / 1e9, tokensReceived };
 }
 
 // ── DB persistence (survives Render free-tier spin-down / restarts) ───────────
@@ -954,8 +957,8 @@ async function pollTokenBuys(mint: string): Promise<void> {
         'Whale sniper: baseline — scanning recent txns for early whale buys',
       );
 
-      // Use on-chain reserve ratio (falls back to Jupiter/DexScreener) for priceAtDetection.
-      const currentPrice = await fetchPriceFresh(mint, pairAddr).catch(() => 0);
+      // Ensure SOL price is fresh so we can compute whale's avg entry price from tx data.
+      await fetchSolPrice().catch(() => {});
 
       // Process from oldest → newest to trigger on the FIRST qualifying buy.
       // Batch in groups of 5 (parallel) to maximise speed. Stop as soon as we enter.
@@ -982,11 +985,18 @@ async function pollTokenBuys(mint: string): Promise<void> {
           if (!buy) continue;
           const amountUsd = buy.solSpent * cachedSolPrice;
           if (amountUsd < 10) continue;
+          // Whale's TRUE average entry price from the transaction:
+          // SOL they spent ÷ tokens they received × SOL/USD.
+          // This is always < the post-buy pool price because their buy moved the price up.
+          const whaleTxPrice = buy.tokensReceived > 0 && cachedSolPrice > 0
+            ? (buy.solSpent * cachedSolPrice) / buy.tokensReceived
+            : 0;
           logger.info(
-            { mint: mint.slice(0, 12), wallet: buy.wallet.slice(0, 8), usd: amountUsd.toFixed(0), sig: batch[j].slice(0, 12) },
+            { mint: mint.slice(0, 12), wallet: buy.wallet.slice(0, 8), usd: amountUsd.toFixed(0),
+              whaleTxPrice, sig: batch[j].slice(0, 12) },
             'Whale sniper: baseline — early whale buy found',
           );
-          await handleWhaleBuy(mint, buy.wallet, amountUsd, batch[j], currentPrice);
+          await handleWhaleBuy(mint, buy.wallet, amountUsd, batch[j], whaleTxPrice);
           if (trackedTokens.get(mint)?.entryTriggered) break outer;
         }
         if (i + BATCH < toFetchEarly.length) await new Promise(r => setTimeout(r, 50)); // brief pause between batches
@@ -1001,8 +1011,8 @@ async function pollTokenBuys(mint: string): Promise<void> {
     for (const s of newSigs) seen.add(s);
     if (newSigs.length === 0) return;
 
-    // On-chain reserve ratio (falls back to Jupiter/DexScreener) for priceAtDetection.
-    const currentPrice = await fetchPriceFresh(mint, pairAddr).catch(() => 0);
+    // Ensure SOL price is fresh before computing whale avg entry price from tx data.
+    await fetchSolPrice().catch(() => {});
 
     // Fetch up to 5 new txns in parallel
     const toFetch = newSigs.slice(0, 5);
@@ -1028,11 +1038,17 @@ async function pollTokenBuys(mint: string): Promise<void> {
         );
         continue;
       }
+      // Whale's TRUE average entry price from the transaction:
+      // SOL they spent ÷ tokens they received × SOL/USD.
+      // This is always < the post-buy pool price because their buy moved the price up.
+      const whaleTxPrice = buy.tokensReceived > 0 && cachedSolPrice > 0
+        ? (buy.solSpent * cachedSolPrice) / buy.tokensReceived
+        : 0;
       logger.info(
-        { mint: mint.slice(0, 12), wallet: buy.wallet.slice(0, 8), usd: amountUsd.toFixed(0), sig: toFetch[i].slice(0, 12) },
+        { mint: mint.slice(0, 12), wallet: buy.wallet.slice(0, 8), usd: amountUsd.toFixed(0), whaleTxPrice, sig: toFetch[i].slice(0, 12) },
         'Whale sniper: buy detected',
       );
-      await handleWhaleBuy(mint, buy.wallet, amountUsd, toFetch[i], currentPrice);
+      await handleWhaleBuy(mint, buy.wallet, amountUsd, toFetch[i], whaleTxPrice);
     }
   } catch (err: any) {
     logger.debug({ mint: mint.slice(0, 12), err: err?.message }, 'Whale sniper: poll error');
