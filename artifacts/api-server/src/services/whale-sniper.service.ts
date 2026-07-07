@@ -503,14 +503,17 @@ function detectBuy(tx: any, targetMint: string): BuyInfo | null {
   const keys: any[]       = (tx.transaction?.message as any)?.accountKeys ?? [];
 
   // Sum all token balance increases for this mint — the total tokens the buyer received.
-  // Using uiAmount (decimal-adjusted) so division by decimals is already done.
+  // Use raw integer amounts (uiTokenAmount.amount) divided by 10^decimals rather than
+  // uiAmount to avoid floating-point rounding errors on large token quantities.
   let tokensReceived = 0;
   for (const post of postTok) {
     if (post.mint !== targetMint) continue;
-    const pre    = preTok.find((p: any) => p.accountIndex === post.accountIndex && p.mint === targetMint);
-    const preAmt = pre?.uiTokenAmount?.uiAmount ?? 0;
-    const postAmt= post.uiTokenAmount?.uiAmount ?? 0;
-    if (postAmt > preAmt) tokensReceived += (postAmt - preAmt);
+    const pre      = preTok.find((p: any) => p.accountIndex === post.accountIndex && p.mint === targetMint);
+    const decimals = parseInt(post.uiTokenAmount?.decimals ?? '6', 10);
+    const divisor  = Math.pow(10, decimals);
+    const preRaw   = parseInt(pre?.uiTokenAmount?.amount  ?? '0', 10);
+    const postRaw  = parseInt(post.uiTokenAmount?.amount  ?? '0', 10);
+    if (postRaw > preRaw) tokensReceived += (postRaw - preRaw) / divisor;
   }
   if (tokensReceived <= 0) return null;
 
@@ -673,19 +676,8 @@ async function enterWhalePosition(
     // Fetch market metadata (liquidity, mcap, name, symbol) from DexScreener
     const marketData = await fetchTokenPrice(mint);
 
-    // Get accurate real-time spot price from Jupiter first, fall back to DexScreener
-    // DexScreener can lag 30-120s for fresh meme coins — Jupiter reads on-chain reserves
-    const tok = trackedTokens.get(mint);
-    const pairAddr = tok?.poolAddress;
-    const spotPrice = await fetchPriceFresh(mint, pairAddr);
-    const entryPrice = spotPrice > 0 ? spotPrice : marketData.price;
-
-    if (entryPrice === 0) {
-      logger.warn({ mint }, 'Whale sniper: no price available at entry — skipped');
-      return;
-    }
-
     // Enrich name/symbol from DexScreener if still placeholder
+    const tok = trackedTokens.get(mint);
     if (tok) {
       if (tok.name.endsWith('…') || !tok.symbol) {
         tok.name   = marketData.name   || tok.name;
@@ -696,50 +688,60 @@ async function enterWhalePosition(
     }
 
     // ── Slippage guard ─────────────────────────────────────────────────────────
-    // If price has moved more than whaleSlippagePct% above the whale's detection
-    // price, the opportunity has already pumped too much — skip it.
     let maxSlippage = 20;
     try {
       const s = await getSettings();
       maxSlippage = s.whaleSlippagePct ?? 20;
     } catch { /* use default */ }
 
-    if (priceAtDetection > 0) {
-      const slipPct = ((entryPrice - priceAtDetection) / priceAtDetection) * 100;
-      if (slipPct > maxSlippage) {
-        logger.warn(
-          { mint: mint.slice(0, 12), symbol, slipPct: slipPct.toFixed(1), maxSlippage },
-          'Whale sniper: slippage exceeded — skipped',
-        );
-        notifyWhaleSkip({
-          name, symbol, mint, whaleAmountUsd: triggerAmountUsd,
-          reason: `Slippage ${slipPct.toFixed(1)}% > ${maxSlippage}% max`,
-          entryPrice, whalePriceAtDetection: priceAtDetection, maxSlippagePct: maxSlippage,
-        }).catch(() => {});
-        return;
-      }
-    }
-
-    // Re-check after the async gaps above — belt-and-suspenders in case the
-    // lock was somehow bypassed (e.g. process restart mid-flight).
+    // Re-check after the async gaps above — belt-and-suspenders.
     if (whalePositions.has(mint)) return;
 
+    // Mark entryTriggered BEFORE the delay so validateOrPrune cannot prune
+    // this token during the wait window.
+    if (tok) tok.entryTriggered = true;
+
     // ── 2-second entry delay ─────────────────────────────────────────────────
-    // Wait ENTRY_DELAY_MS after whale detection, then fetch a fresh market price.
-    // This ensures our entry price reflects the real market 2s after the whale
-    // pumped — not the whale's own buy price — and keeps timing tight.
+    // We do NOT fetch price before this delay:
+    //   • the pool address may not yet be resolved (enrichTokenMetadataAsync is
+    //     async and takes 5-15s);
+    //   • on-chain reserve reads would return the stale pre-whale pool state
+    //     if RPC is lagging or rate-limited;
+    //   • DexScreener lags 30-120s and would return an even older price.
+    // Instead we wait, then fetch ONCE — by that time Jupiter has the token,
+    // DexScreener has often updated, and the pool address is more likely set.
+    // If the fetch still fails, we fall back to priceAtDetection (the whale's
+    // verified on-chain avg price from the tx), which is far more accurate than
+    // any stale cached value.
     await new Promise(r => setTimeout(r, ENTRY_DELAY_MS));
     if (whalePositions.has(mint)) return;
 
-    const delayedPrice = await fetchPriceFresh(mint, pairAddr);
-    const finalEntryPrice = delayedPrice > 0 ? delayedPrice : entryPrice;
+    // Use the poolAddress if enrichment has completed by now; otherwise Jupiter
+    // quote (which doesn't need the pair address) will work for any valid token.
+    const pairAddr     = trackedTokens.get(mint)?.poolAddress;
+    const delayedPrice = await fetchPriceFresh(mint, pairAddr).catch(() => 0);
+
+    // Require a fresh market price — do NOT fall back to priceAtDetection (whale's
+    // tx avg) here. Using the whale's avg as OUR entry price would:
+    //   (a) record a falsely low entry (whale's avg < post-buy pool price);
+    //   (b) make the slippage check near-0% (same reference on both sides), so
+    //       a legitimate pump-too-far scenario passes undetected.
+    // If the market fetch fails, skip this entry; the RPC will recover quickly
+    // and the next qualifying whale buy on this token (or any other) will work.
+    if (delayedPrice === 0) {
+      logger.warn({ mint: mint.slice(0, 12), symbol }, 'Whale sniper: post-delay price unavailable — skipped (will retry on next whale buy)');
+      if (tok) tok.entryTriggered = false; // allow future qualifying buys to trigger
+      return;
+    }
+
+    const finalEntryPrice = delayedPrice;
 
     const entryTimestamp = Date.now();
     const entryDelayMs   = entryTimestamp - whaleBuyTimestamp;
 
-    // ── Post-delay slippage re-check ─────────────────────────────────────────
-    // Price may have moved further during the 2s wait — re-validate against the
-    // actual entry price before committing. This is the real enforcement point.
+    // ── Slippage check (single, post-delay) ──────────────────────────────────
+    // Compare our actual entry price against the whale's on-chain avg price.
+    // If the token pumped more than maxSlippage% in the wait window, skip.
     if (priceAtDetection > 0) {
       const finalSlipPct = ((finalEntryPrice - priceAtDetection) / priceAtDetection) * 100;
       if (finalSlipPct > maxSlippage) {
@@ -749,9 +751,10 @@ async function enterWhalePosition(
         );
         notifyWhaleSkip({
           name, symbol, mint, whaleAmountUsd: triggerAmountUsd,
-          reason: `Post-delay slippage ${finalSlipPct.toFixed(1)}% > ${maxSlippage}% max`,
+          reason: `Slippage ${finalSlipPct.toFixed(1)}% > ${maxSlippage}% max`,
           entryPrice: finalEntryPrice, whalePriceAtDetection: priceAtDetection, maxSlippagePct: maxSlippage,
         }).catch(() => {});
+        if (tok) tok.entryTriggered = false;
         return;
       }
     }
@@ -765,7 +768,7 @@ async function enterWhalePosition(
         whaleBuyAt: new Date(whaleBuyTimestamp).toISOString(),
         ourEntryAt: new Date(entryTimestamp).toISOString(),
         entryDelayMs },
-      'Whale sniper: entering 2s after whale — price fetched fresh',
+      'Whale sniper: entering after delay — price fetched post-delay',
     );
 
     const balance = await getBalance().catch(() => 10);

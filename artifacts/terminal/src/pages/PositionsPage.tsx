@@ -460,14 +460,23 @@ export default function PositionsPage({ whaleStatus, onRefresh }: Props) {
         </div>
       )}
 
-      {/* ── Whale closed positions ── */}
-      {whaleClosed.length > 0 && (
-        <>
-          <div className="section-label" style={{ marginTop: 8 }}>🐋 Closed Whale Positions ({whaleClosed.length})</div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-            {whaleClosed.slice(0, 20).map((p) => <ClosedWhaleCard key={p.id} pos={p} onRefresh={onRefresh} />)}
-          </div>
-        </>
+      {/* ── Whale closed positions — always visible so fast-close trades are never hidden ── */}
+      <div className="section-label" style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 8 }}>
+        <span>🐋 Closed Whale Positions</span>
+        {whaleClosed.length > 0 && (
+          <span style={{ fontSize: 11, fontWeight: 700, color: '#00d4ff', background: 'rgba(0,212,255,0.12)', borderRadius: 6, padding: '1px 7px' }}>
+            {whaleClosed.length}
+          </span>
+        )}
+      </div>
+      {whaleClosed.length === 0 ? (
+        <div className="card" style={{ padding: '16px 20px', textAlign: 'center', color: '#3a5070', fontSize: 12 }}>
+          No closed positions yet — fast-closing trades appear here immediately
+        </div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {whaleClosed.slice(0, 20).map((p) => <ClosedWhaleCard key={p.id} pos={p} onRefresh={onRefresh} />)}
+        </div>
       )}
     </div>
   );
