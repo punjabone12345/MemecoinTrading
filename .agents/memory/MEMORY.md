@@ -29,3 +29,4 @@
 - [Whale sniper Jupiter price formula](whale-sniper-jupiter-price.md) — price = (0.01 SOL × SOL_USD) / (outAmount / 1e6); never rely on swapUsdValue (zero for fresh tokens); SOL price from Jupiter Price API v2 not DexScreener
 - [Trenches poll Helius 429 / public RPC fallback](trenches-poll-rpc.md) — @solana/web3.js Connection.getSignaturesForAddress fails on Render with Helius 429; use direct fetch() + public RPC fallback; wrap in withHeliusLimit
 - [Whale lifetime mint dedup](whale-lifetime-mint-dedup.md) — in-memory open-position tracking alone can't guarantee "never trade a mint twice"; needs DB-backed lifetime set checked at every pipeline entry point
+- [Whale entry price fix](whale-entry-price-fix.md) — DexScreener last-resort in fetchPriceFresh returned stale pre-pump price; fixed by extracting pool vaults from whale's tx and reading reserves directly

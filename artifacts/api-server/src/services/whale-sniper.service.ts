@@ -52,6 +52,11 @@ export interface TrackedToken {
   name: string;
   symbol: string;
   poolAddress?: string;
+  // Vault addresses extracted directly from the whale's buy transaction.
+  // These are the pool's actual token vault (base) and WSOL vault (quote).
+  // Populated the moment a whale buy is detected — no DexScreener pool resolution needed.
+  poolBaseVault?: string;
+  poolQuoteVault?: string;
   migrationTime: number;
   expiresAt: number;
   entryTriggered: boolean;
@@ -473,27 +478,54 @@ async function fetchPriceFresh(mint: string, pairAddress?: string): Promise<numb
     return jupiterPrice;
   }
 
-  // ── Last resort: DexScreener confirmed-pumpswap pair ─────────────────────
-  try {
-    const r = await axios.get<any>(`${DEX_BASE}/latest/dex/tokens/${mint}`, { timeout: 6_000 });
-    const pairs: any[] = (r.data?.pairs ?? [])
-      .filter((p: any) => (p.dexId ?? '').toLowerCase() === 'pumpswap')
-      .sort((a: any, b: any) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0));
-    if (pairs.length) {
-      const price = parseFloat(pairs[0]?.priceUsd ?? '0');
-      if (price > 0) {
-        logger.info({ mint: mint.slice(0, 12), price, source: 'dexscreener-last-resort' }, 'Whale sniper: spot price (dexscreener last resort)');
-        return price;
-      }
-    }
-  } catch { /* non-fatal */ }
-
+  // DexScreener is intentionally NOT used here. For freshly-graduated tokens,
+  // DexScreener caches its price 30-120s — reading it during entry returns the
+  // pre-whale-pump price, which can be 10-30% below the real pool price.
+  // Use fetchPriceFromVaults() directly when on-chain data is needed.
   return 0;
+}
+
+// ── Direct vault-balance price (most accurate for fresh tokens) ───────────────
+//
+// Reads the pool's ACTUAL token vault and WSOL vault balances at this moment.
+// Vault addresses are extracted from the whale's buy tx (detectBuy), so this
+// requires no pool-account lookup, no DexScreener pair resolution, and no
+// Jupiter routing — just two getTokenAccountBalance calls.
+//
+// price = (wsolVaultBalance × solPriceUsd) / baseVaultBalance
+//
+async function fetchPriceFromVaults(baseVault: string, quoteVault: string, solPriceUsd: number): Promise<number> {
+  if (!baseVault || !quoteVault || solPriceUsd <= 0) return 0;
+  try {
+    const conn = getConn();
+    const [baseBal, quoteBal] = await Promise.all([
+      withHeliusLimit(() => conn.getTokenAccountBalance(new PublicKey(baseVault))).catch(() => null),
+      withHeliusLimit(() => conn.getTokenAccountBalance(new PublicKey(quoteVault))).catch(() => null),
+    ]);
+    const baseAmount  = baseBal?.value?.uiAmount  ?? 0;
+    const quoteAmount = quoteBal?.value?.uiAmount ?? 0;
+    if (baseAmount <= 0 || quoteAmount <= 0) return 0;
+    const price = (quoteAmount * solPriceUsd) / baseAmount;
+    logger.info(
+      { baseVault: baseVault.slice(0, 12), quoteVault: quoteVault.slice(0, 12),
+        base: baseAmount.toFixed(0), quote: quoteAmount.toFixed(4), price, source: 'tx-vault-balances' },
+      'Whale sniper: spot price (tx vault balances — ground truth)',
+    );
+    return price > 0 ? price : 0;
+  } catch {
+    return 0;
+  }
 }
 
 // ── Buy detection from a parsed Solana transaction ───────────────────────────
 
-interface BuyInfo { wallet: string; solSpent: number; tokensReceived: number; }
+interface BuyInfo {
+  wallet: string;
+  solSpent: number;
+  tokensReceived: number;
+  poolBaseVault: string | null;  // pool's token vault — decreasing side of the swap
+  poolQuoteVault: string | null; // pool's WSOL vault — increasing side of the swap
+}
 
 function detectBuy(tx: any, targetMint: string): BuyInfo | null {
   const preTok: any[]     = tx.meta?.preTokenBalances  ?? [];
@@ -539,8 +571,48 @@ function detectBuy(tx: any, targetMint: string): BuyInfo | null {
   const spent = Math.max(nativeLamports, wsolLamports);
   if (spent < 10_000) return null;
 
+  // ── Extract pool vault addresses from this tx ────────────────────────────
+  // Pool's BASE vault: the target-mint account that DECREASED (pool gave tokens to buyer)
+  let poolBaseVault: string | null = null;
+  for (const pre of preTok) {
+    if (pre.mint !== targetMint) continue;
+    const post   = postTok.find((p: any) => p.accountIndex === pre.accountIndex && p.mint === targetMint);
+    const preRaw = parseInt(pre.uiTokenAmount?.amount ?? '0', 10);
+    const postRaw= parseInt(post?.uiTokenAmount?.amount ?? '0', 10);
+    if (preRaw > postRaw) {
+      const addr = keys[pre.accountIndex]?.pubkey?.toString() ?? keys[pre.accountIndex]?.toString() ?? null;
+      if (addr) { poolBaseVault = addr; break; }
+    }
+  }
+
+  // Pool's QUOTE vault (WSOL): pick the WSOL account with the LARGEST lamport increase.
+  //
+  // Why largest-increase instead of first-match with owner filter:
+  //   • In a direct PumpSwap buy, the pool's WSOL vault receives all the SOL the buyer paid.
+  //   • In multi-leg or routed transactions, intermediate accounts may also gain WSOL, but
+  //     the pool vault always shows the dominant increase.
+  //   • The owner field is sometimes absent from getParsedTransaction results, making
+  //     owner-based exclusion unreliable. The buyer's WSOL account DECREASES (they spend SOL),
+  //     so any WSOL account that increases is either the pool or an intermediate account.
+  //     Taking the largest increase almost always gives us the pool vault.
+  //   • Explicitly skip fee-payer-owned accounts when owner IS available.
+  let poolQuoteVault: string | null = null;
+  let maxWsolIncrease = 0;
+  for (const post of postTok) {
+    if (post.mint !== WSOL_MINT) continue;
+    if (post.owner && post.owner === feePayerAddr) continue; // buyer's WSOL — skip when owner known
+    const pre     = preTok.find((p: any) => p.accountIndex === post.accountIndex && p.mint === WSOL_MINT);
+    const preRaw  = parseInt(pre?.uiTokenAmount?.amount ?? '0', 10);
+    const postRaw = parseInt(post.uiTokenAmount?.amount ?? '0', 10);
+    const delta   = postRaw - preRaw;
+    if (delta > maxWsolIncrease) {
+      const addr = keys[post.accountIndex]?.pubkey?.toString() ?? keys[post.accountIndex]?.toString() ?? null;
+      if (addr) { poolQuoteVault = addr; maxWsolIncrease = delta; }
+    }
+  }
+
   const wallet = keys[0]?.pubkey?.toString() ?? keys[0]?.toString() ?? 'unknown';
-  return { wallet, solSpent: spent / 1e9, tokensReceived };
+  return { wallet, solSpent: spent / 1e9, tokensReceived, poolBaseVault, poolQuoteVault };
 }
 
 // ── DB persistence (survives Render free-tier spin-down / restarts) ───────────
@@ -716,20 +788,38 @@ async function enterWhalePosition(
     await new Promise(r => setTimeout(r, ENTRY_DELAY_MS));
     if (whalePositions.has(mint)) return;
 
-    // Use the poolAddress if enrichment has completed by now; otherwise Jupiter
-    // quote (which doesn't need the pair address) will work for any valid token.
-    const pairAddr     = trackedTokens.get(mint)?.poolAddress;
-    const delayedPrice = await fetchPriceFresh(mint, pairAddr).catch(() => 0);
+    // Read the latest state of trackedTokens — enrichment may have run during the delay.
+    const tok2 = trackedTokens.get(mint);
 
-    // Require a fresh market price — do NOT fall back to priceAtDetection (whale's
-    // tx avg) here. Using the whale's avg as OUR entry price would:
-    //   (a) record a falsely low entry (whale's avg < post-buy pool price);
-    //   (b) make the slippage check near-0% (same reference on both sides), so
-    //       a legitimate pump-too-far scenario passes undetected.
-    // If the market fetch fails, skip this entry; the RPC will recover quickly
-    // and the next qualifying whale buy on this token (or any other) will work.
+    // ── Price fetch priority after the 2s wait ───────────────────────────────
+    // 1. Direct vault read from whale's tx (ground truth — no pool addr resolution needed)
+    // 2. On-chain reserve ratio via DexScreener pool address (if enrichment has resolved it)
+    // 3. Jupiter quote (no pool address needed)
+    // If all fail: skip entry — never fall back to DexScreener priceUsd (it's 30-120s stale)
+    await fetchSolPrice().catch(() => {}); // ensure SOL price is fresh for all paths
+
+    let delayedPrice = 0;
+
+    // Path 1: direct vault balance read — extracted from whale's buy tx
+    if (tok2?.poolBaseVault && tok2?.poolQuoteVault) {
+      delayedPrice = await fetchPriceFromVaults(tok2.poolBaseVault, tok2.poolQuoteVault, cachedSolPrice).catch(() => 0);
+    }
+
+    // Path 2: on-chain reserve ratio via pool account (requires DexScreener pool addr)
+    if (delayedPrice === 0 && tok2?.poolAddress) {
+      delayedPrice = await fetchOnChainReservePrice(tok2.poolAddress, cachedSolPrice).catch(() => 0);
+      if (delayedPrice > 0) logger.info({ mint: mint.slice(0, 12), price: delayedPrice, source: 'pool-account' }, 'Whale sniper: spot price (pool account fallback)');
+    }
+
+    // Path 3: Jupiter quote (on-chain-derived, no pool address needed)
     if (delayedPrice === 0) {
-      logger.warn({ mint: mint.slice(0, 12), symbol }, 'Whale sniper: post-delay price unavailable — skipped (will retry on next whale buy)');
+      delayedPrice = await fetchPriceFresh(mint, undefined).catch(() => 0); // pairAddress=undefined → skips on-chain read, goes straight to Jupiter
+    }
+
+    // Do NOT fall back to DexScreener priceUsd — it's 30-120s stale on fresh tokens
+    // and will return the pre-whale-pump price, making our entry price completely wrong.
+    if (delayedPrice === 0) {
+      logger.warn({ mint: mint.slice(0, 12), symbol }, 'Whale sniper: all price sources failed — skipping entry (will retry on next whale buy)');
       if (tok) tok.entryTriggered = false; // allow future qualifying buys to trigger
       return;
     }
@@ -994,9 +1084,17 @@ async function pollTokenBuys(mint: string): Promise<void> {
           const whaleTxPrice = buy.tokensReceived > 0 && cachedSolPrice > 0
             ? (buy.solSpent * cachedSolPrice) / buy.tokensReceived
             : 0;
+          // Store vault addresses from this tx so enterWhalePosition can read
+          // the actual on-chain pool reserves without needing DexScreener pool resolution.
+          // Update missing fields independently — a later buy can backfill a missing quoteVault.
+          const tokEntry = trackedTokens.get(mint);
+          if (tokEntry) {
+            if (buy.poolBaseVault  && !tokEntry.poolBaseVault)  tokEntry.poolBaseVault  = buy.poolBaseVault;
+            if (buy.poolQuoteVault && !tokEntry.poolQuoteVault) tokEntry.poolQuoteVault = buy.poolQuoteVault;
+          }
           logger.info(
             { mint: mint.slice(0, 12), wallet: buy.wallet.slice(0, 8), usd: amountUsd.toFixed(0),
-              whaleTxPrice, sig: batch[j].slice(0, 12) },
+              whaleTxPrice, vaults: !!(buy.poolBaseVault && buy.poolQuoteVault), sig: batch[j].slice(0, 12) },
             'Whale sniper: baseline — early whale buy found',
           );
           await handleWhaleBuy(mint, buy.wallet, amountUsd, batch[j], whaleTxPrice);
@@ -1047,6 +1145,14 @@ async function pollTokenBuys(mint: string): Promise<void> {
       const whaleTxPrice = buy.tokensReceived > 0 && cachedSolPrice > 0
         ? (buy.solSpent * cachedSolPrice) / buy.tokensReceived
         : 0;
+      // Store vault addresses from this tx so enterWhalePosition can read
+      // the actual on-chain pool reserves without needing DexScreener pool resolution.
+      // Update missing fields independently — a later buy can backfill a missing quoteVault.
+      const tokLive = trackedTokens.get(mint);
+      if (tokLive) {
+        if (buy.poolBaseVault  && !tokLive.poolBaseVault)  tokLive.poolBaseVault  = buy.poolBaseVault;
+        if (buy.poolQuoteVault && !tokLive.poolQuoteVault) tokLive.poolQuoteVault = buy.poolQuoteVault;
+      }
       logger.info(
         { mint: mint.slice(0, 12), wallet: buy.wallet.slice(0, 8), usd: amountUsd.toFixed(0), whaleTxPrice, sig: toFetch[i].slice(0, 12) },
         'Whale sniper: buy detected',
