@@ -266,6 +266,35 @@ async function markMintTraded(mint: string): Promise<void> {
   }
 }
 
+// ── Slippage-skipped mints registry ──────────────────────────────────────────
+// Once a mint is skipped due to post-delay slippage it is permanently blocked
+// at every entry gate. The token already pumped past our threshold before we
+// could get a fill — subsequent whale buys on the same mint will face the same
+// or worse slippage, so we never attempt it again.
+const slippageSkippedMints = new Set<string>();
+
+async function loadSlippageSkippedMintsFromDB(): Promise<void> {
+  try {
+    const rows = await query<any>(`SELECT mint FROM whale_slippage_skipped_mints`);
+    for (const r of rows) slippageSkippedMints.add(r.mint);
+    logger.info({ count: slippageSkippedMints.size }, 'Whale sniper: loaded slippage-skipped mint registry');
+  } catch (err: any) {
+    logger.warn({ err: err?.message }, 'Whale sniper: failed to load slippage-skipped mint registry');
+  }
+}
+
+async function markMintSlippageSkipped(mint: string, slipPct: number): Promise<void> {
+  slippageSkippedMints.add(mint);
+  try {
+    await query(
+      `INSERT INTO whale_slippage_skipped_mints (mint, skipped_at, slip_pct) VALUES ($1, $2, $3) ON CONFLICT (mint) DO NOTHING`,
+      [mint, Date.now(), slipPct],
+    );
+  } catch (err: any) {
+    logger.warn({ err: err?.message, mint }, 'Whale sniper: failed to persist slippage-skipped mint record');
+  }
+}
+
 // SOL price cache
 let cachedSolPrice    = 200;
 let lastSolPriceFetch = 0;
@@ -741,7 +770,7 @@ async function enterWhalePosition(
   // an overlapping poll cycle) cannot both pass this guard.
   // `everTradedMints` is the lifetime gate: a mint that has EVER been entered
   // (open or closed, this session or a previous one) can never be entered again.
-  if (whalePositions.has(mint) || entryLocks.has(mint) || everTradedMints.has(mint)) return;
+  if (whalePositions.has(mint) || entryLocks.has(mint) || everTradedMints.has(mint) || slippageSkippedMints.has(mint)) return;
   entryLocks.add(mint);
 
   try {
@@ -844,6 +873,10 @@ async function enterWhalePosition(
           reason: `Slippage ${finalSlipPct.toFixed(1)}% > ${maxSlippage}% max`,
           entryPrice: finalEntryPrice, whalePriceAtDetection: priceAtDetection, maxSlippagePct: maxSlippage,
         }).catch(() => {});
+        // Permanently block this mint — it already pumped past our threshold
+        // before we could enter; future whale buys on the same token would face
+        // the same or worse slippage so we never attempt it again.
+        markMintSlippageSkipped(mint, finalSlipPct).catch(() => {});
         if (tok) tok.entryTriggered = false;
         return;
       }
@@ -922,7 +955,7 @@ async function enterWhalePosition(
 // ── Queue / slot management ───────────────────────────────────────────────────
 
 function enqueueSignal(mint: string, name: string, symbol: string, sizePct: number, amountUsd: number, priceAtDetection: number, whaleWallet: string, whaleBuyTimestamp: number): void {
-  if (everTradedMints.has(mint)) return;
+  if (everTradedMints.has(mint) || slippageSkippedMints.has(mint)) return;
   if (signalQueue.find(s => s.mint === mint)) return;
   signalQueue.push({ mint, name, symbol, sizePct, triggerAmountUsd: amountUsd, queuedAt: Date.now(), priceAtDetection, whaleWallet, whaleBuyTimestamp });
   logger.info({ mint, symbol, sizePct, reason: 'max 10 positions' }, 'Whale sniper: signal queued');
@@ -933,7 +966,7 @@ async function processQueue(): Promise<void> {
     const sig = signalQueue.shift()!;
     const tok  = trackedTokens.get(sig.mint);
     if (!tok || Date.now() > tok.expiresAt) continue;
-    if (whalePositions.has(sig.mint) || everTradedMints.has(sig.mint)) continue;
+    if (whalePositions.has(sig.mint) || everTradedMints.has(sig.mint) || slippageSkippedMints.has(sig.mint)) continue;
     await enterWhalePosition(sig.mint, sig.name, sig.symbol, sig.sizePct, sig.triggerAmountUsd, sig.priceAtDetection, sig.whaleWallet, sig.whaleBuyTimestamp);
   }
 }
@@ -959,8 +992,10 @@ async function handleWhaleBuy(
 
   if (!tier) {
     entry.skipReason = `${amountUsd.toFixed(0)} below $500 threshold`;
-  } else if (whalePositions.has(mint) || tok.entryTriggered || everTradedMints.has(mint)) {
-    entry.skipReason = 'Already traded this token (lifetime — never re-entered)';
+  } else if (whalePositions.has(mint) || tok.entryTriggered || everTradedMints.has(mint) || slippageSkippedMints.has(mint)) {
+    entry.skipReason = slippageSkippedMints.has(mint)
+      ? 'Slippage-skipped token (permanently blocked — pumped too fast before entry)'
+      : 'Already traded this token (lifetime — never re-entered)';
   } else if (whalePositions.size >= MAX_POSITIONS) {
     entry.skipReason = 'Max positions — queued';
     enqueueSignal(mint, tok.name, tok.symbol, tier.sizePct, amountUsd, priceAtDetection, wallet, whaleBuyTimestamp);
@@ -1434,9 +1469,9 @@ async function activateTrackingNow(mint: string): Promise<void> {
   // Lifetime guard: never re-track (let alone re-enter) a mint that has ever
   // been traded before, even if it "graduates" again due to a duplicate or
   // re-detected on-chain event.
-  if (everTradedMints.has(mint)) {
+  if (everTradedMints.has(mint) || slippageSkippedMints.has(mint)) {
     pendingGraduations.delete(mint);
-    logger.info({ mint: mint.slice(0, 12) }, 'Whale sniper: ignoring re-graduation of already-traded mint');
+    logger.info({ mint: mint.slice(0, 12) }, 'Whale sniper: ignoring re-graduation of already-traded/slippage-skipped mint');
     return;
   }
 
@@ -1615,8 +1650,8 @@ export function addGraduatedToken(ev: { mint: string; poolAddress?: string; ts: 
   }
 
   if (trackedTokens.has(ev.mint) || pendingGraduations.has(ev.mint)) return;
-  if (everTradedMints.has(ev.mint)) {
-    logger.debug({ mint: ev.mint.slice(0, 12) }, 'Whale sniper: ignoring graduation of already-traded mint');
+  if (everTradedMints.has(ev.mint) || slippageSkippedMints.has(ev.mint)) {
+    logger.debug({ mint: ev.mint.slice(0, 12) }, 'Whale sniper: ignoring graduation of already-traded/slippage-skipped mint');
     return;
   }
 
@@ -1842,19 +1877,25 @@ export function resetWhaleState(): void {
   seenTxns.clear();
   mintCheckpointed.clear();
   // Only cleared here because this is invoked by the explicit "reset all data"
-  // admin action (which also wipes whale_traded_mints in the DB) — a real
-  // fresh start. It is never cleared as a side effect of normal trading.
+  // admin action (which also wipes the DB tables) — a real fresh start.
+  // Neither set is cleared as a side effect of normal trading.
   everTradedMints.clear();
+  slippageSkippedMints.clear();
   // Unsubscribe all Helius WS mints
   for (const mint of Array.from(_mintUnsubscribe.keys())) wsUnsubscribeMint(mint);
   broadcastWhaleStatus();
   logger.info('Whale sniper: state reset (all positions and tracking cleared)');
 }
 
-export function startWhaleSniper(): void {
+export async function startWhaleSniper(): Promise<void> {
   logger.info('Whale sniper: started (paper mode — following pump.fun graduations)');
 
-  void loadTradedMintsFromDB();
+  // Await both lifetime-block registries before enabling any entry flow so there
+  // is no window where a previously blocked mint could slip through on startup.
+  await Promise.all([
+    loadTradedMintsFromDB(),
+    loadSlippageSkippedMintsFromDB(),
+  ]);
   void restoreWhalePositionsFromDB();
 
   scheduleBuyPoll();

@@ -22,7 +22,7 @@ async function main(): Promise<void> {
   // Wire pump.fun graduation detection → whale sniper
   setOnGraduation(addGraduatedToken);
   startTrenchesScanner();
-  startWhaleSniper();
+  await startWhaleSniper();
   startTelegramCommands();
 
   process.on('SIGTERM', () => {

@@ -451,5 +451,17 @@ export async function initDB(): Promise<void> {
     )
   `);
 
+  // ── whale_slippage_skipped_mints: permanent record of mints that were skipped
+  // due to post-delay slippage exceeding the configured threshold. Once a mint
+  // lands here it is blocked from every entry gate permanently — we already
+  // know it pumped hard before we could enter, so we will never get a fair fill.
+  await query(`
+    CREATE TABLE IF NOT EXISTS whale_slippage_skipped_mints (
+      mint        TEXT PRIMARY KEY,
+      skipped_at  BIGINT NOT NULL,
+      slip_pct    NUMERIC(10,2)
+    )
+  `);
+
   logger.info('Database initialized');
 }
