@@ -532,6 +532,11 @@ export function startTrenchesScanner(): void {
   if (started) return;
   started = true;
 
+  // Reset cursor so the first poll sets it to "now" — never catch up on
+  // historical migrations that graduated before this session started.
+  lastSeenSig = null;
+  isBootstrap = true;
+
   // Real-time WebSocket subscription (primary, instant)
   startMigrationWalletWS();
 
