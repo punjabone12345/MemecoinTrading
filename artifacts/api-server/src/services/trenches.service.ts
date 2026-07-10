@@ -381,6 +381,7 @@ async function trackMigrationWallet(): Promise<void> {
 
 function schedulePoll(): void {
   if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+  if (!started) return; // don't reschedule after stopTrenchesScanner()
   pollTimer = setTimeout(async () => {
     await trackMigrationWallet();
     schedulePoll(); // reschedule after each run (uses current pollDelayMs)
@@ -389,6 +390,7 @@ function schedulePoll(): void {
 
 // ── Scanner lifecycle ─────────────────────────────────────────────────────────
 let started = false;
+let wsUnsubMigration: (() => void) | null = null;
 
 // ── Real-time Helius WebSocket subscription to the migration wallet ───────────
 // Subscribes to logsSubscribe for the migration wallet so we get notified
@@ -483,7 +485,7 @@ function startMigrationWalletWS(): void {
   // Subscribe to migration-wallet logs via the shared Helius WS connection
   // (avoids opening a second dedicated socket that competes for the single
   // concurrent-connection slot Helius allows per API key).
-  subscribeLogs([MIGRATION_WALLET], (value) => {
+  wsUnsubMigration = subscribeLogs([MIGRATION_WALLET], (value) => {
     if (value.err !== null) return;
 
     const sig: string = value.signature;
@@ -514,6 +516,16 @@ export function getTrenchesDiagnostics() {
     rpcEndpoint: process.env.RPC_ENDPOINT ?? (process.env.HELIUS_API_KEY ? 'helius-http' : 'public-mainnet'),
     recentFeed: pumpfunFeed.slice(0, 5).map(e => ({ mint: e.mint.slice(0, 12), instructionType: e.instructionType, ts: e.ts })),
   };
+}
+
+export function stopTrenchesScanner(): void {
+  if (!started) return;
+  started = false;
+  // Stop polling loop
+  if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+  // Unsubscribe from Helius WS
+  if (wsUnsubMigration) { wsUnsubMigration(); wsUnsubMigration = null; }
+  logger.info('PumpFun migration wallet tracker stopped');
 }
 
 export function startTrenchesScanner(): void {

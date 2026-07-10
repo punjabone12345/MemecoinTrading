@@ -1,4 +1,5 @@
 export interface Settings {
+  botEnabled: boolean;
   startingBalanceSol: number;
   currentBalanceSol: number;
   rpcEndpoint: string;

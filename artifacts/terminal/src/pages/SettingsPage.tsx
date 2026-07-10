@@ -78,7 +78,7 @@ export default function SettingsPage({ settings: init, onUpdate }: Props) {
 
   function update(key: keyof Settings, value: string) {
     const strKeys = ['rpcEndpoint', 'walletPublicKey', 'tradingWindowStart', 'tradingWindowEnd'];
-    const boolKeys = ['tradingWindowEnabled'];
+    const boolKeys = ['tradingWindowEnabled', 'botEnabled'];
     const updated = { ...settings } as Record<string, unknown>;
     if (strKeys.includes(key)) updated[key] = value;
     else if (boolKeys.includes(key)) updated[key] = value === 'true';
@@ -108,6 +108,63 @@ export default function SettingsPage({ settings: init, onUpdate }: Props) {
 
   return (
     <div style={{ maxWidth: 520, paddingBottom: 20 }}>
+
+      {/* ── Master Bot On/Off Switch ────────────────────────────────────── */}
+      {(() => {
+        const on = settings.botEnabled;
+        return (
+          <div
+            className="card"
+            style={{
+              marginBottom: 14,
+              overflow: 'hidden',
+              border: `1px solid ${on ? 'rgba(0,255,136,0.3)' : 'rgba(255,68,102,0.3)'}`,
+              background: on ? 'rgba(0,255,136,0.04)' : 'rgba(255,68,102,0.04)',
+            }}
+          >
+            <div style={{ padding: '16px 18px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16 }}>
+              <div style={{ flex: 1 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                  <span style={{ fontSize: 16 }}>{on ? '🟢' : '🔴'}</span>
+                  <span style={{ fontSize: 14, fontWeight: 800, color: on ? '#00ff88' : '#ff4466', letterSpacing: '0.04em' }}>
+                    Bot {on ? 'ACTIVE' : 'PAUSED'}
+                  </span>
+                </div>
+                <div style={{ fontSize: 11, color: '#3a5070', lineHeight: 1.5 }}>
+                  {on
+                    ? 'All services running — Helius WS connected, graduation scanner active.'
+                    : 'All services stopped — zero Helius or Render credits consumed.'}
+                </div>
+              </div>
+              <button
+                onClick={async () => {
+                  const next = !on;
+                  update('botEnabled', String(next));
+                  // Auto-save immediately — this is a critical on/off switch
+                  try {
+                    const updated = await api.updateSettings({ ...settings, botEnabled: next });
+                    onUpdate(updated);
+                  } catch { /* non-fatal — user can still hit Save */ }
+                }}
+                style={{
+                  flexShrink: 0,
+                  padding: '10px 20px',
+                  borderRadius: 10,
+                  border: `1px solid ${on ? 'rgba(255,68,102,0.4)' : 'rgba(0,255,136,0.4)'}`,
+                  background: on ? 'rgba(255,68,102,0.15)' : 'rgba(0,255,136,0.15)',
+                  color: on ? '#ff4466' : '#00ff88',
+                  fontSize: 12,
+                  fontWeight: 800,
+                  cursor: 'pointer',
+                  letterSpacing: '0.06em',
+                }}
+              >
+                {on ? 'PAUSE BOT' : 'START BOT'}
+              </button>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* ── Trading Mode Toggle ─────────────────────────────────────────── */}
       <div className="card" style={{ marginBottom: 14, overflow: 'hidden' }}>

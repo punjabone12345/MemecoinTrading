@@ -13,6 +13,7 @@ type Tab = 'discover' | 'positions' | 'analytics' | 'settings';
 const TAB_ORDER: Tab[] = ['discover', 'positions', 'analytics', 'settings'];
 
 const DEFAULT_SETTINGS: Settings = {
+  botEnabled: true,
   startingBalanceSol: 10, currentBalanceSol: 10,
   rpcEndpoint: 'https://api.mainnet-beta.solana.com',
   slippagePct: 1, priorityFeeSol: 0.001, walletPublicKey: '',

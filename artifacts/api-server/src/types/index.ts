@@ -1,4 +1,6 @@
 export interface Settings {
+  // Master on/off switch — when false ALL background services stop completely
+  botEnabled: boolean;
   // Paper
   startingBalanceSol: number;
   currentBalanceSol: number;

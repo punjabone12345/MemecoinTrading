@@ -34,6 +34,7 @@ export async function getSettings(): Promise<Settings> {
   const str = (k: string, def: string) => map[k] ?? def;
 
   const settings: Settings = {
+    botEnabled: bool('botEnabled', true),
     startingBalanceSol: num('startingBalanceSol', 10),
     currentBalanceSol: num('currentBalanceSol', 10),
     rpcEndpoint: str('rpcEndpoint', 'https://api.mainnet-beta.solana.com'),

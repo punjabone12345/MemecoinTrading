@@ -5,6 +5,7 @@ import { initWebSocket } from './websocket/server.js';
 import { startTrenchesScanner, setOnGraduation } from './services/trenches.service.js';
 import { startWhaleSniper, addGraduatedToken } from './services/whale-sniper.service.js';
 import { startTelegramCommands, stopTelegramCommands } from './lib/telegram-commands.js';
+import { initSessionManager } from './lib/session-manager.js';
 import { logger } from './lib/logger.js';
 
 const PORT = parseInt(process.env.PORT || '8080', 10);
@@ -24,6 +25,10 @@ async function main(): Promise<void> {
   startTrenchesScanner();
   await startWhaleSniper();
   startTelegramCommands();
+
+  // Session manager: honours the persisted botEnabled flag — stops all services
+  // immediately if the bot was saved as disabled, and handles future toggles.
+  await initSessionManager();
 
   process.on('SIGTERM', () => {
     logger.info('SIGTERM received, shutting down');

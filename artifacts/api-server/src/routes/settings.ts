@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { getSettings, updateSettings, resetAllData, getBalance } from '../services/settings.service.js';
 import { broadcastBalance, broadcastSettings } from '../websocket/server.js';
 import { resetWhaleState } from '../services/whale-sniper.service.js';
+import { applyBotEnabledChange } from '../lib/session-manager.js';
 
 const router = Router();
 
@@ -21,6 +22,9 @@ router.patch('/', async (req, res) => {
 
   // Push updated settings to every connected WS client.
   broadcastSettings().catch(() => { /* non-fatal */ });
+
+  // Apply bot on/off transition if botEnabled changed.
+  applyBotEnabledChange().catch(() => { /* non-fatal */ });
 
   res.json(settings);
 });

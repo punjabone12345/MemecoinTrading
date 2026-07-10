@@ -1796,10 +1796,19 @@ async function refreshTrackedTokensMarketData(): Promise<void> {
 }
 
 // Non-overlapping market refresh: waits for each run to finish before scheduling the next
-function scheduleMarketRefresh(): void {
+// ── Session on/off flag + generation token ────────────────────────────────────
+// _whaleSniperRunning gates rescheduling. _loopGen is a monotonic counter that
+// increments on every stop(); each loop captures its generation at start time
+// and bails if the generation has changed — preventing stale callbacks from a
+// previous run from spawning a new chain after a resume().
+let _whaleSniperRunning = false;
+let _loopGen = 0;
+
+function scheduleMarketRefresh(gen = _loopGen): void {
   setTimeout(async () => {
+    if (!_whaleSniperRunning || _loopGen !== gen) return;
     try { await refreshTrackedTokensMarketData(); } catch { /* non-fatal */ }
-    scheduleMarketRefresh();
+    if (_whaleSniperRunning && _loopGen === gen) scheduleMarketRefresh(gen);
   }, MARKET_REFRESH_MS);
 }
 
@@ -1808,8 +1817,9 @@ function scheduleMarketRefresh(): void {
 // setInterval here previously allowed cycles to overlap when a sweep took
 // longer than POLL_INTERVAL_MS, causing the same whale buy to be detected
 // and entered/alerted twice.
-function scheduleBuyPoll(): void {
+function scheduleBuyPoll(gen = _loopGen): void {
   setTimeout(async () => {
+    if (!_whaleSniperRunning || _loopGen !== gen) return;
     try {
       // Skip scanning entirely when outside the trading window
       const s = await getSettings();
@@ -1821,18 +1831,19 @@ function scheduleBuyPoll(): void {
         }
       }
     } catch { /* non-fatal */ }
-    scheduleBuyPoll();
+    if (_whaleSniperRunning && _loopGen === gen) scheduleBuyPoll(gen);
   }, POLL_INTERVAL_MS);
 }
 
 // Non-overlapping position monitor loop — same rationale as scheduleBuyPoll.
-function schedulePositionMonitor(): void {
+function schedulePositionMonitor(gen = _loopGen): void {
   setTimeout(async () => {
+    if (!_whaleSniperRunning || _loopGen !== gen) return;
     try {
       await monitorPositions();
       broadcastWhaleStatus();
     } catch { /* non-fatal */ }
-    schedulePositionMonitor();
+    if (_whaleSniperRunning && _loopGen === gen) schedulePositionMonitor(gen);
   }, PRICE_CHECK_MS);
 }
 
@@ -1950,6 +1961,30 @@ export function resetWhaleState(): void {
   logger.info('Whale sniper: state reset (all positions and tracking cleared)');
 }
 
+/** Stop all background polling loops. In-flight cycles finish gracefully. */
+export function stopWhaleSniper(): void {
+  if (!_whaleSniperRunning) return;
+  _whaleSniperRunning = false;
+  _loopGen++; // invalidate any pending setTimeout callbacks from the old generation
+  // Unsubscribe all per-mint Helius WS watchers
+  for (const mint of Array.from(_mintUnsubscribe.keys())) wsUnsubscribeMint(mint);
+  logger.info('Whale sniper: stopped (polling loops will not reschedule)');
+}
+
+/** Resume polling loops after a stopWhaleSniper() call. Does NOT reload DB state. */
+export function resumeWhaleSniper(): void {
+  if (_whaleSniperRunning) return;
+  _whaleSniperRunning = true;
+  scheduleBuyPoll();
+  schedulePositionMonitor();
+  scheduleMarketRefresh();
+  void fetchSolPrice();
+  if (isHeliusWsConfigured()) {
+    connectWhaleWs();
+  }
+  logger.info('Whale sniper: resumed');
+}
+
 export async function startWhaleSniper(): Promise<void> {
   logger.info('Whale sniper: started (paper mode — following pump.fun graduations)');
 
@@ -1961,6 +1996,7 @@ export async function startWhaleSniper(): Promise<void> {
   ]);
   void restoreWhalePositionsFromDB();
 
+  _whaleSniperRunning = true;
   scheduleBuyPoll();
   schedulePositionMonitor();
 

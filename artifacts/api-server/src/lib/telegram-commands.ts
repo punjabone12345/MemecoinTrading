@@ -10,6 +10,7 @@ const BASE_URL = () => `https://api.telegram.org/bot${BOT_TOKEN}`;
 
 let updateOffset = 0;
 let pollTimeout: ReturnType<typeof setTimeout> | null = null;
+let _telegramRunning = false;
 const startedAt = Date.now();
 
 function toIST(date: Date): string {
@@ -197,7 +198,9 @@ async function pollOnce(): Promise<void> {
 }
 
 async function pollLoop(): Promise<void> {
+  if (!_telegramRunning) return; // guard: stop requested before this iteration
   await pollOnce();
+  if (!_telegramRunning) return; // guard: stop requested while pollOnce was in flight
   pollTimeout = setTimeout(() => { void pollLoop(); }, 100);
 }
 
@@ -206,6 +209,8 @@ export function startTelegramCommands(): void {
     logger.info('TELEGRAM_BOT_TOKEN not set — command polling disabled');
     return;
   }
+  if (_telegramRunning) return; // idempotent — already started
+  _telegramRunning = true;
 
   // Drop any pending updates that accumulated while the bot was offline
   // by fetching with offset=-1 and a zero timeout on startup.
@@ -213,19 +218,24 @@ export function startTelegramCommands(): void {
     params: { offset: -1, timeout: 0 },
     timeout: 5_000,
   }).then((res: { data: { result?: TelegramUpdate[] } }) => {
+    if (!_telegramRunning) return; // stop was called before startup completed
     const updates = res.data?.result ?? [];
     if (updates.length > 0) {
       updateOffset = updates[updates.length - 1].update_id + 1;
     }
     void pollLoop();
-  }).catch(() => { void pollLoop(); });
+  }).catch(() => {
+    if (_telegramRunning) void pollLoop();
+  });
 
   logger.info('Telegram command polling started (/command1 /command2 /command3)');
 }
 
 export function stopTelegramCommands(): void {
+  _telegramRunning = false;
   if (pollTimeout) {
     clearTimeout(pollTimeout);
     pollTimeout = null;
   }
+  logger.info('Telegram command polling stopped');
 }

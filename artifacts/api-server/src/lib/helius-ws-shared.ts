@@ -173,6 +173,28 @@ export function ensureHeliusWsStarted(): void {
 }
 
 /**
+ * Fully stop the shared Helius WebSocket connection and cancel any pending
+ * reconnect timer. Resets `startedOnce` so `ensureHeliusWsStarted()` will
+ * reconnect cleanly if called again.
+ */
+export function stopHeliusWs(): void {
+  startedOnce = false;
+  ready = false;
+  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+  if (pingTimer) { clearInterval(pingTimer); pingTimer = null; }
+  if (ws) {
+    ws.removeAllListeners();
+    try { ws.terminate(); } catch {}
+    ws = null;
+  }
+  // Clear server-assigned sub IDs; subscriptions are re-registered on next connect
+  for (const sub of subs.values()) sub.subId = undefined;
+  subIdToKey.clear();
+  pendingReqToKey.clear();
+  logger.info('Helius WS (shared): stopped');
+}
+
+/**
  * Register a logsSubscribe subscription for one or more "mentions" (program ID or
  * account address). Returns an unsubscribe function. Automatically resubscribes
  * after reconnects.
