@@ -112,39 +112,50 @@ export default function SettingsPage({ settings: init, onUpdate }: Props) {
       {/* ── Master Bot On/Off Switch ────────────────────────────────────── */}
       {(() => {
         const on = settings.botEnabled;
+        const winEnabled = settings.tradingWindowEnabled;
+        const inWindow = checkInWindow(winEnabled, settings.tradingWindowStart, settings.tradingWindowEnd);
+
+        // Effective running state (mirrors session-manager logic)
+        const effectivelyRunning = on && (!winEnabled || inWindow);
+
+        let statusLine: string;
+        if (!on) {
+          statusLine = 'Manually paused — zero Helius or Render credits consumed.';
+        } else if (!winEnabled) {
+          statusLine = 'Running 24/7 — no trading window restriction.';
+        } else if (inWindow) {
+          statusLine = `Active inside trading window (${settings.tradingWindowStart}–${settings.tradingWindowEnd} IST). Will auto-pause when window closes.`;
+        } else {
+          statusLine = `Waiting for trading window (${settings.tradingWindowStart} IST). Will auto-start when window opens.`;
+        }
+
+        const accentColor = effectivelyRunning ? '#00ff88' : on ? '#ffaa00' : '#ff4466';
+        const borderColor = effectivelyRunning ? 'rgba(0,255,136,0.3)' : on ? 'rgba(255,170,0,0.3)' : 'rgba(255,68,102,0.3)';
+        const bgColor     = effectivelyRunning ? 'rgba(0,255,136,0.04)' : on ? 'rgba(255,170,0,0.04)' : 'rgba(255,68,102,0.04)';
+        const statusEmoji = effectivelyRunning ? '🟢' : on ? '🟡' : '🔴';
+        const statusLabel = effectivelyRunning ? 'RUNNING' : on ? 'SCHEDULED' : 'PAUSED';
+
         return (
-          <div
-            className="card"
-            style={{
-              marginBottom: 14,
-              overflow: 'hidden',
-              border: `1px solid ${on ? 'rgba(0,255,136,0.3)' : 'rgba(255,68,102,0.3)'}`,
-              background: on ? 'rgba(0,255,136,0.04)' : 'rgba(255,68,102,0.04)',
-            }}
-          >
+          <div className="card" style={{ marginBottom: 14, overflow: 'hidden', border: `1px solid ${borderColor}`, background: bgColor }}>
             <div style={{ padding: '16px 18px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16 }}>
               <div style={{ flex: 1 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
-                  <span style={{ fontSize: 16 }}>{on ? '🟢' : '🔴'}</span>
-                  <span style={{ fontSize: 14, fontWeight: 800, color: on ? '#00ff88' : '#ff4466', letterSpacing: '0.04em' }}>
-                    Bot {on ? 'ACTIVE' : 'PAUSED'}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+                  <span style={{ fontSize: 15 }}>{statusEmoji}</span>
+                  <span style={{ fontSize: 14, fontWeight: 800, color: accentColor, letterSpacing: '0.04em' }}>
+                    Bot {statusLabel}
                   </span>
+                  <span style={{ fontSize: 10, color: '#3a5070', marginLeft: 2 }}>· {istClock}</span>
                 </div>
-                <div style={{ fontSize: 11, color: '#3a5070', lineHeight: 1.5 }}>
-                  {on
-                    ? 'All services running — Helius WS connected, graduation scanner active.'
-                    : 'All services stopped — zero Helius or Render credits consumed.'}
-                </div>
+                <div style={{ fontSize: 11, color: '#4a6080', lineHeight: 1.6 }}>{statusLine}</div>
               </div>
               <button
                 onClick={async () => {
                   const next = !on;
                   update('botEnabled', String(next));
-                  // Auto-save immediately — this is a critical on/off switch
                   try {
                     const updated = await api.updateSettings({ ...settings, botEnabled: next });
                     onUpdate(updated);
-                  } catch { /* non-fatal — user can still hit Save */ }
+                  } catch { /* non-fatal */ }
                 }}
                 style={{
                   flexShrink: 0,
