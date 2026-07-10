@@ -17,6 +17,7 @@ const DEFAULT_SETTINGS: Settings = {
   rpcEndpoint: 'https://api.mainnet-beta.solana.com',
   slippagePct: 1, priorityFeeSol: 0.001, walletPublicKey: '',
   whaleSlippagePct: 20, whaleStagnationPct: 5,
+  tradingWindowEnabled: true, tradingWindowStart: '17:00', tradingWindowEnd: '00:00',
   wt1Tp1Pct: 50,  wt1Tp1Exit: 30,
   wt1Tp2Pct: 125, wt1Tp2Exit: 30, wt1Tp2Trail: 30,
   wt1Tp3Pct: 200, wt1Tp3Exit: 30, wt1Tp3Trail: 20,

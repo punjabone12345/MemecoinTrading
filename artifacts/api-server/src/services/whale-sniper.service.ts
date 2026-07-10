@@ -952,6 +952,50 @@ async function enterWhalePosition(
   }
 }
 
+// ── Trading window (IST) ─────────────────────────────────────────────────────
+
+/**
+ * Returns true if the current IST time is within the configured trading window.
+ * When tradingWindowEnabled is false, always returns true (no restriction).
+ *
+ * "00:00" as an end time is treated as midnight = end of calendar day (1440 min).
+ * Supports cross-midnight windows like 22:00→06:00 automatically.
+ */
+/** Returns the current time-of-day in IST as total minutes since midnight (0–1439). */
+function getISTMinutes(): number {
+  // Intl.DateTimeFormat with timeZone:'Asia/Kolkata' is the only correct way to
+  // get IST regardless of the host server's local timezone setting.
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Kolkata',
+    hour: 'numeric', minute: 'numeric', hour12: false,
+  }).formatToParts(new Date());
+  const h = parseInt(parts.find(p => p.type === 'hour')?.value   ?? '0', 10);
+  const m = parseInt(parts.find(p => p.type === 'minute')?.value ?? '0', 10);
+  // Intl may return hour=24 for midnight in some environments; normalise to 0.
+  return (h % 24) * 60 + m;
+}
+
+function isInTradingWindow(settings: { tradingWindowEnabled: boolean; tradingWindowStart: string; tradingWindowEnd: string }): boolean {
+  if (!settings.tradingWindowEnabled) return true;
+
+  const currentMin = getISTMinutes();
+
+  const [sh, sm] = (settings.tradingWindowStart || '17:00').split(':').map(Number);
+  const [eh, em] = (settings.tradingWindowEnd   || '00:00').split(':').map(Number);
+
+  const startMin = sh * 60 + (sm || 0);
+  // "00:00" end → treat as 1440 (end of calendar day = just-before-midnight)
+  const endMin   = (eh === 0 && (em || 0) === 0) ? 1440 : eh * 60 + (em || 0);
+
+  if (startMin < endMin) {
+    // Normal same-day window: e.g. 17:00→00:00 (→1440), 09:00→17:00
+    return currentMin >= startMin && currentMin < endMin;
+  } else {
+    // Cross-midnight window: e.g. 22:00→06:00
+    return currentMin >= startMin || currentMin < endMin;
+  }
+}
+
 // ── Queue / slot management ───────────────────────────────────────────────────
 
 function enqueueSignal(mint: string, name: string, symbol: string, sizePct: number, amountUsd: number, priceAtDetection: number, whaleWallet: string, whaleBuyTimestamp: number): void {
@@ -962,6 +1006,12 @@ function enqueueSignal(mint: string, name: string, symbol: string, sizePct: numb
 }
 
 async function processQueue(): Promise<void> {
+  // Don't dequeue if we're outside the trading window
+  try {
+    const s = await getSettings();
+    if (!isInTradingWindow(s)) return;
+  } catch { return; }
+
   while (signalQueue.length > 0 && whalePositions.size < MAX_POSITIONS) {
     const sig = signalQueue.shift()!;
     const tok  = trackedTokens.get(sig.mint);
@@ -978,6 +1028,15 @@ async function handleWhaleBuy(
 ): Promise<void> {
   const tok = trackedTokens.get(mint);
   if (!tok) return;
+
+  // ── Trading window gate ───────────────────────────────────────────────────
+  try {
+    const s = await getSettings();
+    if (!isInTradingWindow(s)) {
+      logger.info({ mint, symbol: tok.symbol }, 'Whale sniper: outside trading window — entry skipped');
+      return;
+    }
+  } catch { /* if settings unavailable, block entry to be safe */ return; }
 
   const whaleBuyTimestamp = Date.now();
   tok.whaleBuys.push({ wallet, amountUsd, timestamp: whaleBuyTimestamp, txSig, priceAtDetection });
@@ -1752,10 +1811,14 @@ function scheduleMarketRefresh(): void {
 function scheduleBuyPoll(): void {
   setTimeout(async () => {
     try {
-      pruneExpiredTracking();
-      for (const mint of Array.from(trackedTokens.keys())) {
-        await pollTokenBuys(mint);
-        await new Promise(r => setTimeout(r, 300));
+      // Skip scanning entirely when outside the trading window
+      const s = await getSettings();
+      if (isInTradingWindow(s)) {
+        pruneExpiredTracking();
+        for (const mint of Array.from(trackedTokens.keys())) {
+          await pollTokenBuys(mint);
+          await new Promise(r => setTimeout(r, 300));
+        }
       }
     } catch { /* non-fatal */ }
     scheduleBuyPoll();

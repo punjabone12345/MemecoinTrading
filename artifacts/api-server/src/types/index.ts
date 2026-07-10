@@ -9,6 +9,10 @@ export interface Settings {
   walletPublicKey: string;
   whaleSlippagePct: number;
   whaleStagnationPct: number;  // exit if |priceChange1h| < this %, after 1h open
+  // Trading window (IST)
+  tradingWindowEnabled: boolean;
+  tradingWindowStart: string;  // HH:MM in IST, e.g. "17:00"
+  tradingWindowEnd: string;    // HH:MM in IST, e.g. "00:00" means midnight (end of day)
   // Whale TP tier configs ($500-$999 / $1000-$1999 / $2000+)
   wt1Tp1Pct: number;  wt1Tp1Exit: number;
   wt1Tp2Pct: number;  wt1Tp2Exit: number;  wt1Tp2Trail: number;

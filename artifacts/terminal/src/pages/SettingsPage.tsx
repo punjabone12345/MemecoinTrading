@@ -1,6 +1,35 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Settings } from '../lib/types.js';
 import { api } from '../lib/api.js';
+
+/** Returns current IST time using Intl.DateTimeFormat (correct across all host timezones). */
+function getISTNow() {
+  const now = new Date();
+  const fmt = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Kolkata',
+    hour: 'numeric', minute: 'numeric', second: 'numeric', hour12: false,
+  });
+  const parts = fmt.formatToParts(now);
+  const get = (type: string) => parseInt(parts.find(p => p.type === type)?.value ?? '0', 10);
+  const h = get('hour') % 24; // normalise hour=24 (midnight) to 0
+  const m = get('minute');
+  const s = get('second');
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return { hours: h, minutes: m, label: `${pad(h)}:${pad(m)}:${pad(s)} IST` };
+}
+
+function checkInWindow(enabled: boolean, start: string, end: string): boolean {
+  if (!enabled) return true;
+  const { hours, minutes } = getISTNow();
+  const currentMin = hours * 60 + minutes;
+  const [sh, sm] = start.split(':').map(Number);
+  const [eh, em] = end.split(':').map(Number);
+  const startMin = sh * 60 + (sm || 0);
+  // "00:00" end → end of calendar day (just before midnight)
+  const endMin   = (eh === 0 && (em || 0) === 0) ? 1440 : eh * 60 + (em || 0);
+  if (startMin < endMin) return currentMin >= startMin && currentMin < endMin;
+  return currentMin >= startMin || currentMin < endMin;
+}
 
 interface Props { settings: Settings; onUpdate: (s: Settings) => void }
 
@@ -39,11 +68,20 @@ export default function SettingsPage({ settings: init, onUpdate }: Props) {
   const [saved, setSaved] = useState(false);
   const [showReset, setShowReset] = useState(false);
   const [resetInput, setResetInput] = useState('');
+  const [istClock, setIstClock] = useState(getISTNow().label);
+
+  // Live IST clock
+  useEffect(() => {
+    const t = setInterval(() => setIstClock(getISTNow().label), 1000);
+    return () => clearInterval(t);
+  }, []);
 
   function update(key: keyof Settings, value: string) {
-    const strKeys = ['rpcEndpoint', 'walletPublicKey'];
+    const strKeys = ['rpcEndpoint', 'walletPublicKey', 'tradingWindowStart', 'tradingWindowEnd'];
+    const boolKeys = ['tradingWindowEnabled'];
     const updated = { ...settings } as Record<string, unknown>;
     if (strKeys.includes(key)) updated[key] = value;
+    else if (boolKeys.includes(key)) updated[key] = value === 'true';
     else updated[key] = parseFloat(value) || 0;
     setSettings((updated as unknown) as Settings);
   }
@@ -92,6 +130,91 @@ export default function SettingsPage({ settings: init, onUpdate }: Props) {
 
         </div>
       </div>
+
+      {/* ── Trading Window ──────────────────────────────────────────────── */}
+      {(() => {
+        const enabled = settings.tradingWindowEnabled;
+        const inWindow = checkInWindow(enabled, settings.tradingWindowStart, settings.tradingWindowEnd);
+        const statusColor = !enabled ? '#7090b0' : inWindow ? '#00ff88' : '#ff4466';
+        const statusLabel = !enabled ? 'UNRESTRICTED' : inWindow ? 'ACTIVE — TRADING' : 'PAUSED';
+        return (
+          <div className="card" style={{ marginBottom: 14, overflow: 'hidden' }}>
+            <div style={{ padding: '14px 16px', borderBottom: '1px solid rgba(255,255,255,0.05)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <div style={{ width: 3, height: 14, borderRadius: 2, background: '#ffaa00' }} />
+                <span style={{ fontSize: 12, fontWeight: 800, letterSpacing: '0.08em', textTransform: 'uppercase', color: '#d4e0f0' }}>Trading Window (IST)</span>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span style={{ fontSize: 11, color: '#3a5070' }}>{istClock}</span>
+                <div style={{ padding: '3px 8px', borderRadius: 6, background: `${statusColor}22`, border: `1px solid ${statusColor}55`, fontSize: 10, fontWeight: 800, color: statusColor, letterSpacing: '0.06em' }}>
+                  {statusLabel}
+                </div>
+              </div>
+            </div>
+
+            <div style={{ padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 14 }}>
+              {/* Enable toggle */}
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                <div>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: '#d4e0f0' }}>Enable trading window</div>
+                  <div style={{ fontSize: 11, color: '#3a5070', marginTop: 2 }}>Restrict entries to a set IST time range. Open positions continue to be tracked 24/7.</div>
+                </div>
+                <button
+                  onClick={() => update('tradingWindowEnabled', String(!settings.tradingWindowEnabled))}
+                  style={{
+                    flexShrink: 0, width: 44, height: 24, borderRadius: 12, border: 'none', cursor: 'pointer',
+                    background: enabled ? '#00ff88' : 'rgba(255,255,255,0.1)',
+                    transition: 'background 0.2s', position: 'relative',
+                  }}
+                >
+                  <div style={{
+                    position: 'absolute', top: 3, left: enabled ? 23 : 3, width: 18, height: 18,
+                    borderRadius: '50%', background: enabled ? '#001a0a' : '#3a5070', transition: 'left 0.2s',
+                  }} />
+                </button>
+              </div>
+
+              {/* Time inputs */}
+              {enabled && (
+                <div style={{ display: 'flex', gap: 12 }}>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 11, color: '#3a5070', fontWeight: 700, marginBottom: 6, letterSpacing: '0.04em' }}>Start Time (IST)</div>
+                    <input
+                      type="time"
+                      value={settings.tradingWindowStart}
+                      onChange={e => update('tradingWindowStart', e.target.value)}
+                      className="input-premium"
+                      style={{ width: '100%' }}
+                    />
+                  </div>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 11, color: '#3a5070', fontWeight: 700, marginBottom: 6, letterSpacing: '0.04em' }}>End Time (IST)</div>
+                    <input
+                      type="time"
+                      value={settings.tradingWindowEnd}
+                      onChange={e => update('tradingWindowEnd', e.target.value)}
+                      className="input-premium"
+                      style={{ width: '100%' }}
+                    />
+                    <div style={{ fontSize: 10, color: '#2a3a50', marginTop: 4 }}>00:00 = midnight (end of day)</div>
+                  </div>
+                </div>
+              )}
+
+              {enabled && (
+                <div style={{ padding: '10px 12px', borderRadius: 10, background: inWindow ? 'rgba(0,255,136,0.05)' : 'rgba(255,68,102,0.05)', border: `1px solid ${inWindow ? 'rgba(0,255,136,0.15)' : 'rgba(255,68,102,0.15)'}` }}>
+                  <div style={{ fontSize: 11, color: inWindow ? '#00ff88' : '#ff4466', fontWeight: 700, marginBottom: 2 }}>
+                    {inWindow ? '✅ Bot is active — new entries allowed' : '⏸ Bot is paused — no new entries until window opens'}
+                  </div>
+                  <div style={{ fontSize: 11, color: '#3a5070' }}>
+                    Window: {settings.tradingWindowStart} → {settings.tradingWindowEnd === '00:00' ? '00:00 (midnight)' : settings.tradingWindowEnd} IST
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Whale sniper context banner */}
       <div style={{ padding: '12px 14px', borderRadius: 12, background: 'rgba(0,191,255,0.06)', border: '1px solid rgba(0,191,255,0.18)', marginBottom: 14 }}>

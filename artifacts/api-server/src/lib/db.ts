@@ -277,6 +277,10 @@ export async function initDB(): Promise<void> {
     ['wt3Tp1Pct', '150'],  ['wt3Tp1Exit', '30'],
     ['wt3Tp2Pct', '350'],  ['wt3Tp2Exit', '30'],  ['wt3Tp2Trail', '20'],
     ['wt3Tp3Pct', '550'],  ['wt3Tp3Exit', '30'],  ['wt3Tp3Trail', '10'],
+    // Trading window
+    ['tradingWindowEnabled', 'true'],
+    ['tradingWindowStart', '17:00'],
+    ['tradingWindowEnd', '00:00'],
   ];
 
   for (const [key, value] of seedDefaults) {
