@@ -88,6 +88,7 @@ let lastSeenSig: string | null = null;
 let lastPollSuccess = Date.now();
 let consecutivePollFailures = 0;
 let isBootstrap = true; // only true on first server start — never set back to true
+let sessionStartMs = 0; // set to Date.now() each time the scanner starts — graduations older than this are ignored
 let lastPollError: string | null = null; // last error message for diagnostics
 let connection: Connection | null = null;
 
@@ -331,7 +332,11 @@ async function trackMigrationWallet(): Promise<void> {
         const txTs = (tx.blockTime ?? 0) > 0 ? (tx.blockTime! * 1_000) : Date.now();
         pushFeed(pumpfunFeed, { mint, ts: txTs, txSig: sig, instructionType, poolAddress, creatorWallet });
         if (onNewMint) onNewMint(mint);
-        if (onGraduation) onGraduation({ mint, poolAddress, ts: txTs });
+        if (txTs < sessionStartMs) {
+          logger.debug({ mint, txTs, sessionStartMs }, 'PumpFun poll: skipping pre-session graduation');
+        } else {
+          if (onGraduation) onGraduation({ mint, poolAddress, ts: txTs });
+        }
 
         logger.info(
           { mint, sig: sig.slice(0, 16), instructionType, poolAddress, creatorWallet: creatorWallet.slice(0, 16) },
@@ -462,7 +467,9 @@ function startMigrationWalletWS(): void {
         const wsTxTs = (tx.blockTime ?? 0) > 0 ? (tx.blockTime! * 1_000) : Date.now();
         pushFeed(pumpfunFeed, { mint, ts: wsTxTs, txSig: sig, instructionType, poolAddress, creatorWallet });
         if (onNewMint) onNewMint(mint);
-        if (onGraduation) onGraduation({ mint, poolAddress, ts: wsTxTs });
+        if (wsTxTs >= sessionStartMs) {
+          if (onGraduation) onGraduation({ mint, poolAddress, ts: wsTxTs });
+        }
 
         logger.info(
           { mint, sig: sig.slice(0, 16), instructionType, poolAddress: poolAddress?.slice(0, 16), source: 'helius_ws' },
@@ -532,10 +539,9 @@ export function startTrenchesScanner(): void {
   if (started) return;
   started = true;
 
-  // Reset cursor so the first poll sets it to "now" — never catch up on
-  // historical migrations that graduated before this session started.
-  lastSeenSig = null;
-  isBootstrap = true;
+  // Record when this session started — used to drop graduations whose on-chain
+  // blockTime predates the session start (old coins that slip through the cursor).
+  sessionStartMs = Date.now();
 
   // Real-time WebSocket subscription (primary, instant)
   startMigrationWalletWS();
