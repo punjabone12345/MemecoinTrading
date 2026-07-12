@@ -52,14 +52,19 @@ function isInsideWindow(start: string, end: string): boolean {
  *  - botEnabled=false  → always stopped (manual override, never auto-resumed)
  *  - tradingWindowEnabled=false → always running (no time restriction)
  *  - tradingWindowEnabled=true  → running only inside the IST window
+ *
+ * `hard` = true means a full hard-stop (botEnabled=false manual pause).
+ * `hard` = false means a soft window-close — only new-entry services stop;
+ *          the whale sniper position monitor keeps running for open trades.
  */
-async function shouldServicesRun(): Promise<{ run: boolean; reason: string }> {
+async function shouldServicesRun(): Promise<{ run: boolean; hard: boolean; reason: string }> {
   const s = await getSettings();
-  if (!s.botEnabled) return { run: false, reason: 'botEnabled=false (manual pause)' };
-  if (!s.tradingWindowEnabled) return { run: true, reason: 'botEnabled=true, no time restriction' };
+  if (!s.botEnabled) return { run: false, hard: true,  reason: 'botEnabled=false (manual pause)' };
+  if (!s.tradingWindowEnabled) return { run: true, hard: false, reason: 'botEnabled=true, no time restriction' };
   const inWindow = isInsideWindow(s.tradingWindowStart, s.tradingWindowEnd);
   return {
     run: inWindow,
+    hard: false, // window transitions are never hard-stops
     reason: inWindow
       ? `inside trading window ${s.tradingWindowStart}–${s.tradingWindowEnd} IST`
       : `outside trading window ${s.tradingWindowStart}–${s.tradingWindowEnd} IST`,
@@ -70,11 +75,28 @@ async function shouldServicesRun(): Promise<{ run: boolean; reason: string }> {
 
 function startServices(): void {
   startTrenchesScanner();
-  resumeWhaleSniper();
+  resumeWhaleSniper();   // idempotent — no-op if already running
   startTelegramCommands();
 }
 
-function stopServices(): void {
+/**
+ * Soft stop — called when the trading window closes.
+ * Stops new-graduation detection and Telegram, but intentionally leaves the
+ * whale sniper and Helius WS alive so open positions continue to be tracked
+ * for P&L, TP, and SL until they close naturally.
+ * The whale sniper's own isInTradingWindow() guards block any new entries.
+ */
+function stopNewEntryServices(): void {
+  stopTrenchesScanner();
+  stopTelegramCommands();
+  logger.info('Session Manager: soft stop — graduation scanner paused; open positions continue tracking');
+}
+
+/**
+ * Hard stop — called only when botEnabled=false (manual PAUSE BOT).
+ * Stops everything including the whale sniper and Helius WS.
+ */
+function stopAllServices(): void {
   stopTrenchesScanner();
   stopWhaleSniper();
   stopTelegramCommands();
@@ -89,15 +111,18 @@ function stopServices(): void {
  * whenever botEnabled or tradingWindow settings are updated.
  */
 export async function applyBotEnabledChange(): Promise<void> {
-  const { run, reason } = await shouldServicesRun();
+  const { run, hard, reason } = await shouldServicesRun();
   if (_servicesRunning === run) return; // no transition needed
   _servicesRunning = run;
   if (run) {
     logger.info({ reason }, 'Session Manager: STARTING all services');
     startServices();
+  } else if (hard) {
+    logger.info({ reason }, 'Session Manager: HARD STOP — all services stopped');
+    stopAllServices();
   } else {
-    logger.info({ reason }, 'Session Manager: STOPPING all services');
-    stopServices();
+    logger.info({ reason }, 'Session Manager: SOFT STOP — pausing new entries, keeping position monitor alive');
+    stopNewEntryServices();
   }
 }
 
@@ -116,12 +141,15 @@ function scheduleWindowCheck(): void {
  * 60-second window-check loop.
  */
 export async function initSessionManager(): Promise<void> {
-  const { run, reason } = await shouldServicesRun();
+  const { run, hard, reason } = await shouldServicesRun();
   _servicesRunning = run;
 
-  if (!run) {
-    logger.info({ reason }, 'Session Manager: initialising in STOPPED state — stopping all services');
-    stopServices();
+  if (!run && hard) {
+    logger.info({ reason }, 'Session Manager: initialising in HARD STOP state — stopping all services');
+    stopAllServices();
+  } else if (!run) {
+    logger.info({ reason }, 'Session Manager: initialising in SOFT STOP state — pausing new entries, position monitor alive');
+    stopNewEntryServices();
   } else {
     logger.info({ reason }, 'Session Manager: initialising in RUNNING state');
   }
