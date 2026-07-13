@@ -43,7 +43,7 @@ export async function getSettings(): Promise<Settings> {
     walletPublicKey: str('walletPublicKey', ''),
     whaleSlippagePct: num('whaleSlippagePct', 20),
     whaleStagnationPct: num('whaleStagnationPct', 5),
-    tradingWindowEnabled: bool('tradingWindowEnabled', true),
+    tradingWindowEnabled: bool('tradingWindowEnabled', false),
     tradingWindowStart: str('tradingWindowStart', '17:00'),
     tradingWindowEnd: str('tradingWindowEnd', '00:00'),
     // Whale TP tier configs

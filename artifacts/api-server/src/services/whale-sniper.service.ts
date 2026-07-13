@@ -30,11 +30,14 @@ const SERVER_START_MS       = Date.now();
 const STALE_GRAD_GRACE_MS   = 2 * 60_000; // 2 minutes before server start
 
 const PRICE_SL_PCT          = 0.3;    // -30% price stop loss from entry
+const VOLUME_WINDOW_MS      = 10_000; // 10-second rolling buy+sell volume window
 
-const WHALE_TIERS = [
-  { minUsd: 2_000, sizePct: 1.0 },
-  { minUsd: 1_000, sizePct: 0.75 },
-  { minUsd:   500, sizePct: 0.5  },
+// Entry tiers based on 10-second aggregate volume (buys + sells combined).
+// Replaces single-wallet whale buy thresholds.
+const VOLUME_TIERS = [
+  { minUsd: 2_250, sizePct: 1.0  },
+  { minUsd: 1_500, sizePct: 0.75 },
+  { minUsd:   750, sizePct: 0.5  },
 ] as const;
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -111,8 +114,8 @@ interface WhaleTierConfig {
 }
 
 function determineTier(amountUsd: number): 1 | 2 | 3 {
-  if (amountUsd >= 2_000) return 3;
-  if (amountUsd >= 1_000) return 2;
+  if (amountUsd >= 2_250) return 3;
+  if (amountUsd >= 1_500) return 2;
   return 1;
 }
 
@@ -234,6 +237,9 @@ const closeLocks = new Set<string>();
 const pollLocks  = new Set<string>();
 const seenTxns = new Map<string, Set<string>>();
 const mintCheckpointed = new Set<string>();
+// 10-second rolling transaction volume per tracked mint (buys + sells combined).
+// Each entry = { ts: epoch-ms, usd: dollar value of that tx }.
+const mintTxVolume = new Map<string, Array<{ ts: number; usd: number }>>();
 
 // Permanent, DB-backed lifetime registry of every mint ever traded by the
 // whale sniper. `whalePositions` only reflects currently-OPEN positions, so
@@ -644,6 +650,86 @@ function detectBuy(tx: any, targetMint: string): BuyInfo | null {
   return { wallet, solSpent: spent / 1e9, tokensReceived, poolBaseVault, poolQuoteVault };
 }
 
+// ── Sell detection from a parsed Solana transaction ───────────────────────────
+// Detects when a user sends tokens to the pool and receives SOL back.
+// Used together with detectBuy to compute aggregate 10-second pool volume.
+
+interface SellInfo {
+  wallet: string;
+  solReceived: number; // SOL paid out by the pool to the seller
+  poolBaseVault: string | null;
+  poolQuoteVault: string | null;
+}
+
+function detectSell(tx: any, targetMint: string): SellInfo | null {
+  const preTok: any[]     = tx.meta?.preTokenBalances  ?? [];
+  const postTok: any[]    = tx.meta?.postTokenBalances ?? [];
+  const preSol: number[]  = tx.meta?.preBalances  ?? [];
+  const postSol: number[] = tx.meta?.postBalances ?? [];
+  const keys: any[]       = (tx.transaction?.message as any)?.accountKeys ?? [];
+  const feePayerAddr = keys[0]?.pubkey?.toString() ?? keys[0]?.toString() ?? '';
+
+  // Pool's base vault (token account) INCREASES — pool receives tokens from seller
+  let poolBaseVault: string | null = null;
+  let tokensSentToPool = 0;
+  for (const post of postTok) {
+    if (post.mint !== targetMint) continue;
+    const pre      = preTok.find((p: any) => p.accountIndex === post.accountIndex && p.mint === targetMint);
+    const decimals = parseInt(post.uiTokenAmount?.decimals ?? '6', 10);
+    const preRaw   = parseInt(pre?.uiTokenAmount?.amount ?? '0', 10);
+    const postRaw  = parseInt(post.uiTokenAmount?.amount ?? '0', 10);
+    if (postRaw > preRaw) {
+      const addr  = keys[post.accountIndex]?.pubkey?.toString() ?? keys[post.accountIndex]?.toString() ?? '';
+      const owner = post.owner ?? '';
+      // Pool vault is owned by the pool program, not by the fee payer (seller)
+      if (owner !== feePayerAddr && addr !== feePayerAddr) {
+        tokensSentToPool += (postRaw - preRaw) / Math.pow(10, decimals);
+        if (!poolBaseVault) poolBaseVault = addr;
+      }
+    }
+  }
+  if (tokensSentToPool <= 0) return null;
+
+  // Pool's WSOL vault DECREASES — pool pays out SOL to the seller
+  let poolQuoteVault: string | null = null;
+  let maxWsolDecrease = 0;
+  for (const pre of preTok) {
+    if (pre.mint !== WSOL_MINT) continue;
+    if (pre.owner && pre.owner === feePayerAddr) continue; // seller's own WSOL — skip
+    const post    = postTok.find((p: any) => p.accountIndex === pre.accountIndex && p.mint === WSOL_MINT);
+    const preRaw  = parseInt(pre.uiTokenAmount?.amount ?? '0', 10);
+    const postRaw = parseInt(post?.uiTokenAmount?.amount ?? '0', 10);
+    const delta   = preRaw - postRaw;
+    if (delta > maxWsolDecrease) {
+      const addr = keys[pre.accountIndex]?.pubkey?.toString() ?? keys[pre.accountIndex]?.toString() ?? null;
+      if (addr) { poolQuoteVault = addr; maxWsolDecrease = delta; }
+    }
+  }
+
+  // Fallback: native SOL gain at fee payer (seller receives native SOL)
+  const nativeSolGained = (postSol[0] ?? 0) - (preSol[0] ?? 0);
+  const solReceived = maxWsolDecrease > 0
+    ? maxWsolDecrease / 1e9
+    : (nativeSolGained > 0 ? nativeSolGained / 1e9 : 0);
+
+  if (solReceived < 0.001) return null; // filter dust/fee-only txns
+
+  const wallet = feePayerAddr || 'unknown';
+  return { wallet, solReceived, poolBaseVault, poolQuoteVault };
+}
+
+// ── 10-second rolling volume window ──────────────────────────────────────────
+// Adds a transaction's USD value to the per-mint volume window, prunes entries
+// older than VOLUME_WINDOW_MS (relative to `ts`), and returns the window total.
+function addVolumeAndGetWindowTotal(mint: string, usd: number, ts: number): number {
+  if (!mintTxVolume.has(mint)) mintTxVolume.set(mint, []);
+  const entries = mintTxVolume.get(mint)!;
+  entries.push({ ts, usd });
+  const cutoff = ts - VOLUME_WINDOW_MS;
+  while (entries.length > 0 && entries[0].ts < cutoff) entries.shift();
+  return entries.reduce((sum, e) => sum + e.usd, 0);
+}
+
 // ── DB persistence (survives Render free-tier spin-down / restarts) ───────────
 
 async function saveWhalePosition(pos: WhalePosition): Promise<void> {
@@ -1021,10 +1107,14 @@ async function processQueue(): Promise<void> {
   }
 }
 
-// ── Whale buy handler ─────────────────────────────────────────────────────────
+// ── Volume update handler ─────────────────────────────────────────────────────
+// Called for every detected transaction (buy OR sell) on a tracked token.
+// Accumulates USD value in a 10-second rolling window, then triggers entry
+// if the window total crosses a VOLUME_TIERS threshold.
 
-async function handleWhaleBuy(
-  mint: string, wallet: string, amountUsd: number, txSig: string, priceAtDetection: number,
+async function handleVolumeUpdate(
+  mint: string, wallet: string, txUsd: number, txSig: string,
+  priceAtDetection: number, txTimestamp: number,
 ): Promise<void> {
   const tok = trackedTokens.get(mint);
   if (!tok) return;
@@ -1038,38 +1128,54 @@ async function handleWhaleBuy(
     }
   } catch { /* if settings unavailable, block entry to be safe */ return; }
 
-  const whaleBuyTimestamp = Date.now();
-  tok.whaleBuys.push({ wallet, amountUsd, timestamp: whaleBuyTimestamp, txSig, priceAtDetection });
+  tok.whaleBuys.push({ wallet, amountUsd: txUsd, timestamp: txTimestamp, txSig, priceAtDetection });
 
-  const tier = WHALE_TIERS.find(t => amountUsd >= t.minUsd);
+  // Accumulate into the 10-second window and compute its total
+  const windowTotal = addVolumeAndGetWindowTotal(mint, txUsd, txTimestamp);
+
+  const tier = VOLUME_TIERS.find(t => windowTotal >= t.minUsd);
 
   const entry: WhaleBuyLog = {
     mint, name: tok.name, symbol: tok.symbol,
-    wallet, amountUsd, timestamp: whaleBuyTimestamp, txSig,
+    wallet, amountUsd: windowTotal, timestamp: txTimestamp, txSig,
     entered: false, priceAtDetection,
   };
 
   if (!tier) {
-    entry.skipReason = `${amountUsd.toFixed(0)} below $500 threshold`;
-  } else if (whalePositions.has(mint) || tok.entryTriggered || everTradedMints.has(mint) || slippageSkippedMints.has(mint)) {
-    entry.skipReason = slippageSkippedMints.has(mint)
-      ? 'Slippage-skipped token (permanently blocked — pumped too fast before entry)'
-      : 'Already traded this token (lifetime — never re-entered)';
-  } else if (whalePositions.size >= MAX_POSITIONS) {
-    entry.skipReason = 'Max positions — queued';
-    enqueueSignal(mint, tok.name, tok.symbol, tier.sizePct, amountUsd, priceAtDetection, wallet, whaleBuyTimestamp);
-  } else {
-    entry.entered = true;
-    buyLog.unshift(entry);
-    if (buyLog.length > MAX_BUY_LOG) buyLog.pop();
-    broadcastWhaleStatus();
-    await enterWhalePosition(mint, tok.name, tok.symbol, tier.sizePct, amountUsd, priceAtDetection, wallet, whaleBuyTimestamp);
+    // Volume not yet at threshold — only log if this tx itself is notable
+    if (txUsd >= 50) {
+      entry.skipReason = `10s vol ${windowTotal.toFixed(0)} below ${VOLUME_TIERS[VOLUME_TIERS.length - 1].minUsd} threshold`;
+      buyLog.unshift(entry);
+      if (buyLog.length > MAX_BUY_LOG) buyLog.pop();
+      broadcastWhaleStatus();
+    }
     return;
   }
 
+  if (whalePositions.has(mint) || tok.entryTriggered || everTradedMints.has(mint) || slippageSkippedMints.has(mint)) {
+    entry.skipReason = slippageSkippedMints.has(mint)
+      ? 'Slippage-skipped token (permanently blocked — pumped too fast before entry)'
+      : 'Already traded this token (lifetime — never re-entered)';
+    buyLog.unshift(entry);
+    if (buyLog.length > MAX_BUY_LOG) buyLog.pop();
+    broadcastWhaleStatus();
+    return;
+  }
+
+  if (whalePositions.size >= MAX_POSITIONS) {
+    entry.skipReason = 'Max positions — queued';
+    enqueueSignal(mint, tok.name, tok.symbol, tier.sizePct, windowTotal, priceAtDetection, wallet, txTimestamp);
+    buyLog.unshift(entry);
+    if (buyLog.length > MAX_BUY_LOG) buyLog.pop();
+    broadcastWhaleStatus();
+    return;
+  }
+
+  entry.entered = true;
   buyLog.unshift(entry);
   if (buyLog.length > MAX_BUY_LOG) buyLog.pop();
   broadcastWhaleStatus();
+  await enterWhalePosition(mint, tok.name, tok.symbol, tier.sizePct, windowTotal, priceAtDetection, wallet, txTimestamp);
 }
 
 // ── Buy polling ───────────────────────────────────────────────────────────────
@@ -1168,30 +1274,32 @@ async function pollTokenBuys(mint: string): Promise<void> {
         for (let j = 0; j < txns.length; j++) {
           const tx = txns[j];
           if (!tx) continue;
-          const buy = detectBuy(tx, mint);
-          if (!buy) continue;
-          const amountUsd = buy.solSpent * cachedSolPrice;
-          if (amountUsd < 10) continue;
-          // Whale's TRUE average entry price from the transaction:
-          // SOL they spent ÷ tokens they received × SOL/USD.
-          // This is always < the post-buy pool price because their buy moved the price up.
-          const whaleTxPrice = buy.tokensReceived > 0 && cachedSolPrice > 0
-            ? (buy.solSpent * cachedSolPrice) / buy.tokensReceived
-            : 0;
-          // Store vault addresses from this tx so enterWhalePosition can read
-          // the actual on-chain pool reserves without needing DexScreener pool resolution.
-          // Update missing fields independently — a later buy can backfill a missing quoteVault.
+          // Detect buy or sell — both contribute to the 10s volume window
+          const buy  = detectBuy(tx, mint);
+          const sell = buy ? null : detectSell(tx, mint);
+          const txSolAmount = buy ? buy.solSpent : (sell ? sell.solReceived : 0);
+          if (txSolAmount < 0.001) continue;
+          const txUsd = txSolAmount * cachedSolPrice;
+          if (txUsd < 10) continue;
+          const txWallet = buy ? buy.wallet : (sell ? sell.wallet : 'unknown');
+          // Price at detection: use whale's avg entry price for buys; 0 for sells (slippage check skipped)
+          const txPrice = (buy && buy.tokensReceived > 0 && cachedSolPrice > 0)
+            ? (buy.solSpent * cachedSolPrice) / buy.tokensReceived : 0;
+          // Store vault addresses from this tx for later on-chain price reads
           const tokEntry = trackedTokens.get(mint);
           if (tokEntry) {
-            if (buy.poolBaseVault  && !tokEntry.poolBaseVault)  tokEntry.poolBaseVault  = buy.poolBaseVault;
-            if (buy.poolQuoteVault && !tokEntry.poolQuoteVault) tokEntry.poolQuoteVault = buy.poolQuoteVault;
+            const bv = buy?.poolBaseVault  ?? sell?.poolBaseVault;
+            const qv = buy?.poolQuoteVault ?? sell?.poolQuoteVault;
+            if (bv && !tokEntry.poolBaseVault)  tokEntry.poolBaseVault  = bv;
+            if (qv && !tokEntry.poolQuoteVault) tokEntry.poolQuoteVault = qv;
           }
+          const txTs = tx.blockTime ? tx.blockTime * 1_000 : Date.now();
           logger.info(
-            { mint: mint.slice(0, 12), wallet: buy.wallet.slice(0, 8), usd: amountUsd.toFixed(0),
-              whaleTxPrice, vaults: !!(buy.poolBaseVault && buy.poolQuoteVault), sig: batch[j].slice(0, 12) },
-            'Whale sniper: baseline — early whale buy found',
+            { mint: mint.slice(0, 12), wallet: txWallet.slice(0, 8), usd: txUsd.toFixed(0),
+              type: buy ? 'buy' : 'sell', sig: batch[j].slice(0, 12) },
+            'Whale sniper: baseline — tx volume found',
           );
-          await handleWhaleBuy(mint, buy.wallet, amountUsd, batch[j], whaleTxPrice);
+          await handleVolumeUpdate(mint, txWallet, txUsd, batch[j], txPrice, txTs);
           if (trackedTokens.get(mint)?.entryTriggered) break outer;
         }
         if (i + BATCH < toFetchEarly.length) await new Promise(r => setTimeout(r, 50)); // brief pause between batches
@@ -1220,38 +1328,38 @@ async function pollTokenBuys(mint: string): Promise<void> {
     for (let i = 0; i < txns.length; i++) {
       const tx = txns[i];
       if (!tx) continue;
-      const buy = detectBuy(tx, mint);
-      if (!buy) continue;
-      const amountUsd = buy.solSpent * cachedSolPrice;
-      // Hard minimum: ignore dust/fee-only transactions (< $10) that are not
-      // real buys — these are fee-payer deductions (~15k lamports) that happen
-      // to touch the token account and pass the gained-token check.
-      if (amountUsd < 10) {
-        logger.debug(
-          { mint: mint.slice(0, 12), wallet: buy.wallet.slice(0, 8), usd: amountUsd.toFixed(2), sig: toFetch[i].slice(0, 12) },
-          'Whale sniper: buy below $10 minimum — skipped',
-        );
+      // Detect buy or sell — both count toward the 10s rolling volume window
+      const buy  = detectBuy(tx, mint);
+      const sell = buy ? null : detectSell(tx, mint);
+      const txSolAmount = buy ? buy.solSpent : (sell ? sell.solReceived : 0);
+      // Hard minimum: ignore dust/fee-only transactions (< $10)
+      const txUsd = txSolAmount * cachedSolPrice;
+      if (txUsd < 10) {
+        if (txSolAmount > 0) {
+          logger.debug(
+            { mint: mint.slice(0, 12), usd: txUsd.toFixed(2), type: buy ? 'buy' : 'sell', sig: toFetch[i].slice(0, 12) },
+            'Whale sniper: tx below $10 minimum — skipped',
+          );
+        }
         continue;
       }
-      // Whale's TRUE average entry price from the transaction:
-      // SOL they spent ÷ tokens they received × SOL/USD.
-      // This is always < the post-buy pool price because their buy moved the price up.
-      const whaleTxPrice = buy.tokensReceived > 0 && cachedSolPrice > 0
-        ? (buy.solSpent * cachedSolPrice) / buy.tokensReceived
-        : 0;
-      // Store vault addresses from this tx so enterWhalePosition can read
-      // the actual on-chain pool reserves without needing DexScreener pool resolution.
-      // Update missing fields independently — a later buy can backfill a missing quoteVault.
+      const txWallet = buy ? buy.wallet : (sell ? sell.wallet : 'unknown');
+      // Price at detection: use whale's avg entry price for buys; 0 for sells (slippage check skipped)
+      const txPrice = (buy && buy.tokensReceived > 0 && cachedSolPrice > 0)
+        ? (buy.solSpent * cachedSolPrice) / buy.tokensReceived : 0;
+      // Store vault addresses from this tx for later on-chain price reads
       const tokLive = trackedTokens.get(mint);
       if (tokLive) {
-        if (buy.poolBaseVault  && !tokLive.poolBaseVault)  tokLive.poolBaseVault  = buy.poolBaseVault;
-        if (buy.poolQuoteVault && !tokLive.poolQuoteVault) tokLive.poolQuoteVault = buy.poolQuoteVault;
+        const bv = buy?.poolBaseVault  ?? sell?.poolBaseVault;
+        const qv = buy?.poolQuoteVault ?? sell?.poolQuoteVault;
+        if (bv && !tokLive.poolBaseVault)  tokLive.poolBaseVault  = bv;
+        if (qv && !tokLive.poolQuoteVault) tokLive.poolQuoteVault = qv;
       }
       logger.info(
-        { mint: mint.slice(0, 12), wallet: buy.wallet.slice(0, 8), usd: amountUsd.toFixed(0), whaleTxPrice, sig: toFetch[i].slice(0, 12) },
-        'Whale sniper: buy detected',
+        { mint: mint.slice(0, 12), wallet: txWallet.slice(0, 8), usd: txUsd.toFixed(0), type: buy ? 'buy' : 'sell', txPrice, sig: toFetch[i].slice(0, 12) },
+        'Whale sniper: tx detected',
       );
-      await handleWhaleBuy(mint, buy.wallet, amountUsd, toFetch[i], whaleTxPrice);
+      await handleVolumeUpdate(mint, txWallet, txUsd, toFetch[i], txPrice, Date.now());
     }
   } catch (err: any) {
     logger.debug({ mint: mint.slice(0, 12), err: err?.message }, 'Whale sniper: poll error');
@@ -1950,6 +2058,7 @@ export function resetWhaleState(): void {
   pollLocks.clear();
   seenTxns.clear();
   mintCheckpointed.clear();
+  mintTxVolume.clear();
   // Only cleared here because this is invoked by the explicit "reset all data"
   // admin action (which also wipes the DB tables) — a real fresh start.
   // Neither set is cleared as a side effect of normal trading.

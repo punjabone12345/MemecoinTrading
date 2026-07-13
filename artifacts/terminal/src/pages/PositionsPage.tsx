@@ -106,7 +106,7 @@ function WhaleEditModal({ pos, onClose, onSave }: { pos: WhalePosition; onClose:
           </div>
         ))}
         <div style={{ fontSize: 10, color: '#3a5070', padding: '8px 10px', borderRadius: 8, background: 'rgba(155,89,255,0.06)', border: '1px solid rgba(155,89,255,0.15)' }}>
-          Changing Trigger Amount adjusts TP tier ($500→Tier1 · $1000→Tier2 · $2000→Tier3)
+          Changing Trigger Amount adjusts TP tier ($750→Tier1 · $1500→Tier2 · $2250→Tier3)
         </div>
       </div>
       <div style={{ display: 'flex', gap: 10, marginTop: 20 }}>
@@ -450,7 +450,7 @@ export default function PositionsPage({ whaleStatus, onRefresh }: Props) {
           <div style={{ fontWeight: 700, color: '#7090b0', marginBottom: 4 }}>No whale positions yet</div>
           <div style={{ fontSize: 12 }}>
             {whaleStatus
-              ? `Tracking ${whaleStatus.stats.tracking} token${whaleStatus.stats.tracking !== 1 ? 's' : ''} · waiting for whale buys ≥$500`
+              ? `Tracking ${whaleStatus.stats.tracking} token${whaleStatus.stats.tracking !== 1 ? 's' : ''} · watching 10s volume ≥$750`
               : 'Watching for whale entries on graduated tokens…'}
           </div>
         </div>
