@@ -834,6 +834,14 @@ export async function restoreWhalePositionsFromDB(): Promise<void> {
       });
     }
     logger.info({ open: rows.length, closed: closedRows.length }, 'Whale sniper: restored positions from DB after restart');
+    // Belt-and-suspenders: populate everTradedMints from ALL position rows
+    // (open + closed) as a supplementary source. If the whale_traded_mints
+    // table ever has a gap (e.g. DB write failed silently after a successful
+    // entry), this ensures a previously-traded mint can never be re-entered
+    // after a restart, regardless of the state of whale_traded_mints.
+    for (const r of rows)       everTradedMints.add(r.mint);
+    for (const r of closedRows) everTradedMints.add(r.mint);
+    logger.info({ size: everTradedMints.size }, 'Whale sniper: everTradedMints back-filled from position history');
     // Push restored state to any frontend clients that connected before the DB
     // restore completed. Without this broadcast, the frontend sees empty
     // closedPositions on initial load and has no way to know it should refresh.
@@ -1152,9 +1160,11 @@ async function handleVolumeUpdate(
     return;
   }
 
-  if (whalePositions.has(mint) || tok.entryTriggered || everTradedMints.has(mint) || slippageSkippedMints.has(mint)) {
+  if (whalePositions.has(mint) || tok.entryTriggered || entryLocks.has(mint) || everTradedMints.has(mint) || slippageSkippedMints.has(mint)) {
     entry.skipReason = slippageSkippedMints.has(mint)
       ? 'Slippage-skipped token (permanently blocked — pumped too fast before entry)'
+      : entryLocks.has(mint)
+      ? 'Entry already in progress for this token'
       : 'Already traded this token (lifetime — never re-entered)';
     buyLog.unshift(entry);
     if (buyLog.length > MAX_BUY_LOG) buyLog.pop();
@@ -2080,10 +2090,14 @@ export function stopWhaleSniper(): void {
   logger.info('Whale sniper: stopped (polling loops will not reschedule)');
 }
 
-/** Resume polling loops after a stopWhaleSniper() call. Does NOT reload DB state. */
+/** Resume polling loops after a stopWhaleSniper() call. Reloads lifetime dedup sets from DB. */
 export function resumeWhaleSniper(): void {
   if (_whaleSniperRunning) return;
   _whaleSniperRunning = true;
+  // Reload lifetime block registries from DB so any mints traded while the
+  // sniper was paused (or persisted from a prior session) are never re-entered.
+  void loadTradedMintsFromDB();
+  void loadSlippageSkippedMintsFromDB();
   scheduleBuyPoll();
   schedulePositionMonitor();
   scheduleMarketRefresh();
@@ -2091,7 +2105,7 @@ export function resumeWhaleSniper(): void {
   if (isHeliusWsConfigured()) {
     connectWhaleWs();
   }
-  logger.info('Whale sniper: resumed');
+  logger.info('Whale sniper: resumed (lifetime dedup sets reloaded from DB)');
 }
 
 export async function startWhaleSniper(): Promise<void> {
