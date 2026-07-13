@@ -312,14 +312,14 @@ export default function SettingsPage({ settings: init, onUpdate }: Props) {
       {/* Whale TP Tiers */}
       <Section title="Whale TP Tiers" color="#ff9900">
         <div style={{ fontSize: 11, color: '#3a5070', marginBottom: 14, lineHeight: 1.6 }}>
-          Each TP exits <b style={{ color: '#c0c8e0' }}>30% of the original position</b> → 10% runner held until trailing SL. Tier is set by whale buy size at detection.
+          Each TP exits <b style={{ color: '#c0c8e0' }}>30% of the original position</b> → 10% runner held until trailing SL. Tier is set by 10-second rolling volume at detection.
         </div>
 
         {/* Tier header helper */}
         {([
-          { label: 'Tier 1 — $500–$999 buys',   k: 'wt1' as const, color: '#00d4ff' },
-          { label: 'Tier 2 — $1000–$1999 buys', k: 'wt2' as const, color: '#9b59ff' },
-          { label: 'Tier 3 — $2000+ buys',       k: 'wt3' as const, color: '#ff9900' },
+          { label: 'Tier 1 — $750–$1499 vol',    k: 'wt1' as const, color: '#00d4ff' },
+          { label: 'Tier 2 — $1500–$2249 vol',   k: 'wt2' as const, color: '#9b59ff' },
+          { label: 'Tier 3 — $2250+ vol',         k: 'wt3' as const, color: '#ff9900' },
         ] as const).map(({ label, k, color }) => (
           <div key={k} style={{ marginBottom: 18 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>

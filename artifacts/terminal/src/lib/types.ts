@@ -12,7 +12,7 @@ export interface Settings {
   tradingWindowEnabled: boolean;
   tradingWindowStart: string;  // HH:MM in IST, e.g. "17:00"
   tradingWindowEnd: string;    // HH:MM in IST, e.g. "00:00" means midnight (end of day)
-  // Whale TP tier configs ($500-$999 / $1000-$1999 / $2000+)
+  // Whale TP tier configs (10s vol $750-$1499 / $1500-$2249 / $2250+)
   wt1Tp1Pct: number;  wt1Tp1Exit: number;
   wt1Tp2Pct: number;  wt1Tp2Exit: number;  wt1Tp2Trail: number;
   wt1Tp3Pct: number;  wt1Tp3Exit: number;  wt1Tp3Trail: number;

@@ -186,7 +186,7 @@ function TrackedCard({ tok, tick }: { tok: TrackedToken; tick: number }) {
   return (
     <div style={{
       ...C.card, marginBottom: 8,
-      borderColor: tok.entryTriggered ? 'rgba(0,255,136,0.25)' : biggestBuy >= 500 ? 'rgba(0,191,255,0.3)' : 'rgba(255,255,255,0.07)',
+      borderColor: tok.entryTriggered ? 'rgba(0,255,136,0.25)' : biggestBuy >= 750 ? 'rgba(0,191,255,0.3)' : 'rgba(255,255,255,0.07)',
     }}>
 
       {/* ── Header ── */}
@@ -268,7 +268,7 @@ function TrackedCard({ tok, tick }: { tok: TrackedToken; tick: number }) {
           {tok.whaleBuys.slice(0, 5).map((b, i) => (
             <span key={i} style={{
               fontSize: 9, fontWeight: 800, padding: '2px 6px', borderRadius: 4,
-              background: b.amountUsd >= 2000 ? 'rgba(0,191,255,0.18)' : b.amountUsd >= 1000 ? 'rgba(0,191,255,0.11)' : 'rgba(0,191,255,0.06)',
+              background: b.amountUsd >= 2250 ? 'rgba(0,191,255,0.18)' : b.amountUsd >= 1500 ? 'rgba(0,191,255,0.11)' : 'rgba(0,191,255,0.06)',
               color: C.whale, border: '1px solid rgba(0,191,255,0.2)',
             }}>
               🐋 {fmtUsd(b.amountUsd)} · {timeAgo(b.timestamp)}
@@ -277,14 +277,14 @@ function TrackedCard({ tok, tick }: { tok: TrackedToken; tick: number }) {
         </div>
       )}
       {!hasMarket && tok.whaleBuys.length === 0 && (
-        <div style={{ fontSize: 9, color: C.gray }}>Monitoring for whale buys…</div>
+        <div style={{ fontSize: 9, color: C.gray }}>Monitoring 10s volume…</div>
       )}
     </div>
   );
 }
 
 function WhaleBuyRow({ entry }: { entry: WhaleBuyLog }) {
-  const tier = entry.amountUsd >= 2000 ? '🐳' : entry.amountUsd >= 1000 ? '🐋' : '🐬';
+  const tier = entry.amountUsd >= 2250 ? '🐳' : entry.amountUsd >= 1500 ? '🐋' : '🐬';
   return (
     <div style={{
       display: 'flex', alignItems: 'flex-start', gap: 10,
