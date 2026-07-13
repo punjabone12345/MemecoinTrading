@@ -306,6 +306,10 @@ export async function initDB(): Promise<void> {
     ['maxMc',          '7000000', '5000000'],// $7M  → $5M : focus on small-mid caps
     ['minVolume24h',   '100000',  '15000'],  // $100K→ $15K: fresh tokens have low 24h vol
     ['maxAgeHours',    '720',     '48'],     // 30 days → 48h: ignore stale tokens
+    // ── v3: trading window disabled — bot runs 24/7 ──
+    // Old default was 'true' (restricted to 17:00–00:00 IST).
+    // Force off so the bot operates around the clock on all environments.
+    ['tradingWindowEnabled', 'true', 'false'],
   ];
   for (const [key, oldVal, newVal] of forceMigrations) {
     await query(

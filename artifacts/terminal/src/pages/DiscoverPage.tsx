@@ -397,9 +397,9 @@ export default function DiscoverPage({ whaleStatus: wsProp, wsConnected = false 
         {/* Strategy summary */}
         <div style={{ marginTop: 12, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
           {[
-            { label: '≥$500 → 0.5%', color: 'rgba(0,191,255,0.15)' },
-            { label: '≥$1k → 0.75%', color: 'rgba(0,191,255,0.22)' },
-            { label: '≥$2k → 1%',    color: 'rgba(0,191,255,0.30)' },
+            { label: '10s vol ≥$750 → 0.5%',    color: 'rgba(0,191,255,0.15)' },
+            { label: '10s vol ≥$1.5k → 0.75%', color: 'rgba(0,191,255,0.22)' },
+            { label: '10s vol ≥$2.25k → 1%',   color: 'rgba(0,191,255,0.30)' },
             { label: 'TP +100%',      color: 'rgba(0,255,136,0.15)' },
             { label: 'SL price -30%', color: 'rgba(255,68,102,0.12)' },
             { label: 'SL liq -40%',   color: 'rgba(255,68,102,0.12)' },
@@ -448,9 +448,9 @@ export default function DiscoverPage({ whaleStatus: wsProp, wsConnected = false 
       {/* ── Whale Buy Feed ── */}
       <div style={{ ...C.card, marginBottom: 16 }}>
         <div style={{ ...C.label, marginBottom: 2 }}>WHALE BUY FEED</div>
-        <div style={{ fontSize: 9, color: '#2a3a50', marginBottom: 10 }}>All detected buys ≥$500 on tracked tokens</div>
+        <div style={{ fontSize: 9, color: '#2a3a50', marginBottom: 10 }}>10s rolling volume on tracked tokens (buys + sells)</div>
         {buyLogs.length === 0 ? (
-          <div style={{ fontSize: 11, color: C.gray, textAlign: 'center', padding: '16px 0' }}>No whale buys detected yet</div>
+          <div style={{ fontSize: 11, color: C.gray, textAlign: 'center', padding: '16px 0' }}>No volume signals detected yet</div>
         ) : (
           buyLogs.map((log, i) => <WhaleBuyRow key={i} entry={log} />)
         )}

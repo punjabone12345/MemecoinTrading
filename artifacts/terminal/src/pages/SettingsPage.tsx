@@ -189,7 +189,7 @@ export default function SettingsPage({ settings: init, onUpdate }: Props) {
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
             <div>
               <div style={{ fontSize: 13, fontWeight: 700, color: '#00bfff' }}>🐋 Whale Sniper</div>
-              <div style={{ fontSize: 11, color: '#3a5070', marginTop: 2 }}>Follows pump.fun graduations · copies $500+ whale buys</div>
+              <div style={{ fontSize: 11, color: '#3a5070', marginTop: 2 }}>Follows pump.fun graduations · triggers on 10s volume ≥$750</div>
             </div>
             <div style={{ padding: '4px 10px', borderRadius: 8, background: 'rgba(0,191,255,0.15)', border: '1px solid rgba(0,191,255,0.3)', fontSize: 11, fontWeight: 800, color: '#00bfff', letterSpacing: '0.04em' }}>
               ALWAYS ON
@@ -288,7 +288,7 @@ export default function SettingsPage({ settings: init, onUpdate }: Props) {
       <div style={{ padding: '12px 14px', borderRadius: 12, background: 'rgba(0,191,255,0.06)', border: '1px solid rgba(0,191,255,0.18)', marginBottom: 14 }}>
         <div style={{ fontSize: 11, fontWeight: 800, color: '#00bfff', letterSpacing: '0.06em', marginBottom: 4 }}>🐋 WHALE SNIPER MODE</div>
         <div style={{ fontSize: 11, color: '#3a5070', lineHeight: 1.6 }}>
-          Entry size is determined by whale buy size ($500 → 0.5%, $1k → 0.75%, $2k → 1%). Positions are held <b style={{ color: '#c0c8e0' }}>indefinitely</b> — no time limit. Exit only via TP/SL, liquidity emergency, or stagnation (&lt;X% move in 1h).
+          Entry size is determined by 10-second rolling volume ($750 → 0.5%, $1.5k → 0.75%, $2.25k → 1%). Positions are held <b style={{ color: '#c0c8e0' }}>indefinitely</b> — no time limit. Exit only via TP/SL, liquidity emergency, or stagnation (&lt;X% move in 1h).
         </div>
       </div>
 
