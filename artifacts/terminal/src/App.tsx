@@ -272,7 +272,7 @@ export default function App() {
               />
             )}
             {tab === 'analytics' && (
-              <MemoAnalytics balance={portfolioValue} onRefresh={refreshAll} whaleStatus={whaleStatus} />
+              <MemoAnalytics balance={portfolioValue} freeBalance={freeBalance} onRefresh={refreshAll} whaleStatus={whaleStatus} />
             )}
             {tab === 'settings' && (
               <MemoSettings settings={effectiveSettings} onUpdate={(s) => setSettings(s)} />
