@@ -237,9 +237,10 @@ const closeLocks = new Set<string>();
 const pollLocks  = new Set<string>();
 const seenTxns = new Map<string, Set<string>>();
 const mintCheckpointed = new Set<string>();
-// 10-second rolling transaction volume per tracked mint (buys + sells combined).
-// Each entry = { ts: epoch-ms, usd: dollar value of that tx }.
-const mintTxVolume = new Map<string, Array<{ ts: number; usd: number }>>();
+// 10-second rolling transaction volume per tracked mint, split by direction.
+// Each entry = { ts: epoch-ms, usd: dollar value, type: buy/sell }.
+// Entry trigger fires on NET buy pressure: buyTotal - sellTotal > threshold.
+const mintTxVolume = new Map<string, Array<{ ts: number; usd: number; type: 'buy' | 'sell' }>>();
 
 // Permanent, DB-backed lifetime registry of every mint ever traded by the
 // whale sniper. `whalePositions` only reflects currently-OPEN positions, so
@@ -720,14 +721,23 @@ function detectSell(tx: any, targetMint: string): SellInfo | null {
 
 // ── 10-second rolling volume window ──────────────────────────────────────────
 // Adds a transaction's USD value to the per-mint volume window, prunes entries
-// older than VOLUME_WINDOW_MS (relative to `ts`), and returns the window total.
-function addVolumeAndGetWindowTotal(mint: string, usd: number, ts: number): number {
+// older than VOLUME_WINDOW_MS (relative to `ts`), and returns the NET buy
+// pressure: buyTotal - sellTotal. Entry only fires when this is positive and
+// crosses a VOLUME_TIERS threshold, so pure sell pressure never triggers a trade.
+function addVolumeAndGetWindowNet(
+  mint: string, usd: number, ts: number, type: 'buy' | 'sell',
+): { net: number; buyTotal: number; sellTotal: number } {
   if (!mintTxVolume.has(mint)) mintTxVolume.set(mint, []);
   const entries = mintTxVolume.get(mint)!;
-  entries.push({ ts, usd });
+  entries.push({ ts, usd, type });
   const cutoff = ts - VOLUME_WINDOW_MS;
   while (entries.length > 0 && entries[0].ts < cutoff) entries.shift();
-  return entries.reduce((sum, e) => sum + e.usd, 0);
+  let buyTotal = 0, sellTotal = 0;
+  for (const e of entries) {
+    if (e.type === 'buy') buyTotal += e.usd;
+    else sellTotal += e.usd;
+  }
+  return { net: buyTotal - sellTotal, buyTotal, sellTotal };
 }
 
 // ── DB persistence (survives Render free-tier spin-down / restarts) ───────────
@@ -1118,11 +1128,12 @@ async function processQueue(): Promise<void> {
 // ── Volume update handler ─────────────────────────────────────────────────────
 // Called for every detected transaction (buy OR sell) on a tracked token.
 // Accumulates USD value in a 10-second rolling window, then triggers entry
-// if the window total crosses a VOLUME_TIERS threshold.
+// when NET buy pressure (buyTotal - sellTotal) crosses a VOLUME_TIERS threshold.
 
 async function handleVolumeUpdate(
   mint: string, wallet: string, txUsd: number, txSig: string,
   priceAtDetection: number, txTimestamp: number,
+  txType: 'buy' | 'sell',
 ): Promise<void> {
   const tok = trackedTokens.get(mint);
   if (!tok) return;
@@ -1138,21 +1149,22 @@ async function handleVolumeUpdate(
 
   tok.whaleBuys.push({ wallet, amountUsd: txUsd, timestamp: txTimestamp, txSig, priceAtDetection });
 
-  // Accumulate into the 10-second window and compute its total
-  const windowTotal = addVolumeAndGetWindowTotal(mint, txUsd, txTimestamp);
+  // Accumulate into the 10-second window and compute NET buy pressure
+  const { net: windowNet, buyTotal, sellTotal } = addVolumeAndGetWindowNet(mint, txUsd, txTimestamp, txType);
 
-  const tier = VOLUME_TIERS.find(t => windowTotal >= t.minUsd);
+  // Only buy-side volume can push net positive; pure sell storms never trigger
+  const tier = windowNet > 0 ? VOLUME_TIERS.find(t => windowNet >= t.minUsd) : undefined;
 
   const entry: WhaleBuyLog = {
     mint, name: tok.name, symbol: tok.symbol,
-    wallet, amountUsd: windowTotal, timestamp: txTimestamp, txSig,
+    wallet, amountUsd: windowNet, timestamp: txTimestamp, txSig,
     entered: false, priceAtDetection,
   };
 
   if (!tier) {
-    // Volume not yet at threshold — only log if this tx itself is notable
+    // Net pressure not yet at threshold — log if this tx itself is notable
     if (txUsd >= 50) {
-      entry.skipReason = `10s vol ${windowTotal.toFixed(0)} below ${VOLUME_TIERS[VOLUME_TIERS.length - 1].minUsd} threshold`;
+      entry.skipReason = `10s net buy ${windowNet.toFixed(0)} (buy ${buyTotal.toFixed(0)} − sell ${sellTotal.toFixed(0)}) below ${VOLUME_TIERS[VOLUME_TIERS.length - 1].minUsd} threshold`;
       buyLog.unshift(entry);
       if (buyLog.length > MAX_BUY_LOG) buyLog.pop();
       broadcastWhaleStatus();
@@ -1174,7 +1186,7 @@ async function handleVolumeUpdate(
 
   if (whalePositions.size >= MAX_POSITIONS) {
     entry.skipReason = 'Max positions — queued';
-    enqueueSignal(mint, tok.name, tok.symbol, tier.sizePct, windowTotal, priceAtDetection, wallet, txTimestamp);
+    enqueueSignal(mint, tok.name, tok.symbol, tier.sizePct, windowNet, priceAtDetection, wallet, txTimestamp);
     buyLog.unshift(entry);
     if (buyLog.length > MAX_BUY_LOG) buyLog.pop();
     broadcastWhaleStatus();
@@ -1185,7 +1197,7 @@ async function handleVolumeUpdate(
   buyLog.unshift(entry);
   if (buyLog.length > MAX_BUY_LOG) buyLog.pop();
   broadcastWhaleStatus();
-  await enterWhalePosition(mint, tok.name, tok.symbol, tier.sizePct, windowTotal, priceAtDetection, wallet, txTimestamp);
+  await enterWhalePosition(mint, tok.name, tok.symbol, tier.sizePct, windowNet, priceAtDetection, wallet, txTimestamp);
 }
 
 // ── Buy polling ───────────────────────────────────────────────────────────────
@@ -1309,10 +1321,10 @@ async function pollTokenBuys(mint: string): Promise<void> {
               type: buy ? 'buy' : 'sell', sig: batch[j].slice(0, 12) },
             'Whale sniper: baseline — tx volume found',
           );
-          await handleVolumeUpdate(mint, txWallet, txUsd, batch[j], txPrice, txTs);
+          await handleVolumeUpdate(mint, txWallet, txUsd, batch[j], txPrice, txTs, buy ? 'buy' : 'sell');
           if (trackedTokens.get(mint)?.entryTriggered) break outer;
         }
-        if (i + BATCH < toFetchEarly.length) await new Promise(r => setTimeout(r, 50)); // brief pause between batches
+        // No inter-batch pause — speed is critical in the 10s window
       }
       return;
     }
@@ -1327,8 +1339,8 @@ async function pollTokenBuys(mint: string): Promise<void> {
     // Ensure SOL price is fresh before computing whale avg entry price from tx data.
     await fetchSolPrice().catch(() => {});
 
-    // Fetch up to 5 new txns in parallel
-    const toFetch = newSigs.slice(0, 5);
+    // Fetch up to 10 new txns in parallel (doubled for faster 10s window coverage)
+    const toFetch = newSigs.slice(0, 10);
     const txns    = await Promise.all(
       toFetch.map(sig =>
         withHeliusLimit(() => conn.getParsedTransaction(sig, { maxSupportedTransactionVersion: 0 })).catch(() => null),
@@ -1369,7 +1381,7 @@ async function pollTokenBuys(mint: string): Promise<void> {
         { mint: mint.slice(0, 12), wallet: txWallet.slice(0, 8), usd: txUsd.toFixed(0), type: buy ? 'buy' : 'sell', txPrice, sig: toFetch[i].slice(0, 12) },
         'Whale sniper: tx detected',
       );
-      await handleVolumeUpdate(mint, txWallet, txUsd, toFetch[i], txPrice, Date.now());
+      await handleVolumeUpdate(mint, txWallet, txUsd, toFetch[i], txPrice, Date.now(), buy ? 'buy' : 'sell');
     }
   } catch (err: any) {
     logger.debug({ mint: mint.slice(0, 12), err: err?.message }, 'Whale sniper: poll error');
