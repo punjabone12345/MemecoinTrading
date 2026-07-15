@@ -41,12 +41,12 @@ export async function getSettings(): Promise<Settings> {
     slippagePct: num('slippagePct', 1),
     priorityFeeSol: num('priorityFeeSol', 0.001),
     walletPublicKey: str('walletPublicKey', ''),
-    whaleSlippagePct: num('whaleSlippagePct', 20),
-    whaleStagnationPct: num('whaleStagnationPct', 5),
+    sniperSlippagePct: num('sniperSlippagePct', 20),
+    sniperStagnationPct: num('sniperStagnationPct', 5),
     tradingWindowEnabled: bool('tradingWindowEnabled', false),
     tradingWindowStart: str('tradingWindowStart', '17:00'),
     tradingWindowEnd: str('tradingWindowEnd', '00:00'),
-    // Whale TP tier configs
+    // Sniper TP tier configs
     wt1Tp1Pct: num('wt1Tp1Pct', 50),   wt1Tp1Exit: num('wt1Tp1Exit', 30),
     wt1Tp2Pct: num('wt1Tp2Pct', 125),  wt1Tp2Exit: num('wt1Tp2Exit', 30),  wt1Tp2Trail: num('wt1Tp2Trail', 30),
     wt1Tp3Pct: num('wt1Tp3Pct', 200),  wt1Tp3Exit: num('wt1Tp3Exit', 30),  wt1Tp3Trail: num('wt1Tp3Trail', 20),
@@ -98,7 +98,7 @@ export async function setBalance(sol: number): Promise<void> {
 }
 
 // Serializes all balance read-modify-write operations so concurrent callers
-// (whale-sniper.service.ts) can never race and silently clobber each other's
+// (sniper-engine.service.ts) can never race and silently clobber each other's
 // balance updates.
 let balanceMutex: Promise<unknown> = Promise.resolve();
 
@@ -130,9 +130,9 @@ export async function adjustBalance(deltaSol: number, floorAtZero = true): Promi
 }
 
 export async function resetAllData(): Promise<void> {
-  await query(`DELETE FROM whale_positions`);
-  await query(`DELETE FROM whale_traded_mints`).catch(() => {});
-  await query(`DELETE FROM whale_slippage_skipped_mints`).catch(() => {});
+  await query(`DELETE FROM sniper_positions`);
+  await query(`DELETE FROM traded_mints`).catch(() => {});
+  await query(`DELETE FROM slippage_skipped_mints`).catch(() => {});
   const rows = await query<{ value: string }>(`SELECT value FROM settings WHERE key = 'startingBalanceSol'`);
   const start = parseFloat(rows[0]?.value ?? '10');
   balanceCache = start;

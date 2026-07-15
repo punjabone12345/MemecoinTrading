@@ -1,4 +1,4 @@
-import { Settings, WhaleStatus, WhalePosition, ClosedWhalePosition } from './types.js';
+import { Settings, SniperStatus, SniperPosition, ClosedSniperPosition } from './types.js';
 
 // In local dev VITE_API_URL is empty — Vite proxy forwards /api → :8080.
 // On Vercel set VITE_API_URL=https://your-app.onrender.com so the static
@@ -27,22 +27,22 @@ export const api = {
   // ── Discovery ──────────────────────────────────────────────────────────────
   getScannerSources: () => apiFetch<{ pumpfun: { total: number; recent: { mint: string; ts: number; txSig?: string; instructionType?: string }[] } }>('/scanner/sources'),
 
-  // ── Whale sniper — read ───────────────────────────────────────────────────
-  getWhaleStatus: () => apiFetch<WhaleStatus>('/whale/status'),
+  // ── Sniper engine — read ───────────────────────────────────────────────────
+  getSniperStatus: () => apiFetch<SniperStatus>('/sniper/status'),
 
-  // ── Whale sniper — open position management ───────────────────────────────
-  closeWhalePosition: (id: string, reason?: string) =>
-    apiFetch<{ success: boolean }>(`/whale/${id}/close`, { method: 'POST', body: JSON.stringify({ reason }) }),
-  editWhalePosition:  (id: string, updates: { entryPrice?: number; currentSLPrice?: number; triggerAmountUsd?: number }) =>
-    apiFetch<WhalePosition>(`/whale/${id}`, { method: 'PATCH', body: JSON.stringify(updates) }),
-  deleteWhalePosition: (id: string) =>
-    apiFetch<{ success: boolean }>(`/whale/${id}`, { method: 'DELETE' }),
+  // ── Sniper engine — open position management ───────────────────────────────
+  closeSniperPosition: (id: string, reason?: string) =>
+    apiFetch<{ success: boolean }>(`/sniper/${id}/close`, { method: 'POST', body: JSON.stringify({ reason }) }),
+  editSniperPosition:  (id: string, updates: { entryPrice?: number; currentSLPrice?: number; triggerAmountUsd?: number }) =>
+    apiFetch<SniperPosition>(`/sniper/${id}`, { method: 'PATCH', body: JSON.stringify(updates) }),
+  deleteSniperPosition: (id: string) =>
+    apiFetch<{ success: boolean }>(`/sniper/${id}`, { method: 'DELETE' }),
 
-  // ── Whale sniper — closed position management ─────────────────────────────
-  editClosedWhalePosition:   (id: string, updates: { closeReason?: string; closePnlPct?: number }) =>
-    apiFetch<ClosedWhalePosition>(`/whale/closed/${id}`, { method: 'PATCH', body: JSON.stringify(updates) }),
-  deleteClosedWhalePosition: (id: string) =>
-    apiFetch<{ success: boolean }>(`/whale/closed/${id}`, { method: 'DELETE' }),
+  // ── Sniper engine — closed position management ─────────────────────────────
+  editClosedSniperPosition:   (id: string, updates: { closeReason?: string; closePnlPct?: number }) =>
+    apiFetch<ClosedSniperPosition>(`/sniper/closed/${id}`, { method: 'PATCH', body: JSON.stringify(updates) }),
+  deleteClosedSniperPosition: (id: string) =>
+    apiFetch<{ success: boolean }>(`/sniper/closed/${id}`, { method: 'DELETE' }),
 };
 
 // WebSocket with auto-reconnect

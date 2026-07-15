@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback, useTransition, memo } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
-import { Settings, WhaleStatus } from './lib/types.js';
+import { Settings, SniperStatus } from './lib/types.js';
 import { api, createWS } from './lib/api.js';
 import DiscoverPage from './pages/DiscoverPage.js';
 import PositionsPage from './pages/PositionsPage.js';
@@ -17,7 +17,7 @@ const DEFAULT_SETTINGS: Settings = {
   startingBalanceSol: 10, currentBalanceSol: 10,
   rpcEndpoint: 'https://api.mainnet-beta.solana.com',
   slippagePct: 1, priorityFeeSol: 0.001, walletPublicKey: '',
-  whaleSlippagePct: 20, whaleStagnationPct: 5,
+  sniperSlippagePct: 20, sniperStagnationPct: 5,
   tradingWindowEnabled: true, tradingWindowStart: '17:00', tradingWindowEnd: '00:00',
   wt1Tp1Pct: 50,  wt1Tp1Exit: 30,
   wt1Tp2Pct: 125, wt1Tp2Exit: 30, wt1Tp2Trail: 30,
@@ -57,7 +57,7 @@ export default function App() {
   const [tab, setTab] = useState<Tab>('discover');
   const [balance, setBalance] = useState<number>(10);
   const [settings, setSettings] = useState<Settings | null>(null);
-  const [whaleStatus, setWhaleStatus] = useState<WhaleStatus | null>(null);
+  const [sniperStatus, setSniperStatus] = useState<SniperStatus | null>(null);
   const [wsConnected, setWsConnected] = useState(false);
   const [dataLoaded, setDataLoaded] = useState(false);
   const [, startTransition] = useTransition();
@@ -69,13 +69,13 @@ export default function App() {
 
   const loadInitial = useCallback(async () => {
     try {
-      const [settingsData, whaleData] = await Promise.all([
+      const [settingsData, statusData] = await Promise.all([
         api.getSettings(),
-        api.getWhaleStatus(),
+        api.getSniperStatus(),
       ]);
       setSettings(settingsData);
       setBalance(settingsData.currentBalanceSol);
-      setWhaleStatus(whaleData);
+      setSniperStatus(statusData);
       setDataLoaded(true);
     } catch {
       retryRef.current = setTimeout(loadInitial, 3000);
@@ -99,17 +99,17 @@ export default function App() {
         // by React 18 — no extra work needed.
         if (msg.type === 'balance') setBalance((msg.data as { balance: number }).balance);
         if (msg.type === 'settings') setSettings(msg.data as Settings);
-        if (msg.type === 'whale_status') setWhaleStatus(msg.data as WhaleStatus);
+        if (msg.type === 'sniper_status') setSniperStatus(msg.data as SniperStatus);
       });
       if (destroyed) { ws.close(); return; }
       ws.onopen = () => {
         setWsConnected(true);
         wsConnectedRef.current = true;
         reconnectDelay = 500;
-        // Re-fetch whale status on every reconnect — WS messages sent while
+        // Re-fetch sniper status on every reconnect — WS messages sent while
         // the connection was down (app backgrounded, brief disconnect, etc.)
         // are not replayed, so we pull the latest snapshot immediately.
-        api.getWhaleStatus().then(setWhaleStatus).catch(() => {});
+        api.getSniperStatus().then(setSniperStatus).catch(() => {});
       };
       ws.onclose = () => {
         setWsConnected(false);
@@ -125,19 +125,19 @@ export default function App() {
     return () => { destroyed = true; wsRef.current?.close(); };
   }, []);
 
-  // Fallback poll — keeps settings/balance/whale status fresh via HTTP
+  // Fallback poll — keeps settings/balance/sniper status fresh via HTTP
   // whenever the WebSocket connection is offline.
   useEffect(() => {
     const poll = async () => {
       try {
         const wsLive = wsConnectedRef.current;
         if (!wsLive) {
-          const [settingsData, whaleData] = await Promise.all([
+          const [settingsData, statusData] = await Promise.all([
             api.getSettings(),
-            api.getWhaleStatus(),
+            api.getSniperStatus(),
           ]);
           setBalance(settingsData.currentBalanceSol);
-          setWhaleStatus(whaleData);
+          setSniperStatus(statusData);
         }
       } catch {
         // Silently ignore
@@ -156,33 +156,33 @@ export default function App() {
     startTransition(() => setTab(t));
   }, [tab]);
 
-  const whaleOpen = whaleStatus?.openPositions ?? [];
+  const openPositions = sniperStatus?.openPositions ?? [];
 
-  // Nav badge: open whale positions
-  const openCount = whaleOpen.length;
+  // Nav badge: open sniper positions
+  const openCount = openPositions.length;
   const effectiveSettings = settings ?? DEFAULT_SETTINGS;
 
-  // Whale unrealized PnL — pnlPct from the monitor already accounts for banked partial TP returns.
+  // Sniper unrealized PnL — pnlPct from the monitor already accounts for banked partial TP returns.
   // Only used for the ▲▼ header indicator (not for portfolio value, which uses balance directly).
-  const whaleUnrealizedPnl = whaleOpen.reduce((sum, p) => {
+  const unrealizedPnl = openPositions.reduce((sum, p) => {
     const initSize = p.initialSizeSol > 0 ? p.initialSizeSol : p.sizeSol;
     return sum + initSize * (p.pnlPct / 100);
   }, 0);
 
   // `balance` (= currentBalanceSol from settings) is the authoritative free cash.
-  // The whale service calls setBalance() on every partial-TP and full close, so it
+  // The sniper service calls setBalance() on every partial-TP and full close, so it
   // already embeds ALL historical realized P&L — no need to re-sum closed history.
   //
-  // Portfolio value = free cash + current market value of remaining open whale positions.
-  const deployedWhaleValue = whaleOpen.reduce((sum, p) => {
+  // Portfolio value = free cash + current market value of remaining open sniper positions.
+  const deployedValue = openPositions.reduce((sum, p) => {
     const remaining = p.remainingSizeSol > 0 ? p.remainingSizeSol : p.sizeSol;
     const priceRatio = p.entryPrice > 0 && p.lastPrice > 0 ? p.lastPrice / p.entryPrice : 1;
     return sum + remaining * priceRatio;
   }, 0);
-  const portfolioValue = balance + deployedWhaleValue;
+  const portfolioValue = balance + deployedValue;
 
   // totalUnrealized only for the ▲▼ display in the header
-  const totalUnrealized = whaleUnrealizedPnl;
+  const totalUnrealized = unrealizedPnl;
 
   // freeBalance = the free cash itself (balance already excludes deployed capital)
   const freeBalance = balance;
@@ -226,7 +226,7 @@ export default function App() {
         <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
           <div style={{ textAlign: 'right' }}>
             <div style={{ fontSize: 8, color: '#4a6080', letterSpacing: '0.1em', fontWeight: 700 }}>
-              PORTFOLIO{whaleOpen.length > 0 && (
+              PORTFOLIO{openPositions.length > 0 && (
                 <span style={{ marginLeft: 4, color: totalUnrealized >= 0 ? '#00ff88' : '#ff4466' }}>
                   {totalUnrealized >= 0 ? '▲' : '▼'}{Math.abs(totalUnrealized).toFixed(3)}
                 </span>
@@ -235,7 +235,7 @@ export default function App() {
             <div style={{ fontSize: 16, fontWeight: 900, color: '#00d4ff', letterSpacing: '-0.01em', fontVariantNumeric: 'tabular-nums' }}>
               {portfolioValue.toFixed(3)}<span style={{ fontSize: 9, opacity: 0.6, marginLeft: 3 }}>SOL</span>
             </div>
-            {whaleOpen.length > 0 && (
+            {openPositions.length > 0 && (
               <div style={{ fontSize: 8, color: '#3a5070', marginTop: 1 }}>{freeBalance.toFixed(3)} free</div>
             )}
           </div>
@@ -264,15 +264,15 @@ export default function App() {
             transition={pageTrans}
             style={{ position: 'absolute', inset: 0, overflowY: 'auto', overflowX: 'hidden', WebkitOverflowScrolling: 'touch', padding: '16px 16px 12px' }}
           >
-            {tab === 'discover' && <MemoDiscover whaleStatus={whaleStatus} wsConnected={wsConnected} />}
+            {tab === 'discover' && <MemoDiscover sniperStatus={sniperStatus} wsConnected={wsConnected} />}
             {tab === 'positions' && (
               <MemoPositions
-                whaleStatus={whaleStatus}
+                sniperStatus={sniperStatus}
                 onRefresh={refreshAll}
               />
             )}
             {tab === 'analytics' && (
-              <MemoAnalytics balance={portfolioValue} freeBalance={freeBalance} onRefresh={refreshAll} whaleStatus={whaleStatus} />
+              <MemoAnalytics balance={portfolioValue} freeBalance={freeBalance} onRefresh={refreshAll} sniperStatus={sniperStatus} />
             )}
             {tab === 'settings' && (
               <MemoSettings settings={effectiveSettings} onUpdate={(s) => setSettings(s)} />

@@ -12,7 +12,7 @@
 
 import { getSettings } from '../services/settings.service.js';
 import { startTrenchesScanner, stopTrenchesScanner } from '../services/trenches.service.js';
-import { resumeWhaleSniper, stopWhaleSniper } from '../services/whale-sniper.service.js';
+import { resumeSniperEngine, stopSniperEngine } from '../services/sniper-engine.service.js';
 import { startTelegramCommands, stopTelegramCommands } from './telegram-commands.js';
 import { stopHeliusWs } from './helius-ws-shared.js';
 import { logger } from './logger.js';
@@ -55,7 +55,7 @@ function isInsideWindow(start: string, end: string): boolean {
  *
  * `hard` = true means a full hard-stop (botEnabled=false manual pause).
  * `hard` = false means a soft window-close — only new-entry services stop;
- *          the whale sniper position monitor keeps running for open trades.
+ *          the sniper engine position monitor keeps running for open trades.
  */
 async function shouldServicesRun(): Promise<{ run: boolean; hard: boolean; reason: string }> {
   const s = await getSettings();
@@ -75,16 +75,16 @@ async function shouldServicesRun(): Promise<{ run: boolean; hard: boolean; reaso
 
 function startServices(): void {
   startTrenchesScanner();
-  resumeWhaleSniper();   // idempotent — no-op if already running
+  resumeSniperEngine();   // idempotent — no-op if already running
   startTelegramCommands();
 }
 
 /**
  * Soft stop — called when the trading window closes.
  * Stops new-graduation detection and Telegram, but intentionally leaves the
- * whale sniper and Helius WS alive so open positions continue to be tracked
+ * sniper engine and Helius WS alive so open positions continue to be tracked
  * for P&L, TP, and SL until they close naturally.
- * The whale sniper's own isInTradingWindow() guards block any new entries.
+ * The sniper engine's own isInTradingWindow() guards block any new entries.
  */
 function stopNewEntryServices(): void {
   stopTrenchesScanner();
@@ -94,11 +94,11 @@ function stopNewEntryServices(): void {
 
 /**
  * Hard stop — called only when botEnabled=false (manual PAUSE BOT).
- * Stops everything including the whale sniper and Helius WS.
+ * Stops everything including the sniper engine and Helius WS.
  */
 function stopAllServices(): void {
   stopTrenchesScanner();
-  stopWhaleSniper();
+  stopSniperEngine();
   stopTelegramCommands();
   stopHeliusWs();
 }

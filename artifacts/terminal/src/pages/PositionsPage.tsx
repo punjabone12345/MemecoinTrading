@@ -1,10 +1,10 @@
 import { useState, useRef, useEffect } from 'react';
-import { WhaleStatus, WhalePosition, ClosedWhalePosition } from '../lib/types.js';
+import { SniperStatus, SniperPosition, ClosedSniperPosition } from '../lib/types.js';
 import { api } from '../lib/api.js';
 import { formatSOL, formatPct, formatPrice } from '../lib/utils.js';
 
 interface Props {
-  whaleStatus?: WhaleStatus | null;
+  sniperStatus?: SniperStatus | null;
   onRefresh: () => Promise<void>;
 }
 
@@ -73,10 +73,10 @@ function LivePriceTicker({ price, entryPrice }: { price: number; entryPrice: num
   );
 }
 
-// ── Whale position card ───────────────────────────────────────────────────────
+// ── Sniper position card ───────────────────────────────────────────────────────
 
-// ─── Whale edit modal ─────────────────────────────────────────────────────────
-function WhaleEditModal({ pos, onClose, onSave }: { pos: WhalePosition; onClose: () => void; onSave: () => Promise<void> }) {
+// ─── Position edit modal ─────────────────────────────────────────────────────────
+function PositionEditModal({ pos, onClose, onSave }: { pos: SniperPosition; onClose: () => void; onSave: () => Promise<void> }) {
   const [form, setForm] = useState({
     entryPrice: String(pos.entryPrice),
     currentSLPrice: String(pos.currentSLPrice),
@@ -86,7 +86,7 @@ function WhaleEditModal({ pos, onClose, onSave }: { pos: WhalePosition; onClose:
   async function save() {
     setLoading(true);
     try {
-      await api.editWhalePosition(pos.id, {
+      await api.editSniperPosition(pos.id, {
         entryPrice: parseFloat(form.entryPrice) || undefined,
         currentSLPrice: parseFloat(form.currentSLPrice) || undefined,
         triggerAmountUsd: parseFloat(form.triggerAmountUsd) || undefined,
@@ -97,7 +97,7 @@ function WhaleEditModal({ pos, onClose, onSave }: { pos: WhalePosition; onClose:
   }
   return (
     <Modal onClose={onClose}>
-      <h3 style={{ fontWeight: 900, fontSize: 16, color: '#9b59ff', marginBottom: 20 }}>Edit 🐋 {pos.symbol}</h3>
+      <h3 style={{ fontWeight: 900, fontSize: 16, color: '#9b59ff', marginBottom: 20 }}>Edit {pos.symbol}</h3>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
         {([['Entry Price ($)', 'entryPrice'], ['SL Price ($)', 'currentSLPrice'], ['Trigger Amount (USD)', 'triggerAmountUsd']] as const).map(([label, key]) => (
           <div key={key}>
@@ -117,10 +117,10 @@ function WhaleEditModal({ pos, onClose, onSave }: { pos: WhalePosition; onClose:
   );
 }
 
-// ─── Whale close modal ────────────────────────────────────────────────────────
+// ─── Position close modal ────────────────────────────────────────────────────────
 const WHALE_CLOSE_REASONS = ['Manual close', 'Taking profit', 'Risk management', 'Strategy change'];
 
-function WhaleCloseModal({ pos, onClose, onConfirm }: { pos: WhalePosition; onClose: () => void; onConfirm: () => Promise<void> }) {
+function PositionCloseModal({ pos, onClose, onConfirm }: { pos: SniperPosition; onClose: () => void; onConfirm: () => Promise<void> }) {
   const [loading, setLoading] = useState(false);
   const [reason, setReason] = useState('Manual close');
   const pnlPct = pos.pnlPct;
@@ -128,12 +128,12 @@ function WhaleCloseModal({ pos, onClose, onConfirm }: { pos: WhalePosition; onCl
   const pnlSol = initSize * (pnlPct / 100);
   async function close() {
     setLoading(true);
-    try { await api.closeWhalePosition(pos.id, reason); await onConfirm(); onClose(); }
+    try { await api.closeSniperPosition(pos.id, reason); await onConfirm(); onClose(); }
     finally { setLoading(false); }
   }
   return (
     <Modal onClose={onClose}>
-      <h3 style={{ fontWeight: 900, fontSize: 16, color: '#ff4466', marginBottom: 20 }}>Close 🐋 {pos.symbol}</h3>
+      <h3 style={{ fontWeight: 900, fontSize: 16, color: '#ff4466', marginBottom: 20 }}>Close {pos.symbol}</h3>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 16 }}>
         {([['Current Price', `${formatPrice(pos.lastPrice)}`, '#d4e0f0'], ['P&L', `${formatSOL(pnlSol)} (${formatPct(pnlPct)})`, pnlSol >= 0 ? '#00ff88' : '#ff4466'], ['Remaining', `${pos.remainingSizeSol.toFixed(4)} SOL`, '#7090b0'], ['Banked', `${pos.bankedSol.toFixed(4)} SOL`, '#9b59ff']] as const).map(([l, v, c]) => (
           <div key={l} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13 }}>
@@ -158,21 +158,21 @@ function WhaleCloseModal({ pos, onClose, onConfirm }: { pos: WhalePosition; onCl
   );
 }
 
-// ─── Whale closed-position edit modal ─────────────────────────────────────────
-function WhaleClosedEditModal({ pos, onClose, onSave }: { pos: ClosedWhalePosition; onClose: () => void; onSave: () => Promise<void> }) {
+// ─── Closed-position edit modal ─────────────────────────────────────────
+function ClosedPositionEditModal({ pos, onClose, onSave }: { pos: ClosedSniperPosition; onClose: () => void; onSave: () => Promise<void> }) {
   const [form, setForm] = useState({ closeReason: pos.closeReason, closePnlPct: String(pos.closePnlPct) });
   const [loading, setLoading] = useState(false);
   async function save() {
     setLoading(true);
     try {
-      await api.editClosedWhalePosition(pos.id, { closeReason: form.closeReason, closePnlPct: parseFloat(form.closePnlPct) || undefined });
+      await api.editClosedSniperPosition(pos.id, { closeReason: form.closeReason, closePnlPct: parseFloat(form.closePnlPct) || undefined });
       await onSave();
       onClose();
     } finally { setLoading(false); }
   }
   return (
     <Modal onClose={onClose}>
-      <h3 style={{ fontWeight: 900, fontSize: 16, color: '#9b59ff', marginBottom: 20 }}>Edit Closed 🐋 {pos.symbol}</h3>
+      <h3 style={{ fontWeight: 900, fontSize: 16, color: '#9b59ff', marginBottom: 20 }}>Edit Closed {pos.symbol}</h3>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
         <div>
           <div style={{ fontSize: 11, color: '#3a5070', marginBottom: 5, fontWeight: 700 }}>Close Reason</div>
@@ -191,8 +191,8 @@ function WhaleClosedEditModal({ pos, onClose, onSave }: { pos: ClosedWhalePositi
   );
 }
 
-// ─── Whale runner bar (uses real pos.currentSLPrice) ──────────────────────────
-function WhaleRunnerBar({ pos }: { pos: WhalePosition }) {
+// ─── Runner bar (uses real pos.currentSLPrice) ──────────────────────────
+function RunnerBar({ pos }: { pos: SniperPosition }) {
   const pnlPct = pos.pnlPct;
   const peakGain = ((pos.peakPrice - pos.entryPrice) / pos.entryPrice) * 100;
   const slFromEntry = ((pos.currentSLPrice - pos.entryPrice) / pos.entryPrice) * 100;
@@ -214,7 +214,7 @@ function WhaleRunnerBar({ pos }: { pos: WhalePosition }) {
     <div style={{ marginTop: 10 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, marginBottom: 6 }}>
         <span style={{ color: pos.tp1Hit ? '#9b59ff' : '#ffd700', fontWeight: 800 }}>
-          🐋 {slLabel}
+          🎯 {slLabel}
           {pos.tp1Hit && <span style={{ color: '#00ff88', marginLeft: 6 }}>TP1✓</span>}
           {pos.tp2Hit && <span style={{ color: '#00ff88', marginLeft: 4 }}>TP2✓</span>}
           {pos.tp3Hit && <span style={{ color: '#00ff88', marginLeft: 4 }}>TP3✓</span>}
@@ -237,8 +237,8 @@ function WhaleRunnerBar({ pos }: { pos: WhalePosition }) {
   );
 }
 
-// ─── Open whale position card ─────────────────────────────────────────────────
-function WhalePositionCard({ pos, solPrice, onRefresh }: { pos: WhalePosition; solPrice: number; onRefresh: () => Promise<void> }) {
+// ─── Open sniper position card ─────────────────────────────────────────────────
+function SniperPositionCard({ pos, solPrice, onRefresh }: { pos: SniperPosition; solPrice: number; onRefresh: () => Promise<void> }) {
   const [showEdit, setShowEdit] = useState(false);
   const [showClose, setShowClose] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -251,9 +251,9 @@ function WhalePositionCard({ pos, solPrice, onRefresh }: { pos: WhalePosition; s
   void solPrice; // used by parent for context
 
   async function del() {
-    if (!confirm(`Delete ${pos.symbol} whale position? Remaining ${pos.remainingSizeSol.toFixed(4)} SOL will be refunded to balance.`)) return;
+    if (!confirm(`Delete ${pos.symbol} sniper position? Remaining ${pos.remainingSizeSol.toFixed(4)} SOL will be refunded to balance.`)) return;
     setDeleting(true);
-    try { await api.deleteWhalePosition(pos.id); await onRefresh(); } finally { setDeleting(false); }
+    try { await api.deleteSniperPosition(pos.id); await onRefresh(); } finally { setDeleting(false); }
   }
 
   return (
@@ -266,7 +266,7 @@ function WhalePositionCard({ pos, solPrice, onRefresh }: { pos: WhalePosition; s
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4, flexWrap: 'wrap' }}>
               <span style={{ fontWeight: 900, fontSize: 15, color: '#d4e0f0', flexShrink: 0 }}>{pos.symbol}</span>
               <span style={{ fontSize: 11, color: '#3a5070', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 80 }}>{pos.name}</span>
-              <span style={{ padding: '2px 7px', borderRadius: 6, fontSize: 10, fontWeight: 700, background: 'rgba(155,89,255,0.15)', color: '#9b59ff', border: '1px solid rgba(155,89,255,0.35)', flexShrink: 0 }}>🐋 WHALE T{pos.tpTier}</span>
+              <span style={{ padding: '2px 7px', borderRadius: 6, fontSize: 10, fontWeight: 700, background: 'rgba(155,89,255,0.15)', color: '#9b59ff', border: '1px solid rgba(155,89,255,0.35)', flexShrink: 0 }}>🎯 TIER T{pos.tpTier}</span>
               {entryMcapK && <span style={{ padding: '2px 7px', borderRadius: 6, fontSize: 10, fontWeight: 700, background: 'rgba(0,212,255,0.08)', color: '#00d4ff', border: '1px solid rgba(0,212,255,0.2)', flexShrink: 0 }}>Entry {entryMcapK}k MC</span>}
               <span title="Price updating every 1.5s" style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 9, color: '#00ff88', fontWeight: 800, flexShrink: 0 }}>
                 <span style={{ display: 'inline-block', width: 5, height: 5, borderRadius: '50%', background: '#00ff88', boxShadow: '0 0 5px #00ff88', animation: 'pulse-dot 0.8s ease-in-out infinite' }} />
@@ -310,7 +310,7 @@ function WhalePositionCard({ pos, solPrice, onRefresh }: { pos: WhalePosition; s
           </div>
         </div>
 
-        <WhaleRunnerBar pos={pos} />
+        <RunnerBar pos={pos} />
 
         {/* Action buttons */}
         <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
@@ -323,14 +323,14 @@ function WhalePositionCard({ pos, solPrice, onRefresh }: { pos: WhalePosition; s
           </button>
         </div>
       </div>
-      {showEdit  && <WhaleEditModal  pos={pos} onClose={() => setShowEdit(false)}  onSave={onRefresh} />}
-      {showClose && <WhaleCloseModal pos={pos} onClose={() => setShowClose(false)} onConfirm={onRefresh} />}
+      {showEdit  && <PositionEditModal  pos={pos} onClose={() => setShowEdit(false)}  onSave={onRefresh} />}
+      {showClose && <PositionCloseModal pos={pos} onClose={() => setShowClose(false)} onConfirm={onRefresh} />}
     </>
   );
 }
 
-// ─── Closed whale position card ───────────────────────────────────────────────
-function ClosedWhaleCard({ pos, onRefresh }: { pos: ClosedWhalePosition; onRefresh: () => Promise<void> }) {
+// ─── Closed sniper position card ───────────────────────────────────────────────
+function ClosedPositionCard({ pos, onRefresh }: { pos: ClosedSniperPosition; onRefresh: () => Promise<void> }) {
   const [showEdit, setShowEdit] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const pnlPos = pos.closePnlPct >= 0;
@@ -340,9 +340,9 @@ function ClosedWhaleCard({ pos, onRefresh }: { pos: ClosedWhalePosition; onRefre
   const entryMcapK = pos.entryMcap > 0 ? (pos.entryMcap / 1000).toFixed(0) : null;
 
   async function del() {
-    if (!confirm(`Delete ${pos.symbol} closed whale trade?`)) return;
+    if (!confirm(`Delete ${pos.symbol} closed sniper trade?`)) return;
     setDeleting(true);
-    try { await api.deleteClosedWhalePosition(pos.id); await onRefresh(); } finally { setDeleting(false); }
+    try { await api.deleteClosedSniperPosition(pos.id); await onRefresh(); } finally { setDeleting(false); }
   }
 
   return (
@@ -353,7 +353,7 @@ function ClosedWhaleCard({ pos, onRefresh }: { pos: ClosedWhalePosition; onRefre
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4, flexWrap: 'wrap' }}>
               <span style={{ fontWeight: 800, fontSize: 14, color: '#d4e0f0' }}>{pos.symbol}</span>
               <span style={{ fontSize: 10, color: '#3a5070' }}>{pos.name}</span>
-              <span style={{ padding: '1px 6px', borderRadius: 5, fontSize: 9, fontWeight: 800, background: 'rgba(155,89,255,0.12)', color: '#9b59ff', border: '1px solid rgba(155,89,255,0.28)' }}>🐋 T{pos.tpTier}</span>
+              <span style={{ padding: '1px 6px', borderRadius: 5, fontSize: 9, fontWeight: 800, background: 'rgba(155,89,255,0.12)', color: '#9b59ff', border: '1px solid rgba(155,89,255,0.28)' }}>🎯 T{pos.tpTier}</span>
               {entryMcapK && <span style={{ fontSize: 10, color: '#3a5070' }}>@ {entryMcapK}k MC</span>}
             </div>
             <div style={{ fontSize: 10, color: '#3a5070', marginBottom: 3 }}>
@@ -378,45 +378,45 @@ function ClosedWhaleCard({ pos, onRefresh }: { pos: ClosedWhalePosition; onRefre
           </button>
         </div>
       </div>
-      {showEdit && <WhaleClosedEditModal pos={pos} onClose={() => setShowEdit(false)} onSave={onRefresh} />}
+      {showEdit && <ClosedPositionEditModal pos={pos} onClose={() => setShowEdit(false)} onSave={onRefresh} />}
     </>
   );
 }
 
 // ── Main page ─────────────────────────────────────────────────────────────────
 
-export default function PositionsPage({ whaleStatus, onRefresh }: Props) {
-  const whaleOpen   = whaleStatus?.openPositions   ?? [];
-  const whaleClosed = whaleStatus?.closedPositions  ?? [];
-  const solPrice    = whaleStatus?.solPriceUsd ?? 0;
+export default function PositionsPage({ sniperStatus, onRefresh }: Props) {
+  const openPositions   = sniperStatus?.openPositions   ?? [];
+  const closedPositions = sniperStatus?.closedPositions  ?? [];
+  const solPrice    = sniperStatus?.solPriceUsd ?? 0;
 
-  // Whale unrealized PnL (pnlPct accounts for banked partial closes)
-  const whaleUnrealized = whaleOpen.reduce((s, p) => {
+  // Unrealized PnL (pnlPct accounts for banked partial closes)
+  const unrealizedPnl = openPositions.reduce((s, p) => {
     const initSize = p.initialSizeSol > 0 ? p.initialSizeSol : p.sizeSol;
     return s + initSize * (p.pnlPct / 100);
   }, 0);
 
-  // Whale today's P&L
+  // Today's P&L
   const todayStr = new Date().toDateString();
-  const whaleDailyPnl = whaleClosed.reduce((sum, p) => {
+  const dailyPnl = closedPositions.reduce((sum, p) => {
     if (new Date(p.closeTime).toDateString() !== todayStr) return sum;
     const initSize = p.initialSizeSol > 0 ? p.initialSizeSol : p.sizeSol;
     return sum + initSize * (p.closePnlPct / 100);
   }, 0);
 
-  // Whale win rate
-  const whaleWins = whaleClosed.filter(p => p.closePnlPct > 0).length;
-  const whaleWinRate = whaleClosed.length > 0 ? (whaleWins / whaleClosed.length) * 100 : 0;
+  // Win rate
+  const wins = closedPositions.filter(p => p.closePnlPct > 0).length;
+  const winRate = closedPositions.length > 0 ? (wins / closedPositions.length) * 100 : 0;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
       {/* Summary stats */}
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
         {[
-          { label: 'Open Positions', value: String(whaleOpen.length), color: '#00d4ff' },
-          { label: 'Unrealized PNL', value: `${whaleUnrealized >= 0 ? '+' : ''}${whaleUnrealized.toFixed(4)} SOL`, color: whaleUnrealized >= 0 ? '#00ff88' : '#ff4466' },
-          { label: "Today's PNL", value: `${whaleDailyPnl >= 0 ? '+' : ''}${whaleDailyPnl.toFixed(4)} SOL`, color: whaleDailyPnl >= 0 ? '#00ff88' : '#ff4466' },
-          { label: 'Win Rate', value: `${whaleWinRate.toFixed(1)}%`, color: '#ffd700' },
+          { label: 'Open Positions', value: String(openPositions.length), color: '#00d4ff' },
+          { label: 'Unrealized PNL', value: `${unrealizedPnl >= 0 ? '+' : ''}${unrealizedPnl.toFixed(4)} SOL`, color: unrealizedPnl >= 0 ? '#00ff88' : '#ff4466' },
+          { label: "Today's PNL", value: `${dailyPnl >= 0 ? '+' : ''}${dailyPnl.toFixed(4)} SOL`, color: dailyPnl >= 0 ? '#00ff88' : '#ff4466' },
+          { label: 'Win Rate', value: `${winRate.toFixed(1)}%`, color: '#ffd700' },
         ].map((s) => (
           <div key={s.label} className="card" style={{ padding: '14px 16px' }}>
             <div style={{ fontSize: 17, fontWeight: 900, color: s.color, lineHeight: 1.1 }}>{s.value}</div>
@@ -426,56 +426,56 @@ export default function PositionsPage({ whaleStatus, onRefresh }: Props) {
       </div>
 
       {/* Live feed badge */}
-      {whaleOpen.length > 0 && (
+      {openPositions.length > 0 && (
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 14px', borderRadius: 8, background: 'rgba(0,255,136,0.04)', border: '1px solid rgba(0,255,136,0.1)', fontSize: 10 }}>
           <span style={{ display: 'inline-block', width: 6, height: 6, borderRadius: '50%', background: '#00ff88', boxShadow: '0 0 6px #00ff88', animation: 'pulse-dot 0.8s ease-in-out infinite' }} />
           <span style={{ color: '#00ff88', fontWeight: 800 }}>LIVE</span>
-          <span style={{ color: '#3a5070' }}>Prices update every <b style={{ color: '#7090b0' }}>1.5s</b> · Whale detection via Helius WS + 2s poll</span>
+          <span style={{ color: '#3a5070' }}>Prices update every <b style={{ color: '#7090b0' }}>1.5s</b> · Buy detection via Helius WS + 2s poll</span>
         </div>
       )}
 
-      {/* ── Whale Sniper open positions ── */}
+      {/* ── Sniper engine open positions ── */}
       <div className="section-label" style={{ marginTop: 4, display: 'flex', alignItems: 'center', gap: 8 }}>
-        <span>🐋 Whale Sniper Positions ({whaleOpen.length})</span>
-        {whaleStatus && (
+        <span>🎯 Sniper Positions ({openPositions.length})</span>
+        {sniperStatus && (
           <span style={{ fontSize: 10, color: '#3a5070', fontWeight: 500 }}>
-            · watching {whaleStatus.stats.tracking} token{whaleStatus.stats.tracking !== 1 ? 's' : ''}
+            · watching {sniperStatus.stats.tracking} token{sniperStatus.stats.tracking !== 1 ? 's' : ''}
           </span>
         )}
       </div>
 
-      {whaleOpen.length === 0 ? (
+      {openPositions.length === 0 ? (
         <div className="card" style={{ padding: '28px 20px', textAlign: 'center', color: '#3a5070' }}>
-          <div style={{ fontSize: 32, marginBottom: 8 }}>🐋</div>
-          <div style={{ fontWeight: 700, color: '#7090b0', marginBottom: 4 }}>No whale positions yet</div>
+          <div style={{ fontSize: 32, marginBottom: 8 }}>🎯</div>
+          <div style={{ fontWeight: 700, color: '#7090b0', marginBottom: 4 }}>No sniper positions yet</div>
           <div style={{ fontSize: 12 }}>
-            {whaleStatus
-              ? `Tracking ${whaleStatus.stats.tracking} token${whaleStatus.stats.tracking !== 1 ? 's' : ''} · watching 10s volume ≥$750`
-              : 'Watching for whale entries on graduated tokens…'}
+            {sniperStatus
+              ? `Tracking ${sniperStatus.stats.tracking} token${sniperStatus.stats.tracking !== 1 ? 's' : ''} · watching 10s volume ≥$750`
+              : 'Watching for consensus entries on graduated tokens…'}
           </div>
         </div>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-          {whaleOpen.map((p) => <WhalePositionCard key={p.id} pos={p} solPrice={solPrice} onRefresh={onRefresh} />)}
+          {openPositions.map((p) => <SniperPositionCard key={p.id} pos={p} solPrice={solPrice} onRefresh={onRefresh} />)}
         </div>
       )}
 
-      {/* ── Whale closed positions — always visible so fast-close trades are never hidden ── */}
+      {/* ── Sniper engine closed positions — always visible so fast-close trades are never hidden ── */}
       <div className="section-label" style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 8 }}>
-        <span>🐋 Closed Whale Positions</span>
-        {whaleClosed.length > 0 && (
+        <span>🎯 Closed Sniper Positions</span>
+        {closedPositions.length > 0 && (
           <span style={{ fontSize: 11, fontWeight: 700, color: '#00d4ff', background: 'rgba(0,212,255,0.12)', borderRadius: 6, padding: '1px 7px' }}>
-            {whaleClosed.length}
+            {closedPositions.length}
           </span>
         )}
       </div>
-      {whaleClosed.length === 0 ? (
+      {closedPositions.length === 0 ? (
         <div className="card" style={{ padding: '16px 20px', textAlign: 'center', color: '#3a5070', fontSize: 12 }}>
           No closed positions yet — fast-closing trades appear here immediately
         </div>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-          {whaleClosed.slice(0, 20).map((p) => <ClosedWhaleCard key={p.id} pos={p} onRefresh={onRefresh} />)}
+          {closedPositions.slice(0, 20).map((p) => <ClosedPositionCard key={p.id} pos={p} onRefresh={onRefresh} />)}
         </div>
       )}
     </div>

@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { WhaleStatus, ClosedWhalePosition } from '../lib/types.js';
+import { SniperStatus, ClosedSniperPosition } from '../lib/types.js';
 import { api } from '../lib/api.js';
 import { formatPrice } from '../lib/utils.js';
 
@@ -7,7 +7,7 @@ interface Props {
   balance: number;      // portfolio value (free cash + open position market value)
   freeBalance: number;  // free cash only
   onRefresh: () => Promise<void>;
-  whaleStatus?: WhaleStatus | null;
+  sniperStatus?: SniperStatus | null;
 }
 
 function StatCard({ label, value, color, sub }: { label: string; value: string; color?: string; sub?: string }) {
@@ -20,7 +20,7 @@ function StatCard({ label, value, color, sub }: { label: string; value: string; 
   );
 }
 
-function WhalePnlChart({ positions }: { positions: ClosedWhalePosition[] }) {
+function PnlChart({ positions }: { positions: ClosedSniperPosition[] }) {
   if (positions.length < 1) return null;
   const sorted = [...positions].sort((a, b) => (a.closeTime ?? a.entryTime) - (b.closeTime ?? b.entryTime));
   let running = 0;
@@ -44,15 +44,15 @@ function WhalePnlChart({ positions }: { positions: ClosedWhalePosition[] }) {
   const col = last >= 0 ? '#9b59ff' : '#ff4466';
   return (
     <div className="card" style={{ padding: '16px', marginBottom: 4 }}>
-      <div className="section-label" style={{ marginBottom: 12 }}>🐋 Cumulative Realised PNL (SOL)</div>
+      <div className="section-label" style={{ marginBottom: 12 }}>📈 Cumulative Realised PNL (SOL)</div>
       <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: 72, display: 'block' }}>
         <defs>
-          <linearGradient id="whalepnlg" x1="0" y1="0" x2="0" y2="1">
+          <linearGradient id="pnlg" x1="0" y1="0" x2="0" y2="1">
             <stop offset="0%" stopColor={col} stopOpacity="0.25" />
             <stop offset="100%" stopColor={col} stopOpacity="0" />
           </linearGradient>
         </defs>
-        <path d={area} fill="url(#whalepnlg)" />
+        <path d={area} fill="url(#pnlg)" />
         <path d={path} fill="none" stroke={col} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ filter: `drop-shadow(0 0 4px ${col}88)` }} />
         <line x1={pad} y1={my(0)} x2={W - pad} y2={my(0)} stroke="rgba(255,255,255,0.08)" strokeWidth="1" strokeDasharray="4,4" />
       </svg>
@@ -67,59 +67,59 @@ function csvField(v: string | number): string {
   return `"${s.replace(/"/g, '""')}"`;
 }
 
-export default function AnalyticsPage({ balance, freeBalance, onRefresh, whaleStatus }: Props) {
-  const whaleClosed = whaleStatus?.closedPositions ?? [];
-  const whaleOpen   = whaleStatus?.openPositions   ?? [];
+export default function AnalyticsPage({ balance, freeBalance, onRefresh, sniperStatus }: Props) {
+  const closedPositions = sniperStatus?.closedPositions ?? [];
+  const openPositions   = sniperStatus?.openPositions   ?? [];
 
   // ── Realised stats (closed positions only) ────────────────────────────────
-  const whaleTotalPnlSol = whaleClosed.reduce((sum, p) => {
+  const totalPnlSol = closedPositions.reduce((sum, p) => {
     const initSize = p.initialSizeSol > 0 ? p.initialSizeSol : p.sizeSol;
     return sum + initSize * (p.closePnlPct / 100);
   }, 0);
-  const whaleWins    = whaleClosed.filter(p => p.closePnlPct > 0).length;
-  const whaleLosses  = whaleClosed.filter(p => p.closePnlPct <= 0).length;
-  const whaleWinRate = whaleClosed.length > 0 ? (whaleWins / whaleClosed.length) * 100 : 0;
-  const whalePnls    = whaleClosed.map(p => p.closePnlPct);
-  const whaleBest    = whalePnls.length > 0 ? Math.max(...whalePnls) : 0;
-  const whaleWorst   = whalePnls.length > 0 ? Math.min(...whalePnls) : 0;
+  const wins    = closedPositions.filter(p => p.closePnlPct > 0).length;
+  const losses  = closedPositions.filter(p => p.closePnlPct <= 0).length;
+  const winRate = closedPositions.length > 0 ? (wins / closedPositions.length) * 100 : 0;
+  const pnls    = closedPositions.map(p => p.closePnlPct);
+  const best    = pnls.length > 0 ? Math.max(...pnls) : 0;
+  const worst   = pnls.length > 0 ? Math.min(...pnls) : 0;
 
-  const whaleGross = whaleClosed.reduce((s, p) => {
+  const grossProfit = closedPositions.reduce((s, p) => {
     const initSize = p.initialSizeSol > 0 ? p.initialSizeSol : p.sizeSol;
     const pnl = initSize * (p.closePnlPct / 100);
     return s + (pnl > 0 ? pnl : 0);
   }, 0);
-  const whaleLossAmt = whaleClosed.reduce((s, p) => {
+  const lossAmt = closedPositions.reduce((s, p) => {
     const initSize = p.initialSizeSol > 0 ? p.initialSizeSol : p.sizeSol;
     const pnl = initSize * (p.closePnlPct / 100);
     return s + (pnl < 0 ? Math.abs(pnl) : 0);
   }, 0);
-  const whalePF = whaleLossAmt > 0 ? whaleGross / whaleLossAmt : whaleGross > 0 ? 99 : 0;
+  const profitFactor = lossAmt > 0 ? grossProfit / lossAmt : grossProfit > 0 ? 99 : 0;
 
   // Current streak (from most-recent trade — closedPositions is newest-first)
-  let whaleStreak = 0;
-  for (let i = 0; i < whaleClosed.length; i++) {
-    const win = whaleClosed[i].closePnlPct > 0;
-    if (i === 0) { whaleStreak = win ? 1 : -1; }
-    else if (win && whaleStreak > 0) whaleStreak++;
-    else if (!win && whaleStreak < 0) whaleStreak--;
+  let streak = 0;
+  for (let i = 0; i < closedPositions.length; i++) {
+    const win = closedPositions[i].closePnlPct > 0;
+    if (i === 0) { streak = win ? 1 : -1; }
+    else if (win && streak > 0) streak++;
+    else if (!win && streak < 0) streak--;
     else break;
   }
 
   // Daily PNL — uses browser local timezone (which is IST for this app's users)
   const todayStr = new Date().toDateString();
-  const whaleDailyPnl = whaleClosed.reduce((sum, p) => {
+  const dailyPnl = closedPositions.reduce((sum, p) => {
     if (new Date(p.closeTime).toDateString() !== todayStr) return sum;
     const initSize = p.initialSizeSol > 0 ? p.initialSizeSol : p.sizeSol;
     return sum + initSize * (p.closePnlPct / 100);
   }, 0);
 
-  const whaleAvgHoldMin = whaleClosed.length > 0
-    ? whaleClosed.reduce((s, p) => s + (p.closeTime - p.entryTime), 0) / whaleClosed.length / 60000
+  const avgHoldMin = closedPositions.length > 0
+    ? closedPositions.reduce((s, p) => s + (p.closeTime - p.entryTime), 0) / closedPositions.length / 60000
     : 0;
 
   // Max drawdown over realised equity curve
   let peak = 0, maxDD = 0, running = 0;
-  for (const p of [...whaleClosed].reverse()) {
+  for (const p of [...closedPositions].reverse()) {
     const initSize = p.initialSizeSol > 0 ? p.initialSizeSol : p.sizeSol;
     running += initSize * (p.closePnlPct / 100);
     if (running > peak) peak = running;
@@ -128,13 +128,13 @@ export default function AnalyticsPage({ balance, freeBalance, onRefresh, whaleSt
   }
 
   // ── Unrealised stats (open positions) ────────────────────────────────────
-  const unrealisedPnlSol = whaleOpen.reduce((sum, p) => {
+  const unrealisedPnlSol = openPositions.reduce((sum, p) => {
     const initSize = p.initialSizeSol > 0 ? p.initialSizeSol : p.sizeSol;
     return sum + initSize * (p.pnlPct / 100);
   }, 0);
 
   // ── CSV export ───────────────────────────────────────────────────────────
-  function exportWhaleCSV() {
+  function exportCSV() {
     const headers = [
       'Symbol', 'Name', 'Mint',
       'Entry Time (IST)', 'Close Time (IST)', 'Hold (min)',
@@ -144,7 +144,7 @@ export default function AnalyticsPage({ balance, freeBalance, onRefresh, whaleSt
       'Close Reason',
     ];
 
-    const rows = whaleClosed.map((p) => {
+    const rows = closedPositions.map((p) => {
       const initSize    = p.initialSizeSol > 0 ? p.initialSizeSol : p.sizeSol;
       const pnlSol      = initSize * (p.closePnlPct / 100);
       const totalReturn = p.bankedSol + (p.remainingSizeSol * (p.lastPrice / (p.entryPrice || 1)));
@@ -188,40 +188,40 @@ export default function AnalyticsPage({ balance, freeBalance, onRefresh, whaleSt
 
       {/* Stats grid */}
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-        <StatCard label="Total Trades"    value={String(whaleClosed.length)}                 color="#00d4ff" />
-        <StatCard label="Win Rate"        value={`${whaleWinRate.toFixed(1)}%`}              color={whaleWinRate >= 55 ? '#00ff88' : '#ffd700'}
-          sub={`W: ${whaleWins}  L: ${whaleLosses}`} />
-        <StatCard label="Realised PNL"    value={`${whaleTotalPnlSol >= 0 ? '+' : ''}${whaleTotalPnlSol.toFixed(4)} SOL`}
-          color={whaleTotalPnlSol >= 0 ? '#00ff88' : '#ff4466'} />
+        <StatCard label="Total Trades"    value={String(closedPositions.length)}                 color="#00d4ff" />
+        <StatCard label="Win Rate"        value={`${winRate.toFixed(1)}%`}              color={winRate >= 55 ? '#00ff88' : '#ffd700'}
+          sub={`W: ${wins}  L: ${losses}`} />
+        <StatCard label="Realised PNL"    value={`${totalPnlSol >= 0 ? '+' : ''}${totalPnlSol.toFixed(4)} SOL`}
+          color={totalPnlSol >= 0 ? '#00ff88' : '#ff4466'} />
         <StatCard label="Unrealised PNL"  value={`${unrealisedPnlSol >= 0 ? '+' : ''}${unrealisedPnlSol.toFixed(4)} SOL`}
           color={unrealisedPnlSol >= 0 ? '#9b59ff' : '#ff8844'}
-          sub={`${whaleOpen.length} open position${whaleOpen.length !== 1 ? 's' : ''}`} />
+          sub={`${openPositions.length} open position${openPositions.length !== 1 ? 's' : ''}`} />
         <StatCard label="Portfolio Value" value={`${balance.toFixed(3)} SOL`}               color="#00d4ff" />
         <StatCard label="Free Cash"       value={`${freeBalance.toFixed(3)} SOL`}           color="#7090b0" />
-        <StatCard label="Profit Factor"   value={whalePF >= 99 ? '∞' : whalePF.toFixed(2)} color={whalePF >= 1.5 ? '#00ff88' : '#d4e0f0'} />
-        <StatCard label="Daily PNL"       value={`${whaleDailyPnl >= 0 ? '+' : ''}${whaleDailyPnl.toFixed(4)} SOL`}
-          color={whaleDailyPnl >= 0 ? '#00ff88' : '#ff4466'} />
-        <StatCard label="Best Trade"      value={`+${whaleBest.toFixed(1)}%`}               color="#00ff88" />
-        <StatCard label="Worst Trade"     value={`${whaleWorst.toFixed(1)}%`}               color="#ff4466" />
-        <StatCard label="Avg Hold"        value={`${whaleAvgHoldMin.toFixed(0)}m`}          color="#d4e0f0" />
+        <StatCard label="Profit Factor"   value={profitFactor >= 99 ? '∞' : profitFactor.toFixed(2)} color={profitFactor >= 1.5 ? '#00ff88' : '#d4e0f0'} />
+        <StatCard label="Daily PNL"       value={`${dailyPnl >= 0 ? '+' : ''}${dailyPnl.toFixed(4)} SOL`}
+          color={dailyPnl >= 0 ? '#00ff88' : '#ff4466'} />
+        <StatCard label="Best Trade"      value={`+${best.toFixed(1)}%`}               color="#00ff88" />
+        <StatCard label="Worst Trade"     value={`${worst.toFixed(1)}%`}               color="#ff4466" />
+        <StatCard label="Avg Hold"        value={`${avgHoldMin.toFixed(0)}m`}          color="#d4e0f0" />
         <StatCard label="Max Drawdown"    value={`-${maxDD.toFixed(1)}%`}                   color="#ff4466" />
-        <StatCard label="Streak"          value={`${whaleStreak >= 0 ? '+' : ''}${whaleStreak}`}
-          color={whaleStreak >= 0 ? '#00ff88' : '#ff4466'} />
-        <StatCard label="Open Positions"  value={String(whaleOpen.length)}                  color="#9b59ff" />
+        <StatCard label="Streak"          value={`${streak >= 0 ? '+' : ''}${streak}`}
+          color={streak >= 0 ? '#00ff88' : '#ff4466'} />
+        <StatCard label="Open Positions"  value={String(openPositions.length)}                  color="#9b59ff" />
       </div>
 
-      <WhalePnlChart positions={whaleClosed} />
+      <PnlChart positions={closedPositions} />
 
-      {/* Whale closed trades table */}
-      <WhaleClosedTable positions={whaleClosed} onRefresh={onRefresh} onExport={exportWhaleCSV} />
+      {/* Closed trades table */}
+      <ClosedTradesTable positions={closedPositions} onRefresh={onRefresh} onExport={exportCSV} />
     </div>
   );
 }
 
-// ── Whale closed positions table ──────────────────────────────────────────────
+// ── Closed positions table ──────────────────────────────────────────────
 
-function WhaleClosedTable({ positions, onRefresh, onExport }: {
-  positions: ClosedWhalePosition[];
+function ClosedTradesTable({ positions, onRefresh, onExport }: {
+  positions: ClosedSniperPosition[];
   onRefresh: () => Promise<void>;
   onExport: () => void;
 }) {
@@ -235,12 +235,12 @@ function WhaleClosedTable({ positions, onRefresh, onExport }: {
   );
 
   async function handleDelete(id: string, symbol: string) {
-    if (!confirm(`Delete ${symbol} closed whale trade?`)) return;
+    if (!confirm(`Delete ${symbol} closed sniper trade?`)) return;
     setDeleting(id);
-    try { await api.deleteClosedWhalePosition(id); await onRefresh(); } finally { setDeleting(null); }
+    try { await api.deleteClosedSniperPosition(id); await onRefresh(); } finally { setDeleting(null); }
   }
 
-  function openEdit(pos: ClosedWhalePosition) {
+  function openEdit(pos: ClosedSniperPosition) {
     setEditingId(pos.id);
     setDraft({
       closeReason: pos.closeReason ?? '',
@@ -253,7 +253,7 @@ function WhaleClosedTable({ positions, onRefresh, onExport }: {
     if (!editingId) return;
     setSaving(true);
     try {
-      await api.editClosedWhalePosition(editingId, {
+      await api.editClosedSniperPosition(editingId, {
         closeReason: draft.closeReason || undefined,
         closePnlPct: parseFloat(draft.closePnlPct) || undefined,
       });
@@ -273,7 +273,7 @@ function WhaleClosedTable({ positions, onRefresh, onExport }: {
         return (
           <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}>
             <div className="card" style={{ width: 340, padding: 24, display: 'flex', flexDirection: 'column', gap: 16 }}>
-              <div style={{ fontWeight: 900, color: '#d4e0f0', fontSize: 15 }}>Edit 🐋 Whale — <span style={{ color: '#9b59ff' }}>{pos.symbol}</span></div>
+              <div style={{ fontWeight: 900, color: '#d4e0f0', fontSize: 15 }}>Edit — <span style={{ color: '#9b59ff' }}>{pos.symbol}</span></div>
 
               {/* Read-only summary */}
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, padding: '10px 12px', borderRadius: 8, background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.06)' }}>
@@ -329,7 +329,7 @@ function WhaleClosedTable({ positions, onRefresh, onExport }: {
       })()}
 
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '14px 16px', borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
-        <span style={{ fontWeight: 800, color: '#9b59ff', fontSize: 13 }}>🐋 Whale Closed Trades ({positions.length})</span>
+        <span style={{ fontWeight: 800, color: '#9b59ff', fontSize: 13 }}>🎯 Closed Sniper Trades ({positions.length})</span>
         {positions.length > 0 && (
           <button onClick={onExport} className="btn-primary" style={{ padding: '6px 12px', fontSize: 11 }}>📥 Export CSV</button>
         )}
@@ -346,8 +346,8 @@ function WhaleClosedTable({ positions, onRefresh, onExport }: {
           <tbody>
             {sorted.length === 0 ? (
               <tr><td colSpan={12} style={{ textAlign: 'center', padding: '32px', color: '#3a5070' }}>
-                <div style={{ fontSize: 28, marginBottom: 8 }}>🐋</div>
-                No closed whale trades yet
+                <div style={{ fontSize: 28, marginBottom: 8 }}>🎯</div>
+                No closed sniper trades yet
               </td></tr>
             ) : sorted.map((p) => {
               const pnlPos  = p.closePnlPct >= 0;

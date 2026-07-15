@@ -116,7 +116,7 @@ export function setOnNewMint(cb: (mint: string) => void): void {
   onNewMint = cb;
 }
 
-// Callback invoked with full graduation context (for whale sniper)
+// Callback invoked with full graduation context (for sniper engine)
 let onGraduation: ((ev: { mint: string; poolAddress?: string; ts: number }) => void) | null = null;
 export function setOnGraduation(cb: (ev: { mint: string; poolAddress?: string; ts: number }) => void): void {
   onGraduation = cb;
@@ -183,7 +183,7 @@ async function rpcGetSignatures(
   } catch (err: any) {
     // On 429 / credit exhaustion from Helius, fall back to public RPC.
     // This keeps the graduation poll running even when the Helius key is
-    // consumed by other services (whale sniper, Meteora watcher).
+    // consumed by other services (sniper engine, Meteora watcher).
     const is429 = (e: any) =>
       e?.code === -32429 ||
       String(e?.message ?? '').includes('429') ||
@@ -328,7 +328,7 @@ async function trackMigrationWallet(): Promise<void> {
         if (!isNew) continue;
 
         added++;
-        // Use actual on-chain blockTime so the whale sniper can filter stale backfill events
+        // Use actual on-chain blockTime so the sniper engine can filter stale backfill events
         const txTs = (tx.blockTime ?? 0) > 0 ? (tx.blockTime! * 1_000) : Date.now();
         pushFeed(pumpfunFeed, { mint, ts: txTs, txSig: sig, instructionType, poolAddress, creatorWallet });
         if (onNewMint) onNewMint(mint);

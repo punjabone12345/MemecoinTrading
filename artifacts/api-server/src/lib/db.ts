@@ -95,8 +95,16 @@ export async function initDB(): Promise<void> {
     )
   `);
 
+  // ── Rename legacy whale-branded tables/columns to the sniper-engine schema ──
+  // No-ops if the old names don't exist (fresh DB) or the rename already happened.
+  await query(`ALTER TABLE IF EXISTS whale_positions RENAME TO sniper_positions`).catch(() => {});
+  await query(`ALTER TABLE IF EXISTS whale_traded_mints RENAME TO traded_mints`).catch(() => {});
+  await query(`ALTER TABLE IF EXISTS whale_slippage_skipped_mints RENAME TO slippage_skipped_mints`).catch(() => {});
+  await query(`ALTER TABLE IF EXISTS sniper_positions RENAME COLUMN whale_buy_timestamp TO buy_detected_timestamp`).catch(() => {});
+  await query(`UPDATE settings SET key = 'sniperStagnationPct' WHERE key = 'whaleStagnationPct'`).catch(() => {});
+
   await query(`
-    CREATE TABLE IF NOT EXISTS whale_positions (
+    CREATE TABLE IF NOT EXISTS sniper_positions (
       id TEXT PRIMARY KEY,
       mint TEXT NOT NULL,
       name TEXT NOT NULL,
@@ -120,10 +128,10 @@ export async function initDB(): Promise<void> {
     )
   `);
   // Migration: add entry_mcap column for existing DBs
-  await query(`ALTER TABLE whale_positions ADD COLUMN IF NOT EXISTS entry_mcap NUMERIC NOT NULL DEFAULT 0`).catch(() => {});
-  // Migration: add timing columns (whale buy timestamp + how long after whale we entered)
-  await query(`ALTER TABLE whale_positions ADD COLUMN IF NOT EXISTS whale_buy_timestamp BIGINT`).catch(() => {});
-  await query(`ALTER TABLE whale_positions ADD COLUMN IF NOT EXISTS entry_delay_ms BIGINT`).catch(() => {});
+  await query(`ALTER TABLE sniper_positions ADD COLUMN IF NOT EXISTS entry_mcap NUMERIC NOT NULL DEFAULT 0`).catch(() => {});
+  // Migration: add timing columns (buy-detection timestamp + how long after detection we entered)
+  await query(`ALTER TABLE sniper_positions ADD COLUMN IF NOT EXISTS buy_detected_timestamp BIGINT`).catch(() => {});
+  await query(`ALTER TABLE sniper_positions ADD COLUMN IF NOT EXISTS entry_delay_ms BIGINT`).catch(() => {});
 
   await query(`
     CREATE TABLE IF NOT EXISTS tokens (
@@ -210,18 +218,18 @@ export async function initDB(): Promise<void> {
     `ALTER TABLE tokens ADD COLUMN IF NOT EXISTS last_updated   TIMESTAMPTZ DEFAULT NOW()`,
     // Source labels: comma-separated list of discovery sources ('bot', 'trenches', 'pumpfun')
     `ALTER TABLE positions ADD COLUMN IF NOT EXISTS sources TEXT DEFAULT '[]'`,
-    // whale_positions TP tier columns (multi-stage exits)
-    `ALTER TABLE whale_positions ADD COLUMN IF NOT EXISTS tp1_hit BOOLEAN DEFAULT FALSE`,
-    `ALTER TABLE whale_positions ADD COLUMN IF NOT EXISTS tp2_hit BOOLEAN DEFAULT FALSE`,
-    `ALTER TABLE whale_positions ADD COLUMN IF NOT EXISTS tp3_hit BOOLEAN DEFAULT FALSE`,
-    `ALTER TABLE whale_positions ADD COLUMN IF NOT EXISTS initial_size_sol NUMERIC DEFAULT 0`,
-    `ALTER TABLE whale_positions ADD COLUMN IF NOT EXISTS remaining_size_sol NUMERIC DEFAULT 0`,
-    `ALTER TABLE whale_positions ADD COLUMN IF NOT EXISTS banked_sol NUMERIC DEFAULT 0`,
-    `ALTER TABLE whale_positions ADD COLUMN IF NOT EXISTS tp_tier INTEGER DEFAULT 1`,
-    `ALTER TABLE whale_positions ADD COLUMN IF NOT EXISTS trigger_amount_usd NUMERIC DEFAULT 0`,
-    `ALTER TABLE whale_positions ADD COLUMN IF NOT EXISTS current_sl_price NUMERIC DEFAULT 0`,
-    // Ensure whaleStagnationPct seed exists (no-op if already set by user)
-    `INSERT INTO settings (key, value) VALUES ('whaleStagnationPct', '5') ON CONFLICT (key) DO NOTHING`,
+    // sniper_positions TP tier columns (multi-stage exits)
+    `ALTER TABLE sniper_positions ADD COLUMN IF NOT EXISTS tp1_hit BOOLEAN DEFAULT FALSE`,
+    `ALTER TABLE sniper_positions ADD COLUMN IF NOT EXISTS tp2_hit BOOLEAN DEFAULT FALSE`,
+    `ALTER TABLE sniper_positions ADD COLUMN IF NOT EXISTS tp3_hit BOOLEAN DEFAULT FALSE`,
+    `ALTER TABLE sniper_positions ADD COLUMN IF NOT EXISTS initial_size_sol NUMERIC DEFAULT 0`,
+    `ALTER TABLE sniper_positions ADD COLUMN IF NOT EXISTS remaining_size_sol NUMERIC DEFAULT 0`,
+    `ALTER TABLE sniper_positions ADD COLUMN IF NOT EXISTS banked_sol NUMERIC DEFAULT 0`,
+    `ALTER TABLE sniper_positions ADD COLUMN IF NOT EXISTS tp_tier INTEGER DEFAULT 1`,
+    `ALTER TABLE sniper_positions ADD COLUMN IF NOT EXISTS trigger_amount_usd NUMERIC DEFAULT 0`,
+    `ALTER TABLE sniper_positions ADD COLUMN IF NOT EXISTS current_sl_price NUMERIC DEFAULT 0`,
+    // Ensure sniperStagnationPct seed exists (no-op if already set by user)
+    `INSERT INTO settings (key, value) VALUES ('sniperStagnationPct', '5') ON CONFLICT (key) DO NOTHING`,
   ];
 
   for (const sql of migrations) {
@@ -267,7 +275,7 @@ export async function initDB(): Promise<void> {
     ['slippagePct', '1'],
     ['priorityFeeSol', '0.001'],
     ['walletPublicKey', ''],
-    // Whale TP tier configs
+    // Sniper TP tier configs
     ['wt1Tp1Pct', '50'],   ['wt1Tp1Exit', '30'],
     ['wt1Tp2Pct', '125'],  ['wt1Tp2Exit', '30'],  ['wt1Tp2Trail', '30'],
     ['wt1Tp3Pct', '200'],  ['wt1Tp3Exit', '30'],  ['wt1Tp3Trail', '20'],
@@ -448,23 +456,23 @@ export async function initDB(): Promise<void> {
   await query(`CREATE INDEX IF NOT EXISTS idx_migrations_detected_at ON detected_migrations (detected_at DESC)`);
   await query(`CREATE INDEX IF NOT EXISTS idx_migrations_mint ON detected_migrations (mint)`);
 
-  // ── whale_traded_mints: permanent lifetime record of every mint that has ever
-  // been entered by the whale sniper. Checked BEFORE every entry so a mint can
+  // ── traded_mints: permanent lifetime record of every mint that has ever
+  // been entered by the sniper engine. Checked BEFORE every entry so a mint can
   // never be traded more than once, even across restarts, re-detected
   // graduations, or re-tracking after the 30-min window expires.
   await query(`
-    CREATE TABLE IF NOT EXISTS whale_traded_mints (
+    CREATE TABLE IF NOT EXISTS traded_mints (
       mint       TEXT PRIMARY KEY,
       traded_at  BIGINT NOT NULL
     )
   `);
 
-  // ── whale_slippage_skipped_mints: permanent record of mints that were skipped
+  // ── slippage_skipped_mints: permanent record of mints that were skipped
   // due to post-delay slippage exceeding the configured threshold. Once a mint
   // lands here it is blocked from every entry gate permanently — we already
   // know it pumped hard before we could enter, so we will never get a fair fill.
   await query(`
-    CREATE TABLE IF NOT EXISTS whale_slippage_skipped_mints (
+    CREATE TABLE IF NOT EXISTS slippage_skipped_mints (
       mint        TEXT PRIMARY KEY,
       skipped_at  BIGINT NOT NULL,
       slip_pct    NUMERIC(10,2)

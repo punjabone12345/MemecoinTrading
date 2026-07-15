@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { getSettings, updateSettings, resetAllData, getBalance } from '../services/settings.service.js';
 import { broadcastBalance, broadcastSettings } from '../websocket/server.js';
-import { resetWhaleState } from '../services/whale-sniper.service.js';
+import { resetSniperState } from '../services/sniper-engine.service.js';
 import { applyBotEnabledChange } from '../lib/session-manager.js';
 
 const router = Router();
@@ -31,7 +31,7 @@ router.patch('/', async (req, res) => {
 
 router.post('/reset', async (_req, res) => {
   await resetAllData();
-  resetWhaleState();
+  resetSniperState();
   await broadcastBalance();
   const balance = await getBalance();
   res.json({ success: true, balance });

@@ -4,7 +4,7 @@ import { logger } from './logger.js';
 // ── Shared Helius WebSocket client ──────────────────────────────────────────
 // Helius free/dev-tier API keys allow only ONE concurrent WebSocket connection.
 // Previously, three separate services (Meteora watcher, PumpFun migration-wallet
-// watcher, whale-sniper per-mint watcher) each opened their own independent
+// watcher, sniper per-mint watcher) each opened their own independent
 // `wss://mainnet.helius-rpc.com` connection with the same key. They competed
 // for the single connection slot — at most one would succeed while the others
 // got rejected with HTTP 429, then all reconnected on their own timers,

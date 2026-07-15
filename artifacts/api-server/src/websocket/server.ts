@@ -17,16 +17,16 @@ export function initWebSocket(server: Server): void {
 
     // Push current state immediately so the UI doesn't wait for the next broadcast cycle
     try {
-      const { getWhaleStatus } = await import('../services/whale-sniper.service.js');
+      const { getSniperStatus } = await import('../services/sniper-engine.service.js');
       const { getBalance, getSettings } = await import('../services/settings.service.js');
 
-      const [whaleStatus, balance, settings] = await Promise.all([
-        Promise.resolve(getWhaleStatus()),
+      const [sniperStatus, balance, settings] = await Promise.all([
+        Promise.resolve(getSniperStatus()),
         getBalance(),
         getSettings(),
       ]);
 
-      safeSend(ws, { type: 'whale_status' as any, data: whaleStatus });
+      safeSend(ws, { type: 'sniper_status' as any, data: sniperStatus });
       safeSend(ws, { type: 'balance', data: { balance } });
       safeSend(ws, { type: 'settings', data: settings });
     } catch (err) {

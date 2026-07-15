@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import scannerRouter from './scanner.js';
 import settingsRouter from './settings.js';
-import whaleSniperRouter from './whale-sniper.js';
+import sniperRouter from './sniper.js';
 import { getTrenchesDiagnostics } from '../services/trenches.service.js';
 import { isHeliusWsConfigured } from '../lib/helius-ws-shared.js';
 
@@ -45,6 +45,6 @@ router.get('/config', (_req, res) => {
 
 router.use('/scanner', scannerRouter);
 router.use('/settings', settingsRouter);
-router.use('/whale', whaleSniperRouter);
+router.use('/sniper', sniperRouter);
 
 export default router;

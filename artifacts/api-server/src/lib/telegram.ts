@@ -111,32 +111,32 @@ export async function notifyHeartbeat(params: {
   );
 }
 
-export async function notifyWhaleTrade(params: {
+export async function notifySniperTrade(params: {
   name: string; symbol: string; mint: string;
-  whaleAmountUsd: number; sizePct: number; sizeSol: number;
-  entryPrice: number; whalePriceAtDetection: number; slippagePct: number;
-  whaleWallet?: string;
+  buyAmountUsd: number; sizePct: number; sizeSol: number;
+  entryPrice: number; priceAtBuyDetection: number; slippagePct: number;
+  buyerWallet?: string;
 }): Promise<void> {
-  const { name, symbol, mint, whaleAmountUsd, sizePct, sizeSol, entryPrice, whalePriceAtDetection, slippagePct, whaleWallet } = params;
-  const actualSlip = whalePriceAtDetection > 0
-    ? ((entryPrice - whalePriceAtDetection) / whalePriceAtDetection * 100).toFixed(1)
+  const { name, symbol, mint, buyAmountUsd, sizePct, sizeSol, entryPrice, priceAtBuyDetection, slippagePct, buyerWallet } = params;
+  const actualSlip = priceAtBuyDetection > 0
+    ? ((entryPrice - priceAtBuyDetection) / priceAtBuyDetection * 100).toFixed(1)
     : '0.0';
-  const walletLine = whaleWallet && whaleWallet !== 'unknown'
-    ? `Whale Wallet: <code>${whaleWallet}</code>\n`
+  const walletLine = buyerWallet && buyerWallet !== 'unknown'
+    ? `Buyer Wallet: <code>${buyerWallet}</code>\n`
     : '';
   await sendMessage(
     `🐋 <b>WHALE ENTRY — ${symbol}</b> (${name})\n` +
     `Mint: <code>${mint.slice(0, 16)}…</code>\n` +
     walletLine +
-    `Whale Buy: $${whaleAmountUsd.toFixed(0)}\n` +
+    `Buyer Activity: $${buyAmountUsd.toFixed(0)}\n` +
     `Size: ${sizeSol.toFixed(3)} SOL (${sizePct.toFixed(2)}%)\n` +
     `Entry Price: $${entryPrice.toFixed(8)}\n` +
-    `Whale Price: $${whalePriceAtDetection.toFixed(8)} (slip ${actualSlip}% of ${slippagePct}% max)\n` +
+    `Detected Price: $${priceAtBuyDetection.toFixed(8)} (slip ${actualSlip}% of ${slippagePct}% max)\n` +
     `Time: ${toIST(new Date())}`
   );
 }
 
-export async function notifyWhaleClose(params: {
+export async function notifySniperClose(params: {
   name: string; symbol: string; mint: string;
   pnlPct: number; pnlSol: number; reason: string;
   entryPrice: number; exitPrice: number; sizeSol: number;
@@ -154,7 +154,7 @@ export async function notifyWhaleClose(params: {
   );
 }
 
-export async function notifyWhaleTP(params: {
+export async function notifySniperTP(params: {
   name: string; symbol: string; mint: string;
   tpNum: 1 | 2 | 3; gainPct: number;
   chunkSol: number; returnedSol: number;
@@ -180,21 +180,21 @@ export async function notifyWhaleTP(params: {
   );
 }
 
-export async function notifyWhaleSkip(params: {
+export async function notifySniperSkip(params: {
   name: string; symbol: string; mint: string;
-  whaleAmountUsd: number; reason: string;
-  entryPrice?: number; whalePriceAtDetection?: number; maxSlippagePct?: number;
+  buyAmountUsd: number; reason: string;
+  entryPrice?: number; priceAtBuyDetection?: number; maxSlippagePct?: number;
 }): Promise<void> {
-  const { name, symbol, mint, whaleAmountUsd, reason, entryPrice, whalePriceAtDetection, maxSlippagePct } = params;
+  const { name, symbol, mint, buyAmountUsd, reason, entryPrice, priceAtBuyDetection, maxSlippagePct } = params;
   let extra = '';
-  if (entryPrice && whalePriceAtDetection && maxSlippagePct) {
-    const slip = ((entryPrice - whalePriceAtDetection) / whalePriceAtDetection * 100).toFixed(1);
-    extra = `\nPrice Slip: ${slip}% (max ${maxSlippagePct}%)\nWhale Price: $${whalePriceAtDetection.toFixed(8)}\nCurrent: $${entryPrice.toFixed(8)}`;
+  if (entryPrice && priceAtBuyDetection && maxSlippagePct) {
+    const slip = ((entryPrice - priceAtBuyDetection) / priceAtBuyDetection * 100).toFixed(1);
+    extra = `\nPrice Slip: ${slip}% (max ${maxSlippagePct}%)\nDetected Price: $${priceAtBuyDetection.toFixed(8)}\nCurrent: $${entryPrice.toFixed(8)}`;
   }
   await sendMessage(
     `⏭️ <b>WHALE SKIP — ${symbol}</b> (${name})\n` +
     `Mint: <code>${mint.slice(0, 16)}…</code>\n` +
-    `Whale Buy: $${whaleAmountUsd.toFixed(0)}\n` +
+    `Buyer Activity: $${buyAmountUsd.toFixed(0)}\n` +
     `Skip Reason: ${reason}${extra}\n` +
     `Time: ${toIST(new Date())}`
   );

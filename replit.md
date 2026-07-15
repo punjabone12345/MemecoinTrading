@@ -21,7 +21,7 @@ A Solana memecoin graduation sniper bot — automatically detects tokens graduat
 
 ## Where things live
 
-- `artifacts/api-server/src/services/whale-sniper.service.ts` — the active entry/exit engine: tracks Pump.fun graduations for 30 min, runs the Smart Wallet Consensus entry decision, manages TP/SL/trailing-stop positions
+- `artifacts/api-server/src/services/sniper-engine.service.ts` — the ONLY entry/exit engine (no separate "whale" mirror-trading module exists): tracks Pump.fun graduations for 30 min, scores every buyer wallet via GMGN, and enters on the Smart Wallet Consensus decision; manages TP/SL/trailing-stop positions in the `sniper_positions` table
 - `artifacts/api-server/src/services/trenches.service.ts` — Pump.fun graduation detection (Helius migration-wallet subscription)
 - `artifacts/api-server/src/services/wallet-score.service.ts` — GMGN-backed wallet scoring (0-100) with in-memory TTL cache
 - `artifacts/api-server/src/services/wallet-consensus.service.ts` — per-mint consensus bookkeeping (2×score≥80 within 5 min, or 1×score≥95) → entry trigger + position size + TP tier

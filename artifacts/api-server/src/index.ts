@@ -3,7 +3,7 @@ import app from './app.js';
 import { initDB } from './lib/db.js';
 import { initWebSocket } from './websocket/server.js';
 import { startTrenchesScanner, setOnGraduation } from './services/trenches.service.js';
-import { startWhaleSniper, addGraduatedToken } from './services/whale-sniper.service.js';
+import { startSniperEngine, addGraduatedToken } from './services/sniper-engine.service.js';
 import { startTelegramCommands, stopTelegramCommands } from './lib/telegram-commands.js';
 import { initSessionManager } from './lib/session-manager.js';
 import { logger } from './lib/logger.js';
@@ -20,10 +20,10 @@ async function main(): Promise<void> {
     logger.info({ port: PORT }, 'Apex Meme Trader API running');
   });
 
-  // Wire pump.fun graduation detection → whale sniper
+  // Wire pump.fun graduation detection → sniper engine
   setOnGraduation(addGraduatedToken);
   startTrenchesScanner();
-  await startWhaleSniper();
+  await startSniperEngine();
   startTelegramCommands();
 
   // Session manager: honours the persisted botEnabled flag — stops all services

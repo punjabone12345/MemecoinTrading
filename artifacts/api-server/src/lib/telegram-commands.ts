@@ -1,6 +1,6 @@
 import axios from 'axios';
 import { logger } from './logger.js';
-import { getWhaleStatus } from '../services/whale-sniper.service.js';
+import { getSniperStatus } from '../services/sniper-engine.service.js';
 import { getBalance } from '../services/settings.service.js';
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
@@ -29,15 +29,15 @@ async function sendReply(chatId: number | string, text: string): Promise<void> {
   }
 }
 
-// ── /command1 — Check your whale positions ──────────────────────────────────
+// ── /command1 — Check your open sniper positions ──────────────────────────────────
 async function handlePositions(chatId: number | string): Promise<void> {
-  const status = getWhaleStatus();
+  const status = getSniperStatus();
   const balance = await getBalance();
   const positions = status.openPositions;
 
   if (positions.length === 0) {
     await sendReply(chatId,
-      `📭 <b>No Open Whale Positions</b>\n` +
+      `📭 <b>No Open Sniper Positions</b>\n` +
       `Balance: ${balance.toFixed(3)} SOL\n` +
       `Tracking ${status.stats.tracking} token(s)\n` +
       `Time: ${toIST(new Date())}`
@@ -46,7 +46,7 @@ async function handlePositions(chatId: number | string): Promise<void> {
   }
 
   const lines: string[] = [
-    `🐋 <b>Open Whale Positions (${positions.length})</b>`,
+    `🎯 <b>Open Sniper Positions (${positions.length})</b>`,
     `Balance: ${balance.toFixed(3)} SOL\n`,
   ];
 
@@ -69,9 +69,9 @@ async function handlePositions(chatId: number | string): Promise<void> {
   await sendReply(chatId, lines.join('\n'));
 }
 
-// ── /command2 — Analyse Whale Sniper ────────────────────────────────────────
+// ── /command2 — Analyse Sniper Engine ────────────────────────────────────────
 async function handleAnalyse(chatId: number | string): Promise<void> {
-  const status = getWhaleStatus();
+  const status = getSniperStatus();
   const closed = status.closedPositions;
   const wins = closed.filter((p) => p.closePnlPct > 0).length;
   const winRate = closed.length > 0 ? (wins / closed.length) * 100 : 0;
@@ -83,7 +83,7 @@ async function handleAnalyse(chatId: number | string): Promise<void> {
     .reduce((s, p) => s + p.initialSizeSol * (p.closePnlPct / 100), 0);
 
   const text =
-    `🐋 <b>Whale Sniper Analysis</b>\n\n` +
+    `🎯 <b>Sniper Engine Analysis</b>\n\n` +
 
     `<b>📈 Performance</b>\n` +
     `Closed trades: ${closed.length}\n` +
@@ -104,7 +104,7 @@ async function handleAnalyse(chatId: number | string): Promise<void> {
 
 // ── /command3 — Check the bot working or not ────────────────────────────────
 async function handleStatus(chatId: number | string): Promise<void> {
-  const status = getWhaleStatus();
+  const status = getSniperStatus();
   const balance = await getBalance();
 
   const uptimeSec = Math.floor((Date.now() - startedAt) / 1000);
@@ -117,7 +117,7 @@ async function handleStatus(chatId: number | string): Promise<void> {
   const text =
     `✅ <b>Bot Status — ONLINE</b>\n\n` +
     `Uptime: ${uptimeStr}\n` +
-    `Whale Sniper: 🟢 Active (tracking ${status.stats.tracking} tokens)\n` +
+    `Sniper Engine: 🟢 Active (tracking ${status.stats.tracking} tokens)\n` +
     `Open positions: ${status.stats.positions}\n` +
     `Balance: ${balance.toFixed(3)} SOL\n\n` +
     `🕐 ${toIST(new Date())}`;
@@ -161,8 +161,8 @@ async function processUpdate(update: TelegramUpdate): Promise<void> {
     } else if (cmd === '/start' || cmd === '/help') {
       await sendReply(chatId,
         `👋 <b>Apex Meme Trader Bot</b>\n\n` +
-        `/command1 — Check your whale positions\n` +
-        `/command2 — Analyse Whale Sniper\n` +
+        `/command1 — Check your open sniper positions\n` +
+        `/command2 — Analyse Sniper Engine\n` +
         `/command3 — Check the bot working or not`
       );
     }

@@ -185,10 +185,10 @@ export default function SettingsPage({ settings: init, onUpdate }: Props) {
         </div>
         <div style={{ padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 12 }}>
 
-          {/* Whale Sniper — always on */}
+          {/* Sniper Engine — always on */}
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
             <div>
-              <div style={{ fontSize: 13, fontWeight: 700, color: '#00bfff' }}>🐋 Whale Sniper</div>
+              <div style={{ fontSize: 13, fontWeight: 700, color: '#00bfff' }}>🎯 Smart Wallet Consensus</div>
               <div style={{ fontSize: 11, color: '#3a5070', marginTop: 2 }}>Follows pump.fun graduations · triggers on 10s volume ≥$750</div>
             </div>
             <div style={{ padding: '4px 10px', borderRadius: 8, background: 'rgba(0,191,255,0.15)', border: '1px solid rgba(0,191,255,0.3)', fontSize: 11, fontWeight: 800, color: '#00bfff', letterSpacing: '0.04em' }}>
@@ -284,9 +284,9 @@ export default function SettingsPage({ settings: init, onUpdate }: Props) {
         );
       })()}
 
-      {/* Whale sniper context banner */}
+      {/* Sniper engine context banner */}
       <div style={{ padding: '12px 14px', borderRadius: 12, background: 'rgba(0,191,255,0.06)', border: '1px solid rgba(0,191,255,0.18)', marginBottom: 14 }}>
-        <div style={{ fontSize: 11, fontWeight: 800, color: '#00bfff', letterSpacing: '0.06em', marginBottom: 4 }}>🐋 WHALE SNIPER MODE</div>
+        <div style={{ fontSize: 11, fontWeight: 800, color: '#00bfff', letterSpacing: '0.06em', marginBottom: 4 }}>🎯 SNIPER ENGINE MODE</div>
         <div style={{ fontSize: 11, color: '#3a5070', lineHeight: 1.6 }}>
           Entry size is determined by 10-second rolling volume ($750 → 0.5%, $1.5k → 0.75%, $2.25k → 1%). Positions are held <b style={{ color: '#c0c8e0' }}>indefinitely</b> — no time limit. Exit only via TP/SL, liquidity emergency, or stagnation (&lt;X% move in 1h).
         </div>
@@ -309,8 +309,8 @@ export default function SettingsPage({ settings: init, onUpdate }: Props) {
         />
       </Section>
 
-      {/* Whale TP Tiers */}
-      <Section title="Whale TP Tiers" color="#ff9900">
+      {/* Sniper TP Tiers */}
+      <Section title="Sniper TP Tiers" color="#ff9900">
         <div style={{ fontSize: 11, color: '#3a5070', marginBottom: 14, lineHeight: 1.6 }}>
           Each TP exits <b style={{ color: '#c0c8e0' }}>30% of the original position</b> → 10% runner held until trailing SL. Tier is set by 10-second rolling volume at detection.
         </div>
@@ -380,20 +380,20 @@ export default function SettingsPage({ settings: init, onUpdate }: Props) {
       <Section title="Stagnation Exit" color="#ff6600">
         <NumberInput
           label="Max Flat Move in 1h"
-          value={n('whaleStagnationPct')}
-          onChange={(v) => update('whaleStagnationPct', v)}
+          value={n('sniperStagnationPct')}
+          onChange={(v) => update('sniperStagnationPct', v)}
           min={1} max={30} step={1} suffix="%"
-          sublabel="Close a whale position if the absolute 1h price change is below this % and the position has been open for at least 1 hour. Keeps capital moving; no time-based exit otherwise."
+          sublabel="Close a sniper position if the absolute 1h price change is below this % and the position has been open for at least 1 hour. Keeps capital moving; no time-based exit otherwise."
         />
       </Section>
 
-      <Section title="Whale Entry Slippage" color="#ffaa00">
+      <Section title="Entry Slippage" color="#ffaa00">
         <NumberInput
-          label="Max Slippage vs Whale Price"
-          value={n('whaleSlippagePct')}
-          onChange={(v) => update('whaleSlippagePct', v)}
+          label="Max Slippage vs Detected Price"
+          value={n('sniperSlippagePct')}
+          onChange={(v) => update('sniperSlippagePct', v)}
           min={1} max={100} step={1} suffix="%"
-          sublabel="Skip a trade if the current price has pumped more than this % above the detected whale buy price. Default: 20%. Telegram alert is sent on every skip."
+          sublabel="Skip a trade if the current price has pumped more than this % above the detected buyer price. Default: 20%. Telegram alert is sent on every skip."
         />
       </Section>
 

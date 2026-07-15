@@ -1,7 +1,7 @@
 import { logger } from './logger.js';
 
 // ── Shared Helius RPC rate limiter ─────────────────────────────────────────
-// Multiple services (trenches, whale-sniper, meteora watcher) each hit the
+// Multiple services (trenches, sniper, meteora watcher) each hit the
 // same Helius API key independently. Previously each had its own backoff,
 // so when one service got rate-limited the others kept firing — the
 // aggregate request rate never actually dropped, causing a continuous

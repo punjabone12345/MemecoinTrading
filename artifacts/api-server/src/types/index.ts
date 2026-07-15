@@ -9,13 +9,13 @@ export interface Settings {
   slippagePct: number;
   priorityFeeSol: number;
   walletPublicKey: string;
-  whaleSlippagePct: number;
-  whaleStagnationPct: number;  // exit if |priceChange1h| < this %, after 1h open
+  sniperSlippagePct: number;
+  sniperStagnationPct: number;  // exit if |priceChange1h| < this %, after 1h open
   // Trading window (IST)
   tradingWindowEnabled: boolean;
   tradingWindowStart: string;  // HH:MM in IST, e.g. "17:00"
   tradingWindowEnd: string;    // HH:MM in IST, e.g. "00:00" means midnight (end of day)
-  // Whale TP tier configs ($500-$999 / $1000-$1999 / $2000+)
+  // Sniper TP tier configs ($500-$999 / $1000-$1999 / $2000+)
   wt1Tp1Pct: number;  wt1Tp1Exit: number;
   wt1Tp2Pct: number;  wt1Tp2Exit: number;  wt1Tp2Trail: number;
   wt1Tp3Pct: number;  wt1Tp3Exit: number;  wt1Tp3Trail: number;
@@ -28,6 +28,6 @@ export interface Settings {
 }
 
 export interface WSMessage {
-  type: 'whale_status' | 'balance' | 'alert' | 'settings';
+  type: 'sniper_status' | 'balance' | 'alert' | 'settings';
   data: unknown;
 }

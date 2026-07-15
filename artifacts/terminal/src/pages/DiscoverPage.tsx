@@ -1,12 +1,12 @@
 import { useState, useEffect, useRef } from 'react';
-import { WhaleStatus, TrackedToken, WhaleBuyLog, PendingSignal } from '../lib/types.js';
+import { SniperStatus, TrackedToken, BuyerActivityLog, PendingSignal } from '../lib/types.js';
 import { api } from '../lib/api.js';
 
 // ── Props ─────────────────────────────────────────────────────────────────────
 
 interface Props {
-  /** Real-time whale status pushed via App-level WebSocket. */
-  whaleStatus?: WhaleStatus | null;
+  /** Real-time sniper status pushed via App-level WebSocket. */
+  sniperStatus?: SniperStatus | null;
   /** True when the App-level WebSocket is connected. Polling resumes when false. */
   wsConnected?: boolean;
 }
@@ -47,17 +47,17 @@ function shortAddr(addr: string): string {
   return addr.slice(0, 4) + '…' + addr.slice(-4);
 }
 
-// ── Whale status hook (polling fallback when WS data is absent) ───────────────
+// ── Sniper status hook (polling fallback when WS data is absent) ───────────────
 
-function useWhaleStatusFallback(skip: boolean) {
-  const [status, setStatus] = useState<WhaleStatus | null>(null);
+function useSniperStatusFallback(skip: boolean) {
+  const [status, setStatus] = useState<SniperStatus | null>(null);
 
   useEffect(() => {
     if (skip) return;
     let cancelled = false;
     async function poll() {
       try {
-        const data = await api.getWhaleStatus();
+        const data = await api.getSniperStatus();
         if (!cancelled) setStatus(data);
       } catch { /* ignore */ }
     }
@@ -99,7 +99,7 @@ function useSourceActivity() {
 const C = {
   card:   { background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.07)', borderRadius: 12, padding: '12px 14px', marginBottom: 10 } as React.CSSProperties,
   label:  { fontSize: 9, fontWeight: 800, letterSpacing: '0.12em', color: '#3a5070' } as React.CSSProperties,
-  whale:  '#00bfff',
+  accent: '#00bfff',
   green:  '#00ff88',
   red:    '#ff4466',
   yellow: '#ffd700',
@@ -137,7 +137,7 @@ function DexLink({ mint, pool }: { mint: string; pool?: string }) {
 function StatPill({ label, value, color }: { label: string; value: string | number; color?: string }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2, minWidth: 54 }}>
-      <span style={{ fontSize: 18, fontWeight: 900, color: color ?? C.whale, fontVariantNumeric: 'tabular-nums' }}>{value}</span>
+      <span style={{ fontSize: 18, fontWeight: 900, color: color ?? C.accent, fontVariantNumeric: 'tabular-nums' }}>{value}</span>
       <span style={{ fontSize: 8, fontWeight: 800, letterSpacing: '0.1em', color: C.gray, textTransform: 'uppercase' }}>{label}</span>
     </div>
   );
@@ -180,7 +180,7 @@ function TrackedCard({ tok, tick }: { tok: TrackedToken; tick: number }) {
   const pct        = countdownPct(tok.migrationTime, tok.expiresAt);
   const remaining  = countdown(tok.expiresAt);
   const expired    = tok.expiresAt <= Date.now();
-  const biggestBuy = tok.whaleBuys.reduce((max, b) => b.amountUsd > max ? b.amountUsd : max, 0);
+  const biggestBuy = tok.buyerActivity.reduce((max, b) => b.amountUsd > max ? b.amountUsd : max, 0);
   const hasMarket  = (tok.price ?? 0) > 0;
 
   return (
@@ -239,10 +239,10 @@ function TrackedCard({ tok, tick }: { tok: TrackedToken; tick: number }) {
           <PctBadge value={tok.priceChange5m} label="5m chg" />
           <PctBadge value={tok.priceChange1h} label="1h chg" />
           <div style={{ textAlign: 'center' }}>
-            <div style={{ fontSize: 10, fontWeight: 800, color: tok.whaleBuys.length > 0 ? C.whale : C.gray }}>
-              {tok.whaleBuys.length}
+            <div style={{ fontSize: 10, fontWeight: 800, color: tok.buyerActivity.length > 0 ? C.accent : C.gray }}>
+              {tok.buyerActivity.length}
             </div>
-            <div style={{ fontSize: 8, color: C.gray }}>🐋 buys</div>
+            <div style={{ fontSize: 8, color: C.gray }}>📊 buys</div>
           </div>
           <div style={{ textAlign: 'center' }}>
             <div style={{ fontSize: 9, color: C.gray }}>
@@ -259,43 +259,61 @@ function TrackedCard({ tok, tick }: { tok: TrackedToken; tick: number }) {
 
       {/* ── Progress bar ── */}
       <div style={{ margin: '6px 0 6px', height: 3, borderRadius: 2, background: 'rgba(255,255,255,0.06)', overflow: 'hidden' }}>
-        <div style={{ width: `${pct}%`, height: '100%', borderRadius: 2, background: expired ? C.red : pct > 80 ? `linear-gradient(90deg,${C.yellow},${C.red})` : `linear-gradient(90deg,${C.whale},#7b5ea7)`, transition: 'width 1s linear' }} />
+        <div style={{ width: `${pct}%`, height: '100%', borderRadius: 2, background: expired ? C.red : pct > 80 ? `linear-gradient(90deg,${C.yellow},${C.red})` : `linear-gradient(90deg,${C.accent},#7b5ea7)`, transition: 'width 1s linear' }} />
       </div>
 
-      {/* ── Whale buy chips ── */}
-      {tok.whaleBuys.length > 0 && (
+      {/* ── Buyer activity chips ── */}
+      {tok.buyerActivity.length > 0 && (
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 2 }}>
-          {tok.whaleBuys.slice(0, 5).map((b, i) => (
+          {tok.buyerActivity.slice(0, 5).map((b, i) => (
             <span key={i} style={{
               fontSize: 9, fontWeight: 800, padding: '2px 6px', borderRadius: 4,
               background: b.amountUsd >= 2250 ? 'rgba(0,191,255,0.18)' : b.amountUsd >= 1500 ? 'rgba(0,191,255,0.11)' : 'rgba(0,191,255,0.06)',
-              color: C.whale, border: '1px solid rgba(0,191,255,0.2)',
+              color: C.accent, border: '1px solid rgba(0,191,255,0.2)',
             }}>
-              🐋 {fmtUsd(b.amountUsd)} · {timeAgo(b.timestamp)}
+              📈 {fmtUsd(b.amountUsd)} · {timeAgo(b.timestamp)}
             </span>
           ))}
         </div>
       )}
-      {!hasMarket && tok.whaleBuys.length === 0 && (
+      {!hasMarket && tok.buyerActivity.length === 0 && (
         <div style={{ fontSize: 9, color: C.gray }}>Monitoring 10s volume…</div>
       )}
     </div>
   );
 }
 
-function WhaleBuyRow({ entry }: { entry: WhaleBuyLog }) {
-  const tier = entry.amountUsd >= 2250 ? '🐳' : entry.amountUsd >= 1500 ? '🐋' : '🐬';
+function BuyerActivityRow({ entry }: { entry: BuyerActivityLog }) {
+  const score = entry.walletScore;
+  const scoreColor = score == null ? C.gray : score >= 95 ? C.green : score >= 80 ? C.accent : C.gray;
+  const modeLabel = entry.consensusMode === 'solo' ? 'SOLO ≥95'
+    : entry.consensusMode === 'consensus' ? 'CONSENSUS'
+    : entry.consensusMode === 'tracking' ? `${entry.qualifyingWalletsCount ?? 0}/2 QUALIFYING`
+    : null;
   return (
     <div style={{
       display: 'flex', alignItems: 'flex-start', gap: 10,
       padding: '8px 0', borderBottom: '1px solid rgba(255,255,255,0.04)',
     }}>
-      <span style={{ fontSize: 16, flexShrink: 0, marginTop: 1 }}>{tier}</span>
+      <div style={{
+        flexShrink: 0, marginTop: 1, width: 34, height: 34, borderRadius: 8,
+        display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+        background: `rgba(${score != null && score >= 95 ? '0,255,136' : score != null && score >= 80 ? '0,191,255' : '255,255,255'},0.1)`,
+        border: `1px solid ${scoreColor}55`,
+      }}>
+        <span style={{ fontSize: 12, fontWeight: 900, color: scoreColor, lineHeight: 1 }}>{score ?? '—'}</span>
+        <span style={{ fontSize: 6, color: C.gray, lineHeight: 1 }}>GMGN</span>
+      </div>
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-          <span style={{ fontSize: 12, fontWeight: 900, color: C.whale }}>{fmtUsd(entry.amountUsd)}</span>
+          <span style={{ fontSize: 12, fontWeight: 900, color: C.accent }}>{fmtUsd(entry.amountUsd)}</span>
           <span style={{ fontSize: 10, color: '#e0e8ff', fontWeight: 700 }}>buy on {entry.symbol}</span>
           <DexLink mint={entry.mint} />
+          {modeLabel && (
+            <span style={{ fontSize: 8, fontWeight: 800, padding: '1px 5px', borderRadius: 3, background: 'rgba(155,89,255,0.12)', color: '#9b59ff', border: '1px solid rgba(155,89,255,0.3)' }}>
+              {modeLabel}
+            </span>
+          )}
           {entry.entered ? (
             <span style={{ fontSize: 8, fontWeight: 800, padding: '1px 5px', borderRadius: 3, background: 'rgba(0,255,136,0.12)', color: C.green, border: '1px solid rgba(0,255,136,0.25)' }}>
               ENTERED
@@ -353,9 +371,9 @@ function GraduationFeed() {
 
 // ── Main page ─────────────────────────────────────────────────────────────────
 
-export default function DiscoverPage({ whaleStatus: wsProp, wsConnected = false }: Props) {
-  // Poll only when WebSocket is offline; WS pushes whale_status in real time when connected
-  const polled = useWhaleStatusFallback(wsConnected);
+export default function DiscoverPage({ sniperStatus: wsProp, wsConnected = false }: Props) {
+  // Poll only when WebSocket is offline; WS pushes sniper_status in real time when connected
+  const polled = useSniperStatusFallback(wsConnected);
   const status = wsConnected ? (wsProp ?? polled) : (polled ?? wsProp);
 
   const [tick, setTick] = useState(0);
@@ -375,7 +393,7 @@ export default function DiscoverPage({ whaleStatus: wsProp, wsConnected = false 
       <div style={{ ...C.card, marginBottom: 16, background: 'linear-gradient(135deg,rgba(0,191,255,0.06),rgba(123,94,167,0.06))', borderColor: 'rgba(0,191,255,0.2)' }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 }}>
           <div>
-            <div style={{ fontSize: 18, fontWeight: 900, color: C.whale, letterSpacing: '0.04em' }}>🐋 WHALE SNIPER</div>
+            <div style={{ fontSize: 18, fontWeight: 900, color: C.accent, letterSpacing: '0.04em' }}>🎯 SNIPER ENGINE</div>
             <div style={{ fontSize: 9, color: C.gray, marginTop: 2 }}>Following pump.fun graduations · Paper mode</div>
           </div>
           <div style={{ textAlign: 'right', fontSize: 9, color: C.gray }}>
@@ -385,7 +403,7 @@ export default function DiscoverPage({ whaleStatus: wsProp, wsConnected = false 
         </div>
 
         <div style={{ display: 'flex', justifyContent: 'space-around', padding: '10px 0', borderTop: '1px solid rgba(255,255,255,0.06)', borderBottom: '1px solid rgba(255,255,255,0.06)', margin: '0 -2px' }}>
-          <StatPill label="Pending" value={stats.pending ?? 0} color={(stats.pending ?? 0) > 0 ? C.whale : C.gray} />
+          <StatPill label="Pending" value={stats.pending ?? 0} color={(stats.pending ?? 0) > 0 ? C.accent : C.gray} />
           <div style={{ width: 1, background: 'rgba(255,255,255,0.06)' }} />
           <StatPill label="Tracking" value={stats.tracking} />
           <div style={{ width: 1, background: 'rgba(255,255,255,0.06)' }} />
@@ -397,9 +415,9 @@ export default function DiscoverPage({ whaleStatus: wsProp, wsConnected = false 
         {/* Strategy summary */}
         <div style={{ marginTop: 12, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
           {[
-            { label: '10s vol ≥$750 → 0.5%',    color: 'rgba(0,191,255,0.15)' },
-            { label: '10s vol ≥$1.5k → 0.75%', color: 'rgba(0,191,255,0.22)' },
-            { label: '10s vol ≥$2.25k → 1%',   color: 'rgba(0,191,255,0.30)' },
+            { label: 'Solo score ≥95 → 1%',        color: 'rgba(0,255,136,0.18)' },
+            { label: 'Consensus 2x ≥80 → 0.75%',   color: 'rgba(0,191,255,0.22)' },
+            { label: 'GMGN wallet scoring',         color: 'rgba(155,89,255,0.18)' },
             { label: 'TP +100%',      color: 'rgba(0,255,136,0.15)' },
             { label: 'SL price -30%', color: 'rgba(255,68,102,0.12)' },
             { label: 'SL liq -40%',   color: 'rgba(255,68,102,0.12)' },
@@ -418,7 +436,7 @@ export default function DiscoverPage({ whaleStatus: wsProp, wsConnected = false 
             <div key={i} style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', borderBottom: i < queued.length - 1 ? '1px solid rgba(255,255,255,0.04)' : 'none' }}>
               <span style={{ fontSize: 10, color: '#e0e8ff', fontWeight: 700 }}>{sig.symbol}</span>
               <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                <span style={{ fontSize: 9, color: C.whale }}>🐋 {fmtUsd(sig.triggerAmountUsd)}</span>
+                <span style={{ fontSize: 9, color: C.accent }}>🎯 {fmtUsd(sig.triggerAmountUsd)}</span>
                 <span style={{ fontSize: 9, color: C.yellow }}>{sig.sizePct}% position</span>
                 <span style={{ fontSize: 8, color: C.gray }}>{timeAgo(sig.queuedAt)}</span>
               </div>
@@ -440,19 +458,21 @@ export default function DiscoverPage({ whaleStatus: wsProp, wsConnected = false 
         ) : (
           tracked
             .slice()
-            .sort((a, b) => b.whaleBuys.length - a.whaleBuys.length || b.migrationTime - a.migrationTime)
+            .sort((a, b) => b.buyerActivity.length - a.buyerActivity.length || b.migrationTime - a.migrationTime)
             .map(tok => <TrackedCard key={tok.mint} tok={tok} tick={tick} />)
         )}
       </div>
 
-      {/* ── Whale Buy Feed ── */}
+      {/* ── Wallet Signal Feed ── */}
       <div style={{ ...C.card, marginBottom: 16 }}>
-        <div style={{ ...C.label, marginBottom: 2 }}>WHALE BUY FEED</div>
-        <div style={{ fontSize: 9, color: '#2a3a50', marginBottom: 10 }}>10s rolling volume on tracked tokens (buys + sells)</div>
+        <div style={{ ...C.label, marginBottom: 2 }}>🧠 SMART WALLET SIGNAL FEED</div>
+        <div style={{ fontSize: 9, color: '#2a3a50', marginBottom: 10 }}>
+          Every buyer on a tracked token is scored via GMGN — entry fires on a single ≥95 score (solo conviction) or two+ wallets ≥80 within 5 min (consensus)
+        </div>
         {buyLogs.length === 0 ? (
-          <div style={{ fontSize: 11, color: C.gray, textAlign: 'center', padding: '16px 0' }}>No volume signals detected yet</div>
+          <div style={{ fontSize: 11, color: C.gray, textAlign: 'center', padding: '16px 0' }}>No buyer wallets scored yet</div>
         ) : (
-          buyLogs.map((log, i) => <WhaleBuyRow key={i} entry={log} />)
+          buyLogs.map((log, i) => <BuyerActivityRow key={i} entry={log} />)
         )}
       </div>
 

@@ -6,13 +6,13 @@ export interface Settings {
   slippagePct: number;
   priorityFeeSol: number;
   walletPublicKey: string;
-  whaleSlippagePct: number;
-  whaleStagnationPct: number;  // exit if |priceChange1h| < this %, after 1h open
+  sniperSlippagePct: number;
+  sniperStagnationPct: number;  // exit if |priceChange1h| < this %, after 1h open
   // Trading window (IST)
   tradingWindowEnabled: boolean;
   tradingWindowStart: string;  // HH:MM in IST, e.g. "17:00"
   tradingWindowEnd: string;    // HH:MM in IST, e.g. "00:00" means midnight (end of day)
-  // Whale TP tier configs (10s vol $750-$1499 / $1500-$2249 / $2250+)
+  // Sniper TP tier configs (10s vol $750-$1499 / $1500-$2249 / $2250+)
   wt1Tp1Pct: number;  wt1Tp1Exit: number;
   wt1Tp2Pct: number;  wt1Tp2Exit: number;  wt1Tp2Trail: number;
   wt1Tp3Pct: number;  wt1Tp3Exit: number;  wt1Tp3Trail: number;
@@ -24,7 +24,7 @@ export interface Settings {
   wt3Tp3Pct: number;  wt3Tp3Exit: number;  wt3Tp3Trail: number;
 }
 
-export interface WhaleBuy {
+export interface BuyerActivity {
   wallet: string;
   amountUsd: number;
   timestamp: number;
@@ -40,7 +40,7 @@ export interface TrackedToken {
   migrationTime: number;
   expiresAt: number;
   entryTriggered: boolean;
-  whaleBuys: WhaleBuy[];
+  buyerActivity: BuyerActivity[];
   // Live market data (refreshed every 30s by the server)
   price?: number;
   mcap?: number;
@@ -51,7 +51,7 @@ export interface TrackedToken {
   lastMarketUpdate?: number;
 }
 
-export interface WhalePosition {
+export interface SniperPosition {
   id: string;
   mint: string;
   name: string;
@@ -77,18 +77,18 @@ export interface WhalePosition {
   tpTier: 1 | 2 | 3;
   triggerAmountUsd: number;
   currentSLPrice: number;
-  // Timing: when whale bought vs when we entered
-  whaleBuyTimestamp?: number;
+  // Timing: when the triggering buy happened vs when we entered
+  buyDetectedTimestamp?: number;
   entryDelayMs?: number;
 }
 
-export interface ClosedWhalePosition extends WhalePosition {
+export interface ClosedSniperPosition extends SniperPosition {
   closeTime: number;
   closeReason: string;
   closePnlPct: number;
 }
 
-export interface WhaleBuyLog {
+export interface BuyerActivityLog {
   mint: string;
   name: string;
   symbol: string;
@@ -101,6 +101,9 @@ export interface WhaleBuyLog {
   priceAtDetection?: number;
   entryPrice?: number;
   slippagePct?: number;
+  walletScore?: number;
+  consensusMode?: 'solo' | 'consensus' | 'tracking' | 'none';
+  qualifyingWalletsCount?: number;
 }
 
 export interface PendingSignal {
@@ -113,11 +116,11 @@ export interface PendingSignal {
   priceAtDetection: number;
 }
 
-export interface WhaleStatus {
+export interface SniperStatus {
   trackedTokens: TrackedToken[];
-  openPositions: WhalePosition[];
-  closedPositions: ClosedWhalePosition[];
-  recentBuyLog: WhaleBuyLog[];
+  openPositions: SniperPosition[];
+  closedPositions: ClosedSniperPosition[];
+  recentBuyLog: BuyerActivityLog[];
   queuedSignals: PendingSignal[];
   solPriceUsd: number;
   pendingCount: number;
