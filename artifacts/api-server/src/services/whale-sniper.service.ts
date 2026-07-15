@@ -7,6 +7,7 @@ import { notifyWhaleTrade, notifyWhaleSkip, notifyWhaleClose, notifyWhaleTP } fr
 import { query } from '../lib/db.js';
 import { withHeliusLimit, isHeliusCoolingDown } from '../lib/helius-limiter.js';
 import { subscribeLogs, isHeliusWsConfigured } from '../lib/helius-ws-shared.js';
+import { evaluateBuy, clearMintConsensus, resetConsensusState, ConsensusResult, CONSENSUS_SCORE_THRESHOLD } from './wallet-consensus.service.js';
 
 const MAX_TRACKING_MS       = 30 * 60 * 1_000;
 const MAX_POSITIONS         = 10;
@@ -30,15 +31,9 @@ const SERVER_START_MS       = Date.now();
 const STALE_GRAD_GRACE_MS   = 2 * 60_000; // 2 minutes before server start
 
 const PRICE_SL_PCT          = 0.3;    // -30% price stop loss from entry
-const VOLUME_WINDOW_MS      = 10_000; // 10-second rolling buy+sell volume window
 
-// Entry tiers based on 10-second aggregate volume (buys + sells combined).
-// Replaces single-wallet whale buy thresholds.
-const VOLUME_TIERS = [
-  { minUsd: 2_250, sizePct: 1.0  },
-  { minUsd: 1_500, sizePct: 0.75 },
-  { minUsd:   750, sizePct: 0.5  },
-] as const;
+// Entry is now decided by the Smart Wallet Consensus strategy
+// (wallet-consensus.service.ts) — see handleVolumeUpdate below.
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -168,6 +163,7 @@ interface PendingSignal {
   priceAtDetection: number;
   whaleWallet: string;
   whaleBuyTimestamp: number;
+  tpTier: 1 | 2 | 3;
 }
 
 // ── Pending graduation type ───────────────────────────────────────────────────
@@ -237,10 +233,6 @@ const closeLocks = new Set<string>();
 const pollLocks  = new Set<string>();
 const seenTxns = new Map<string, Set<string>>();
 const mintCheckpointed = new Set<string>();
-// 10-second rolling transaction volume per tracked mint, split by direction.
-// Each entry = { ts: epoch-ms, usd: dollar value, type: buy/sell }.
-// Entry trigger fires on NET buy pressure: buyTotal - sellTotal > threshold.
-const mintTxVolume = new Map<string, Array<{ ts: number; usd: number; type: 'buy' | 'sell' }>>();
 
 // Permanent, DB-backed lifetime registry of every mint ever traded by the
 // whale sniper. `whalePositions` only reflects currently-OPEN positions, so
@@ -719,27 +711,6 @@ function detectSell(tx: any, targetMint: string): SellInfo | null {
   return { wallet, solReceived, poolBaseVault, poolQuoteVault };
 }
 
-// ── 10-second rolling volume window ──────────────────────────────────────────
-// Adds a transaction's USD value to the per-mint volume window, prunes entries
-// older than VOLUME_WINDOW_MS (relative to `ts`), and returns the NET buy
-// pressure: buyTotal - sellTotal. Entry only fires when this is positive and
-// crosses a VOLUME_TIERS threshold, so pure sell pressure never triggers a trade.
-function addVolumeAndGetWindowNet(
-  mint: string, usd: number, ts: number, type: 'buy' | 'sell',
-): { net: number; buyTotal: number; sellTotal: number } {
-  if (!mintTxVolume.has(mint)) mintTxVolume.set(mint, []);
-  const entries = mintTxVolume.get(mint)!;
-  entries.push({ ts, usd, type });
-  const cutoff = ts - VOLUME_WINDOW_MS;
-  while (entries.length > 0 && entries[0].ts < cutoff) entries.shift();
-  let buyTotal = 0, sellTotal = 0;
-  for (const e of entries) {
-    if (e.type === 'buy') buyTotal += e.usd;
-    else sellTotal += e.usd;
-  }
-  return { net: buyTotal - sellTotal, buyTotal, sellTotal };
-}
-
 // ── DB persistence (survives Render free-tier spin-down / restarts) ───────────
 
 async function saveWhalePosition(pos: WhalePosition): Promise<void> {
@@ -868,6 +839,7 @@ async function enterWhalePosition(
   sizePct: number, triggerAmountUsd: number,
   priceAtDetection: number, whaleWallet: string,
   whaleBuyTimestamp: number,
+  tpTier: 1 | 2 | 3,
 ): Promise<void> {
   // Synchronous reservation — no `await` happens between the check and the
   // lock being taken, so two overlapping calls for the same mint (e.g. from
@@ -1000,7 +972,6 @@ async function enterWhalePosition(
 
     const balance = await getBalance().catch(() => 10);
     const sizeSol = balance * (sizePct / 100);
-    const tpTier  = determineTier(triggerAmountUsd);
     const liquidity = marketData.liquidity;
 
     const pos: WhalePosition = {
@@ -1102,10 +1073,10 @@ function isInTradingWindow(settings: { tradingWindowEnabled: boolean; tradingWin
 
 // ── Queue / slot management ───────────────────────────────────────────────────
 
-function enqueueSignal(mint: string, name: string, symbol: string, sizePct: number, amountUsd: number, priceAtDetection: number, whaleWallet: string, whaleBuyTimestamp: number): void {
+function enqueueSignal(mint: string, name: string, symbol: string, sizePct: number, amountUsd: number, priceAtDetection: number, whaleWallet: string, whaleBuyTimestamp: number, tpTier: 1 | 2 | 3): void {
   if (everTradedMints.has(mint) || slippageSkippedMints.has(mint)) return;
   if (signalQueue.find(s => s.mint === mint)) return;
-  signalQueue.push({ mint, name, symbol, sizePct, triggerAmountUsd: amountUsd, queuedAt: Date.now(), priceAtDetection, whaleWallet, whaleBuyTimestamp });
+  signalQueue.push({ mint, name, symbol, sizePct, triggerAmountUsd: amountUsd, queuedAt: Date.now(), priceAtDetection, whaleWallet, whaleBuyTimestamp, tpTier });
   logger.info({ mint, symbol, sizePct, reason: 'max 10 positions' }, 'Whale sniper: signal queued');
 }
 
@@ -1121,14 +1092,18 @@ async function processQueue(): Promise<void> {
     const tok  = trackedTokens.get(sig.mint);
     if (!tok || Date.now() > tok.expiresAt) continue;
     if (whalePositions.has(sig.mint) || everTradedMints.has(sig.mint) || slippageSkippedMints.has(sig.mint)) continue;
-    await enterWhalePosition(sig.mint, sig.name, sig.symbol, sig.sizePct, sig.triggerAmountUsd, sig.priceAtDetection, sig.whaleWallet, sig.whaleBuyTimestamp);
+    await enterWhalePosition(sig.mint, sig.name, sig.symbol, sig.sizePct, sig.triggerAmountUsd, sig.priceAtDetection, sig.whaleWallet, sig.whaleBuyTimestamp, sig.tpTier);
   }
 }
 
-// ── Volume update handler ─────────────────────────────────────────────────────
+// ── Smart Wallet Consensus — buy-detection handler ────────────────────────────
 // Called for every detected transaction (buy OR sell) on a tracked token.
-// Accumulates USD value in a 10-second rolling window, then triggers entry
-// when NET buy pressure (buyTotal - sellTotal) crosses a VOLUME_TIERS threshold.
+// Only buys are evaluated for entry. Each buyer wallet is scored via GMGN
+// (wallet-score.service.ts, cached) and checked against the consensus rules
+// (wallet-consensus.service.ts):
+//   • score >= 95              → enter immediately, solo conviction (1% risk)
+//   • 2+ distinct wallets >=80 → enter on consensus within a 5-min window (0.75% risk)
+// Sell transactions are recorded for display only — they never trigger entries.
 
 async function handleVolumeUpdate(
   mint: string, wallet: string, txUsd: number, txSig: string,
@@ -1137,6 +1112,10 @@ async function handleVolumeUpdate(
 ): Promise<void> {
   const tok = trackedTokens.get(mint);
   if (!tok) return;
+
+  tok.whaleBuys.push({ wallet, amountUsd: txUsd, timestamp: txTimestamp, txSig, priceAtDetection });
+
+  if (txType !== 'buy') return; // sells never trigger entries under Smart Wallet Consensus
 
   // ── Trading window gate ───────────────────────────────────────────────────
   try {
@@ -1147,24 +1126,29 @@ async function handleVolumeUpdate(
     }
   } catch { /* if settings unavailable, block entry to be safe */ return; }
 
-  tok.whaleBuys.push({ wallet, amountUsd: txUsd, timestamp: txTimestamp, txSig, priceAtDetection });
-
-  // Accumulate into the 10-second window and compute NET buy pressure
-  const { net: windowNet, buyTotal, sellTotal } = addVolumeAndGetWindowNet(mint, txUsd, txTimestamp, txType);
-
-  // Only buy-side volume can push net positive; pure sell storms never trigger
-  const tier = windowNet > 0 ? VOLUME_TIERS.find(t => windowNet >= t.minUsd) : undefined;
+  // Wallet score lookup is async (GMGN, cached) — awaited here so the entry
+  // decision has the score, but this never blocks OTHER tracked mints: each
+  // mint's poll/WS callback fires independently (`void pollTokenBuys(mint)`).
+  let result: ConsensusResult;
+  try {
+    result = await evaluateBuy(mint, wallet, txTimestamp);
+  } catch (err: any) {
+    logger.debug({ mint: mint.slice(0, 12), err: err?.message }, 'Whale sniper: consensus evaluation failed — skipping buy');
+    return;
+  }
 
   const entry: WhaleBuyLog = {
     mint, name: tok.name, symbol: tok.symbol,
-    wallet, amountUsd: windowNet, timestamp: txTimestamp, txSig,
+    wallet, amountUsd: txUsd, timestamp: txTimestamp, txSig,
     entered: false, priceAtDetection,
   };
 
-  if (!tier) {
-    // Net pressure not yet at threshold — log if this tx itself is notable
-    if (txUsd >= 50) {
-      entry.skipReason = `10s net buy ${windowNet.toFixed(0)} (buy ${buyTotal.toFixed(0)} − sell ${sellTotal.toFixed(0)}) below ${VOLUME_TIERS[VOLUME_TIERS.length - 1].minUsd} threshold`;
+  if (!result.trigger) {
+    // Log notable evaluations (any wallet that scored high enough to matter) for visibility.
+    if (result.score >= CONSENSUS_SCORE_THRESHOLD) {
+      entry.skipReason = result.mode === 'tracking'
+        ? `Wallet score ${result.score} qualifies (>=80) — waiting for a 2nd qualifying wallet within 5 min (${result.qualifyingWallets.length}/2)`
+        : `Wallet score ${result.score} below consensus threshold (80)`;
       buyLog.unshift(entry);
       if (buyLog.length > MAX_BUY_LOG) buyLog.pop();
       broadcastWhaleStatus();
@@ -1184,9 +1168,13 @@ async function handleVolumeUpdate(
     return;
   }
 
+  const modeLabel = result.mode === 'solo'
+    ? `Solo conviction (score ${result.score} >= 95)`
+    : `Consensus (${result.qualifyingWallets.length} wallets >= 80 within 5 min)`;
+
   if (whalePositions.size >= MAX_POSITIONS) {
-    entry.skipReason = 'Max positions — queued';
-    enqueueSignal(mint, tok.name, tok.symbol, tier.sizePct, windowNet, priceAtDetection, wallet, txTimestamp);
+    entry.skipReason = `Max positions — queued (${modeLabel})`;
+    enqueueSignal(mint, tok.name, tok.symbol, result.sizePct, txUsd, priceAtDetection, wallet, txTimestamp, result.tpTier);
     buyLog.unshift(entry);
     if (buyLog.length > MAX_BUY_LOG) buyLog.pop();
     broadcastWhaleStatus();
@@ -1194,10 +1182,11 @@ async function handleVolumeUpdate(
   }
 
   entry.entered = true;
+  entry.skipReason = modeLabel;
   buyLog.unshift(entry);
   if (buyLog.length > MAX_BUY_LOG) buyLog.pop();
   broadcastWhaleStatus();
-  await enterWhalePosition(mint, tok.name, tok.symbol, tier.sizePct, windowNet, priceAtDetection, wallet, txTimestamp);
+  await enterWhalePosition(mint, tok.name, tok.symbol, result.sizePct, txUsd, priceAtDetection, wallet, txTimestamp, result.tpTier);
 }
 
 // ── Buy polling ───────────────────────────────────────────────────────────────
@@ -1624,6 +1613,7 @@ function pruneExpiredTracking(): void {
     trackedTokens.delete(mint);
     seenTxns.delete(mint);
     mintCheckpointed.delete(mint);
+    clearMintConsensus(mint);
     wsUnsubscribeMint(mint);
     // Do NOT close the position when tracking window expires — positions are
     // held indefinitely and exited only by TP/SL/liquidity/stagnation rules.
@@ -1760,6 +1750,7 @@ function pruneToken(mint: string): void {
   trackedTokens.delete(mint);
   seenTxns.delete(mint);
   mintCheckpointed.delete(mint);
+  clearMintConsensus(mint);
   wsUnsubscribeMint(mint);
   broadcastWhaleStatus();
 }
@@ -2080,7 +2071,7 @@ export function resetWhaleState(): void {
   pollLocks.clear();
   seenTxns.clear();
   mintCheckpointed.clear();
-  mintTxVolume.clear();
+  resetConsensusState();
   // Only cleared here because this is invoked by the explicit "reset all data"
   // admin action (which also wipes the DB tables) — a real fresh start.
   // Neither set is cleared as a side effect of normal trading.
