@@ -61,14 +61,21 @@ async function existAuthGet<T = any>(subPath: string, query: Record<string, any>
     // GMGN wraps responses as { code, msg, data }. code 0 = success.
     if (body && typeof body === 'object' && 'code' in body) {
       if (body.code !== 0) {
-        logger.debug({ subPath, code: body.code, msg: body.msg }, 'GMGN: API returned non-zero code');
+        logger.warn({ subPath, code: body.code, msg: body.msg }, 'GMGN: API returned non-zero code — wallet score will fall back to 0');
         return null;
       }
       return body.data as T;
     }
     return body as T;
   } catch (err: any) {
-    logger.debug({ subPath, err: err?.message }, 'GMGN: request failed');
+    // Elevated to warn (not debug) so GMGN failures are visible in production
+    // logs (default LOG_LEVEL=info) — this was previously silent, making it
+    // impossible to tell "GMGN_API_KEY set but calls failing" apart from
+    // "GMGN_API_KEY missing" from Render logs alone.
+    logger.warn(
+      { subPath, status: err?.response?.status, data: err?.response?.data, err: err?.message },
+      'GMGN: request failed — wallet score will fall back to 0',
+    );
     return null;
   }
 }

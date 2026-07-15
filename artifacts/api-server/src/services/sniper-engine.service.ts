@@ -7,7 +7,7 @@ import { notifySniperTrade, notifySniperSkip, notifySniperClose, notifySniperTP 
 import { query } from '../lib/db.js';
 import { withHeliusLimit, isHeliusCoolingDown } from '../lib/helius-limiter.js';
 import { subscribeLogs, isHeliusWsConfigured } from '../lib/helius-ws-shared.js';
-import { evaluateBuy, clearMintConsensus, resetConsensusState, ConsensusResult, CONSENSUS_SCORE_THRESHOLD } from './wallet-consensus.service.js';
+import { evaluateBuy, clearMintConsensus, resetConsensusState, ConsensusResult } from './wallet-consensus.service.js';
 
 const MAX_TRACKING_MS       = 30 * 60 * 1_000;
 const MAX_POSITIONS         = 10;
@@ -1139,7 +1139,11 @@ async function handleVolumeUpdate(
   try {
     result = await evaluateBuy(mint, wallet, txTimestamp);
   } catch (err: any) {
-    logger.debug({ mint: mint.slice(0, 12), err: err?.message }, 'Sniper engine: consensus evaluation failed — skipping buy');
+    // getWalletScore/evaluateBuy are designed to never throw (they fail safe
+    // to a 0 score), so reaching this catch means something unexpected broke.
+    // Elevated to warn — this was silently swallowed at debug level before,
+    // making GMGN failures invisible in production logs.
+    logger.warn({ mint: mint.slice(0, 12), err: err?.message }, 'Sniper engine: consensus evaluation failed — skipping buy');
     return;
   }
 
@@ -1152,15 +1156,15 @@ async function handleVolumeUpdate(
   };
 
   if (!result.trigger) {
-    // Log notable evaluations (any wallet that scored high enough to matter) for visibility.
-    if (result.score >= CONSENSUS_SCORE_THRESHOLD) {
-      entry.skipReason = result.mode === 'tracking'
-        ? `Wallet score ${result.score} qualifies (>=80) — waiting for a 2nd qualifying wallet within 5 min (${result.qualifyingWallets.length}/2)`
-        : `Wallet score ${result.score} below consensus threshold (80)`;
-      buyLog.unshift(entry);
-      if (buyLog.length > MAX_BUY_LOG) buyLog.pop();
-      broadcastSniperStatus();
-    }
+    // Every evaluated buyer is logged for visibility, even scores below the
+    // consensus threshold — the Smart Wallet Signal Feed is meant to show the
+    // GMGN scoring model working, not just the buys that happened to qualify.
+    entry.skipReason = result.mode === 'tracking'
+      ? `Wallet score ${result.score} qualifies (>=80) — waiting for a 2nd qualifying wallet within 5 min (${result.qualifyingWallets.length}/2)`
+      : `Wallet score ${result.score} below consensus threshold (80)`;
+    buyLog.unshift(entry);
+    if (buyLog.length > MAX_BUY_LOG) buyLog.pop();
+    broadcastSniperStatus();
     return;
   }
 

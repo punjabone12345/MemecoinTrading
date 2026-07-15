@@ -141,7 +141,7 @@ export async function getWalletScore(wallet: string): Promise<WalletScoreBreakdo
         return result;
       })
       .catch((err) => {
-        logger.debug({ wallet: wallet.slice(0, 12), err: err?.message }, 'Wallet score: compute failed');
+        logger.warn({ wallet: wallet.slice(0, 12), err: err?.message }, 'Wallet score: compute failed — scoring 0');
         const fallback: WalletScoreBreakdown = cached ?? {
           wallet, score: 0, winRate: null, avgRoiPct: null, completedTrades: null,
           walletAgeDays: null, avgHoldMinutes: null, computedAt: Date.now(),
