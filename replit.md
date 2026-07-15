@@ -46,6 +46,10 @@ A Solana memecoin graduation sniper bot — automatically detects tokens graduat
 - Real-time dashboard showing open positions, P&L, wallet balance
 - Telegram alerts for entries, exits, and errors
 
+## Recent changes
+
+- **Entry latency fix (2026-07-15)**: Smart Wallet Consensus entries were landing 30-40s after the qualifying buy instead of the target ~3-4s. Root causes: a blocking DexScreener call for display-only name/symbol/mcap at the top of `enterSniperPosition` (now deferred to a background refine step), a flat 2s `ENTRY_DELAY_MS` no longer needed now that entry price reads from tx-captured vault addresses directly (cut to 400ms), and entry-critical Helius RPC calls sharing one queue with routine background polling (added a priority lane in `helius-limiter.ts` so buy-detection/entry-price reads jump ahead of housekeeping calls — same rate limit budget, just reordered). No thresholds/timeouts that could cause a qualifying transaction to be skipped were changed. See `.agents/memory/sniper-consensus-entry-latency.md` for details. **This only takes effect on Render** (where the live-trading secrets live) after pushing — run `push.sh` to sync to GitHub for Render to pick up.
+
 ## Gotchas
 
 - **GMGN wallet-stats field names**: `/v1/user/wallet_stats` nests `winrate` and `avg_holding_period` under `pnl_stat`, uses `buy`/`sell` (not `buy_count`/`sell_count`) for trade counts, and `realized_profit_pnl` (not `pnl`) for ROI — and returns some of those as numeric strings, not numbers. Reading the old flat field names silently zeroed every wallet score (all fields undefined → every scoring condition false). Fixed in `wallet-score.service.ts`/`gmgn-client.ts`; verify against a live response before renaming any of these again. Activity items use `event_type`, not `type`.

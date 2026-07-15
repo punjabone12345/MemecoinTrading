@@ -13,7 +13,12 @@ import { isGmgnConfigured, getGmgnBannedUntil } from '../lib/gmgn-client.js';
 const MAX_TRACKING_MS       = 30 * 60 * 1_000;
 const MAX_POSITIONS         = 10;
 const POLL_INTERVAL_MS      = 2_000;   // reduced from 5s for faster detection
-const ENTRY_DELAY_MS        = 2_000;   // wait 2s after buyer detection before entering
+// Reduced from 2000ms: vault addresses are captured directly from the buyer's
+// tx at detection time, so the ground-truth price read (fetchPriceFromVaults)
+// doesn't need to wait for Jupiter/DexScreener to index the pool — it was pure
+// added latency. Small buffer kept only in case the vault RPC read races the
+// tx's own confirmation.
+const ENTRY_DELAY_MS        = 400;     // wait before entering (was 2s)
 const PRICE_CHECK_MS        = 1_500;   // reduced from 3s for snappier live prices
 const SOL_PRICE_TTL_MS      = 60_000;
 const MAX_BUY_LOG           = 100;
@@ -213,7 +218,7 @@ function wsSubscribeMint(mint: string): void {
       { mint: mint.slice(0, 12), sig: (value.signature ?? '').slice(0, 12) },
       'Sniper engine: WS event — triggering instant poll',
     );
-    void pollTokenBuys(mint);
+    void pollTokenBuys(mint, true);
   }, 'processed');
   _mintUnsubscribe.set(mint, unsub);
 }
@@ -425,7 +430,7 @@ const POOL_MIN_ACCOUNT_BYTES  = 203;
 
 const pumpswapVaultCache = new Map<string, { baseVault: PublicKey; quoteVault: PublicKey }>();
 
-async function fetchOnChainReservePrice(poolAddress: string, solPriceUsd: number): Promise<number> {
+async function fetchOnChainReservePrice(poolAddress: string, solPriceUsd: number, priority = false): Promise<number> {
   if (!poolAddress || solPriceUsd <= 0) return 0;
   try {
     const conn = getConn();
@@ -433,7 +438,7 @@ async function fetchOnChainReservePrice(poolAddress: string, solPriceUsd: number
 
     if (!vaults) {
       const poolPk = new PublicKey(poolAddress);
-      const info = await withHeliusLimit(() => conn.getAccountInfo(poolPk));
+      const info = await withHeliusLimit(() => conn.getAccountInfo(poolPk), { priority });
       if (!info || info.data.length < POOL_MIN_ACCOUNT_BYTES) return 0;
       const baseVault  = new PublicKey(info.data.subarray(POOL_BASE_VAULT_OFFSET, POOL_BASE_VAULT_OFFSET + POOL_VAULT_LEN));
       const quoteVault = new PublicKey(info.data.subarray(POOL_QUOTE_VAULT_OFFSET, POOL_QUOTE_VAULT_OFFSET + POOL_VAULT_LEN));
@@ -442,8 +447,8 @@ async function fetchOnChainReservePrice(poolAddress: string, solPriceUsd: number
     }
 
     const [baseBal, quoteBal] = await Promise.all([
-      withHeliusLimit(() => conn.getTokenAccountBalance(vaults!.baseVault)).catch(() => null),
-      withHeliusLimit(() => conn.getTokenAccountBalance(vaults!.quoteVault)).catch(() => null),
+      withHeliusLimit(() => conn.getTokenAccountBalance(vaults!.baseVault), { priority }).catch(() => null),
+      withHeliusLimit(() => conn.getTokenAccountBalance(vaults!.quoteVault), { priority }).catch(() => null),
     ]);
 
     const baseAmount  = baseBal?.value?.uiAmount ?? 0;
@@ -544,13 +549,13 @@ async function fetchPriceFresh(mint: string, pairAddress?: string): Promise<numb
 //
 // price = (wsolVaultBalance × solPriceUsd) / baseVaultBalance
 //
-async function fetchPriceFromVaults(baseVault: string, quoteVault: string, solPriceUsd: number): Promise<number> {
+async function fetchPriceFromVaults(baseVault: string, quoteVault: string, solPriceUsd: number, priority = false): Promise<number> {
   if (!baseVault || !quoteVault || solPriceUsd <= 0) return 0;
   try {
     const conn = getConn();
     const [baseBal, quoteBal] = await Promise.all([
-      withHeliusLimit(() => conn.getTokenAccountBalance(new PublicKey(baseVault))).catch(() => null),
-      withHeliusLimit(() => conn.getTokenAccountBalance(new PublicKey(quoteVault))).catch(() => null),
+      withHeliusLimit(() => conn.getTokenAccountBalance(new PublicKey(baseVault)), { priority }).catch(() => null),
+      withHeliusLimit(() => conn.getTokenAccountBalance(new PublicKey(quoteVault)), { priority }).catch(() => null),
     ]);
     const baseAmount  = baseBal?.value?.uiAmount  ?? 0;
     const quoteAmount = quoteBal?.value?.uiAmount ?? 0;
@@ -897,19 +902,15 @@ async function enterSniperPosition(
   entryLocks.add(mint);
 
   try {
-    // Fetch market metadata (liquidity, mcap, name, symbol) from DexScreener
-    const marketData = await fetchTokenPrice(mint);
-
-    // Enrich name/symbol from DexScreener if still placeholder
+    // Market metadata (liquidity, mcap, name, symbol) is DexScreener-backed and
+    // was previously fetched here with a blocking await — adding up to 6s to
+    // EVERY entry for display-only data we already have a placeholder for.
+    // It is not needed to compute the entry price (that comes from on-chain
+    // vault reads below), so it's deferred to a fire-and-forget refresh that
+    // patches the position/tracked-token record once it lands.
     const tok = trackedTokens.get(mint);
-    if (tok) {
-      if (tok.name.endsWith('…') || !tok.symbol) {
-        tok.name   = marketData.name   || tok.name;
-        tok.symbol = marketData.symbol || tok.symbol;
-        name   = tok.name;
-        symbol = tok.symbol;
-      }
-    }
+    let liquidityAtEntry = tok?.liquidity ?? 0;
+    let mcapAtEntry = tok?.mcap ?? 0;
 
     // ── Slippage guard ─────────────────────────────────────────────────────────
     let maxSlippage = 20;
@@ -956,12 +957,12 @@ async function enterSniperPosition(
 
     // Path 1: direct vault balance read — extracted from buyer's buy tx
     if (tok2?.poolBaseVault && tok2?.poolQuoteVault) {
-      delayedPrice = await fetchPriceFromVaults(tok2.poolBaseVault, tok2.poolQuoteVault, cachedSolPrice).catch(() => 0);
+      delayedPrice = await fetchPriceFromVaults(tok2.poolBaseVault, tok2.poolQuoteVault, cachedSolPrice, true).catch(() => 0);
     }
 
     // Path 2: on-chain reserve ratio via pool account (requires DexScreener pool addr)
     if (delayedPrice === 0 && tok2?.poolAddress) {
-      delayedPrice = await fetchOnChainReservePrice(tok2.poolAddress, cachedSolPrice).catch(() => 0);
+      delayedPrice = await fetchOnChainReservePrice(tok2.poolAddress, cachedSolPrice, true).catch(() => 0);
       if (delayedPrice > 0) { priceSource = 'pool-account'; logger.info({ mint: mint.slice(0, 12), price: delayedPrice, source: 'pool-account' }, 'Sniper engine: spot price (pool account fallback)'); }
     }
 
@@ -1022,12 +1023,12 @@ async function enterSniperPosition(
 
     const balance = await getBalance().catch(() => 10);
     const sizeSol = balance * (sizePct / 100);
-    const liquidity = marketData.liquidity;
+    const liquidity = liquidityAtEntry;
 
     const pos: SniperPosition = {
       id: `${mint}-${Date.now()}`,
       mint, name, symbol,
-      entryPrice: finalEntryPrice, entryMcap: tok?.mcap ?? marketData.mcap ?? 0,
+      entryPrice: finalEntryPrice, entryMcap: mcapAtEntry,
       entryTime: entryTimestamp,
       sizeSol, sizePct,
       peakPrice:   finalEntryPrice,
@@ -1081,9 +1082,52 @@ async function enterSniperPosition(
     }).catch(() => {});
 
     broadcastSniperStatus();
+
+    // Fire-and-forget: backfill name/symbol/mcap/liquidity from DexScreener
+    // now that the position is already live — this used to block entry by
+    // up to 6s for purely cosmetic/display data.
+    void refineEntryMetadataInBackground(mint);
   } finally {
     entryLocks.delete(mint);
   }
+}
+
+/** Backfills DexScreener-sourced display metadata (name/symbol/mcap/liquidity)
+ * onto an already-open position and its tracked-token record, without
+ * blocking the entry that already happened on ground-truth on-chain price. */
+async function refineEntryMetadataInBackground(mint: string): Promise<void> {
+  try {
+    const marketData = await fetchTokenPrice(mint);
+    if (marketData.price <= 0 && !marketData.name) return; // nothing useful came back
+
+    const tok = trackedTokens.get(mint);
+    if (tok) {
+      if ((tok.name.endsWith('…') || !tok.symbol) && marketData.name) {
+        tok.name = marketData.name;
+        tok.symbol = marketData.symbol || tok.symbol;
+      }
+      if (marketData.liquidity > 0) tok.liquidity = marketData.liquidity;
+      if (marketData.mcap > 0) tok.mcap = marketData.mcap;
+    }
+
+    const pos = openPositions.get(mint);
+    if (pos) {
+      if ((pos.name.endsWith('…') || !pos.symbol) && marketData.name) {
+        pos.name = marketData.name;
+        pos.symbol = marketData.symbol || pos.symbol;
+      }
+      if (marketData.mcap > 0 && pos.entryMcap === 0) pos.entryMcap = marketData.mcap;
+      // baselineLiquidity only had a chance to be a real value if the caller
+      // knew it before entry — if entry started with no liquidity data at all
+      // (baselineLiquidity fell back to 1), seed it now so the liquidity-drop
+      // exit guard has real reserve data to compare against.
+      if (marketData.liquidity > 0 && pos.baselineLiquidity <= 1) {
+        pos.baselineLiquidity = marketData.liquidity;
+        pos.lastLiquidity = marketData.liquidity;
+      }
+      broadcastSniperStatus();
+    }
+  } catch { /* non-fatal — display-only data */ }
 }
 
 // ── Trading window (IST) ─────────────────────────────────────────────────────
@@ -1275,7 +1319,12 @@ async function handleVolumeUpdate(
 
 // ── Buy polling ───────────────────────────────────────────────────────────────
 
-async function pollTokenBuys(mint: string): Promise<void> {
+// `priority`: true when triggered by a WS logsNotification (the fast, real-time
+// path) — these RPC calls jump ahead of routine background polling in the
+// shared Helius queue (see helius-limiter.ts) so buy detection never sits
+// behind housekeeping calls (market refresh, pool enrichment, validation).
+// The scheduled fallback sweep (scheduleBuyPoll) calls this with priority=false.
+async function pollTokenBuys(mint: string, priority = false): Promise<void> {
   // Per-mint concurrency guard — WS-triggered and scheduled polls must not
   // overlap for the same mint, or they'd both read the same "new" sigs before
   // either has had a chance to mark them seen.
@@ -1300,7 +1349,7 @@ async function pollTokenBuys(mint: string): Promise<void> {
     // hiding the earliest (and most important) buyer buys beyond the fetch window.
     // 1000 is the RPC's max per-call limit for getSignaturesForAddress.
     const sigLimit = mintCheckpointed.has(mint) ? 30 : 1_000;
-    const sigs = await withHeliusLimit(() => conn.getSignaturesForAddress(pk, { limit: sigLimit }));
+    const sigs = await withHeliusLimit(() => conn.getSignaturesForAddress(pk, { limit: sigLimit }), { priority });
     if (!sigs.length) return;
 
     // First poll: baseline.
@@ -1363,7 +1412,7 @@ async function pollTokenBuys(mint: string): Promise<void> {
         const batch = toFetchEarly.slice(i, i + BATCH);
         const txns  = await Promise.all(
           batch.map(sig =>
-            withHeliusLimit(() => conn.getParsedTransaction(sig, { maxSupportedTransactionVersion: 0 })).catch(() => null),
+            withHeliusLimit(() => conn.getParsedTransaction(sig, { maxSupportedTransactionVersion: 0 }), { priority }).catch(() => null),
           ),
         );
         for (let j = 0; j < txns.length; j++) {
@@ -1416,7 +1465,7 @@ async function pollTokenBuys(mint: string): Promise<void> {
     const toFetch = newSigs.slice(0, 10);
     const txns    = await Promise.all(
       toFetch.map(sig =>
-        withHeliusLimit(() => conn.getParsedTransaction(sig, { maxSupportedTransactionVersion: 0 })).catch(() => null),
+        withHeliusLimit(() => conn.getParsedTransaction(sig, { maxSupportedTransactionVersion: 0 }), { priority }).catch(() => null),
       ),
     );
 
@@ -2033,7 +2082,7 @@ function scheduleBuyPoll(gen = _loopGen): void {
       if (isInTradingWindow(s)) {
         pruneExpiredTracking();
         for (const mint of Array.from(trackedTokens.keys())) {
-          await pollTokenBuys(mint);
+          await pollTokenBuys(mint, false);
           await new Promise(r => setTimeout(r, 300));
         }
       }
