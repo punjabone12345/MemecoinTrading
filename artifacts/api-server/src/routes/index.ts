@@ -4,6 +4,7 @@ import settingsRouter from './settings.js';
 import sniperRouter from './sniper.js';
 import { getTrenchesDiagnostics } from '../services/trenches.service.js';
 import { isHeliusWsConfigured } from '../lib/helius-ws-shared.js';
+import { isHeliusCoolingDown, heliusCooldownRemainingMs } from '../lib/helius-limiter.js';
 
 const router = Router();
 
@@ -23,6 +24,10 @@ router.get('/debug', (_req, res) => {
       consecutiveFailures: d.consecutivePollFailures,
       lastError: d.lastPollError,
       currentDelayMs: d.pollDelayMs,
+    },
+    heliusCooldown: {
+      active: isHeliusCoolingDown(),
+      remainingMs: heliusCooldownRemainingMs(),
     },
     graduations: {
       total: d.pumpfunMintsTotal,

@@ -110,6 +110,16 @@ function getConnection(): Connection {
   return connection;
 }
 
+// Dedicated public-RPC connection used ONLY while the shared Helius cooldown
+// is active, so migration discovery (the single feed that everything else —
+// sniper entries included — depends on) never goes fully dark just because
+// some other Helius-backed call elsewhere triggered a process-wide cooldown.
+let publicConnection: Connection | null = null;
+function getPublicConnection(): Connection {
+  if (!publicConnection) publicConnection = new Connection(PUBLIC_RPC, { commitment: 'confirmed' });
+  return publicConnection;
+}
+
 // Callback invoked whenever a new mint is discovered from the migration wallet
 let onNewMint: ((mint: string) => void) | null = null;
 export function setOnNewMint(cb: (mint: string) => void): void {
@@ -217,8 +227,15 @@ async function trackMigrationWallet(): Promise<void> {
     String(err?.message ?? '').includes('429') ||
     err?.code === -32429;
 
-  // Skip this cycle entirely while the shared Helius cooldown is active.
-  if (isHeliusCoolingDown()) return;
+  // While the shared Helius cooldown is active, do NOT skip this cycle —
+  // migration discovery is the one feed every downstream trade depends on,
+  // so going dark here for the full cooldown window (up to 120s, and
+  // compounding indefinitely if Helius keeps 429ing) means no new tokens are
+  // ever found, which looks exactly like the scanner being stuck for many
+  // minutes and then bursting a backlog of missed migrations once it
+  // recovers. Instead, fall back to the public RPC directly (unmetered by
+  // the Helius limiter/cooldown) so discovery keeps running throughout.
+  const coolingDown = isHeliusCoolingDown();
 
   try {
     // Fetch sigs since the last checkpoint via direct fetch() (more reliable
@@ -229,8 +246,11 @@ async function trackMigrationWallet(): Promise<void> {
       ? { until: lastSeenSig, limit: 200 }
       : { limit: 50 };
     // Wrap in withHeliusLimit so a 429 from this call triggers the shared
-    // global cooldown and pauses all other Helius HTTP calls too.
-    const sigs = await withHeliusLimit(() => rpcGetSignatures(sigOpts));
+    // global cooldown and pauses all other Helius HTTP calls too. During an
+    // active cooldown, skip Helius entirely and hit the public RPC directly.
+    const sigs = coolingDown
+      ? await rpcGetSignaturesOnce(PUBLIC_RPC, sigOpts)
+      : await withHeliusLimit(() => rpcGetSignatures(sigOpts));
 
     // Mark poll as successful regardless of whether there are new sigs
     lastPollSuccess = Date.now();
@@ -270,10 +290,12 @@ async function trackMigrationWallet(): Promise<void> {
     // If sig[i] returns null, sig[i] and everything newer is retried next poll.
     const toFetch = [...newSigs].reverse(); // oldest-first, full batch (no slice limit)
 
-    const conn = getConnection();
+    const conn = coolingDown ? getPublicConnection() : getConnection();
     const txns = await Promise.all(
       toFetch.map((sig) =>
-        withHeliusLimit(() => conn.getParsedTransaction(sig, { maxSupportedTransactionVersion: 0 }))
+        (coolingDown
+          ? conn.getParsedTransaction(sig, { maxSupportedTransactionVersion: 0 })
+          : withHeliusLimit(() => conn.getParsedTransaction(sig, { maxSupportedTransactionVersion: 0 })))
           .catch(() => null),
       ),
     );
@@ -420,9 +442,15 @@ function startMigrationWalletWS(): void {
     }
 
     try {
-      if (isHeliusCoolingDown()) { wsSeen.delete(sig); return; }
-      const conn = getConnection();
-      const tx   = await withHeliusLimit(() => conn.getParsedTransaction(sig, { maxSupportedTransactionVersion: 0 }));
+      // Same rationale as trackMigrationWallet: fall back to public RPC
+      // during a Helius cooldown instead of dropping the WS event entirely.
+      // The poll fallback would eventually catch this sig via its cursor,
+      // but resolving it here keeps real-time detection alive too.
+      const wsCoolingDown = isHeliusCoolingDown();
+      const conn = wsCoolingDown ? getPublicConnection() : getConnection();
+      const tx   = wsCoolingDown
+        ? await conn.getParsedTransaction(sig, { maxSupportedTransactionVersion: 0 })
+        : await withHeliusLimit(() => conn.getParsedTransaction(sig, { maxSupportedTransactionVersion: 0 }));
       if (!tx) {
         // null means the RPC couldn't return the tx yet (rate-limited or not yet propagated).
         // Remove from wsSeen so the 5s poll fallback can retry it on the next tick.

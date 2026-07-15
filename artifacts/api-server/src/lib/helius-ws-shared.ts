@@ -34,11 +34,23 @@ const subIdToKey = new Map<number, string>();      // Helius subId -> our key
 
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let pingTimer: ReturnType<typeof setInterval> | null = null;
+// Zombie-connection watchdog: some proxies/NATs (seen on Render) silently drop
+// an idle TCP connection without ever sending a FIN/RST, so `ws` stays
+// readyState=OPEN and never fires 'close' — no data flows, but nothing ever
+// triggers our reconnect logic either. A WS-level ping/pong roundtrip with an
+// enforced deadline detects this and forces a reconnect instead of hanging
+// indefinitely (or until something unrelated nudges the process).
+let lastPongAt = 0;
+const PONG_TIMEOUT_MS = 45_000;
 
 const BACKOFF_NORMAL_MIN = 5_000;
 const BACKOFF_NORMAL_MAX = 60_000;
 const BACKOFF_429_MIN = 60_000;
-const BACKOFF_429_MAX = 300_000;
+// Was 300_000 (5 min) — combined with the HTTP-poll cooldown (max 120s) this
+// could leave migration discovery degraded for a long stretch during a
+// sustained Helius rate-limit episode. Capped to 120s so the WS path retries
+// on a similar cadence to the poll fallback's own recovery.
+const BACKOFF_429_MAX = 120_000;
 let backoffDelay = BACKOFF_NORMAL_MIN;
 let last429 = false;
 let startedOnce = false;
@@ -90,14 +102,28 @@ function connect(): void {
       sendSubscribe(sub);
     }
 
+    lastPongAt = Date.now();
     pingTimer = setInterval(() => {
-      if (ws?.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ jsonrpc: '2.0', id: 999999, method: 'getHealth' }));
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      if (Date.now() - lastPongAt > PONG_TIMEOUT_MS) {
+        logger.warn(
+          { silentMs: Date.now() - lastPongAt },
+          'Helius WS (shared): no pong within deadline — connection is likely a zombie, forcing reconnect',
+        );
+        ws.terminate(); // triggers 'close' → normal reconnect path
+        return;
       }
+      ws.ping();
+      // App-level getHealth is kept alongside the WS ping as a secondary
+      // signal (some intermediary proxies only forward app-level traffic).
+      ws.send(JSON.stringify({ jsonrpc: '2.0', id: 999999, method: 'getHealth' }));
     }, 30_000);
   });
 
+  ws.on('pong', () => { lastPongAt = Date.now(); });
+
   ws.on('message', (raw: Buffer) => {
+    lastPongAt = Date.now(); // any inbound traffic proves the connection is alive
     try {
       const msg = JSON.parse(raw.toString());
 

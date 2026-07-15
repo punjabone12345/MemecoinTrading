@@ -34,3 +34,4 @@
 - [Whale entry price fix](whale-entry-price-fix.md) — DexScreener last-resort in fetchPriceFresh returned stale pre-pump price; fixed by extracting pool vaults from whale's tx and reading reserves directly
 - [Sniper entry checklist fields](sniper-entry-checklist.md) — entryMode/entryScore/qualifyingWalletsCount/priceSource/slippage only exist transiently during entry; persisted as columns on sniper_positions to power Telegram checklist + Stats filter-performance breakdowns
 - [Smart Wallet Consensus entry latency fix](sniper-consensus-entry-latency.md) — 30-40s→~3-4s: deferred blocking DexScreener enrichment, cut ENTRY_DELAY_MS, added priority lane to shared Helius RPC queue
+- [Migration-discovery blackout during Helius rate-limit episodes](trenches-cooldown-blackout.md) — scanner skipped entirely during Helius cooldown instead of using its public-RPC fallback, causing multi-minute dark periods + burst catch-up; also added WS zombie-connection watchdog
