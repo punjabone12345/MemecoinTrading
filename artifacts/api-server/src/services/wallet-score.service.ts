@@ -44,6 +44,16 @@ function withTimeout<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
   });
 }
 
+/** GMGN returns some numeric stats fields (e.g. realized_profit_pnl) as strings, not numbers — coerce either shape to a number. */
+function toNumber(v: unknown): number | null {
+  if (typeof v === 'number' && Number.isFinite(v)) return v;
+  if (typeof v === 'string' && v.trim() !== '') {
+    const n = Number(v);
+    if (Number.isFinite(n)) return n;
+  }
+  return null;
+}
+
 /** Approximate wallet age from the oldest transaction timestamp seen in the fetched activity page. */
 function estimateWalletAgeDays(activities: GmgnWalletActivityItem[]): number | null {
   const timestamps = activities.map(a => a.timestamp).filter((t): t is number => typeof t === 'number' && t > 0);
@@ -58,7 +68,10 @@ function estimateAvgHoldMinutes(activities: GmgnWalletActivityItem[]): number | 
   const byToken = new Map<string, GmgnWalletActivityItem[]>();
   for (const a of activities) {
     const addr = a.token?.address;
-    if (!addr || (a.type !== 'buy' && a.type !== 'sell') || typeof a.timestamp !== 'number') continue;
+    // GMGN's activity item field is `event_type`, not `type` — matching on
+    // the wrong field silently dropped every activity here (age estimate
+    // still worked since it only needs `timestamp`, but hold-time never did).
+    if (!addr || (a.event_type !== 'buy' && a.event_type !== 'sell') || typeof a.timestamp !== 'number') continue;
     if (!byToken.has(addr)) byToken.set(addr, []);
     byToken.get(addr)!.push(a);
   }
@@ -67,9 +80,9 @@ function estimateAvgHoldMinutes(activities: GmgnWalletActivityItem[]): number | 
     events.sort((a, b) => (a.timestamp ?? 0) - (b.timestamp ?? 0));
     let openBuyTs: number | null = null;
     for (const e of events) {
-      if (e.type === 'buy') {
+      if (e.event_type === 'buy') {
         if (openBuyTs === null) openBuyTs = e.timestamp!;
-      } else if (e.type === 'sell' && openBuyTs !== null) {
+      } else if (e.event_type === 'sell' && openBuyTs !== null) {
         const deltaSeconds = (e.timestamp! - openBuyTs) * (openBuyTs < 1e12 ? 1 : 1);
         if (deltaSeconds > 0) holdMinutes.push(deltaSeconds / 60);
         openBuyTs = null;
@@ -95,18 +108,29 @@ async function computeScore(wallet: string): Promise<WalletScoreBreakdown> {
 
   if (!stats && !activity) return zero;
 
-  const winRate = typeof stats?.winrate === 'number' ? stats.winrate : null; // 0-1
-  // pnl (realized_profit / total_cost) is the closest available "average ROI" metric.
-  const avgRoiPct = typeof stats?.pnl === 'number' ? stats.pnl * 100 : null;
-  const completedTrades = typeof stats?.sell_count === 'number'
-    ? stats.sell_count
-    : (typeof stats?.buy_count === 'number' && typeof stats?.sell_count === 'number'
-        ? stats.buy_count + stats.sell_count
-        : null);
+  // Win rate and avg holding period live under `pnl_stat` in the real API
+  // response, not top-level — reading `stats.winrate` directly always
+  // returned undefined, which is why every wallet used to score 0.
+  // GMGN inconsistently returns numeric stats as either JSON numbers or
+  // numeric strings (e.g. realized_profit_pnl comes back quoted while
+  // pnl_stat.winrate does not) — toNumber() coerces either shape.
+  const winRate = toNumber(stats?.pnl_stat?.winrate); // 0-1
+  // realized_profit_pnl (realized_profit / total_cost) is the closest available "average ROI" metric.
+  const realizedPnlRatio = toNumber(stats?.realized_profit_pnl);
+  const avgRoiPct = realizedPnlRatio !== null ? realizedPnlRatio * 100 : null;
+  const buyCount = toNumber(stats?.buy);
+  const sellCount = toNumber(stats?.sell);
+  const completedTrades = sellCount !== null
+    ? sellCount
+    : (buyCount !== null && sellCount !== null ? buyCount + sellCount : null);
+  // GMGN also reports avg holding period directly (seconds, across the whole
+  // stats period) — prefer it over the activity-page estimate below when present.
+  const avgHoldingPeriodSec = toNumber(stats?.pnl_stat?.avg_holding_period);
+  const statsAvgHoldMinutes = avgHoldingPeriodSec !== null ? avgHoldingPeriodSec / 60 : null;
 
   const activities = activity?.activities ?? [];
   const walletAgeDays = estimateWalletAgeDays(activities);
-  const avgHoldMinutes = estimateAvgHoldMinutes(activities);
+  const avgHoldMinutes = statsAvgHoldMinutes ?? estimateAvgHoldMinutes(activities);
 
   let score = 0;
   if (winRate !== null && winRate > 0.6) score += 30;

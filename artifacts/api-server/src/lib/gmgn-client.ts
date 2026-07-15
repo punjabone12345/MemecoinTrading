@@ -151,20 +151,33 @@ async function existAuthGet<T = any>(subPath: string, query: Record<string, any>
   }
 }
 
+// NOTE on field names: these mirror the ACTUAL /v1/user/wallet_stats response
+// shape (verified against the live API), which differs from GMGN's older/other
+// docs. Win rate and average holding period are nested under `pnl_stat`, trade
+// counts are plain `buy`/`sell` (not `buy_count`/`sell_count`), and the
+// realized-PnL ratio is `realized_profit_pnl` (not `pnl`). Getting any of these
+// wrong silently zeroes every wallet score (all fields read as `undefined`,
+// so every scoring condition falls through) — always verify against a live
+// response before renaming.
 export interface GmgnWalletStats {
   realized_profit?: number;
   unrealized_profit?: number;
-  winrate?: number;
+  realized_profit_pnl?: number; // ratio, e.g. -0.072 = -7.2% realized ROI
   total_cost?: number;
-  buy_count?: number;
-  sell_count?: number;
-  pnl?: number;
+  buy?: number;
+  sell?: number;
+  pnl_stat?: {
+    winrate?: number; // 0-1 ratio
+    avg_holding_period?: number; // seconds
+    token_num?: number;
+    [key: string]: any;
+  };
   [key: string]: any;
 }
 
 export interface GmgnWalletActivityItem {
-  transaction_hash?: string;
-  type?: 'buy' | 'sell' | 'add' | 'remove' | 'transfer';
+  tx_hash?: string;
+  event_type?: 'buy' | 'sell' | 'add' | 'remove' | 'transfer';
   token?: { address?: string; symbol?: string };
   token_amount?: number;
   cost_usd?: number;

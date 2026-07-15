@@ -48,6 +48,8 @@ A Solana memecoin graduation sniper bot — automatically detects tokens graduat
 
 ## Gotchas
 
+- **GMGN wallet-stats field names**: `/v1/user/wallet_stats` nests `winrate` and `avg_holding_period` under `pnl_stat`, uses `buy`/`sell` (not `buy_count`/`sell_count`) for trade counts, and `realized_profit_pnl` (not `pnl`) for ROI — and returns some of those as numeric strings, not numbers. Reading the old flat field names silently zeroed every wallet score (all fields undefined → every scoring condition false). Fixed in `wallet-score.service.ts`/`gmgn-client.ts`; verify against a live response before renaming any of these again. Activity items use `event_type`, not `type`.
+
 - **Render has all trading secrets** (`SOLANA_PRIVATE_KEY`, `HELIUS_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`) — Replit does NOT. Live trading only works on Render.
 - **`GMGN_API_KEY`** is required for wallet-consensus entries to ever trigger — without it every wallet scores 0 and the bot only tracks/observes, never buys.
 - **Always restart the API Server workflow after code changes** — esbuild rebuilds on `dev` start.
