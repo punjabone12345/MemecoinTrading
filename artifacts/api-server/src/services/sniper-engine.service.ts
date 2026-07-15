@@ -8,6 +8,7 @@ import { query } from '../lib/db.js';
 import { withHeliusLimit, isHeliusCoolingDown } from '../lib/helius-limiter.js';
 import { subscribeLogs, isHeliusWsConfigured } from '../lib/helius-ws-shared.js';
 import { evaluateBuy, clearMintConsensus, resetConsensusState, ConsensusResult } from './wallet-consensus.service.js';
+import { isGmgnConfigured, getGmgnBannedUntil } from '../lib/gmgn-client.js';
 
 const MAX_TRACKING_MS       = 30 * 60 * 1_000;
 const MAX_POSITIONS         = 10;
@@ -1877,6 +1878,8 @@ export function getSniperStatus() {
     queuedSignals:    [...signalQueue],
     solPriceUsd:      cachedSolPrice,
     pendingCount:     pendingGraduations.size,
+    gmgnConfigured:   isGmgnConfigured(),
+    gmgnBannedUntil:  getGmgnBannedUntil(), // unix ms; 0 if not currently rate-limit banned
     stats: {
       tracking:  trackedTokens.size,
       positions: openPositions.size,

@@ -30,6 +30,65 @@ function apiKey(): string | undefined {
   return key;
 }
 
+// ── Rate limiting / ban avoidance ────────────────────────────────────────────
+//
+// GMGN's read endpoints have a per-IP rate limit; hitting it triggers a
+// temporary IP ban (`code: 429, error: "RATE_LIMIT_BANNED"`, with a
+// `reset_at` unix-seconds timestamp). Every buyer wallet triggers TWO calls
+// (wallet_stats + wallet_activity), and dozens of buyers can arrive across
+// tracked tokens within seconds — with no throttling, that blows through the
+// limit almost immediately and self-inflicts a ban that then makes EVERY
+// wallet score 0 until it clears.
+//
+// Fix: (1) serialize + space out requests to stay under the limit, and
+// (2) once banned, stop calling entirely until `reset_at` passes instead of
+// hammering the ban further.
+const MIN_REQUEST_INTERVAL_MS = 600; // caps us at ~1.7 req/sec to GMGN — conservative to avoid re-triggering the ban
+let requestQueue: Promise<void> = Promise.resolve();
+let lastRequestAt = 0;
+let bannedUntilMs = 0;
+let loggedBan = false;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+class GmgnBannedError extends Error {}
+
+/**
+ * Reserves the next outbound-request slot, honoring the pacing interval.
+ * Throws `GmgnBannedError` instead of sleeping through an active ban window —
+ * we never want dozens of queued lookups to sit there and then all fire the
+ * instant the ban lifts (which would just trigger another ban immediately).
+ */
+function reserveSlot(): Promise<void> {
+  const runAfter = requestQueue.then(async () => {
+    if (bannedUntilMs > Date.now()) throw new GmgnBannedError();
+    const elapsed = Date.now() - lastRequestAt;
+    if (elapsed < MIN_REQUEST_INTERVAL_MS) {
+      await sleep(MIN_REQUEST_INTERVAL_MS - elapsed);
+    }
+    lastRequestAt = Date.now();
+  });
+  requestQueue = runAfter.catch(() => {});
+  return runAfter;
+}
+
+/** Reads a GMGN rate-limit-ban error response and, if present, stops all further calls until it clears. */
+function applyBanIfPresent(data: any): void {
+  if (data?.error === 'RATE_LIMIT_BANNED' && typeof data.reset_at === 'number') {
+    const untilMs = data.reset_at * 1000;
+    if (untilMs > bannedUntilMs) bannedUntilMs = untilMs;
+    if (!loggedBan) {
+      loggedBan = true;
+      logger.warn(
+        { resetAt: new Date(bannedUntilMs).toISOString() },
+        'GMGN: IP rate-limit banned — pausing all wallet-score lookups until the ban clears',
+      );
+    }
+  }
+}
+
 function buildAuthQuery(): { timestamp: number; client_id: string } {
   return { timestamp: Math.floor(Date.now() / 1000), client_id: cryptoRandomUUID() };
 }
@@ -50,6 +109,14 @@ function cryptoRandomUUID(): string {
 async function existAuthGet<T = any>(subPath: string, query: Record<string, any>): Promise<T | null> {
   const key = apiKey();
   if (!key) return null;
+
+  try {
+    await reserveSlot();
+  } catch (err) {
+    if (err instanceof GmgnBannedError) return null; // fail fast, don't even attempt while banned
+    throw err;
+  }
+
   try {
     const { timestamp, client_id } = buildAuthQuery();
     const res = await axios.get(`${GMGN_HOST}${subPath}`, {
@@ -57,6 +124,9 @@ async function existAuthGet<T = any>(subPath: string, query: Record<string, any>
       headers: { 'X-APIKEY': key, 'Content-Type': 'application/json' },
       timeout: REQUEST_TIMEOUT_MS,
     });
+    // A successful response means any prior ban has cleared — allow the next
+    // ban (if it happens again later) to be logged again.
+    if (loggedBan) { loggedBan = false; bannedUntilMs = 0; }
     const body = res.data;
     // GMGN wraps responses as { code, msg, data }. code 0 = success.
     if (body && typeof body === 'object' && 'code' in body) {
@@ -68,6 +138,7 @@ async function existAuthGet<T = any>(subPath: string, query: Record<string, any>
     }
     return body as T;
   } catch (err: any) {
+    applyBanIfPresent(err?.response?.data);
     // Elevated to warn (not debug) so GMGN failures are visible in production
     // logs (default LOG_LEVEL=info) — this was previously silent, making it
     // impossible to tell "GMGN_API_KEY set but calls failing" apart from
@@ -123,4 +194,9 @@ export async function getWalletActivity(chain: string, wallet: string, limit = 5
 
 export function isGmgnConfigured(): boolean {
   return Boolean(process.env.GMGN_API_KEY);
+}
+
+/** Non-zero when GMGN has temporarily banned this server's IP for rate-limit violations (unix ms, or 0 if not banned). */
+export function getGmgnBannedUntil(): number {
+  return bannedUntilMs > Date.now() ? bannedUntilMs : 0;
 }

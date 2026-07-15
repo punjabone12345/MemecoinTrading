@@ -386,6 +386,8 @@ export default function DiscoverPage({ sniperStatus: wsProp, wsConnected = false
   const buyLogs  = status?.recentBuyLog   ?? [];
   const queued   = status?.queuedSignals  ?? [];
   const stats    = status?.stats ?? { tracking: 0, positions: 0, queued: 0, pending: 0 };
+  const gmgnConfigured  = status?.gmgnConfigured ?? true; // avoid a false "not set" flash before the first status arrives
+  const gmgnBannedUntil = status?.gmgnBannedUntil ?? 0;
 
   return (
     <div>
@@ -469,7 +471,15 @@ export default function DiscoverPage({ sniperStatus: wsProp, wsConnected = false
         <div style={{ fontSize: 9, color: '#2a3a50', marginBottom: 10 }}>
           Every buyer on a tracked token is scored via GMGN — entry fires on a single ≥95 score (solo conviction) or two+ wallets ≥80 within 5 min (consensus)
         </div>
-        {buyLogs.length === 0 ? (
+        {!gmgnConfigured ? (
+          <div style={{ fontSize: 11, color: C.red, textAlign: 'center', padding: '16px 0' }}>
+            GMGN_API_KEY not set — wallet scoring is disabled, no entries will trigger
+          </div>
+        ) : gmgnBannedUntil > 0 ? (
+          <div style={{ fontSize: 11, color: C.yellow, textAlign: 'center', padding: '16px 0' }}>
+            GMGN rate-limited this server's IP — scoring paused until {new Date(gmgnBannedUntil).toLocaleTimeString()}
+          </div>
+        ) : buyLogs.length === 0 ? (
           <div style={{ fontSize: 11, color: C.gray, textAlign: 'center', padding: '16px 0' }}>No buyer wallets scored yet</div>
         ) : (
           buyLogs.map((log, i) => <BuyerActivityRow key={i} entry={log} />)

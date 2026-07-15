@@ -124,5 +124,7 @@ export interface SniperStatus {
   queuedSignals: PendingSignal[];
   solPriceUsd: number;
   pendingCount: number;
+  gmgnConfigured: boolean;
+  gmgnBannedUntil: number; // unix ms; 0 if not currently rate-limit banned
   stats: { tracking: number; positions: number; queued: number; pending: number };
 }
