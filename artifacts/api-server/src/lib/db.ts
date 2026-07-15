@@ -22,6 +22,24 @@ export async function query<T = unknown>(sql: string, params?: unknown[]): Promi
   }
 }
 
+/**
+ * Same as `query`, but for migration statements that are EXPECTED to fail on
+ * a fresh or already-migrated DB (e.g. "RENAME COLUMN x" when x was already
+ * renamed, or never existed). Swallows the error without the ERROR-level log
+ * `query()` emits — that log made every normal boot look like a crash and
+ * risked masking real errors (e.g. GMGN API failures) in the same log stream.
+ */
+async function queryQuiet(sql: string): Promise<void> {
+  const client = await pool.connect();
+  try {
+    await client.query(sql);
+  } catch {
+    // Expected: legacy table/column may not exist. No-op.
+  } finally {
+    client.release();
+  }
+}
+
 export async function initDB(): Promise<void> {
   // ── Legacy schema detection ───────────────────────────────────────────────
   // Old Render DBs have a `position_id SERIAL PRIMARY KEY` column which makes
@@ -97,11 +115,11 @@ export async function initDB(): Promise<void> {
 
   // ── Rename legacy whale-branded tables/columns to the sniper-engine schema ──
   // No-ops if the old names don't exist (fresh DB) or the rename already happened.
-  await query(`ALTER TABLE IF EXISTS whale_positions RENAME TO sniper_positions`).catch(() => {});
-  await query(`ALTER TABLE IF EXISTS whale_traded_mints RENAME TO traded_mints`).catch(() => {});
-  await query(`ALTER TABLE IF EXISTS whale_slippage_skipped_mints RENAME TO slippage_skipped_mints`).catch(() => {});
-  await query(`ALTER TABLE IF EXISTS sniper_positions RENAME COLUMN whale_buy_timestamp TO buy_detected_timestamp`).catch(() => {});
-  await query(`UPDATE settings SET key = 'sniperStagnationPct' WHERE key = 'whaleStagnationPct'`).catch(() => {});
+  await queryQuiet(`ALTER TABLE IF EXISTS whale_positions RENAME TO sniper_positions`);
+  await queryQuiet(`ALTER TABLE IF EXISTS whale_traded_mints RENAME TO traded_mints`);
+  await queryQuiet(`ALTER TABLE IF EXISTS whale_slippage_skipped_mints RENAME TO slippage_skipped_mints`);
+  await queryQuiet(`ALTER TABLE IF EXISTS sniper_positions RENAME COLUMN whale_buy_timestamp TO buy_detected_timestamp`);
+  await queryQuiet(`UPDATE settings SET key = 'sniperStagnationPct' WHERE key = 'whaleStagnationPct'`);
 
   await query(`
     CREATE TABLE IF NOT EXISTS sniper_positions (
