@@ -99,6 +99,17 @@ export interface SniperPosition {
   // Timing: when the buyer bought vs when we entered
   buyDetectedTimestamp?: number;  // ms since epoch — when buyer tx was detected
   entryDelayMs?: number;       // how many ms after buyer detection we entered
+  // ── Entry checklist — captures WHICH filters/conditions fired at entry,
+  // so closed trades can later be sliced by "which gate let this trade in"
+  // to see which filter setting is actually producing winners vs losers.
+  entryMode?: 'solo' | 'consensus';       // Smart Wallet Consensus path that triggered entry
+  entryScore?: number;                    // GMGN score of the triggering wallet
+  qualifyingWalletsCount?: number;        // how many distinct >=80 wallets had qualified (consensus mode)
+  buyerWallet?: string;                   // wallet whose buy triggered this entry
+  priceSource?: 'vault' | 'pool-account' | 'jupiter'; // which price-fetch path succeeded
+  priceAtDetection?: number;              // buyer's on-chain avg price when their buy was detected
+  actualSlippagePct?: number;             // (entryPrice - priceAtDetection) / priceAtDetection * 100
+  maxSlippagePct?: number;                // slippage cap in effect at entry time
 }
 
 // ── Tier config ───────────────────────────────────────────────────────────────
@@ -171,6 +182,10 @@ interface PendingSignal {
   buyerWallet: string;
   buyDetectedTimestamp: number;
   tpTier: 1 | 2 | 3;
+  entryMode: 'solo' | 'consensus';
+  entryScore: number;
+  qualifyingWalletsCount: number;
+  maxSlippagePctAtQueue: number;
 }
 
 // ── Pending graduation type ───────────────────────────────────────────────────
@@ -727,8 +742,10 @@ async function saveSniperPosition(pos: SniperPosition): Promise<void> {
         (id, mint, name, symbol, entry_price, entry_mcap, entry_time, size_sol, size_pct,
          peak_price, last_price, last_liquidity, baseline_liquidity, migration_time, pnl_pct,
          tp1_hit, tp2_hit, tp3_hit, initial_size_sol, remaining_size_sol, banked_sol,
-         tp_tier, trigger_amount_usd, current_sl_price, buy_detected_timestamp, entry_delay_ms, status)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,'OPEN')
+         tp_tier, trigger_amount_usd, current_sl_price, buy_detected_timestamp, entry_delay_ms,
+         entry_mode, entry_score, qualifying_wallets_count, buyer_wallet, price_source,
+         price_at_detection, actual_slippage_pct, max_slippage_pct, status)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,'OPEN')
        ON CONFLICT (id) DO UPDATE SET
          peak_price        = EXCLUDED.peak_price,
          last_price        = EXCLUDED.last_price,
@@ -747,7 +764,10 @@ async function saveSniperPosition(pos: SniperPosition): Promise<void> {
        pos.tp1Hit, pos.tp2Hit, pos.tp3Hit,
        pos.initialSizeSol, pos.remainingSizeSol, pos.bankedSol,
        pos.tpTier, pos.triggerAmountUsd, pos.currentSLPrice,
-       pos.buyDetectedTimestamp ?? null, pos.entryDelayMs ?? null],
+       pos.buyDetectedTimestamp ?? null, pos.entryDelayMs ?? null,
+       pos.entryMode ?? null, pos.entryScore ?? null, pos.qualifyingWalletsCount ?? null,
+       pos.buyerWallet ?? null, pos.priceSource ?? null,
+       pos.priceAtDetection ?? null, pos.actualSlippagePct ?? null, pos.maxSlippagePct ?? null],
     );
   } catch (err: any) {
     logger.warn({ err: err?.message }, 'Sniper engine: failed to persist position');
@@ -793,6 +813,14 @@ export async function restoreSniperPositionsFromDB(): Promise<void> {
         currentSLPrice:   storedSL > 0 ? storedSL : entryP * (1 - PRICE_SL_PCT),
         buyDetectedTimestamp: r.buy_detected_timestamp ? Number(r.buy_detected_timestamp) : undefined,
         entryDelayMs:      r.entry_delay_ms ? Number(r.entry_delay_ms) : undefined,
+        entryMode:         r.entry_mode ?? undefined,
+        entryScore:        r.entry_score !== null && r.entry_score !== undefined ? Number(r.entry_score) : undefined,
+        qualifyingWalletsCount: r.qualifying_wallets_count !== null && r.qualifying_wallets_count !== undefined ? Number(r.qualifying_wallets_count) : undefined,
+        buyerWallet:       r.buyer_wallet ?? undefined,
+        priceSource:       r.price_source ?? undefined,
+        priceAtDetection:  r.price_at_detection !== null && r.price_at_detection !== undefined ? Number(r.price_at_detection) : undefined,
+        actualSlippagePct: r.actual_slippage_pct !== null && r.actual_slippage_pct !== undefined ? Number(r.actual_slippage_pct) : undefined,
+        maxSlippagePct:    r.max_slippage_pct !== null && r.max_slippage_pct !== undefined ? Number(r.max_slippage_pct) : undefined,
       };
       openPositions.set(pos.mint, pos);
     }
@@ -819,6 +847,14 @@ export async function restoreSniperPositionsFromDB(): Promise<void> {
         currentSLPrice: Number(r.current_sl_price ?? 0),
         buyDetectedTimestamp: r.buy_detected_timestamp ? Number(r.buy_detected_timestamp) : undefined,
         entryDelayMs:      r.entry_delay_ms ? Number(r.entry_delay_ms) : undefined,
+        entryMode:         r.entry_mode ?? undefined,
+        entryScore:        r.entry_score !== null && r.entry_score !== undefined ? Number(r.entry_score) : undefined,
+        qualifyingWalletsCount: r.qualifying_wallets_count !== null && r.qualifying_wallets_count !== undefined ? Number(r.qualifying_wallets_count) : undefined,
+        buyerWallet:       r.buyer_wallet ?? undefined,
+        priceSource:       r.price_source ?? undefined,
+        priceAtDetection:  r.price_at_detection !== null && r.price_at_detection !== undefined ? Number(r.price_at_detection) : undefined,
+        actualSlippagePct: r.actual_slippage_pct !== null && r.actual_slippage_pct !== undefined ? Number(r.actual_slippage_pct) : undefined,
+        maxSlippagePct:    r.max_slippage_pct !== null && r.max_slippage_pct !== undefined ? Number(r.max_slippage_pct) : undefined,
       });
     }
     logger.info({ open: rows.length, closed: closedRows.length }, 'Sniper engine: restored positions from DB after restart');
@@ -847,6 +883,10 @@ async function enterSniperPosition(
   priceAtDetection: number, buyerWallet: string,
   buyDetectedTimestamp: number,
   tpTier: 1 | 2 | 3,
+  entryMode: 'solo' | 'consensus' = 'solo',
+  entryScore: number = 0,
+  qualifyingWalletsCount: number = 1,
+  maxSlippagePctOverride?: number,
 ): Promise<void> {
   // Synchronous reservation — no `await` happens between the check and the
   // lock being taken, so two overlapping calls for the same mint (e.g. from
@@ -877,6 +917,7 @@ async function enterSniperPosition(
       const s = await getSettings();
       maxSlippage = s.sniperSlippagePct ?? 20;
     } catch { /* use default */ }
+    if (maxSlippagePctOverride !== undefined) maxSlippage = maxSlippagePctOverride;
 
     // Re-check after the async gaps above — belt-and-suspenders.
     if (openPositions.has(mint)) return;
@@ -911,6 +952,7 @@ async function enterSniperPosition(
     await fetchSolPrice().catch(() => {}); // ensure SOL price is fresh for all paths
 
     let delayedPrice = 0;
+    let priceSource: 'vault' | 'pool-account' | 'jupiter' = 'vault';
 
     // Path 1: direct vault balance read — extracted from buyer's buy tx
     if (tok2?.poolBaseVault && tok2?.poolQuoteVault) {
@@ -920,12 +962,13 @@ async function enterSniperPosition(
     // Path 2: on-chain reserve ratio via pool account (requires DexScreener pool addr)
     if (delayedPrice === 0 && tok2?.poolAddress) {
       delayedPrice = await fetchOnChainReservePrice(tok2.poolAddress, cachedSolPrice).catch(() => 0);
-      if (delayedPrice > 0) logger.info({ mint: mint.slice(0, 12), price: delayedPrice, source: 'pool-account' }, 'Sniper engine: spot price (pool account fallback)');
+      if (delayedPrice > 0) { priceSource = 'pool-account'; logger.info({ mint: mint.slice(0, 12), price: delayedPrice, source: 'pool-account' }, 'Sniper engine: spot price (pool account fallback)'); }
     }
 
     // Path 3: Jupiter quote (on-chain-derived, no pool address needed)
     if (delayedPrice === 0) {
       delayedPrice = await fetchPriceFresh(mint, undefined).catch(() => 0); // pairAddress=undefined → skips on-chain read, goes straight to Jupiter
+      if (delayedPrice > 0) priceSource = 'jupiter';
     }
 
     // Do NOT fall back to DexScreener priceUsd — it's 30-120s stale on fresh tokens
@@ -1004,6 +1047,13 @@ async function enterSniperPosition(
       // Timing
       buyDetectedTimestamp,
       entryDelayMs,
+      // Entry checklist
+      entryMode, entryScore, qualifyingWalletsCount,
+      buyerWallet,
+      priceSource,
+      priceAtDetection,
+      actualSlippagePct: priceAtDetection > 0 ? ((finalEntryPrice - priceAtDetection) / priceAtDetection) * 100 : 0,
+      maxSlippagePct: maxSlippage,
     };
 
     openPositions.set(mint, pos);
@@ -1026,6 +1076,8 @@ async function enterSniperPosition(
       priceAtBuyDetection: priceAtDetection,
       slippagePct: maxSlippage,
       buyerWallet,
+      entryMode, entryScore, qualifyingWalletsCount,
+      priceSource, tpTier,
     }).catch(() => {});
 
     broadcastSniperStatus();
@@ -1080,10 +1132,17 @@ function isInTradingWindow(settings: { tradingWindowEnabled: boolean; tradingWin
 
 // ── Queue / slot management ───────────────────────────────────────────────────
 
-function enqueueSignal(mint: string, name: string, symbol: string, sizePct: number, amountUsd: number, priceAtDetection: number, buyerWallet: string, buyDetectedTimestamp: number, tpTier: 1 | 2 | 3): void {
+function enqueueSignal(
+  mint: string, name: string, symbol: string, sizePct: number, amountUsd: number,
+  priceAtDetection: number, buyerWallet: string, buyDetectedTimestamp: number, tpTier: 1 | 2 | 3,
+  entryMode: 'solo' | 'consensus', entryScore: number, qualifyingWalletsCount: number, maxSlippagePctAtQueue: number,
+): void {
   if (everTradedMints.has(mint) || slippageSkippedMints.has(mint)) return;
   if (signalQueue.find(s => s.mint === mint)) return;
-  signalQueue.push({ mint, name, symbol, sizePct, triggerAmountUsd: amountUsd, queuedAt: Date.now(), priceAtDetection, buyerWallet, buyDetectedTimestamp, tpTier });
+  signalQueue.push({
+    mint, name, symbol, sizePct, triggerAmountUsd: amountUsd, queuedAt: Date.now(), priceAtDetection, buyerWallet,
+    buyDetectedTimestamp, tpTier, entryMode, entryScore, qualifyingWalletsCount, maxSlippagePctAtQueue,
+  });
   logger.info({ mint, symbol, sizePct, reason: 'max 10 positions' }, 'Sniper engine: signal queued');
 }
 
@@ -1099,7 +1158,10 @@ async function processQueue(): Promise<void> {
     const tok  = trackedTokens.get(sig.mint);
     if (!tok || Date.now() > tok.expiresAt) continue;
     if (openPositions.has(sig.mint) || everTradedMints.has(sig.mint) || slippageSkippedMints.has(sig.mint)) continue;
-    await enterSniperPosition(sig.mint, sig.name, sig.symbol, sig.sizePct, sig.triggerAmountUsd, sig.priceAtDetection, sig.buyerWallet, sig.buyDetectedTimestamp, sig.tpTier);
+    await enterSniperPosition(
+      sig.mint, sig.name, sig.symbol, sig.sizePct, sig.triggerAmountUsd, sig.priceAtDetection, sig.buyerWallet, sig.buyDetectedTimestamp, sig.tpTier,
+      sig.entryMode, sig.entryScore, sig.qualifyingWalletsCount, sig.maxSlippagePctAtQueue,
+    );
   }
 }
 
@@ -1185,9 +1247,15 @@ async function handleVolumeUpdate(
     ? `Solo conviction (score ${result.score} >= 95)`
     : `Consensus (${result.qualifyingWallets.length} wallets >= 80 within 5 min)`;
 
+  let maxSlippageForQueue = 20;
+  try { maxSlippageForQueue = (await getSettings()).sniperSlippagePct ?? 20; } catch { /* use default */ }
+
   if (openPositions.size >= MAX_POSITIONS) {
     entry.skipReason = `Max positions — queued (${modeLabel})`;
-    enqueueSignal(mint, tok.name, tok.symbol, result.sizePct, txUsd, priceAtDetection, wallet, txTimestamp, result.tpTier);
+    enqueueSignal(
+      mint, tok.name, tok.symbol, result.sizePct, txUsd, priceAtDetection, wallet, txTimestamp, result.tpTier,
+      result.mode as 'solo' | 'consensus', result.score, result.qualifyingWallets.length, maxSlippageForQueue,
+    );
     buyLog.unshift(entry);
     if (buyLog.length > MAX_BUY_LOG) buyLog.pop();
     broadcastSniperStatus();
@@ -1199,7 +1267,10 @@ async function handleVolumeUpdate(
   buyLog.unshift(entry);
   if (buyLog.length > MAX_BUY_LOG) buyLog.pop();
   broadcastSniperStatus();
-  await enterSniperPosition(mint, tok.name, tok.symbol, result.sizePct, txUsd, priceAtDetection, wallet, txTimestamp, result.tpTier);
+  await enterSniperPosition(
+    mint, tok.name, tok.symbol, result.sizePct, txUsd, priceAtDetection, wallet, txTimestamp, result.tpTier,
+    result.mode as 'solo' | 'consensus', result.score, result.qualifyingWallets.length,
+  );
 }
 
 // ── Buy polling ───────────────────────────────────────────────────────────────

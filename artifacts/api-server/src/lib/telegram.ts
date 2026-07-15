@@ -116,22 +116,39 @@ export async function notifySniperTrade(params: {
   buyAmountUsd: number; sizePct: number; sizeSol: number;
   entryPrice: number; priceAtBuyDetection: number; slippagePct: number;
   buyerWallet?: string;
+  entryMode?: 'solo' | 'consensus'; entryScore?: number; qualifyingWalletsCount?: number;
+  priceSource?: 'vault' | 'pool-account' | 'jupiter'; tpTier?: 1 | 2 | 3;
 }): Promise<void> {
-  const { name, symbol, mint, buyAmountUsd, sizePct, sizeSol, entryPrice, priceAtBuyDetection, slippagePct, buyerWallet } = params;
+  const {
+    name, symbol, mint, buyAmountUsd, sizePct, sizeSol, entryPrice, priceAtBuyDetection, slippagePct, buyerWallet,
+    entryMode, entryScore, qualifyingWalletsCount, priceSource, tpTier,
+  } = params;
   const actualSlip = priceAtBuyDetection > 0
     ? ((entryPrice - priceAtBuyDetection) / priceAtBuyDetection * 100).toFixed(1)
     : '0.0';
   const walletLine = buyerWallet && buyerWallet !== 'unknown'
     ? `Buyer Wallet: <code>${buyerWallet}</code>\n`
     : '';
+  const modeLine = entryMode === 'consensus'
+    ? `✅ Entry Mode: Consensus (${qualifyingWalletsCount ?? '?'} wallets ≥80, top score ${entryScore ?? '?'})\n`
+    : `✅ Entry Mode: Solo conviction (score ${entryScore ?? '?'} ≥ 95)\n`;
+  const sourceLabel = priceSource === 'vault' ? 'On-chain vault read'
+    : priceSource === 'pool-account' ? 'On-chain pool reserves'
+    : priceSource === 'jupiter' ? 'Jupiter quote'
+    : 'Unknown';
   await sendMessage(
-    `🐋 <b>WHALE ENTRY — ${symbol}</b> (${name})\n` +
+    `🎯 <b>ENTRY CHECKLIST — ${symbol}</b> (${name})\n` +
     `Mint: <code>${mint.slice(0, 16)}…</code>\n` +
     walletLine +
-    `Buyer Activity: $${buyAmountUsd.toFixed(0)}\n` +
-    `Size: ${sizeSol.toFixed(3)} SOL (${sizePct.toFixed(2)}%)\n` +
-    `Entry Price: $${entryPrice.toFixed(8)}\n` +
-    `Detected Price: $${priceAtBuyDetection.toFixed(8)} (slip ${actualSlip}% of ${slippagePct}% max)\n` +
+    `✅ Wallet Score Gate: passed\n` +
+    modeLine +
+    `✅ Price Source: ${sourceLabel}\n` +
+    `✅ Slippage: ${actualSlip}% (max ${slippagePct}%)\n` +
+    `✅ Position Size: ${sizePct.toFixed(2)}% (Tier ${tpTier ?? '?'})\n` +
+    `Buyer Activity: ${buyAmountUsd.toFixed(0)}\n` +
+    `Size: ${sizeSol.toFixed(3)} SOL\n` +
+    `Entry Price: ${entryPrice.toFixed(8)}\n` +
+    `Detected Price: ${priceAtBuyDetection.toFixed(8)}\n` +
     `Time: ${toIST(new Date())}`
   );
 }

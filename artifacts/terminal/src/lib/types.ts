@@ -80,6 +80,15 @@ export interface SniperPosition {
   // Timing: when the triggering buy happened vs when we entered
   buyDetectedTimestamp?: number;
   entryDelayMs?: number;
+  // Entry checklist — which filters/conditions fired at entry
+  entryMode?: 'solo' | 'consensus';
+  entryScore?: number;
+  qualifyingWalletsCount?: number;
+  buyerWallet?: string;
+  priceSource?: 'vault' | 'pool-account' | 'jupiter';
+  priceAtDetection?: number;
+  actualSlippagePct?: number;
+  maxSlippagePct?: number;
 }
 
 export interface ClosedSniperPosition extends SniperPosition {

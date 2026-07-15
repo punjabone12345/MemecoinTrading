@@ -246,6 +246,16 @@ export async function initDB(): Promise<void> {
     `ALTER TABLE sniper_positions ADD COLUMN IF NOT EXISTS tp_tier INTEGER DEFAULT 1`,
     `ALTER TABLE sniper_positions ADD COLUMN IF NOT EXISTS trigger_amount_usd NUMERIC DEFAULT 0`,
     `ALTER TABLE sniper_positions ADD COLUMN IF NOT EXISTS current_sl_price NUMERIC DEFAULT 0`,
+    // Entry checklist columns — capture WHICH filters/conditions fired at entry so
+    // closed trades can be sliced by entry mode/score/price-source/slippage later.
+    `ALTER TABLE sniper_positions ADD COLUMN IF NOT EXISTS entry_mode TEXT`,
+    `ALTER TABLE sniper_positions ADD COLUMN IF NOT EXISTS entry_score NUMERIC`,
+    `ALTER TABLE sniper_positions ADD COLUMN IF NOT EXISTS qualifying_wallets_count INTEGER`,
+    `ALTER TABLE sniper_positions ADD COLUMN IF NOT EXISTS buyer_wallet TEXT`,
+    `ALTER TABLE sniper_positions ADD COLUMN IF NOT EXISTS price_source TEXT`,
+    `ALTER TABLE sniper_positions ADD COLUMN IF NOT EXISTS price_at_detection NUMERIC`,
+    `ALTER TABLE sniper_positions ADD COLUMN IF NOT EXISTS actual_slippage_pct NUMERIC`,
+    `ALTER TABLE sniper_positions ADD COLUMN IF NOT EXISTS max_slippage_pct NUMERIC`,
     // Ensure sniperStagnationPct seed exists (no-op if already set by user)
     `INSERT INTO settings (key, value) VALUES ('sniperStagnationPct', '5') ON CONFLICT (key) DO NOTHING`,
   ];

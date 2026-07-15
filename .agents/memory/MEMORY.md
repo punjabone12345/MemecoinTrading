@@ -21,7 +21,8 @@
 - [Meteora instruction type filter bug](meteora-instruction-filter.md) — naive first-"Instruction:"-in-logs extraction returns SPL Token "InitializeAccount", not Meteora op; must scan from Meteora programId invoke line
 - [Whale sniper architecture](whale-sniper-arch.md) — completely separate service from auto-trader; in-memory state only; buy detection via getSignaturesForAddress polling; setOnGraduation hook in trenches.service.ts
 - [Whale position live display](whale-position-live-display.md) — whale positions shown in Trades tab via whaleStatus prop; poll 2s, monitor 1.5s; Helius WS logsSubscribe per mint when key set
-- [Whale position management](whale-position-management.md) — full CRUD via /whale/:id + /whale/closed/:id routes; loadInitial must fetch whaleStatus or paper-mode positions never appear; $ in JSX string arrays corrupts via WriteFile tool — use python3 replace instead
+- [Whale position management](whale-position-management.md) — full CRUD via /whale/:id + /whale/closed/:id routes; loadInitial must fetch whaleStatus or paper-mode positions never appear
+- [Edit tool $ substitution corruption](edit-tool-dollar-corruption.md) — new_string with $-then-quote/digit sequences gets JS-replace-interpreted, silently duplicating file content; verify after editing
 - [Helius RPC shared rate limiter](helius-shared-rate-limiter.md) — 3 services independently hit Helius, causing continuous 429s; centralized token-bucket + global cooldown fixes it
 - [Helius shared WS connection](helius-shared-ws-connection.md) — Helius allows only 1 concurrent WS; 3 services each opened their own → 429 reconnect storm; consolidated into one shared multiplexed connection
 - [Artifact-managed workflow port conflicts](artifact-workflow-port-conflicts.md) — this project has platform-managed "artifacts/*" workflows that duplicate custom .replit workflows and can't be deleted; conflicts must be resolved by removing/adjusting the custom side
@@ -31,3 +32,4 @@
 - [GMGN wallet_stats/wallet_activity real field shapes](gmgn-wallet-stats-field-names.md) — winrate/avg_holding_period nested under pnl_stat, buy/sell not buy_count/sell_count, some numerics are strings; wrong names silently zero every score
 - [Whale lifetime mint dedup](whale-lifetime-mint-dedup.md) — in-memory open-position tracking alone can't guarantee "never trade a mint twice"; needs DB-backed lifetime set checked at every pipeline entry point
 - [Whale entry price fix](whale-entry-price-fix.md) — DexScreener last-resort in fetchPriceFresh returned stale pre-pump price; fixed by extracting pool vaults from whale's tx and reading reserves directly
+- [Sniper entry checklist fields](sniper-entry-checklist.md) — entryMode/entryScore/qualifyingWalletsCount/priceSource/slippage only exist transiently during entry; persisted as columns on sniper_positions to power Telegram checklist + Stats filter-performance breakdowns

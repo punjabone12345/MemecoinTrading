@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, Fragment } from 'react';
 import { SniperStatus, ClosedSniperPosition } from '../lib/types.js';
 import { api } from '../lib/api.js';
 import { formatPrice } from '../lib/utils.js';
@@ -65,6 +65,130 @@ function csvField(v: string | number): string {
   const s = String(v);
   // Always quote — eliminates all comma-in-value bugs (IST date strings contain commas)
   return `"${s.replace(/"/g, '""')}"`;
+}
+
+// ── Filter attribution — group closed trades by which entry gate/condition
+// fired, so the user can see which filter settings actually produce winners
+// vs losers and tune thresholds accordingly. ──────────────────────────────
+
+interface FilterBucket {
+  label: string;
+  trades: ClosedSniperPosition[];
+}
+
+function bucketStats(bucket: FilterBucket) {
+  const { trades } = bucket;
+  const n = trades.length;
+  const wins = trades.filter(t => t.closePnlPct > 0).length;
+  const winRate = n > 0 ? (wins / n) * 100 : 0;
+  const pnlSol = trades.reduce((s, t) => {
+    const init = t.initialSizeSol > 0 ? t.initialSizeSol : t.sizeSol;
+    return s + init * (t.closePnlPct / 100);
+  }, 0);
+  const avgPnlPct = n > 0 ? trades.reduce((s, t) => s + t.closePnlPct, 0) / n : 0;
+  return { n, winRate, pnlSol, avgPnlPct };
+}
+
+function FilterBucketTable({ title, hint, buckets }: { title: string; hint: string; buckets: FilterBucket[] }) {
+  const withData = buckets.filter(b => b.trades.length > 0);
+  if (withData.length === 0) return null;
+  return (
+    <div className="card" style={{ overflow: 'hidden' }}>
+      <div style={{ padding: '12px 16px', borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
+        <div style={{ fontWeight: 800, color: '#9b59ff', fontSize: 12 }}>{title}</div>
+        <div style={{ fontSize: 10, color: '#3a5070', marginTop: 2 }}>{hint}</div>
+      </div>
+      <div style={{ overflowX: 'auto' }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
+          <thead>
+            <tr style={{ background: 'rgba(255,255,255,0.02)' }}>
+              {['Bucket', 'Trades', 'Win Rate', 'Avg PNL %', 'Total PNL SOL'].map((l) => (
+                <th key={l} style={{ padding: '8px 12px', textAlign: 'left', color: '#3a5070', whiteSpace: 'nowrap', fontWeight: 700, letterSpacing: '0.05em', fontSize: 10 }}>{l}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {withData.map((b) => {
+              const s = bucketStats(b);
+              return (
+                <tr key={b.label} style={{ borderTop: '1px solid rgba(255,255,255,0.04)' }}>
+                  <td style={{ padding: '8px 12px', color: '#d4e0f0', fontWeight: 700, whiteSpace: 'nowrap' }}>{b.label}</td>
+                  <td style={{ padding: '8px 12px', color: '#7090b0' }}>{s.n}</td>
+                  <td style={{ padding: '8px 12px', fontWeight: 700, color: s.winRate >= 55 ? '#00ff88' : '#ffd700' }}>{s.winRate.toFixed(1)}%</td>
+                  <td style={{ padding: '8px 12px', fontWeight: 700, color: s.avgPnlPct >= 0 ? '#00ff88' : '#ff4466' }}>
+                    {s.avgPnlPct >= 0 ? '+' : ''}{s.avgPnlPct.toFixed(1)}%
+                  </td>
+                  <td style={{ padding: '8px 12px', fontWeight: 700, color: s.pnlSol >= 0 ? '#00ff88' : '#ff4466' }}>
+                    {s.pnlSol >= 0 ? '+' : ''}{s.pnlSol.toFixed(4)}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function FilterAnalysis({ positions }: { positions: ClosedSniperPosition[] }) {
+  if (positions.length === 0) return null;
+
+  const byMode: FilterBucket[] = [
+    { label: 'Solo conviction', trades: positions.filter(p => p.entryMode === 'solo') },
+    { label: 'Consensus (2+ wallets)', trades: positions.filter(p => p.entryMode === 'consensus') },
+    { label: 'Unknown (pre-upgrade)', trades: positions.filter(p => !p.entryMode) },
+  ];
+
+  const scoreBuckets: [string, (s: number) => boolean][] = [
+    ['80–89', s => s >= 80 && s < 90],
+    ['90–94', s => s >= 90 && s < 95],
+    ['95–100', s => s >= 95],
+  ];
+  const byScore: FilterBucket[] = scoreBuckets.map(([label, test]) => ({
+    label,
+    trades: positions.filter(p => p.entryScore !== undefined && test(p.entryScore)),
+  }));
+
+  const bySource: FilterBucket[] = [
+    { label: 'On-chain vault read', trades: positions.filter(p => p.priceSource === 'vault') },
+    { label: 'On-chain pool reserves', trades: positions.filter(p => p.priceSource === 'pool-account') },
+    { label: 'Jupiter quote', trades: positions.filter(p => p.priceSource === 'jupiter') },
+  ];
+
+  const byTier: FilterBucket[] = [1, 2, 3].map(t => ({
+    label: `Tier ${t}`,
+    trades: positions.filter(p => p.tpTier === t),
+  }));
+
+  const slipBuckets: [string, (s: number) => boolean][] = [
+    ['0–5%',  s => s >= 0 && s < 5],
+    ['5–10%', s => s >= 5 && s < 10],
+    ['10–15%', s => s >= 10 && s < 15],
+    ['15–20%', s => s >= 15 && s <= 20],
+    ['>20%',  s => s > 20],
+  ];
+  const bySlippage: FilterBucket[] = slipBuckets.map(([label, test]) => ({
+    label,
+    trades: positions.filter(p => p.actualSlippagePct !== undefined && test(p.actualSlippagePct)),
+  }));
+
+  const qualBuckets: FilterBucket[] = [1, 2, 3].map(n => ({
+    label: n === 1 ? '1 wallet' : `${n} wallets`,
+    trades: positions.filter(p => p.qualifyingWalletsCount === n),
+  }));
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+      <div className="section-label" style={{ padding: '4px 4px 0' }}>🔍 Filter Performance — which entry gates actually win</div>
+      <FilterBucketTable title="Entry Mode" hint="Solo conviction (1 wallet ≥95) vs Consensus (2+ wallets ≥80 within 5 min)" buckets={byMode} />
+      <FilterBucketTable title="Wallet Score at Entry" hint="GMGN score of the triggering wallet — higher may not always mean better" buckets={byScore} />
+      <FilterBucketTable title="Qualifying Wallets (Consensus)" hint="How many distinct qualifying wallets had bought before entry" buckets={qualBuckets} />
+      <FilterBucketTable title="Price Source Used" hint="Which price-fetch path succeeded after the entry delay" buckets={bySource} />
+      <FilterBucketTable title="TP Tier (Position Size)" hint="Tier is set by the triggering buy's USD volume — larger buys size up" buckets={byTier} />
+      <FilterBucketTable title="Actual Slippage at Entry" hint="How far price moved between detection and entry — lower should mean better fills" buckets={bySlippage} />
+    </div>
+  );
 }
 
 export default function AnalyticsPage({ balance, freeBalance, onRefresh, sniperStatus }: Props) {
@@ -212,6 +336,8 @@ export default function AnalyticsPage({ balance, freeBalance, onRefresh, sniperS
 
       <PnlChart positions={closedPositions} />
 
+      <FilterAnalysis positions={closedPositions} />
+
       {/* Closed trades table */}
       <ClosedTradesTable positions={closedPositions} onRefresh={onRefresh} onExport={exportCSV} />
     </div>
@@ -229,6 +355,7 @@ function ClosedTradesTable({ positions, onRefresh, onExport }: {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft]         = useState({ closeReason: '', closePnlPct: '' });
   const [saving, setSaving]       = useState(false);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
 
   const sorted = [...positions].sort((a, b) =>
     (b.closeTime ?? b.entryTime) - (a.closeTime ?? a.entryTime),
@@ -338,14 +465,14 @@ function ClosedTradesTable({ positions, onRefresh, onExport }: {
         <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
           <thead>
             <tr style={{ background: 'rgba(255,255,255,0.02)' }}>
-              {['Token', 'Entry (IST)', 'Close (IST)', 'Hold', 'Tier', 'Entry $', 'Exit $', 'Init SOL', 'PNL SOL', 'PNL %', 'Close Reason', ''].map((l) => (
+              {['Token', 'Entry (IST)', 'Close (IST)', 'Hold', 'Tier', 'Entry Price', 'Exit Price', 'Init SOL', 'PNL SOL', 'PNL %', 'Close Reason', '', ''].map((l) => (
                 <th key={l} style={{ padding: '10px 12px', textAlign: 'left', color: '#3a5070', whiteSpace: 'nowrap', fontWeight: 700, letterSpacing: '0.05em', fontSize: 10 }}>{l}</th>
               ))}
             </tr>
           </thead>
           <tbody>
             {sorted.length === 0 ? (
-              <tr><td colSpan={12} style={{ textAlign: 'center', padding: '32px', color: '#3a5070' }}>
+              <tr><td colSpan={13} style={{ textAlign: 'center', padding: '32px', color: '#3a5070' }}>
                 <div style={{ fontSize: 28, marginBottom: 8 }}>🎯</div>
                 No closed sniper trades yet
               </td></tr>
@@ -357,8 +484,10 @@ function ClosedTradesTable({ positions, onRefresh, onExport }: {
                 ? Math.round((p.closeTime - p.entryTime) / 60000)
                 : null;
               const dexUrl  = `https://dexscreener.com/solana/${p.mint}`;
+              const isExpanded = expandedId === p.id;
               return (
-                <tr key={p.id} style={{ borderTop: '1px solid rgba(255,255,255,0.04)' }}>
+                <Fragment key={p.id}>
+                <tr style={{ borderTop: '1px solid rgba(255,255,255,0.04)' }}>
                   <td style={{ padding: '10px 12px', whiteSpace: 'nowrap' }}>
                     <div style={{ fontWeight: 800, color: '#d4e0f0' }}>{p.symbol}</div>
                     <div style={{ color: '#3a5070', fontSize: 10 }}>{p.name?.slice(0, 10)}</div>
@@ -375,7 +504,7 @@ function ClosedTradesTable({ positions, onRefresh, onExport }: {
                   <td style={{ padding: '10px 12px' }}>
                     <span style={{ padding: '2px 6px', borderRadius: 5, fontSize: 9, fontWeight: 800, background: 'rgba(155,89,255,0.12)', color: '#9b59ff', border: '1px solid rgba(155,89,255,0.28)' }}>T{p.tpTier}</span>
                   </td>
-                  <td style={{ padding: '10px 12px', color: '#d4e0f0', whiteSpace: 'nowrap' }}>${formatPrice(p.entryPrice)}</td>
+                  <td style={{ padding: '10px 12px', color: '#d4e0f0', whiteSpace: 'nowrap' }}>{"$"}{formatPrice(p.entryPrice)}</td>
                   <td style={{ padding: '10px 12px', color: '#d4e0f0', whiteSpace: 'nowrap' }}>{p.lastPrice > 0 ? `$${formatPrice(p.lastPrice)}` : '—'}</td>
                   <td style={{ padding: '10px 12px', color: '#7090b0' }}>{initSize.toFixed(3)}</td>
                   <td style={{ padding: '10px 12px', fontWeight: 700, color: pnlPos ? '#00ff88' : '#ff4466', whiteSpace: 'nowrap' }}>
@@ -388,6 +517,15 @@ function ClosedTradesTable({ positions, onRefresh, onExport }: {
                     <span style={{ fontSize: 10, color: '#7090b0' }} title={p.closeReason ?? ''}>{p.closeReason ?? '—'}</span>
                   </td>
                   <td style={{ padding: '10px 12px' }}>
+                    <button
+                      onClick={() => setExpandedId(isExpanded ? null : p.id)}
+                      className="btn-primary"
+                      style={{ padding: '4px 8px', fontSize: 10, background: isExpanded ? 'rgba(0,212,255,0.2)' : 'rgba(0,212,255,0.1)', borderColor: 'rgba(0,212,255,0.35)' }}
+                    >
+                      {isExpanded ? 'Hide' : 'Checklist'}
+                    </button>
+                  </td>
+                  <td style={{ padding: '10px 12px' }}>
                     <div style={{ display: 'flex', gap: 4 }}>
                       <a href={dexUrl} target="_blank" rel="noopener noreferrer" className="btn-primary" style={{ padding: '4px 8px', fontSize: 10, textDecoration: 'none' }}>DEX</a>
                       <button onClick={() => openEdit(p)} className="btn-primary" style={{ padding: '4px 8px', fontSize: 10, background: 'rgba(155,89,255,0.15)', borderColor: 'rgba(155,89,255,0.35)' }}>Edit</button>
@@ -397,11 +535,64 @@ function ClosedTradesTable({ positions, onRefresh, onExport }: {
                     </div>
                   </td>
                 </tr>
+                {isExpanded && (
+                  <tr style={{ background: 'rgba(0,212,255,0.03)' }}>
+                    <td colSpan={13} style={{ padding: '12px 16px' }}>
+                      <EntryChecklist pos={p} />
+                    </td>
+                  </tr>
+                )}
+                </Fragment>
               );
             })}
           </tbody>
         </table>
       </div>
+    </div>
+  );
+}
+
+// ── Per-trade entry checklist — every gate/condition and its value at entry ─
+
+function ChecklistRow({ label, ok, value }: { label: string; ok: boolean; value: string }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, padding: '3px 0' }}>
+      <span style={{ fontSize: 12 }}>{ok ? '✅' : '⚠️'}</span>
+      <span style={{ fontSize: 11, color: '#7090b0', minWidth: 160 }}>{label}</span>
+      <span style={{ fontSize: 11, color: '#d4e0f0', fontWeight: 700 }}>{value}</span>
+    </div>
+  );
+}
+
+function EntryChecklist({ pos }: { pos: ClosedSniperPosition }) {
+  const modeLabel = pos.entryMode === 'consensus'
+    ? `Consensus — ${pos.qualifyingWalletsCount ?? '?'} wallets ≥80`
+    : pos.entryMode === 'solo'
+    ? 'Solo conviction — score ≥95'
+    : 'Unknown (recorded before checklist tracking was added)';
+  const sourceLabel = pos.priceSource === 'vault' ? 'On-chain vault read (ground truth)'
+    : pos.priceSource === 'pool-account' ? 'On-chain pool reserves'
+    : pos.priceSource === 'jupiter' ? 'Jupiter quote'
+    : 'Unknown';
+  const slipOk = pos.actualSlippagePct === undefined || pos.maxSlippagePct === undefined
+    ? true
+    : pos.actualSlippagePct <= pos.maxSlippagePct;
+  return (
+    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '2px 24px', maxWidth: 720 }}>
+      <ChecklistRow label="Wallet score gate" ok={true} value={pos.entryScore !== undefined ? `${pos.entryScore}/100` : '—'} />
+      <ChecklistRow label="Entry mode" ok={true} value={modeLabel} />
+      <ChecklistRow label="Qualifying wallets" ok={true} value={pos.qualifyingWalletsCount !== undefined ? String(pos.qualifyingWalletsCount) : '—'} />
+      <ChecklistRow label="Buyer wallet" ok={true} value={pos.buyerWallet ? `${pos.buyerWallet.slice(0, 6)}…${pos.buyerWallet.slice(-4)}` : '—'} />
+      <ChecklistRow label="Price source" ok={true} value={sourceLabel} />
+      <ChecklistRow label="Entry delay" ok={true} value={pos.entryDelayMs !== undefined ? `${(pos.entryDelayMs / 1000).toFixed(1)}s after detection` : '—'} />
+      <ChecklistRow
+        label="Slippage vs max"
+        ok={slipOk}
+        value={pos.actualSlippagePct !== undefined && pos.maxSlippagePct !== undefined ? `${pos.actualSlippagePct.toFixed(1)}% of ${pos.maxSlippagePct}% max` : '—'}
+      />
+      <ChecklistRow label="Position size / tier" ok={true} value={`${pos.sizePct.toFixed(2)}% (Tier ${pos.tpTier})`} />
+      <ChecklistRow label="Detected price" ok={true} value={pos.priceAtDetection ? `$${formatPrice(pos.priceAtDetection)}` : '—'} />
+      <ChecklistRow label="Entry price" ok={true} value={`$${formatPrice(pos.entryPrice)}`} />
     </div>
   );
 }
