@@ -21,15 +21,18 @@ A Solana memecoin graduation sniper bot — automatically detects tokens graduat
 
 ## Where things live
 
-- `artifacts/api-server/src/services/graduation-sniper.service.ts` — core sniper logic, TP/SL/trailing-stop, DEFAULT_CONFIG
-- `artifacts/api-server/src/services/jupiter-swap.service.ts` — buy/sell/emergencySell via Jupiter; dynamicSlippage; Helius fee estimation
+- `artifacts/api-server/src/services/whale-sniper.service.ts` — the active entry/exit engine: tracks Pump.fun graduations for 30 min, runs the Smart Wallet Consensus entry decision, manages TP/SL/trailing-stop positions
+- `artifacts/api-server/src/services/trenches.service.ts` — Pump.fun graduation detection (Helius migration-wallet subscription)
+- `artifacts/api-server/src/services/wallet-score.service.ts` — GMGN-backed wallet scoring (0-100) with in-memory TTL cache
+- `artifacts/api-server/src/services/wallet-consensus.service.ts` — per-mint consensus bookkeeping (2×score≥80 within 5 min, or 1×score≥95) → entry trigger + position size + TP tier
+- `artifacts/api-server/src/lib/gmgn-client.ts` — minimal GMGN OpenAPI read-only client (wallet_stats, wallet_activity)
+- `artifacts/api-server/src/services/jupiter-swap.service.ts` — buy/sell via Jupiter; dynamicSlippage; Helius fee estimation
 - `artifacts/api-server/src/services/solana-wallet.service.ts` — keypair, signAndSendAndConfirm, getOptimalPriorityFee
-- `artifacts/api-server/src/services/pumpfun-scanner.service.ts` — Module A: Pump.fun bonding curve scanner
 - `artifacts/terminal/src/` — React frontend
 
 ## Architecture decisions
 
-- **Two completely separate modules**: Pumpfun Module A (bonding curve scanner) and Sniper Module B (graduation sniper). Never merge TP logic between them.
+- **Smart Wallet Consensus entry strategy** (current): replaces the old 10s net-buy-volume tiers. Every buyer wallet on a tracked (post-graduation) token is scored via GMGN (`wallet-score.service.ts`); an entry triggers when either 2+ distinct wallets score ≥80 within a 5-min window (consensus, 0.75% risk, TP tier 2) or a single wallet scores ≥95 (solo conviction, 1% risk, TP tier 3). GMGN doesn't expose "wallet age" or "avg hold time" directly — both are approximated from the wallet's recent activity page (oldest tx timestamp; buy→sell time deltas), documented inline in `wallet-score.service.ts`. Without `GMGN_API_KEY` set, all wallet scores resolve to 0 and no entries trigger (fails safe, no crash).
 - **dynamicSlippage only**: Jupiter `/swap` is called with `dynamicSlippage: { minBps: 50, maxBps: 9000 }` and NO `slippageBps` field — passing both causes the static value to override dynamic calculation, which was the root cause of all Custom:1 errors.
 - **Helius p75 priority fees**: `getOptimalPriorityFee()` fetches the 75th-percentile of recent prioritization fees from Helius; floored at `priorityFeeLamports` config value (500k lamports), capped at 5M lamports.
 - **`@solana/web3.js` externalized in esbuild**: marked as external in `build.mjs` to avoid bundling issues; loaded from node_modules at runtime.
@@ -38,7 +41,7 @@ A Solana memecoin graduation sniper bot — automatically detects tokens graduat
 ## Product
 
 - Monitors Pump.fun token graduations via Helius WebSocket
-- Automatically enters positions on newly-graduated Raydium CPMM pools
+- Tracks each graduated token for 30 minutes, scoring buyer wallets via GMGN and entering on Smart Wallet Consensus (see Architecture decisions)
 - Manages each position with configurable TP1/TP2/trailing-stop/SL
 - Real-time dashboard showing open positions, P&L, wallet balance
 - Telegram alerts for entries, exits, and errors
@@ -46,6 +49,6 @@ A Solana memecoin graduation sniper bot — automatically detects tokens graduat
 ## Gotchas
 
 - **Render has all trading secrets** (`SOLANA_PRIVATE_KEY`, `HELIUS_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`) — Replit does NOT. Live trading only works on Render.
-- **`waitBeforeEntryMs: 5000`** — graduation sniper waits 5 s before buying to give Jupiter time to index the new CPMM pool. Shortening this causes "route not found" errors.
+- **`GMGN_API_KEY`** is required for wallet-consensus entries to ever trigger — without it every wallet scores 0 and the bot only tracks/observes, never buys.
 - **Always restart the API Server workflow after code changes** — esbuild rebuilds on `dev` start.
 - **`pnpm --filter @workspace/api-server run dev`** rebuilds then starts; just `pnpm run start` skips the build.
