@@ -41,13 +41,21 @@ export interface TrackedToken {
   expiresAt: number;
   entryTriggered: boolean;
   buyerActivity: BuyerActivity[];
-  // Live market data (refreshed every 30s by the server)
+  // Live market data (refreshed every 30s by the server from DexScreener)
+  dexId?: string;
   price?: number;
   mcap?: number;
   liquidity?: number;
   priceChange5m?: number;
   priceChange1h?: number;
+  priceChange24h?: number;
   volume5m?: number;
+  volume1h?: number;
+  volume24h?: number;
+  txnsH1Buys?: number;
+  txnsH1Sells?: number;
+  txnsH24Buys?: number;
+  txnsH24Sells?: number;
   lastMarketUpdate?: number;
 }
 

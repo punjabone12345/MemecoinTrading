@@ -65,13 +65,21 @@ export interface TrackedToken {
   expiresAt: number;
   entryTriggered: boolean;
   buyerActivity: BuyerActivity[];
-  // Live market data (refreshed every 30s)
+  // Live market data (refreshed every 30s from DexScreener)
+  dexId?: string;
   price?: number;
   mcap?: number;
   liquidity?: number;
   priceChange5m?: number;
   priceChange1h?: number;
+  priceChange24h?: number;
   volume5m?: number;
+  volume1h?: number;
+  volume24h?: number;
+  txnsH1Buys?: number;
+  txnsH1Sells?: number;
+  txnsH24Buys?: number;
+  txnsH24Sells?: number;
   lastMarketUpdate?: number;
 }
 
@@ -368,31 +376,58 @@ interface DexMarketData {
   mcap: number;
   priceChange5m: number;
   priceChange1h: number;
+  priceChange24h: number;
   volume5m: number;
+  volume1h: number;
+  volume24h: number;
+  txnsH1Buys: number;
+  txnsH1Sells: number;
+  txnsH24Buys: number;
+  txnsH24Sells: number;
   name: string;
   symbol: string;
   pairAddress: string;
+  dexId: string;
 }
 
 async function fetchTokenPrice(mint: string): Promise<DexMarketData> {
-  const empty: DexMarketData = { price: 0, liquidity: 0, mcap: 0, priceChange5m: 0, priceChange1h: 0, volume5m: 0, name: '', symbol: '', pairAddress: '' };
+  const empty: DexMarketData = {
+    price: 0, liquidity: 0, mcap: 0,
+    priceChange5m: 0, priceChange1h: 0, priceChange24h: 0,
+    volume5m: 0, volume1h: 0, volume24h: 0,
+    txnsH1Buys: 0, txnsH1Sells: 0, txnsH24Buys: 0, txnsH24Sells: 0,
+    name: '', symbol: '', pairAddress: '', dexId: '',
+  };
   try {
-    const r     = await axios.get<any>(`${DEX_BASE}/latest/dex/tokens/${mint}`, { timeout: 6_000 });
-    const pairs: any[] = (r.data?.pairs ?? [])
+    const r    = await axios.get<any>(`${DEX_BASE}/latest/dex/tokens/${mint}`, { timeout: 6_000 });
+    const all: any[] = r.data?.pairs ?? [];
+    if (!all.length) return empty;
+
+    // Prefer pumpswap (the canonical graduation DEX), fall back to highest-liquidity pair
+    const pumpswap = all
       .filter((p: any) => (p.dexId ?? '').toLowerCase() === 'pumpswap')
       .sort((a: any, b: any) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0));
-    if (!pairs.length) return empty;
-    const best  = pairs[0];
+    const byLiq = [...all].sort((a: any, b: any) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0));
+    const best  = pumpswap[0] ?? byLiq[0];
+
     return {
       price:          parseFloat(best?.priceUsd ?? '0'),
-      liquidity:      best?.liquidity?.usd ?? 0,
+      liquidity:      best?.liquidity?.usd      ?? 0,
       mcap:           best?.marketCap ?? best?.fdv ?? 0,
-      priceChange5m:  best?.priceChange?.m5  ?? 0,
-      priceChange1h:  best?.priceChange?.h1  ?? 0,
-      volume5m:       best?.volume?.m5        ?? 0,
-      name:           best?.baseToken?.name   ?? '',
-      symbol:         best?.baseToken?.symbol ?? '',
-      pairAddress:    best?.pairAddress        ?? '',
+      priceChange5m:  best?.priceChange?.m5     ?? 0,
+      priceChange1h:  best?.priceChange?.h1     ?? 0,
+      priceChange24h: best?.priceChange?.h24    ?? 0,
+      volume5m:       best?.volume?.m5          ?? 0,
+      volume1h:       best?.volume?.h1          ?? 0,
+      volume24h:      best?.volume?.h24         ?? 0,
+      txnsH1Buys:     best?.txns?.h1?.buys      ?? 0,
+      txnsH1Sells:    best?.txns?.h1?.sells     ?? 0,
+      txnsH24Buys:    best?.txns?.h24?.buys     ?? 0,
+      txnsH24Sells:   best?.txns?.h24?.sells    ?? 0,
+      name:           best?.baseToken?.name     ?? '',
+      symbol:         best?.baseToken?.symbol   ?? '',
+      pairAddress:    best?.pairAddress         ?? '',
+      dexId:          best?.dexId              ?? '',
     };
   } catch {
     return empty;
@@ -1614,10 +1649,12 @@ async function monitorPositions(): Promise<void> {
     const pairs: any[] = r.data?.pairs ?? [];
 
     for (const pos of Array.from(openPositions.values())) {
-      const best = (pairs as any[])
-        .filter((p: any) => p.baseToken?.address === pos.mint)
+      const mintPairs = (pairs as any[]).filter((p: any) => p.baseToken?.address === pos.mint);
+      const pumpswapPos = mintPairs
         .filter((p: any) => (p.dexId ?? '').toLowerCase() === 'pumpswap')
-        .sort((a: any, b: any) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0))[0];
+        .sort((a: any, b: any) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0));
+      const byLiqPos = [...mintPairs].sort((a: any, b: any) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0));
+      const best = pumpswapPos[0] ?? byLiqPos[0];
 
       if (!best) continue;
       const price        = parseFloat(best.priceUsd ?? '0');
@@ -1846,9 +1883,12 @@ async function validateOrPrune(mint: string, activatedAt: number): Promise<void>
     try {
       const r = await axios.get<any>(`${DEX_BASE}/latest/dex/tokens/${mint}`, { timeout: 8_000 });
       const allPairs: any[] = r.data?.pairs ?? [];
-      const postGradPairs = allPairs
+      // Prefer pumpswap; fall back to any DEX so non-pumpswap graduates aren't pruned incorrectly
+      const pumpswapValidate = allPairs
         .filter((p: any) => (p.dexId ?? '').toLowerCase() === 'pumpswap')
         .sort((a: any, b: any) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0));
+      const byLiqValidate = [...allPairs].sort((a: any, b: any) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0));
+      const postGradPairs = pumpswapValidate.length > 0 ? pumpswapValidate : byLiqValidate;
 
       if (postGradPairs.length > 0) {
         const liq = postGradPairs[0]?.liquidity?.usd ?? 0;
@@ -1915,13 +1955,14 @@ async function enrichTokenMetadataAsync(mint: string, activatedAt: number): Prom
     try {
       const r = await axios.get<any>(`${DEX_BASE}/latest/dex/tokens/${mint}`, { timeout: 8_000 });
       const allPairs: any[] = r.data?.pairs ?? [];
-      const postGradPairs = allPairs
+      if (allPairs.length === 0) continue; // not indexed yet — keep retrying
+
+      // Prefer pumpswap, fall back to highest-liquidity pair on any DEX
+      const pumpswapPairs = allPairs
         .filter((p: any) => (p.dexId ?? '').toLowerCase() === 'pumpswap')
         .sort((a: any, b: any) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0));
-
-      if (postGradPairs.length === 0) continue; // not indexed yet — keep retrying
-
-      const best      = postGradPairs[0];
+      const byLiqPairs = [...allPairs].sort((a: any, b: any) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0));
+      const best = pumpswapPairs[0] ?? byLiqPairs[0];
       const name      = best?.baseToken?.name   ?? '';
       const symbol    = best?.baseToken?.symbol ?? '';
       const liquidity = best?.liquidity?.usd    ?? 0;
@@ -1931,15 +1972,23 @@ async function enrichTokenMetadataAsync(mint: string, activatedAt: number): Prom
       const tokNow = trackedTokens.get(mint);
       if (!tokNow) return;
 
-      tokNow.name          = name;
-      tokNow.symbol        = symbol;
-      tokNow.poolAddress   = tokNow.poolAddress ?? best?.pairAddress;
-      tokNow.price         = parseFloat(best?.priceUsd ?? '0');
-      tokNow.mcap          = best?.marketCap ?? best?.fdv ?? 0;
-      tokNow.liquidity     = liquidity;
-      tokNow.priceChange5m = best?.priceChange?.m5 ?? 0;
-      tokNow.priceChange1h = best?.priceChange?.h1 ?? 0;
-      tokNow.volume5m      = best?.volume?.m5       ?? 0;
+      tokNow.name            = name;
+      tokNow.symbol          = symbol;
+      tokNow.poolAddress     = tokNow.poolAddress ?? best?.pairAddress;
+      tokNow.dexId           = best?.dexId ?? '';
+      tokNow.price           = parseFloat(best?.priceUsd ?? '0');
+      tokNow.mcap            = best?.marketCap ?? best?.fdv ?? 0;
+      tokNow.liquidity       = liquidity;
+      tokNow.priceChange5m   = best?.priceChange?.m5  ?? 0;
+      tokNow.priceChange1h   = best?.priceChange?.h1  ?? 0;
+      tokNow.priceChange24h  = best?.priceChange?.h24 ?? 0;
+      tokNow.volume5m        = best?.volume?.m5        ?? 0;
+      tokNow.volume1h        = best?.volume?.h1        ?? 0;
+      tokNow.volume24h       = best?.volume?.h24       ?? 0;
+      tokNow.txnsH1Buys      = best?.txns?.h1?.buys   ?? 0;
+      tokNow.txnsH1Sells     = best?.txns?.h1?.sells  ?? 0;
+      tokNow.txnsH24Buys     = best?.txns?.h24?.buys  ?? 0;
+      tokNow.txnsH24Sells    = best?.txns?.h24?.sells ?? 0;
       tokNow.lastMarketUpdate = Date.now();
 
       logger.info(
@@ -2042,12 +2091,20 @@ async function refreshTrackedTokensMarketData(): Promise<void> {
       // Only overwrite market values when DexScreener returned real data.
       tok.lastMarketUpdate = Date.now();
       if (d.price > 0) {
-        tok.price          = d.price;
-        tok.mcap           = d.mcap;
-        tok.liquidity      = d.liquidity;
-        tok.priceChange5m  = d.priceChange5m;
-        tok.priceChange1h  = d.priceChange1h;
-        tok.volume5m       = d.volume5m;
+        tok.dexId           = d.dexId;
+        tok.price           = d.price;
+        tok.mcap            = d.mcap;
+        tok.liquidity       = d.liquidity;
+        tok.priceChange5m   = d.priceChange5m;
+        tok.priceChange1h   = d.priceChange1h;
+        tok.priceChange24h  = d.priceChange24h;
+        tok.volume5m        = d.volume5m;
+        tok.volume1h        = d.volume1h;
+        tok.volume24h       = d.volume24h;
+        tok.txnsH1Buys      = d.txnsH1Buys;
+        tok.txnsH1Sells     = d.txnsH1Sells;
+        tok.txnsH24Buys     = d.txnsH24Buys;
+        tok.txnsH24Sells    = d.txnsH24Sells;
         // Backfill poolAddress from DexScreener if we didn't have it
         if (!tok.poolAddress && d.pairAddress) tok.poolAddress = d.pairAddress;
         // Backfill name/symbol if still on placeholder (enrichMetadataAsync may have timed out)

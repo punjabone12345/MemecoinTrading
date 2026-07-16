@@ -120,9 +120,9 @@ async function computeScore(wallet: string): Promise<WalletScoreBreakdown> {
   const avgRoiPct = realizedPnlRatio !== null ? realizedPnlRatio * 100 : null;
   const buyCount = toNumber(stats?.buy);
   const sellCount = toNumber(stats?.sell);
-  const completedTrades = sellCount !== null
-    ? sellCount
-    : (buyCount !== null && sellCount !== null ? buyCount + sellCount : null);
+  // Use sell count as the primary "completed trades" proxy (each sell = 1 completed round-trip).
+  // Fall back to buy count if sells aren't reported, and finally to null.
+  const completedTrades = sellCount ?? buyCount ?? null;
   // GMGN also reports avg holding period directly (seconds, across the whole
   // stats period) — prefer it over the activity-page estimate below when present.
   const avgHoldingPeriodSec = toNumber(stats?.pnl_stat?.avg_holding_period);

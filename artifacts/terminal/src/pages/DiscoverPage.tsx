@@ -213,41 +213,58 @@ function TrackedCard({ tok, tick }: { tok: TrackedToken; tick: number }) {
 
       {/* ── Market stats grid ── */}
       {hasMarket ? (
-        <div style={{
-          display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)',
-          gap: 6, margin: '10px 0 6px', padding: '8px 10px',
-          borderRadius: 8, background: 'rgba(0,191,255,0.04)',
-          border: '1px solid rgba(0,191,255,0.08)',
-        }}>
-          <div style={{ textAlign: 'center' }}>
-            <div style={{ fontSize: 10, fontWeight: 800, color: '#e0e8ff', fontVariantNumeric: 'tabular-nums' }}>{fmtPrice(tok.price)}</div>
-            <div style={{ fontSize: 8, color: C.gray }}>price</div>
-          </div>
-          <div style={{ textAlign: 'center' }}>
-            <div style={{ fontSize: 10, fontWeight: 800, color: '#e0e8ff' }}>{fmtCompact(tok.mcap)}</div>
-            <div style={{ fontSize: 8, color: C.gray }}>mcap</div>
-          </div>
-          <div style={{ textAlign: 'center' }}>
-            <div style={{ fontSize: 10, fontWeight: 800, color: '#e0e8ff' }}>{fmtCompact(tok.liquidity)}</div>
-            <div style={{ fontSize: 8, color: C.gray }}>liq</div>
-          </div>
-          <div style={{ textAlign: 'center' }}>
-            <div style={{ fontSize: 10, fontWeight: 800, color: '#e0e8ff' }}>{fmtCompact(tok.volume5m)}</div>
-            <div style={{ fontSize: 8, color: C.gray }}>vol 5m</div>
-          </div>
-          <PctBadge value={tok.priceChange5m} label="5m chg" />
-          <PctBadge value={tok.priceChange1h} label="1h chg" />
-          <div style={{ textAlign: 'center' }}>
-            <div style={{ fontSize: 10, fontWeight: 800, color: tok.buyerActivity.length > 0 ? C.accent : C.gray }}>
-              {tok.buyerActivity.length}
+        <div style={{ margin: '10px 0 6px' }}>
+          {/* Row 1: price / mcap / liq / vol 24h */}
+          <div style={{
+            display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)',
+            gap: 6, padding: '8px 10px',
+            borderRadius: '8px 8px 0 0', background: 'rgba(0,191,255,0.04)',
+            border: '1px solid rgba(0,191,255,0.08)', borderBottom: 'none',
+          }}>
+            <div style={{ textAlign: 'center' }}>
+              <div style={{ fontSize: 10, fontWeight: 800, color: '#e0e8ff', fontVariantNumeric: 'tabular-nums' }}>{fmtPrice(tok.price)}</div>
+              <div style={{ fontSize: 8, color: C.gray }}>price</div>
             </div>
-            <div style={{ fontSize: 8, color: C.gray }}>📊 buys</div>
-          </div>
-          <div style={{ textAlign: 'center' }}>
-            <div style={{ fontSize: 9, color: C.gray }}>
-              {tok.lastMarketUpdate ? timeAgo(tok.lastMarketUpdate) : '—'}
+            <div style={{ textAlign: 'center' }}>
+              <div style={{ fontSize: 10, fontWeight: 800, color: '#e0e8ff' }}>${fmtCompact(tok.mcap)}</div>
+              <div style={{ fontSize: 8, color: C.gray }}>mcap</div>
             </div>
-            <div style={{ fontSize: 8, color: C.gray }}>updated</div>
+            <div style={{ textAlign: 'center' }}>
+              <div style={{ fontSize: 10, fontWeight: 800, color: '#e0e8ff' }}>${fmtCompact(tok.liquidity)}</div>
+              <div style={{ fontSize: 8, color: C.gray }}>liquidity</div>
+            </div>
+            <div style={{ textAlign: 'center' }}>
+              <div style={{ fontSize: 10, fontWeight: 800, color: '#e0e8ff' }}>${fmtCompact(tok.volume24h ?? tok.volume1h ?? tok.volume5m)}</div>
+              <div style={{ fontSize: 8, color: C.gray }}>{tok.volume24h != null ? 'vol 24h' : tok.volume1h != null ? 'vol 1h' : 'vol 5m'}</div>
+            </div>
+          </div>
+          {/* Row 2: price changes / txns / updated */}
+          <div style={{
+            display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)',
+            gap: 6, padding: '6px 10px',
+            borderRadius: '0 0 8px 8px', background: 'rgba(0,191,255,0.02)',
+            border: '1px solid rgba(0,191,255,0.08)',
+          }}>
+            <PctBadge value={tok.priceChange5m} label="5m chg" />
+            <PctBadge value={tok.priceChange1h} label="1h chg" />
+            <PctBadge value={tok.priceChange24h} label="24h chg" />
+            <div style={{ textAlign: 'center' }}>
+              {(tok.txnsH24Buys != null && tok.txnsH24Buys > 0) || (tok.txnsH24Sells != null && tok.txnsH24Sells > 0) ? (
+                <>
+                  <div style={{ fontSize: 9, fontWeight: 800, fontVariantNumeric: 'tabular-nums' }}>
+                    <span style={{ color: C.green }}>{tok.txnsH24Buys ?? 0}B</span>
+                    <span style={{ color: C.gray }}> / </span>
+                    <span style={{ color: C.red }}>{tok.txnsH24Sells ?? 0}S</span>
+                  </div>
+                  <div style={{ fontSize: 8, color: C.gray }}>txns 24h</div>
+                </>
+              ) : (
+                <>
+                  <div style={{ fontSize: 9, color: C.gray }}>{tok.lastMarketUpdate ? timeAgo(tok.lastMarketUpdate) : '—'}</div>
+                  <div style={{ fontSize: 8, color: C.gray }}>updated</div>
+                </>
+              )}
+            </div>
           </div>
         </div>
       ) : (
