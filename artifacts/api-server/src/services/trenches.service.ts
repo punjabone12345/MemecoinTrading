@@ -18,11 +18,16 @@ import { query } from '../lib/db.js';
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 const GECKO_BASE = 'https://api.geckoterminal.com/api/v2/networks/solana/new_pools';
-const PAGES_PER_POLL  = 2;            // pages 1 & 2 — ~40 newest pools
-const PAGE_STAGGER_MS = 600;          // stagger between page requests
-const POLL_INTERVAL_MS = 20_000;      // 20 s → 6 req/min (2 pages × 3/min)
+const PAGES_PER_POLL   = 2;            // pages 1 & 2 — ~40 newest pools
+const PAGE_STAGGER_MS  = 800;          // stagger between page requests
+const POLL_INTERVAL_MS = 25_000;       // 25 s base → ~5 req/min (2 pages × 2.4/min)
+const BOOT_DELAY_MS    = 8_000;        // wait after startup before first poll (let old instance clear)
 const MAX_FEED         = 50;
 const TRACKING_WINDOW_MS = 60 * 60_000;  // 1 hour — matches MAX_TRACKING_MS in sniper engine
+
+// Backoff for GeckoTerminal 429s
+const GT_BACKOFF_BASE_MS = 15_000;
+const GT_BACKOFF_MAX_MS  = 120_000;
 
 // Only fire for pools created within the last 2 hours (avoids spamming old
 // pools on cold boot while still catching everything within our window).
@@ -123,111 +128,146 @@ async function fetchNewPoolsPage(page: number): Promise<GeckoPool[]> {
   return data.data as GeckoPool[];
 }
 
+// ── Rate-limit backoff state ──────────────────────────────────────────────────
+
+let gtBackoffUntil      = 0;   // unix ms — block all polls until this time
+let gtConsecutive429s   = 0;
+
+function reportGecko429(): void {
+  gtConsecutive429s++;
+  const delay = Math.min(GT_BACKOFF_BASE_MS * 2 ** (gtConsecutive429s - 1), GT_BACKOFF_MAX_MS);
+  gtBackoffUntil = Date.now() + delay;
+  logger.warn(
+    { delaySec: Math.round(delay / 1000), consecutive: gtConsecutive429s },
+    'DexScreener discovery: GeckoTerminal 429 — backing off',
+  );
+}
+
+function reportGeckoSuccess(): void {
+  if (gtConsecutive429s > 0) logger.info('DexScreener discovery: GeckoTerminal request succeeded — backoff cleared');
+  gtConsecutive429s = 0;
+}
+
 // ── Core poll ─────────────────────────────────────────────────────────────────
 
 async function pollGeckoNewPools(): Promise<void> {
+  // Respect backoff from previous 429s
+  if (Date.now() < gtBackoffUntil) return;
+
   const now = Date.now();
-  let fired = 0;
+  let fired       = 0;
+  let pagesOk     = 0;
+  let got429      = false;
 
-  try {
-    for (let page = 1; page <= PAGES_PER_POLL; page++) {
-      if (page > 1) await new Promise(r => setTimeout(r, PAGE_STAGGER_MS));
+  for (let page = 1; page <= PAGES_PER_POLL; page++) {
+    if (page > 1) await new Promise(r => setTimeout(r, PAGE_STAGGER_MS));
+    if (!started) return; // stopped while staggering
 
-      let pools: GeckoPool[];
-      try {
-        pools = await fetchNewPoolsPage(page);
-      } catch (pageErr: any) {
-        // A single page failure shouldn't abort the whole poll
-        logger.warn(
-          { error: String(pageErr?.message ?? pageErr), page },
-          'DexScreener discovery: page fetch failed',
+    let pools: GeckoPool[];
+    try {
+      pools = await fetchNewPoolsPage(page);
+      pagesOk++;
+    } catch (pageErr: any) {
+      const msg = String(pageErr?.message ?? pageErr ?? '');
+      if (msg.includes('429')) {
+        got429 = true;
+        break; // back off immediately; no point trying remaining pages
+      }
+      // Other error (timeout, network): log and continue to next page
+      logger.warn({ error: msg, page }, 'DexScreener discovery: page fetch failed');
+      continue;
+    }
+
+    for (const pool of pools) {
+      // Extract mint from "solana_<MINT>" relationship ID
+      const baseId = pool.relationships?.base_token?.data?.id ?? '';
+      const mint   = baseId.startsWith('solana_') ? baseId.slice(7) : '';
+      if (!mint || mint.length < 20) continue;
+      if (IGNORE_MINTS.has(mint)) continue;
+
+      // Extract pool address from "solana_<POOL>" pool ID
+      const poolId      = pool.id ?? '';
+      const poolAddress = poolId.startsWith('solana_') ? poolId.slice(7) : undefined;
+
+      // Age filter — skip pools older than MAX_POOL_AGE_MS
+      const createdAt = pool.attributes?.pool_created_at;
+      if (createdAt) {
+        const createdMs = new Date(createdAt).getTime();
+        if (Number.isFinite(createdMs) && now - createdMs > MAX_POOL_AGE_MS) continue;
+      }
+
+      const previousFire = firedAt.get(mint);
+      const isMigration  = previousFire !== undefined && now - previousFire >= TRACKING_WINDOW_MS;
+      const isNew        = previousFire === undefined;
+
+      if (!isNew && !isMigration) continue;
+
+      // Fire
+      firedAt.set(mint, now);
+      if (isNew) totalDiscovered++;
+
+      const tokenName = pool.attributes?.name?.split(' / ')[0]?.trim();
+
+      const ev: DiscoveryEvent = {
+        mint,
+        poolAddress,
+        ts:          now,
+        name:        tokenName,
+        isMigration,
+      };
+
+      discoveryFeed.unshift(ev);
+      if (discoveryFeed.length > MAX_FEED) discoveryFeed.pop();
+
+      if (onGraduation) {
+        onGraduation({ mint, poolAddress, ts: now });
+      }
+
+      // Persist discovery to DB (non-blocking)
+      const source = isMigration ? 'dexscreener_migration' : 'dexscreener';
+      query(`
+        INSERT INTO detected_migrations
+          (source, instruction_type, tx_signature, pool_address, mint, creator_wallet)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        ON CONFLICT (tx_signature) DO NOTHING
+      `, [source, 'token_profile', `gecko_${mint}_${now}`, poolAddress ?? null, mint, null])
+        .catch(() => {});
+
+      if (isMigration) {
+        logger.info(
+          { mint: mint.slice(0, 16) },
+          'DexScreener discovery: migration re-appeared — fresh 1h window',
         );
-        continue;
       }
-
-      for (const pool of pools) {
-        // Extract mint from "solana_<MINT>" relationship ID
-        const baseId = pool.relationships?.base_token?.data?.id ?? '';
-        const mint   = baseId.startsWith('solana_') ? baseId.slice(7) : '';
-        if (!mint || mint.length < 20) continue;
-        if (IGNORE_MINTS.has(mint)) continue;
-
-        // Extract pool address from "solana_<POOL>" pool ID
-        const poolId      = pool.id ?? '';
-        const poolAddress = poolId.startsWith('solana_') ? poolId.slice(7) : undefined;
-
-        // Age filter — skip pools older than MAX_POOL_AGE_MS
-        const createdAt = pool.attributes?.pool_created_at;
-        if (createdAt) {
-          const createdMs = new Date(createdAt).getTime();
-          if (Number.isFinite(createdMs) && now - createdMs > MAX_POOL_AGE_MS) continue;
-        }
-
-        const previousFire = firedAt.get(mint);
-        const isMigration  = previousFire !== undefined && now - previousFire >= TRACKING_WINDOW_MS;
-        const isNew        = previousFire === undefined;
-
-        if (!isNew && !isMigration) continue;
-
-        // Fire
-        firedAt.set(mint, now);
-        if (isNew) totalDiscovered++;
-
-        const tokenName = pool.attributes?.name?.split(' / ')[0]?.trim();
-
-        const ev: DiscoveryEvent = {
-          mint,
-          poolAddress,
-          ts:          now,
-          name:        tokenName,
-          isMigration,
-        };
-
-        discoveryFeed.unshift(ev);
-        if (discoveryFeed.length > MAX_FEED) discoveryFeed.pop();
-
-        if (onGraduation) {
-          onGraduation({ mint, poolAddress, ts: now });
-        }
-
-        // Persist discovery to DB (non-blocking)
-        const source = isMigration ? 'dexscreener_migration' : 'dexscreener';
-        query(`
-          INSERT INTO detected_migrations
-            (source, instruction_type, tx_signature, pool_address, mint, creator_wallet)
-          VALUES ($1, $2, $3, $4, $5, $6)
-          ON CONFLICT (tx_signature) DO NOTHING
-        `, [source, 'token_profile', `gecko_${mint}_${now}`, poolAddress ?? null, mint, null])
-          .catch(() => {});
-
-        if (isMigration) {
-          logger.info(
-            { mint: mint.slice(0, 16) },
-            'DexScreener discovery: migration re-appeared — fresh 1h window',
-          );
-        }
-        fired++;
-      }
+      fired++;
     }
+  }
 
-    pollCount++;
-    lastPollSuccessMs   = Date.now();
-    consecutiveFailures = 0;
-    lastPollError       = null;
-
-    if (fired > 0) {
-      logger.info(
-        { fired, total: totalDiscovered },
-        'DexScreener discovery: new tokens queued',
-      );
-    }
-  } catch (err: any) {
+  if (got429) {
+    // 429: apply exponential backoff; do NOT count as a success
+    reportGecko429();
     consecutiveFailures++;
-    lastPollError = String(err?.message ?? err ?? 'unknown');
-    logger.warn(
-      { error: lastPollError, failures: consecutiveFailures },
-      'DexScreener discovery: poll failed',
-    );
+    lastPollError = 'GeckoTerminal 429';
+    return;
+  }
+
+  if (pagesOk === 0) {
+    // All pages failed (non-429 errors)
+    consecutiveFailures++;
+    lastPollError = 'all pages failed';
+    logger.warn({ failures: consecutiveFailures }, 'DexScreener discovery: all pages failed');
+    return;
+  }
+
+  // At least one page succeeded
+  reportGeckoSuccess();
+  pollCount++;
+  lastPollSuccessMs   = Date.now();
+  consecutiveFailures = 0;
+  lastPollError       = null;
+
+  if (fired > 0) {
+    logger.info({ fired, total: totalDiscovered }, 'DexScreener discovery: new tokens queued');
   }
 }
 
@@ -239,10 +279,14 @@ let pollTimer: ReturnType<typeof setTimeout> | null = null;
 function schedulePoll(): void {
   if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
   if (!started) return;
+  // When in backoff, schedule the next attempt for the end of the backoff window
+  // (plus a small jitter) rather than the fixed poll interval.
+  const backoffRemaining = Math.max(0, gtBackoffUntil - Date.now());
+  const delay = Math.max(POLL_INTERVAL_MS, backoffRemaining + 2_000);
   pollTimer = setTimeout(async () => {
     await pollGeckoNewPools();
     schedulePoll();
-  }, POLL_INTERVAL_MS);
+  }, delay);
 }
 
 export function startTrenchesScanner(): void {
@@ -250,8 +294,14 @@ export function startTrenchesScanner(): void {
   started        = true;
   sessionStartMs = Date.now();
 
-  logger.info('DexScreener discovery: starting GeckoTerminal new_pools poller (20s interval)');
-  void pollGeckoNewPools().then(() => schedulePoll());
+  logger.info(`DexScreener discovery: starting GeckoTerminal new_pools poller (${POLL_INTERVAL_MS / 1000}s interval, ${BOOT_DELAY_MS / 1000}s boot delay)`);
+
+  // Delay the first poll so the previous server instance's rate-limit window
+  // has time to clear before we start firing requests.
+  pollTimer = setTimeout(async () => {
+    await pollGeckoNewPools();
+    schedulePoll();
+  }, BOOT_DELAY_MS);
 }
 
 export function stopTrenchesScanner(): void {

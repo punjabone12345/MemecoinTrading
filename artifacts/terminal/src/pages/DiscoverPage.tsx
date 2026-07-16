@@ -344,7 +344,7 @@ function DiscoveryFeed() {
   return (
     <div style={C.card}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
-        <span style={C.label}>📡 LATEST DEXSCREENER TOKENS</span>
+        <span style={C.label}>📡 LATEST TOKENS (GECKOTERMINAL)</span>
         <span style={{ fontSize: 9, color: C.green, fontWeight: 700 }}>
           <span style={{ display: 'inline-block', width: 5, height: 5, borderRadius: '50%', background: C.green, boxShadow: `0 0 6px ${C.green}`, marginRight: 4, verticalAlign: 'middle' }} />
           LIVE
@@ -383,7 +383,10 @@ export default function DiscoverPage({ sniperStatus: wsProp, wsConnected = false
     return () => clearInterval(id);
   }, []);
 
-  const tracked  = status?.trackedTokens  ?? [];
+  // Filter out locally-expired tokens client-side so the UI clears them immediately
+  // even before the next backend prune broadcast arrives (every 2s poll cycle).
+  const now      = Date.now();
+  const tracked  = (status?.trackedTokens ?? []).filter(t => t.expiresAt > now || t.entryTriggered);
   const buyLogs  = status?.recentBuyLog   ?? [];
   const queued   = status?.queuedSignals  ?? [];
   const stats    = status?.stats ?? { tracking: 0, positions: 0, queued: 0, pending: 0 };
@@ -397,7 +400,7 @@ export default function DiscoverPage({ sniperStatus: wsProp, wsConnected = false
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 }}>
           <div>
             <div style={{ fontSize: 18, fontWeight: 900, color: C.accent, letterSpacing: '0.04em' }}>🎯 SNIPER ENGINE</div>
-            <div style={{ fontSize: 9, color: C.gray, marginTop: 2 }}>Tracking DexScreener tokens · Paper mode</div>
+            <div style={{ fontSize: 9, color: C.gray, marginTop: 2 }}>Tracking GeckoTerminal tokens · Paper mode</div>
           </div>
           <div style={{ textAlign: 'right', fontSize: 9, color: C.gray }}>
             SOL<br />
@@ -455,7 +458,7 @@ export default function DiscoverPage({ sniperStatus: wsProp, wsConnected = false
         </div>
         {tracked.length === 0 ? (
           <div style={{ ...C.card, color: C.gray, fontSize: 11, textAlign: 'center', padding: '24px 16px' }}>
-            Scanning DexScreener for new tokens…<br />
+            Scanning GeckoTerminal for new tokens…<br />
             <span style={{ fontSize: 9, color: '#2a3a50', marginTop: 6, display: 'block' }}>Every discovered token is tracked for 1 hour</span>
           </div>
         ) : (

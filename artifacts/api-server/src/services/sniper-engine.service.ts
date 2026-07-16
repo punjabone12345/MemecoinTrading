@@ -1732,6 +1732,7 @@ async function monitorPositions(): Promise<void> {
 
 function pruneExpiredTracking(): void {
   const now = Date.now();
+  let pruned = 0;
 
   // Prune pending graduations that timed out
   for (const [mint, pg] of pendingGraduations) {
@@ -1751,9 +1752,17 @@ function pruneExpiredTracking(): void {
     // Do NOT close the position when tracking window expires — positions are
     // held indefinitely and exited only by TP/SL/liquidity/stagnation rules.
     // monitorPositions() continues to track the mint independently via openPositions.
+    pruned++;
   }
   const keep = signalQueue.filter(s => trackedTokens.has(s.mint));
   signalQueue.splice(0, signalQueue.length, ...keep);
+
+  // Broadcast so the UI immediately reflects the removal — without this the
+  // expired cards stay on screen until the next unrelated broadcastSniperStatus call.
+  if (pruned > 0) {
+    logger.info({ pruned }, 'Sniper engine: pruned expired tracked tokens');
+    broadcastSniperStatus();
+  }
 }
 
 // ── Immediate tracking activation on graduation ───────────────────────────────
@@ -2077,10 +2086,14 @@ function scheduleBuyPoll(gen = _loopGen): void {
   setTimeout(async () => {
     if (!_sniperEngineRunning || _loopGen !== gen) return;
     try {
-      // Skip scanning entirely when outside the trading window
+      // Always prune expired tokens — independent of trading window.
+      // Without this guard, expired tokens accumulate in memory whenever the
+      // trading window is closed, and the UI never shows them as removed.
+      pruneExpiredTracking();
+
+      // Skip buy-scanning when outside the trading window (no entries allowed)
       const s = await getSettings();
       if (isInTradingWindow(s)) {
-        pruneExpiredTracking();
         for (const mint of Array.from(trackedTokens.keys())) {
           await pollTokenBuys(mint, false);
           await new Promise(r => setTimeout(r, 300));

@@ -38,6 +38,16 @@ async function main(): Promise<void> {
   });
 }
 
+// Keep the process alive — log but never crash on unhandled errors.
+// Without these handlers, a single unhandled rejection (e.g. a flaky RPC call
+// escaping try/catch) can silently kill the server and stop all trading.
+process.on('uncaughtException', (err) => {
+  logger.error({ err }, 'Uncaught exception — process kept alive');
+});
+process.on('unhandledRejection', (reason) => {
+  logger.error({ reason: String(reason) }, 'Unhandled promise rejection — process kept alive');
+});
+
 main().catch((err) => {
   logger.error({ err }, 'Fatal startup error');
   process.exit(1);
