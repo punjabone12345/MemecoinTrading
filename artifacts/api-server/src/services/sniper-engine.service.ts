@@ -1,7 +1,7 @@
 import axios from 'axios';
 import { Connection, PublicKey } from '@solana/web3.js';
 import { logger } from '../lib/logger.js';
-import { broadcast } from '../websocket/server.js';
+import { broadcast, broadcastBalance } from '../websocket/server.js';
 import { getBalance, adjustBalance, getSettings } from './settings.service.js';
 import { notifySniperTrade, notifySniperSkip, notifySniperClose, notifySniperTP } from '../lib/telegram.js';
 import { query } from '../lib/db.js';
@@ -2246,6 +2246,18 @@ export async function editClosedSniperPositionById(id: string, updates: {
 }): Promise<ClosedSniperPosition | undefined> {
   const pos = findClosedByIdInternal(id);
   if (!pos) return undefined;
+
+  // If PNL % is being changed, adjust the balance by the SOL delta so the
+  // portfolio value at the top of the UI stays accurate.
+  if (updates.closePnlPct !== undefined && updates.closePnlPct !== pos.closePnlPct) {
+    const initSize = pos.initialSizeSol > 0 ? pos.initialSizeSol : pos.sizeSol;
+    const oldPnlSol = initSize * (pos.closePnlPct / 100);
+    const newPnlSol = initSize * (updates.closePnlPct / 100);
+    const deltaSol  = newPnlSol - oldPnlSol;
+    await adjustBalance(deltaSol).catch(() => {});
+    await broadcastBalance().catch(() => {});
+  }
+
   if (updates.closeReason !== undefined) pos.closeReason = updates.closeReason;
   if (updates.closePnlPct !== undefined) pos.closePnlPct = updates.closePnlPct;
   await query(
