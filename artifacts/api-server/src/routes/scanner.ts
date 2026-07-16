@@ -1,29 +1,17 @@
 import { Router } from 'express';
-import { getPumpfunMints, getPumpfunFeed } from '../services/trenches.service.js';
+import { getDiscoveryFeed, getDiscoveryTotal } from '../services/trenches.service.js';
 import { query } from '../lib/db.js';
 
 const router = Router();
 
 router.get('/sources', (_req, res) => {
-  // Use the same counter as the dashboard tiles (getPumpfunMints().size) so
-  // live-feed totals always match the tile numbers.
-  const pumpfunTotal = getPumpfunMints().size;
-  let pumpfunFeedItems = getPumpfunFeed();
-
-  // Fallback: if the in-memory feed is empty but mints exist (e.g. after an
-  // incomplete restart cycle), synthesise placeholder entries from the mint set
-  // so the live-feed panel always matches the counter tile.
-  if (pumpfunFeedItems.length === 0 && pumpfunTotal > 0) {
-    const now = Date.now();
-    pumpfunFeedItems = Array.from(getPumpfunMints())
-      .slice(0, 20)
-      .map((mint) => ({ mint, ts: now, instructionType: 'migrate' }));
-  }
+  const total = getDiscoveryTotal();
+  const feed  = getDiscoveryFeed();
 
   res.json({
-    pumpfun: {
-      total: pumpfunTotal,
-      recent: pumpfunFeedItems,
+    dexscreener: {
+      total,
+      recent: feed,
     },
   });
 });

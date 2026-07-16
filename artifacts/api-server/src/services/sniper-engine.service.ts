@@ -10,7 +10,7 @@ import { subscribeLogs, isHeliusWsConfigured } from '../lib/helius-ws-shared.js'
 import { evaluateBuy, clearMintConsensus, resetConsensusState, ConsensusResult } from './wallet-consensus.service.js';
 import { isGmgnConfigured, getGmgnBannedUntil } from '../lib/gmgn-client.js';
 
-const MAX_TRACKING_MS       = 30 * 60 * 1_000;
+const MAX_TRACKING_MS       = 60 * 60 * 1_000; // 1 hour — matches DexScreener discovery tracking window
 const MAX_POSITIONS         = 10;
 const POLL_INTERVAL_MS      = 2_000;   // reduced from 5s for faster detection
 // Reduced from 2000ms: vault addresses are captured directly from the buyer's

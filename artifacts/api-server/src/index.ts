@@ -3,6 +3,7 @@ import app from './app.js';
 import { initDB } from './lib/db.js';
 import { initWebSocket } from './websocket/server.js';
 import { startTrenchesScanner, setOnGraduation } from './services/trenches.service.js';
+// Discovery is now DexScreener token-profiles based — no on-chain imports needed
 import { startSniperEngine, addGraduatedToken } from './services/sniper-engine.service.js';
 import { startTelegramCommands, stopTelegramCommands } from './lib/telegram-commands.js';
 import { initSessionManager } from './lib/session-manager.js';
@@ -20,7 +21,7 @@ async function main(): Promise<void> {
     logger.info({ port: PORT }, 'Apex Meme Trader API running');
   });
 
-  // Wire pump.fun graduation detection → sniper engine
+  // Wire DexScreener token discovery → sniper engine
   setOnGraduation(addGraduatedToken);
   startTrenchesScanner();
   await startSniperEngine();

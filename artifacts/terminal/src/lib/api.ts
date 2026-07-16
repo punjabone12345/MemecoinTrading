@@ -25,7 +25,12 @@ export const api = {
   getConfig:        () => apiFetch<{ wsUrl: string | null }>('/config'),
 
   // ── Discovery ──────────────────────────────────────────────────────────────
-  getScannerSources: () => apiFetch<{ pumpfun: { total: number; recent: { mint: string; ts: number; txSig?: string; instructionType?: string }[] } }>('/scanner/sources'),
+  getScannerSources: () => apiFetch<{
+    dexscreener: {
+      total: number;
+      recent: { mint: string; ts: number; description?: string; icon?: string; isMigration: boolean }[];
+    };
+  }>('/scanner/sources'),
 
   // ── Sniper engine — read ───────────────────────────────────────────────────
   getSniperStatus: () => apiFetch<SniperStatus>('/sniper/status'),

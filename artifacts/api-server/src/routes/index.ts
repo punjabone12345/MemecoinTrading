@@ -3,7 +3,6 @@ import scannerRouter from './scanner.js';
 import settingsRouter from './settings.js';
 import sniperRouter from './sniper.js';
 import { getTrenchesDiagnostics } from '../services/trenches.service.js';
-import { isHeliusWsConfigured } from '../lib/helius-ws-shared.js';
 import { isHeliusCoolingDown, heliusCooldownRemainingMs } from '../lib/helius-limiter.js';
 
 const router = Router();
@@ -15,23 +14,21 @@ router.get('/debug', (_req, res) => {
   res.json({
     serverTime: new Date().toISOString(),
     heliusApiKeySet: d.heliusApiKeySet,
-    heliusWsConfigured: d.heliusWsConfigured,
     rpcEndpoint: d.rpcEndpoint,
-    poll: {
-      isBootstrap: d.isBootstrap,
-      lastSeenSig: d.lastSeenSig,
-      lastPollAgoSec: d.lastPollAgoSec,
-      consecutiveFailures: d.consecutivePollFailures,
-      lastError: d.lastPollError,
-      currentDelayMs: d.pollDelayMs,
+    discovery: {
+      source:             d.source,
+      pollCount:          d.pollCount,
+      lastPollAgoSec:     d.lastPollAgoSec,
+      consecutiveFailures: d.consecutiveFailures,
+      lastError:          d.lastPollError,
+      pollIntervalMs:     d.pollIntervalMs,
+      totalDiscovered:    d.totalDiscovered,
+      activeMints:        d.activeMints,
+      recent:             d.recentFeed,
     },
     heliusCooldown: {
       active: isHeliusCoolingDown(),
       remainingMs: heliusCooldownRemainingMs(),
-    },
-    graduations: {
-      total: d.pumpfunMintsTotal,
-      recent: d.recentFeed,
     },
   });
 });

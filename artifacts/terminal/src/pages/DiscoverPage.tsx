@@ -69,11 +69,11 @@ function useSniperStatusFallback(skip: boolean) {
   return status;
 }
 
-// ── Discovery source feed hook (graduation events) ───────────────────────────
+// ── Discovery source feed hook ────────────────────────────────────────────────
 
-interface DiscoveryEvent { mint: string; ts: number; txSig?: string; instructionType?: string; }
+interface DiscoveryEvent { mint: string; ts: number; description?: string; icon?: string; isMigration: boolean; }
 interface SourceActivity {
-  pumpfun: { total: number; recent: DiscoveryEvent[] };
+  dexscreener: { total: number; recent: DiscoveryEvent[] };
 }
 
 function useSourceActivity() {
@@ -83,12 +83,11 @@ function useSourceActivity() {
     async function poll() {
       try {
         const json = await api.getScannerSources();
-        if (!cancelled) setStatus(json);
+        if (!cancelled) setData(json as unknown as SourceActivity);
       } catch { /* ignore */ }
-      function setStatus(d: SourceActivity) { if (!cancelled) setData(d); }
     }
     poll();
-    const id = setInterval(poll, 3_000);
+    const id = setInterval(poll, 5_000);
     return () => { cancelled = true; clearInterval(id); };
   }, []);
   return data;
@@ -332,34 +331,36 @@ function BuyerActivityRow({ entry }: { entry: BuyerActivityLog }) {
   );
 }
 
-// ── Source feed (graduation events) ──────────────────────────────────────────
+// ── Source feed (DexScreener discovery events) ───────────────────────────────
 
-function GraduationFeed() {
+function DiscoveryFeed() {
   const data = useSourceActivity();
   const [tick, setTick] = useState(0);
   useEffect(() => { const id = setInterval(() => setTick(t => t + 1), 5_000); return () => clearInterval(id); }, []);
   void tick;
 
-  const events = data?.pumpfun?.recent ?? [];
+  const events = data?.dexscreener?.recent ?? [];
 
   return (
     <div style={C.card}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
-        <span style={C.label}>🔥 RECENT PUMP.FUN GRADUATIONS</span>
+        <span style={C.label}>📡 LATEST DEXSCREENER TOKENS</span>
         <span style={{ fontSize: 9, color: C.green, fontWeight: 700 }}>
           <span style={{ display: 'inline-block', width: 5, height: 5, borderRadius: '50%', background: C.green, boxShadow: `0 0 6px ${C.green}`, marginRight: 4, verticalAlign: 'middle' }} />
           LIVE
         </span>
-        {data && <span style={{ fontSize: 9, color: C.gray, marginLeft: 'auto' }}>total: {data.pumpfun?.total ?? 0}</span>}
+        {data && <span style={{ fontSize: 9, color: C.gray, marginLeft: 'auto' }}>discovered: {data.dexscreener?.total ?? 0}</span>}
       </div>
       {events.length === 0 ? (
-        <div style={{ fontSize: 9, color: C.gray }}>Waiting for graduation events…</div>
+        <div style={{ fontSize: 9, color: C.gray }}>Scanning DexScreener token profiles…</div>
       ) : (
         events.slice(0, 8).map((ev, i) => (
-          <div key={i} style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', borderBottom: i < 7 ? '1px solid rgba(255,255,255,0.03)' : 'none' }}>
-            <div style={{ fontSize: 9, color: '#c0c8e0', fontFamily: 'monospace' }}>
+          <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '4px 0', borderBottom: i < 7 ? '1px solid rgba(255,255,255,0.03)' : 'none' }}>
+            <div style={{ fontSize: 9, color: '#c0c8e0', fontFamily: 'monospace', display: 'flex', alignItems: 'center', gap: 6 }}>
               {ev.mint.slice(0, 8)}…{ev.mint.slice(-6)}
-              <span style={{ fontSize: 8, color: C.gray, marginLeft: 6 }}>{ev.instructionType}</span>
+              {ev.isMigration && (
+                <span style={{ fontSize: 7, fontWeight: 800, padding: '1px 4px', borderRadius: 3, background: 'rgba(255,215,0,0.12)', color: C.yellow, border: '1px solid rgba(255,215,0,0.25)' }}>MIGRATED</span>
+              )}
             </div>
             <span style={{ fontSize: 8, color: C.gray }}>{timeAgo(ev.ts)}</span>
           </div>
@@ -396,7 +397,7 @@ export default function DiscoverPage({ sniperStatus: wsProp, wsConnected = false
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 }}>
           <div>
             <div style={{ fontSize: 18, fontWeight: 900, color: C.accent, letterSpacing: '0.04em' }}>🎯 SNIPER ENGINE</div>
-            <div style={{ fontSize: 9, color: C.gray, marginTop: 2 }}>Following pump.fun graduations · Paper mode</div>
+            <div style={{ fontSize: 9, color: C.gray, marginTop: 2 }}>Tracking DexScreener tokens · Paper mode</div>
           </div>
           <div style={{ textAlign: 'right', fontSize: 9, color: C.gray }}>
             SOL<br />
@@ -423,7 +424,7 @@ export default function DiscoverPage({ sniperStatus: wsProp, wsConnected = false
             { label: 'TP +100%',      color: 'rgba(0,255,136,0.15)' },
             { label: 'SL price -30%', color: 'rgba(255,68,102,0.12)' },
             { label: 'SL liq -40%',   color: 'rgba(255,68,102,0.12)' },
-            { label: '30min window',  color: 'rgba(255,215,0,0.10)' },
+            { label: '1hr window',    color: 'rgba(255,215,0,0.10)' },
           ].map(({ label, color }) => (
             <span key={label} style={{ fontSize: 8, fontWeight: 700, padding: '2px 7px', borderRadius: 4, background: color, color: '#c0c8e0', border: '1px solid rgba(255,255,255,0.08)' }}>{label}</span>
           ))}
@@ -450,12 +451,12 @@ export default function DiscoverPage({ sniperStatus: wsProp, wsConnected = false
       {/* ── Tracked Tokens ── */}
       <div style={{ marginBottom: 16 }}>
         <div style={{ ...C.label, marginBottom: 8 }}>
-          TRACKED TOKENS — 30min WATCH WINDOW {tracked.length > 0 && `(${tracked.length})`}
+          TRACKED TOKENS — 1HR WATCH WINDOW {tracked.length > 0 && `(${tracked.length})`}
         </div>
         {tracked.length === 0 ? (
           <div style={{ ...C.card, color: C.gray, fontSize: 11, textAlign: 'center', padding: '24px 16px' }}>
-            Watching for pump.fun graduations…<br />
-            <span style={{ fontSize: 9, color: '#2a3a50', marginTop: 6, display: 'block' }}>Every migrated token is tracked for 30 minutes</span>
+            Scanning DexScreener for new tokens…<br />
+            <span style={{ fontSize: 9, color: '#2a3a50', marginTop: 6, display: 'block' }}>Every discovered token is tracked for 1 hour</span>
           </div>
         ) : (
           tracked
@@ -486,8 +487,8 @@ export default function DiscoverPage({ sniperStatus: wsProp, wsConnected = false
         )}
       </div>
 
-      {/* ── Graduation source feed ── */}
-      <GraduationFeed />
+      {/* ── DexScreener discovery feed ── */}
+      <DiscoveryFeed />
     </div>
   );
 }
