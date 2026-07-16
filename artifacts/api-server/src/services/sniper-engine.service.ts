@@ -787,7 +787,7 @@ async function saveSniperPosition(pos: SniperPosition): Promise<void> {
          tp_tier, trigger_amount_usd, current_sl_price, buy_detected_timestamp, entry_delay_ms,
          entry_mode, entry_score, qualifying_wallets_count, buyer_wallet, price_source,
          price_at_detection, actual_slippage_pct, max_slippage_pct, status)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,'OPEN')
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,'OPEN')
        ON CONFLICT (id) DO UPDATE SET
          peak_price        = EXCLUDED.peak_price,
          last_price        = EXCLUDED.last_price,
