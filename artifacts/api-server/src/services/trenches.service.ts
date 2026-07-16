@@ -1,16 +1,15 @@
 /**
- * Token Discovery Service — DexScreener token-profiles/latest/v1
+ * Token Discovery Service — GeckoTerminal new_pools
  *
- * Replaces the old PumpFun migration-wallet on-chain tracker entirely.
- * Polls DexScreener's public token-profiles endpoint every 10 seconds to
- * discover newly created / newly-active Solana memecoins.
+ * Replaces the DexScreener token-profiles/latest/v1 poller which is
+ * consistently 429-blocked from Replit's shared IP.
  *
- * Rate limit: 60 requests/second (we poll at ~6 req/min — very safe).
+ * GeckoTerminal free tier: ~30 req/min.
+ * We poll 2 pages every 20 seconds = 6 req/min — very safe.
  *
  * Tracking window: 1 hour per token from first discovery.
- * Migration handling: if a mint reappears in the "latest" feed after its
- * 1-hour window has elapsed, it is treated as a new/migration event and
- * fired again with a fresh 1-hour window.
+ * Migration handling: if a mint reappears after its window has elapsed
+ * it is re-fired with a fresh 1-hour window.
  */
 
 import { logger } from '../lib/logger.js';
@@ -18,12 +17,18 @@ import { query } from '../lib/db.js';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-const DEXSCREENER_PROFILES_URL = 'https://api.dexscreener.com/token-profiles/latest/v1';
-const POLL_INTERVAL_MS  = 10_000;   // 10 seconds — 6 req/min, well within 60/sec cap
-const MAX_FEED          = 50;
-const TRACKING_WINDOW_MS = 60 * 60_000; // 1 hour — must match MAX_TRACKING_MS in sniper engine
+const GECKO_BASE = 'https://api.geckoterminal.com/api/v2/networks/solana/new_pools';
+const PAGES_PER_POLL  = 2;            // pages 1 & 2 — ~40 newest pools
+const PAGE_STAGGER_MS = 600;          // stagger between page requests
+const POLL_INTERVAL_MS = 20_000;      // 20 s → 6 req/min (2 pages × 3/min)
+const MAX_FEED         = 50;
+const TRACKING_WINDOW_MS = 60 * 60_000;  // 1 hour — matches MAX_TRACKING_MS in sniper engine
 
-// Stable mints that appear on DexScreener but are not memecoins
+// Only fire for pools created within the last 2 hours (avoids spamming old
+// pools on cold boot while still catching everything within our window).
+const MAX_POOL_AGE_MS = 2 * 60 * 60_000;
+
+// Stable / infrastructure mints that appear in new_pools as base tokens
 const IGNORE_MINTS = new Set([
   'So11111111111111111111111111111111111111112',    // wSOL
   'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', // USDC
@@ -37,33 +42,25 @@ const IGNORE_MINTS = new Set([
 
 export interface DiscoveryEvent {
   mint:        string;
-  ts:          number;    // when we fired onGraduation for this mint
+  poolAddress?: string;
+  ts:          number;
   name?:       string;
-  description?: string;
-  icon?:       string;
-  isMigration: boolean;  // true = this is a re-appearance / migration event
+  isMigration: boolean;
 }
 
 // ── In-memory state ───────────────────────────────────────────────────────────
 
-// mint → timestamp of the last time we fired onGraduation for this mint.
-// Used to deduplicate within the 1-hour window and to detect migrations
-// (mints that reappear after their window expires).
-const firedAt = new Map<string, number>();
-
-// Recent discovery feed for the UI (newest first)
+const firedAt = new Map<string, number>();        // mint → last fired ts
 const discoveryFeed: DiscoveryEvent[] = [];
-
-// Running total of unique mints discovered this session
 let totalDiscovered = 0;
 
 // ── Diagnostics ───────────────────────────────────────────────────────────────
 
-let pollCount          = 0;
-let lastPollSuccessMs  = 0;
+let pollCount           = 0;
+let lastPollSuccessMs   = 0;
 let consecutiveFailures = 0;
 let lastPollError: string | null = null;
-let sessionStartMs     = 0;
+let sessionStartMs      = 0;
 
 // ── Callbacks ─────────────────────────────────────────────────────────────────
 
@@ -75,7 +72,7 @@ export function setOnGraduation(
   onGraduation = cb;
 }
 
-// ── Public feed accessors (for scanner route) ─────────────────────────────────
+// ── Public feed accessors ─────────────────────────────────────────────────────
 
 export function getDiscoveryFeed(): DiscoveryEvent[] {
   return discoveryFeed.slice(0, MAX_FEED);
@@ -85,7 +82,6 @@ export function getDiscoveryTotal(): number {
   return totalDiscovered;
 }
 
-// Legacy alias used by routes/index.ts debug diagnostics
 export function getSourceActivity() {
   return {
     dexscreener: {
@@ -95,102 +91,133 @@ export function getSourceActivity() {
   };
 }
 
-// ── DexScreener fetch ─────────────────────────────────────────────────────────
+// ── GeckoTerminal fetch ───────────────────────────────────────────────────────
 
-interface TokenProfile {
-  url?:          string;
-  chainId?:      string;
-  tokenAddress?: string;
-  icon?:         string;
-  header?:       string;
-  description?:  string;
-  links?:        Array<{ type?: string; label?: string; url?: string }>;
+interface GeckoPool {
+  id: string;
+  attributes: {
+    name?:           string;
+    pool_created_at?: string;
+    reserve_in_usd?: string;
+  };
+  relationships: {
+    base_token: { data: { id: string } };
+    dex?:       { data: { id: string } };
+  };
 }
 
-async function fetchLatestProfiles(): Promise<TokenProfile[]> {
-  const res = await fetch(DEXSCREENER_PROFILES_URL, {
-    headers: { 'Accept': 'application/json' },
+async function fetchNewPoolsPage(page: number): Promise<GeckoPool[]> {
+  const url = `${GECKO_BASE}?page=${page}`;
+  const res = await fetch(url, {
+    headers: {
+      'Accept': 'application/json',
+      'User-Agent': 'Mozilla/5.0 (compatible; apex-meme-trader/1.0)',
+    },
     signal: AbortSignal.timeout(12_000),
   });
 
-  if (!res.ok) {
-    throw new Error(`DexScreener token-profiles: HTTP ${res.status}`);
-  }
+  if (!res.ok) throw new Error(`GeckoTerminal new_pools page ${page}: HTTP ${res.status}`);
 
-  const data: unknown = await res.json();
-  if (!Array.isArray(data)) throw new Error('DexScreener token-profiles: unexpected response shape');
-  return data as TokenProfile[];
+  const data: any = await res.json();
+  if (!Array.isArray(data?.data)) throw new Error(`GeckoTerminal new_pools page ${page}: unexpected shape`);
+  return data.data as GeckoPool[];
 }
 
 // ── Core poll ─────────────────────────────────────────────────────────────────
 
-async function pollDexScreenerProfiles(): Promise<void> {
+async function pollGeckoNewPools(): Promise<void> {
+  const now = Date.now();
+  let fired = 0;
+
   try {
-    const profiles = await fetchLatestProfiles();
-    pollCount++;
-    lastPollSuccessMs = Date.now();
-    consecutiveFailures = 0;
-    lastPollError = null;
+    for (let page = 1; page <= PAGES_PER_POLL; page++) {
+      if (page > 1) await new Promise(r => setTimeout(r, PAGE_STAGGER_MS));
 
-    const now = Date.now();
-    let fired = 0;
-
-    for (const profile of profiles) {
-      const mint = profile.tokenAddress?.trim();
-      if (!mint || mint.length < 20) continue;
-      if (profile.chainId !== 'solana') continue;
-      if (IGNORE_MINTS.has(mint)) continue;
-
-      const previousFire = firedAt.get(mint);
-      const isMigration  = previousFire !== undefined && now - previousFire >= TRACKING_WINDOW_MS;
-      const isNew        = previousFire === undefined;
-
-      // Skip if already tracking within the 1-hour window
-      if (!isNew && !isMigration) continue;
-
-      // Fire the graduation callback (sniper engine receives the new token)
-      firedAt.set(mint, now);
-      if (isNew) totalDiscovered++;
-
-      const ev: DiscoveryEvent = {
-        mint,
-        ts:          now,
-        name:        undefined,
-        description: profile.description?.slice(0, 120),
-        icon:        profile.icon,
-        isMigration,
-      };
-
-      // Push to feed (newest first)
-      discoveryFeed.unshift(ev);
-      if (discoveryFeed.length > MAX_FEED) discoveryFeed.pop();
-
-      if (onGraduation) {
-        onGraduation({ mint, ts: now });
-      }
-
-      // Persist discovery to DB (non-blocking)
-      const source = isMigration ? 'dexscreener_migration' : 'dexscreener';
-      query(`
-        INSERT INTO detected_migrations
-          (source, instruction_type, tx_signature, pool_address, mint, creator_wallet)
-        VALUES ($1, $2, $3, $4, $5, $6)
-        ON CONFLICT (tx_signature) DO NOTHING
-      `, [source, 'token_profile', `dex_${mint}_${now}`, null, mint, null])
-        .catch(() => {});
-
-      if (isMigration) {
-        logger.info(
-          { mint: mint.slice(0, 16) },
-          'DexScreener discovery: migration re-appeared — fresh 1h window',
+      let pools: GeckoPool[];
+      try {
+        pools = await fetchNewPoolsPage(page);
+      } catch (pageErr: any) {
+        // A single page failure shouldn't abort the whole poll
+        logger.warn(
+          { error: String(pageErr?.message ?? pageErr), page },
+          'DexScreener discovery: page fetch failed',
         );
+        continue;
       }
-      fired++;
+
+      for (const pool of pools) {
+        // Extract mint from "solana_<MINT>" relationship ID
+        const baseId = pool.relationships?.base_token?.data?.id ?? '';
+        const mint   = baseId.startsWith('solana_') ? baseId.slice(7) : '';
+        if (!mint || mint.length < 20) continue;
+        if (IGNORE_MINTS.has(mint)) continue;
+
+        // Extract pool address from "solana_<POOL>" pool ID
+        const poolId      = pool.id ?? '';
+        const poolAddress = poolId.startsWith('solana_') ? poolId.slice(7) : undefined;
+
+        // Age filter — skip pools older than MAX_POOL_AGE_MS
+        const createdAt = pool.attributes?.pool_created_at;
+        if (createdAt) {
+          const createdMs = new Date(createdAt).getTime();
+          if (Number.isFinite(createdMs) && now - createdMs > MAX_POOL_AGE_MS) continue;
+        }
+
+        const previousFire = firedAt.get(mint);
+        const isMigration  = previousFire !== undefined && now - previousFire >= TRACKING_WINDOW_MS;
+        const isNew        = previousFire === undefined;
+
+        if (!isNew && !isMigration) continue;
+
+        // Fire
+        firedAt.set(mint, now);
+        if (isNew) totalDiscovered++;
+
+        const tokenName = pool.attributes?.name?.split(' / ')[0]?.trim();
+
+        const ev: DiscoveryEvent = {
+          mint,
+          poolAddress,
+          ts:          now,
+          name:        tokenName,
+          isMigration,
+        };
+
+        discoveryFeed.unshift(ev);
+        if (discoveryFeed.length > MAX_FEED) discoveryFeed.pop();
+
+        if (onGraduation) {
+          onGraduation({ mint, poolAddress, ts: now });
+        }
+
+        // Persist discovery to DB (non-blocking)
+        const source = isMigration ? 'dexscreener_migration' : 'dexscreener';
+        query(`
+          INSERT INTO detected_migrations
+            (source, instruction_type, tx_signature, pool_address, mint, creator_wallet)
+          VALUES ($1, $2, $3, $4, $5, $6)
+          ON CONFLICT (tx_signature) DO NOTHING
+        `, [source, 'token_profile', `gecko_${mint}_${now}`, poolAddress ?? null, mint, null])
+          .catch(() => {});
+
+        if (isMigration) {
+          logger.info(
+            { mint: mint.slice(0, 16) },
+            'DexScreener discovery: migration re-appeared — fresh 1h window',
+          );
+        }
+        fired++;
+      }
     }
+
+    pollCount++;
+    lastPollSuccessMs   = Date.now();
+    consecutiveFailures = 0;
+    lastPollError       = null;
 
     if (fired > 0) {
       logger.info(
-        { fired, total: totalDiscovered, profilesChecked: profiles.length },
+        { fired, total: totalDiscovered },
         'DexScreener discovery: new tokens queued',
       );
     }
@@ -198,7 +225,7 @@ async function pollDexScreenerProfiles(): Promise<void> {
     consecutiveFailures++;
     lastPollError = String(err?.message ?? err ?? 'unknown');
     logger.warn(
-      { msg: lastPollError, failures: consecutiveFailures },
+      { error: lastPollError, failures: consecutiveFailures },
       'DexScreener discovery: poll failed',
     );
   }
@@ -206,26 +233,25 @@ async function pollDexScreenerProfiles(): Promise<void> {
 
 // ── Lifecycle ─────────────────────────────────────────────────────────────────
 
-let started    = false;
+let started   = false;
 let pollTimer: ReturnType<typeof setTimeout> | null = null;
 
 function schedulePoll(): void {
   if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
   if (!started) return;
   pollTimer = setTimeout(async () => {
-    await pollDexScreenerProfiles();
+    await pollGeckoNewPools();
     schedulePoll();
   }, POLL_INTERVAL_MS);
 }
 
 export function startTrenchesScanner(): void {
   if (started) return;
-  started = true;
+  started        = true;
   sessionStartMs = Date.now();
 
-  logger.info('DexScreener discovery: starting token-profiles poller (10s interval)');
-  // Run first poll immediately, then schedule recurring
-  void pollDexScreenerProfiles().then(() => schedulePoll());
+  logger.info('DexScreener discovery: starting GeckoTerminal new_pools poller (20s interval)');
+  void pollGeckoNewPools().then(() => schedulePoll());
 }
 
 export function stopTrenchesScanner(): void {
@@ -235,11 +261,11 @@ export function stopTrenchesScanner(): void {
   logger.info('DexScreener discovery: stopped');
 }
 
-// ── Diagnostics (for /api/debug) ─────────────────────────────────────────────
+// ── Diagnostics ───────────────────────────────────────────────────────────────
 
 export function getTrenchesDiagnostics() {
   return {
-    source:            'dexscreener_token_profiles',
+    source:            'gecko_terminal_new_pools',
     sessionStartMs,
     pollCount,
     lastPollSuccessMs,
@@ -250,19 +276,18 @@ export function getTrenchesDiagnostics() {
     totalDiscovered,
     trackingWindowMs:  TRACKING_WINDOW_MS,
     activeMints:       firedAt.size,
-    // Legacy fields expected by routes/index.ts
     isBootstrap:       pollCount === 0,
     lastSeenSig:       null,
     consecutivePollFailures: consecutiveFailures,
     pollDelayMs:       POLL_INTERVAL_MS,
-    pumpfunMintsTotal: totalDiscovered,  // aliased for debug route backward compat
+    pumpfunMintsTotal: totalDiscovered,
     heliusWsConfigured: false,
     heliusApiKeySet:   !!process.env.HELIUS_API_KEY,
     rpcEndpoint:       process.env.RPC_ENDPOINT ?? (process.env.HELIUS_API_KEY ? 'helius-http' : 'public-mainnet'),
     recentFeed: discoveryFeed.slice(0, 5).map(e => ({
-      mint: e.mint.slice(0, 12),
+      mint:            e.mint.slice(0, 12),
       instructionType: e.isMigration ? 'migration' : 'new_token',
-      ts: e.ts,
+      ts:              e.ts,
     })),
   };
 }
