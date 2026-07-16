@@ -46,7 +46,8 @@ const PRICE_SL_PCT          = 0.3;    // -30% price stop loss from entry
 export interface BuyerActivity {
   wallet: string;
   amountUsd: number;
-  timestamp: number;
+  timestamp: number;    // on-chain blockTime ms — used for consensus window logic
+  detectedAt: number;   // Date.now() when the bot processed the tx — used for display
   txSig: string;
   priceAtDetection: number;
 }
@@ -169,7 +170,8 @@ export interface BuyerActivityLog {
   symbol: string;
   wallet: string;
   amountUsd: number;
-  timestamp: number;
+  timestamp: number;   // on-chain blockTime ms — used for consensus window
+  detectedAt: number;  // Date.now() when the bot processed the tx — use for display
   txSig: string;
   entered: boolean;
   skipReason?: string;
@@ -1261,7 +1263,8 @@ async function handleVolumeUpdate(
   const tok = trackedTokens.get(mint);
   if (!tok) return;
 
-  tok.buyerActivity.push({ wallet, amountUsd: txUsd, timestamp: txTimestamp, txSig, priceAtDetection });
+  const detectedAt = Date.now();
+  tok.buyerActivity.push({ wallet, amountUsd: txUsd, timestamp: txTimestamp, detectedAt, txSig, priceAtDetection });
 
   if (txType !== 'buy') return; // sells never trigger entries under Smart Wallet Consensus
 
@@ -1291,7 +1294,7 @@ async function handleVolumeUpdate(
 
   const entry: BuyerActivityLog = {
     mint, name: tok.name, symbol: tok.symbol,
-    wallet, amountUsd: txUsd, timestamp: txTimestamp, txSig,
+    wallet, amountUsd: txUsd, timestamp: txTimestamp, detectedAt, txSig,
     entered: false, priceAtDetection,
     walletScore: result.score, consensusMode: result.mode,
     qualifyingWalletsCount: result.qualifyingWallets.length,

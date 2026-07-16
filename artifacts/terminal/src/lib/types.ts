@@ -27,7 +27,8 @@ export interface Settings {
 export interface BuyerActivity {
   wallet: string;
   amountUsd: number;
-  timestamp: number;
+  timestamp: number;   // on-chain blockTime ms
+  detectedAt: number;  // Date.now() when bot processed — use this for display
   txSig: string;
   priceAtDetection: number;
 }
@@ -111,7 +112,8 @@ export interface BuyerActivityLog {
   symbol: string;
   wallet: string;
   amountUsd: number;
-  timestamp: number;
+  timestamp: number;   // on-chain blockTime ms — used for consensus window logic
+  detectedAt: number;  // Date.now() when the bot processed the tx — use for display
   txSig: string;
   entered: boolean;
   skipReason?: string;

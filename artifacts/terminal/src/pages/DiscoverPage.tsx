@@ -287,7 +287,7 @@ function TrackedCard({ tok, tick }: { tok: TrackedToken; tick: number }) {
               background: b.amountUsd >= 2250 ? 'rgba(0,191,255,0.18)' : b.amountUsd >= 1500 ? 'rgba(0,191,255,0.11)' : 'rgba(0,191,255,0.06)',
               color: C.accent, border: '1px solid rgba(0,191,255,0.2)',
             }}>
-              📈 {fmtUsd(b.amountUsd)} · {timeAgo(b.timestamp)}
+              📈 {fmtUsd(b.amountUsd)} · {timeAgo(b.detectedAt ?? b.timestamp)}
             </span>
           ))}
         </div>
@@ -341,7 +341,7 @@ function BuyerActivityRow({ entry }: { entry: BuyerActivityLog }) {
           )}
         </div>
         <div style={{ fontSize: 8, color: C.gray, marginTop: 2 }}>
-          {shortAddr(entry.wallet)} · {timeAgo(entry.timestamp)}
+          {shortAddr(entry.wallet)} · {timeAgo(entry.detectedAt ?? entry.timestamp)}
         </div>
       </div>
     </div>
