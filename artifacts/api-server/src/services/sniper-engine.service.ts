@@ -82,6 +82,7 @@ export interface TrackedToken {
   txnsH24Buys?: number;
   txnsH24Sells?: number;
   lastMarketUpdate?: number;
+  pairCreatedAt?: number;  // unix ms — when the pool was listed on DexScreener
 }
 
 export interface SniperPosition {
@@ -390,6 +391,7 @@ interface DexMarketData {
   symbol: string;
   pairAddress: string;
   dexId: string;
+  pairCreatedAt: number;  // unix ms
 }
 
 async function fetchTokenPrice(mint: string): Promise<DexMarketData> {
@@ -398,7 +400,7 @@ async function fetchTokenPrice(mint: string): Promise<DexMarketData> {
     priceChange5m: 0, priceChange1h: 0, priceChange24h: 0,
     volume5m: 0, volume1h: 0, volume24h: 0,
     txnsH1Buys: 0, txnsH1Sells: 0, txnsH24Buys: 0, txnsH24Sells: 0,
-    name: '', symbol: '', pairAddress: '', dexId: '',
+    name: '', symbol: '', pairAddress: '', dexId: '', pairCreatedAt: 0,
   };
   try {
     const r    = await axios.get<any>(`${DEX_BASE}/latest/dex/tokens/${mint}`, { timeout: 6_000 });
@@ -430,6 +432,7 @@ async function fetchTokenPrice(mint: string): Promise<DexMarketData> {
       symbol:         best?.baseToken?.symbol   ?? '',
       pairAddress:    best?.pairAddress         ?? '',
       dexId:          best?.dexId              ?? '',
+      pairCreatedAt:  best?.pairCreatedAt       ?? 0,
     };
   } catch {
     return empty;
@@ -917,6 +920,32 @@ export async function restoreSniperPositionsFromDB(): Promise<void> {
   }
 }
 
+// ── Freeze-authority check ────────────────────────────────────────────────────
+// SPL Token mint layout (82 bytes):
+//   0–3  mint_authority COption header (0=None, 1=Some)
+//   4–35 mint_authority pubkey
+//   36–43 supply (u64)
+//   44   decimals
+//   45   is_initialized
+//   46–49 freeze_authority COption header (0=None, 1=Some) ← we check this
+//   50–81 freeze_authority pubkey
+// Returns true only when freeze_authority is confirmed present.
+// On RPC failure returns false (fail-open) so a network hiccup never blocks entry.
+async function isMintFreezable(mint: string): Promise<boolean> {
+  try {
+    const conn = getConn();
+    const info = await withHeliusLimit(
+      () => conn.getAccountInfo(new PublicKey(mint), 'confirmed'),
+      { priority: false },
+    ).catch(() => null);
+    if (!info?.data || info.data.length < 50) return false;
+    const freezeOption = info.data.readUInt32LE(46);
+    return freezeOption === 1;
+  } catch {
+    return false; // fail-open: don't block on RPC errors
+  }
+}
+
 // ── Position entry ────────────────────────────────────────────────────────────
 
 async function enterSniperPosition(
@@ -1323,6 +1352,46 @@ async function handleVolumeUpdate(
     if (buyLog.length > MAX_BUY_LOG) buyLog.pop();
     broadcastSniperStatus();
     return;
+  }
+
+  // ── Quality filters — evaluated before every entry ────────────────────────
+  // These run after consensus triggers so the signal appears in the buy log
+  // with a clear skip reason rather than silently disappearing.
+
+  // 1. Minimum pool liquidity: $30,000
+  const liqAtSignal = tok.liquidity ?? 0;
+  if (liqAtSignal < 30_000) {
+    entry.skipReason = `Low liquidity ${liqAtSignal.toFixed(0)} < $30,000 min`;
+    buyLog.unshift(entry); if (buyLog.length > MAX_BUY_LOG) buyLog.pop();
+    broadcastSniperStatus(); return;
+  }
+
+  // 2. Minimum pooled SOL: 100 SOL
+  // PumpSwap is a balanced CPMM — SOL side ≈ half of total liquidity.
+  const solPx = cachedSolPrice > 0 ? cachedSolPrice : 150;
+  const pooledSolEst = liqAtSignal / 2 / solPx;
+  if (pooledSolEst < 100) {
+    entry.skipReason = `Pooled SOL ~${pooledSolEst.toFixed(1)} SOL < 100 SOL min (liq ${liqAtSignal.toFixed(0)}, SOL ${solPx.toFixed(0)})`;
+    buyLog.unshift(entry); if (buyLog.length > MAX_BUY_LOG) buyLog.pop();
+    broadcastSniperStatus(); return;
+  }
+
+  // 3. Minimum token age: 10 minutes from pool creation
+  // Use DexScreener pairCreatedAt when available; fall back to migration detection time.
+  const poolBornMs = tok.pairCreatedAt ?? tok.migrationTime;
+  const ageMinutes = (Date.now() - poolBornMs) / 60_000;
+  if (ageMinutes < 10) {
+    entry.skipReason = `Token too new — ${ageMinutes.toFixed(1)} min old (min 10 min)`;
+    buyLog.unshift(entry); if (buyLog.length > MAX_BUY_LOG) buyLog.pop();
+    broadcastSniperStatus(); return;
+  }
+
+  // 4. Skip tokens with freeze authority (freezable mint)
+  const freezable = await isMintFreezable(mint);
+  if (freezable) {
+    entry.skipReason = 'Freeze authority present — token is freezable, skipped';
+    buyLog.unshift(entry); if (buyLog.length > MAX_BUY_LOG) buyLog.pop();
+    broadcastSniperStatus(); return;
   }
 
   const modeLabel = result.mode === 'solo'
@@ -1993,6 +2062,7 @@ async function enrichTokenMetadataAsync(mint: string, activatedAt: number): Prom
       tokNow.txnsH24Buys     = best?.txns?.h24?.buys  ?? 0;
       tokNow.txnsH24Sells    = best?.txns?.h24?.sells ?? 0;
       tokNow.lastMarketUpdate = Date.now();
+      if (best?.pairCreatedAt) tokNow.pairCreatedAt = best.pairCreatedAt;
 
       logger.info(
         { mint: mint.slice(0, 12), symbol, dex: best?.dexId, liq: liquidity.toFixed(0),
@@ -2110,6 +2180,8 @@ async function refreshTrackedTokensMarketData(): Promise<void> {
         tok.txnsH24Sells    = d.txnsH24Sells;
         // Backfill poolAddress from DexScreener if we didn't have it
         if (!tok.poolAddress && d.pairAddress) tok.poolAddress = d.pairAddress;
+        // Backfill pairCreatedAt (pool listing time) — used for the 10-min age gate
+        if (!tok.pairCreatedAt && d.pairCreatedAt) tok.pairCreatedAt = d.pairCreatedAt;
         // Backfill name/symbol if still on placeholder (enrichMetadataAsync may have timed out)
         if (tok.name.endsWith('…') && d.name) { tok.name = d.name; tok.symbol = d.symbol; }
       }
