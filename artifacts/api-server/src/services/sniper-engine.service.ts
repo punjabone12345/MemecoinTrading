@@ -1396,6 +1396,27 @@ async function handleVolumeUpdate(
   // These run after consensus triggers so the signal appears in the buy log
   // with a clear skip reason rather than silently disappearing.
 
+  // Refresh market data immediately before quality filters.
+  // tok.liquidity is updated by enrichTokenMetadataAsync (15 s cadence) which
+  // may be up to 15 s stale.  DexScreener also underreports liquidity for
+  // 30–90 s after pool creation due to indexing lag.  A fresh fetch here
+  // ensures the entry decision uses real-time data and not a stale cached value.
+  try {
+    const freshData = await fetchTokenPrice(mint);
+    if (freshData.liquidity > 0) {
+      tok.liquidity     = freshData.liquidity;
+      if (freshData.mcap > 0)   tok.mcap  = freshData.mcap;
+      if (freshData.price > 0)  tok.price = freshData.price;
+      tok.priceChange1h  = freshData.priceChange1h;
+      tok.volume24h      = freshData.volume24h;
+      if (!tok.pairCreatedAt && freshData.pairCreatedAt) tok.pairCreatedAt = freshData.pairCreatedAt;
+    }
+    logger.info(
+      { mint: mint.slice(0, 12), freshLiq: (freshData.liquidity ?? 0).toFixed(0) },
+      'Sniper engine: pre-entry fresh DexScreener fetch',
+    );
+  } catch { /* non-fatal — fall back to cached tok.liquidity */ }
+
   // 1. Minimum pool liquidity: $30,000
   const liqAtSignal = tok.liquidity ?? 0;
   if (liqAtSignal < 30_000) {
@@ -2097,15 +2118,21 @@ function pruneToken(mint: string): void {
 // Does NOT gate trading — polling is already running in parallel.
 async function enrichTokenMetadataAsync(mint: string, activatedAt: number): Promise<void> {
   const deadline = activatedAt + POOL_WAIT_TIMEOUT_MS;
+  // Once the initial name+liq is set we slow down to 15 s refreshes rather than
+  // stopping altogether.  Liquidity can grow 2–3× in the first few minutes after
+  // graduation as LPs add, so keeping tok.liquidity current is critical for the
+  // entry quality-gate check (which reads this field directly).
+  let initialEnrichDone = false;
 
   while (Date.now() < deadline) {
-    await new Promise(r => setTimeout(r, POOL_WAIT_POLL_MS));
+    // Fast poll (3 s) until we have name+liq; slow poll (15 s) afterwards.
+    const pollMs = initialEnrichDone ? 15_000 : POOL_WAIT_POLL_MS;
+    await new Promise(r => setTimeout(r, pollMs));
 
     const tok = trackedTokens.get(mint);
     if (!tok) return; // token was pruned
-
-    // Already enriched (name no longer a placeholder)
-    if (!tok.name.endsWith('…') && tok.liquidity && tok.liquidity > 0) return;
+    // Stop once an entry is live — the position monitor owns market-data refresh.
+    if (tok.entryTriggered || openPositions.has(mint)) return;
 
     try {
       const r = await axios.get<any>(`${DEX_BASE}/latest/dex/tokens/${mint}`, { timeout: 8_000 });
@@ -2133,7 +2160,7 @@ async function enrichTokenMetadataAsync(mint: string, activatedAt: number): Prom
       tokNow.dexId           = best?.dexId ?? '';
       tokNow.price           = parseFloat(best?.priceUsd ?? '0');
       tokNow.mcap            = best?.marketCap ?? best?.fdv ?? 0;
-      tokNow.liquidity       = liquidity;
+      if (liquidity > 0) tokNow.liquidity = liquidity; // never overwrite a real value with 0
       tokNow.priceChange5m   = best?.priceChange?.m5  ?? 0;
       tokNow.priceChange1h   = best?.priceChange?.h1  ?? 0;
       tokNow.priceChange24h  = best?.priceChange?.h24 ?? 0;
@@ -2147,13 +2174,25 @@ async function enrichTokenMetadataAsync(mint: string, activatedAt: number): Prom
       tokNow.lastMarketUpdate = Date.now();
       if (best?.pairCreatedAt) tokNow.pairCreatedAt = best.pairCreatedAt;
 
-      logger.info(
-        { mint: mint.slice(0, 12), symbol, dex: best?.dexId, liq: liquidity.toFixed(0),
-          enrichSec: Math.round((Date.now() - activatedAt) / 1_000) },
-        'Sniper engine: token metadata enriched from DexScreener',
-      );
-      broadcastSniperStatus();
-      return; // done
+      if (!initialEnrichDone) {
+        logger.info(
+          { mint: mint.slice(0, 12), symbol, dex: best?.dexId, liq: liquidity.toFixed(0),
+            enrichSec: Math.round((Date.now() - activatedAt) / 1_000) },
+          'Sniper engine: token metadata enriched from DexScreener',
+        );
+        broadcastSniperStatus();
+        initialEnrichDone = true;
+      } else if (liquidity > 0) {
+        // Quiet liq refresh — log only when liq changed meaningfully (>5%)
+        const prev = tokNow.liquidity ?? 0;
+        if (prev > 0 && Math.abs(liquidity - prev) / prev > 0.05) {
+          logger.info(
+            { mint: mint.slice(0, 12), liqPrev: prev.toFixed(0), liqNow: liquidity.toFixed(0) },
+            'Sniper engine: liquidity refreshed',
+          );
+        }
+        broadcastSniperStatus();
+      }
     } catch { /* non-fatal — keep retrying */ }
   }
 
