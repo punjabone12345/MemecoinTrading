@@ -400,6 +400,66 @@ interface DexMarketData {
   pairCreatedAt: number;  // unix ms
 }
 
+function parseDexPair(best: any): DexMarketData {
+  return {
+    price:          parseFloat(best?.priceUsd ?? '0'),
+    liquidity:      best?.liquidity?.usd      ?? 0,
+    mcap:           best?.marketCap ?? best?.fdv ?? 0,
+    priceChange5m:  best?.priceChange?.m5     ?? 0,
+    priceChange1h:  best?.priceChange?.h1     ?? 0,
+    priceChange24h: best?.priceChange?.h24    ?? 0,
+    volume5m:       best?.volume?.m5          ?? 0,
+    volume1h:       best?.volume?.h1          ?? 0,
+    volume24h:      best?.volume?.h24         ?? 0,
+    txnsH1Buys:     best?.txns?.h1?.buys      ?? 0,
+    txnsH1Sells:    best?.txns?.h1?.sells     ?? 0,
+    txnsH24Buys:    best?.txns?.h24?.buys     ?? 0,
+    txnsH24Sells:   best?.txns?.h24?.sells    ?? 0,
+    name:           best?.baseToken?.name     ?? '',
+    symbol:         best?.baseToken?.symbol   ?? '',
+    pairAddress:    best?.pairAddress         ?? '',
+    dexId:          best?.dexId              ?? '',
+    pairCreatedAt:  best?.pairCreatedAt       ?? 0,
+  };
+}
+
+function pickBestPair(pairs: any[]): any | null {
+  if (!pairs.length) return null;
+  // Prefer pumpswap (canonical graduation DEX), then highest-liquidity pair
+  const pumpswap = pairs
+    .filter((p: any) => (p.dexId ?? '').toLowerCase() === 'pumpswap')
+    .sort((a: any, b: any) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0));
+  const byLiq = [...pairs].sort((a: any, b: any) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0));
+  return pumpswap[0] ?? byLiq[0];
+}
+
+// Fetch market data for up to 30 mints in a single DexScreener request.
+// Returns a map of mint → DexMarketData for mints that had results.
+async function fetchTokenPriceBatch(mints: string[]): Promise<Map<string, DexMarketData>> {
+  const result = new Map<string, DexMarketData>();
+  if (!mints.length) return result;
+  try {
+    const url = DEX_BASE + '/latest/dex/tokens/' + mints.join(',');
+    const r   = await axios.get<any>(url, { timeout: 8_000 });
+    const pairs: any[] = r.data?.pairs ?? [];
+    // Group pairs by base token address, pick the best pair per mint
+    const byMint = new Map<string, any[]>();
+    for (const pair of pairs) {
+      const addr: string = (pair?.baseToken?.address ?? '').toLowerCase();
+      if (!addr) continue;
+      if (!byMint.has(addr)) byMint.set(addr, []);
+      byMint.get(addr)!.push(pair);
+    }
+    for (const mint of mints) {
+      const candidates = byMint.get(mint.toLowerCase()) ?? [];
+      const best = pickBestPair(candidates);
+      if (best) result.set(mint, parseDexPair(best));
+    }
+  } catch { /* return whatever we have so far */ }
+  return result;
+}
+
+// Single-mint fallback — still used by non-refresh paths (entry price checks, etc.)
 async function fetchTokenPrice(mint: string): Promise<DexMarketData> {
   const empty: DexMarketData = {
     price: 0, liquidity: 0, mcap: 0,
@@ -409,37 +469,11 @@ async function fetchTokenPrice(mint: string): Promise<DexMarketData> {
     name: '', symbol: '', pairAddress: '', dexId: '', pairCreatedAt: 0,
   };
   try {
-    const r    = await axios.get<any>(`${DEX_BASE}/latest/dex/tokens/${mint}`, { timeout: 6_000 });
+    const r    = await axios.get<any>(DEX_BASE + '/latest/dex/tokens/' + mint, { timeout: 6_000 });
     const all: any[] = r.data?.pairs ?? [];
-    if (!all.length) return empty;
-
-    // Prefer pumpswap (the canonical graduation DEX), fall back to highest-liquidity pair
-    const pumpswap = all
-      .filter((p: any) => (p.dexId ?? '').toLowerCase() === 'pumpswap')
-      .sort((a: any, b: any) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0));
-    const byLiq = [...all].sort((a: any, b: any) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0));
-    const best  = pumpswap[0] ?? byLiq[0];
-
-    return {
-      price:          parseFloat(best?.priceUsd ?? '0'),
-      liquidity:      best?.liquidity?.usd      ?? 0,
-      mcap:           best?.marketCap ?? best?.fdv ?? 0,
-      priceChange5m:  best?.priceChange?.m5     ?? 0,
-      priceChange1h:  best?.priceChange?.h1     ?? 0,
-      priceChange24h: best?.priceChange?.h24    ?? 0,
-      volume5m:       best?.volume?.m5          ?? 0,
-      volume1h:       best?.volume?.h1          ?? 0,
-      volume24h:      best?.volume?.h24         ?? 0,
-      txnsH1Buys:     best?.txns?.h1?.buys      ?? 0,
-      txnsH1Sells:    best?.txns?.h1?.sells     ?? 0,
-      txnsH24Buys:    best?.txns?.h24?.buys     ?? 0,
-      txnsH24Sells:   best?.txns?.h24?.sells    ?? 0,
-      name:           best?.baseToken?.name     ?? '',
-      symbol:         best?.baseToken?.symbol   ?? '',
-      pairAddress:    best?.pairAddress         ?? '',
-      dexId:          best?.dexId              ?? '',
-      pairCreatedAt:  best?.pairCreatedAt       ?? 0,
-    };
+    const best = pickBestPair(all);
+    if (!best) return empty;
+    return parseDexPair(best);
   } catch {
     return empty;
   }
@@ -2271,49 +2305,77 @@ function broadcastSniperStatus(): void {
 }
 
 // ── Periodic market data refresh for active tracked tokens ────────────────────
+//
+// Uses DexScreener's batch endpoint (up to 30 mints per request) so that
+// 128 tracked tokens are refreshed in ~5 requests instead of 128 serial calls.
+// Old approach: 128 tokens × 500ms stagger = 64s per cycle (completely broken).
+// New approach: ceil(128/30) = 5 batches × 300ms inter-batch pause = ~5s per cycle.
 
-const MARKET_REFRESH_MS     = 10_000; // refresh every 10s (was 30s — too slow for active tracking)
-const MARKET_REFRESH_STAGGER = 500;   // ms between each token to avoid rate-limit spikes
+const MARKET_REFRESH_MS       = 10_000; // interval between refresh cycles
+const MARKET_BATCH_SIZE       = 30;     // DexScreener batch limit
+const MARKET_BATCH_PAUSE_MS   = 300;    // pause between batches to avoid rate-limits
+
+function applyDexData(tok: TrackedToken, d: DexMarketData): void {
+  tok.lastMarketUpdate = Date.now();
+  if (d.price > 0) {
+    tok.dexId           = d.dexId;
+    tok.price           = d.price;
+    tok.mcap            = d.mcap;
+    tok.liquidity       = d.liquidity;
+    tok.priceChange5m   = d.priceChange5m;
+    tok.priceChange1h   = d.priceChange1h;
+    tok.priceChange24h  = d.priceChange24h;
+    tok.volume5m        = d.volume5m;
+    tok.volume1h        = d.volume1h;
+    tok.volume24h       = d.volume24h;
+    tok.txnsH1Buys      = d.txnsH1Buys;
+    tok.txnsH1Sells     = d.txnsH1Sells;
+    tok.txnsH24Buys     = d.txnsH24Buys;
+    tok.txnsH24Sells    = d.txnsH24Sells;
+    if (!tok.poolAddress && d.pairAddress)  tok.poolAddress  = d.pairAddress;
+    if (!tok.pairCreatedAt && d.pairCreatedAt) tok.pairCreatedAt = d.pairCreatedAt;
+    if (tok.name.endsWith('…') && d.name)   { tok.name = d.name; tok.symbol = d.symbol; }
+  }
+}
 
 async function refreshTrackedTokensMarketData(): Promise<void> {
-  const mints = Array.from(trackedTokens.keys());
-  let updated = false;
-  for (const mint of mints) {
-    try {
-      const d = await fetchTokenPrice(mint);
-      // Re-read after await — token may have been pruned while we were fetching
-      const tok = trackedTokens.get(mint);
-      if (!tok) continue;
-      // Always advance the timestamp so the UI doesn't show a frozen "Xm ago".
-      // Only overwrite market values when DexScreener returned real data.
-      tok.lastMarketUpdate = Date.now();
-      if (d.price > 0) {
-        tok.dexId           = d.dexId;
-        tok.price           = d.price;
-        tok.mcap            = d.mcap;
-        tok.liquidity       = d.liquidity;
-        tok.priceChange5m   = d.priceChange5m;
-        tok.priceChange1h   = d.priceChange1h;
-        tok.priceChange24h  = d.priceChange24h;
-        tok.volume5m        = d.volume5m;
-        tok.volume1h        = d.volume1h;
-        tok.volume24h       = d.volume24h;
-        tok.txnsH1Buys      = d.txnsH1Buys;
-        tok.txnsH1Sells     = d.txnsH1Sells;
-        tok.txnsH24Buys     = d.txnsH24Buys;
-        tok.txnsH24Sells    = d.txnsH24Sells;
-        // Backfill poolAddress from DexScreener if we didn't have it
-        if (!tok.poolAddress && d.pairAddress) tok.poolAddress = d.pairAddress;
-        // Backfill pairCreatedAt (pool listing time) — used for the 10-min age gate
-        if (!tok.pairCreatedAt && d.pairCreatedAt) tok.pairCreatedAt = d.pairCreatedAt;
-        // Backfill name/symbol if still on placeholder (enrichMetadataAsync may have timed out)
-        if (tok.name.endsWith('…') && d.name) { tok.name = d.name; tok.symbol = d.symbol; }
-      }
-      updated = true;
-    } catch { /* non-fatal — keep stale data */ }
-    await new Promise(r => setTimeout(r, MARKET_REFRESH_STAGGER));
+  const allMints = Array.from(trackedTokens.keys());
+  if (!allMints.length) return;
+
+  // Chunk into batches of MARKET_BATCH_SIZE
+  const batches: string[][] = [];
+  for (let i = 0; i < allMints.length; i += MARKET_BATCH_SIZE) {
+    batches.push(allMints.slice(i, i + MARKET_BATCH_SIZE));
   }
-  if (updated) broadcastSniperStatus();
+
+  let updated = false;
+  for (let bi = 0; bi < batches.length; bi++) {
+    const batch = batches[bi];
+    try {
+      const dataMap = await fetchTokenPriceBatch(batch);
+      const now = Date.now();
+      for (const mint of batch) {
+        const tok = trackedTokens.get(mint);
+        if (!tok) continue;
+        const d = dataMap.get(mint);
+        if (d) {
+          applyDexData(tok, d);
+        } else {
+          // No data returned for this mint — still advance timestamp so UI doesn't freeze
+          tok.lastMarketUpdate = now;
+        }
+        updated = true;
+      }
+      // Broadcast after each batch so the UI gets partial updates immediately
+      // rather than waiting for all batches to complete
+      if (updated) broadcastSniperStatus();
+    } catch { /* non-fatal — keep stale data for this batch */ }
+
+    // Pause between batches (skip after the last one)
+    if (bi < batches.length - 1) {
+      await new Promise(r => setTimeout(r, MARKET_BATCH_PAUSE_MS));
+    }
+  }
 }
 
 // Non-overlapping market refresh: waits for each run to finish before scheduling the next
