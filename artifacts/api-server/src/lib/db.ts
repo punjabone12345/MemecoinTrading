@@ -507,5 +507,81 @@ export async function initDB(): Promise<void> {
     )
   `);
 
+  // ── Diagnostic tables ─────────────────────────────────────────────────────
+  // One record per mint — updated incrementally, never duplicated.
+
+  await query(`
+    CREATE TABLE IF NOT EXISTS diag_tokens (
+      mint                      TEXT PRIMARY KEY,
+      name                      TEXT NOT NULL DEFAULT '',
+      symbol                    TEXT NOT NULL DEFAULT '',
+      first_seen_at             BIGINT NOT NULL,
+      discovery_source          TEXT NOT NULL DEFAULT '',
+      -- Snapshot at first discovery
+      initial_mc                NUMERIC DEFAULT 0,
+      initial_liquidity         NUMERIC DEFAULT 0,
+      initial_volume            NUMERIC DEFAULT 0,
+      initial_buy_sell_ratio    NUMERIC DEFAULT 0,
+      -- Current values (refreshed on every scan)
+      current_mc                NUMERIC DEFAULT 0,
+      current_liquidity         NUMERIC DEFAULT 0,
+      current_volume            NUMERIC DEFAULT 0,
+      current_buy_sell_ratio    NUMERIC DEFAULT 0,
+      current_wallet_score      NUMERIC DEFAULT 0,
+      current_qualifying_wallets INTEGER DEFAULT 0,
+      current_age_minutes       NUMERIC DEFAULT 0,
+      -- Peak values reached at any point during tracking
+      highest_mc                NUMERIC DEFAULT 0,
+      highest_liquidity         NUMERIC DEFAULT 0,
+      highest_volume            NUMERIC DEFAULT 0,
+      highest_buy_sell_ratio    NUMERIC DEFAULT 0,
+      highest_wallet_score      NUMERIC DEFAULT 0,
+      highest_qualifying_wallets INTEGER DEFAULT 0,
+      -- Scan counter
+      scan_count                INTEGER NOT NULL DEFAULT 0,
+      -- First-ever timestamp each filter was passed (NULL = never passed)
+      passed_mc_at              BIGINT,
+      passed_liquidity_at       BIGINT,
+      passed_volume_at          BIGINT,
+      passed_rugcheck_at        BIGINT,
+      passed_holder_at          BIGINT,
+      passed_creator_at         BIGINT,
+      passed_wallet_at          BIGINT,
+      passed_entry_at           BIGINT,
+      -- Final status
+      status                    TEXT NOT NULL DEFAULT 'DISCOVERED',
+      reject_reason             TEXT,
+      -- Trade details (populated when status = TRADED)
+      entry_time                BIGINT,
+      entry_price               NUMERIC,
+      entry_mc                  NUMERIC,
+      entry_wallet_score        NUMERIC,
+      entry_qualifying_wallets  INTEGER,
+      entry_mode                TEXT,
+      entry_risk_tier           TEXT,
+      entry_reason              TEXT,
+      -- Timestamps
+      last_updated              BIGINT NOT NULL DEFAULT 0,
+      created_at                BIGINT NOT NULL
+    )
+  `);
+  await query(`CREATE INDEX IF NOT EXISTS idx_diag_tokens_status      ON diag_tokens (status)`);
+  await query(`CREATE INDEX IF NOT EXISTS idx_diag_tokens_created_at  ON diag_tokens (created_at DESC)`);
+  await query(`CREATE INDEX IF NOT EXISTS idx_diag_tokens_last_updated ON diag_tokens (last_updated DESC)`);
+
+  // Technical error log — separate table, one row per error event
+  await query(`
+    CREATE TABLE IF NOT EXISTS diag_errors (
+      id           BIGSERIAL PRIMARY KEY,
+      error_type   TEXT NOT NULL,
+      message      TEXT NOT NULL,
+      mint         TEXT,
+      details      JSONB,
+      occurred_at  BIGINT NOT NULL
+    )
+  `);
+  await query(`CREATE INDEX IF NOT EXISTS idx_diag_errors_occurred_at ON diag_errors (occurred_at DESC)`);
+  await query(`CREATE INDEX IF NOT EXISTS idx_diag_errors_type        ON diag_errors (error_type)`);
+
   logger.info('Database initialized');
 }

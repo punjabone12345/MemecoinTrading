@@ -2,6 +2,7 @@ import { Router } from 'express';
 import scannerRouter from './scanner.js';
 import settingsRouter from './settings.js';
 import sniperRouter from './sniper.js';
+import diagnosticsRouter from './diagnostics.js';
 import { getTrenchesDiagnostics } from '../services/trenches.service.js';
 import { isHeliusCoolingDown, heliusCooldownRemainingMs } from '../lib/helius-limiter.js';
 
@@ -48,5 +49,6 @@ router.get('/config', (_req, res) => {
 router.use('/scanner', scannerRouter);
 router.use('/settings', settingsRouter);
 router.use('/sniper', sniperRouter);
+router.use('/diagnostics', diagnosticsRouter);
 
 export default router;

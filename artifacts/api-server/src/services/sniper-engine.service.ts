@@ -9,6 +9,10 @@ import { withHeliusLimit, isHeliusCoolingDown } from '../lib/helius-limiter.js';
 import { subscribeLogs, isHeliusWsConfigured } from '../lib/helius-ws-shared.js';
 import { evaluateBuy, clearMintConsensus, resetConsensusState, ConsensusResult } from './wallet-consensus.service.js';
 import { isGmgnConfigured, getGmgnBannedUntil } from '../lib/gmgn-client.js';
+import {
+  diagTokenDiscovered, diagTokenScanned, diagTokenRejected,
+  diagTokenTraded, diagTokenExpired, diagTechError,
+} from '../lib/diagnostics.js';
 
 const MAX_TRACKING_MS       = 60 * 60 * 1_000; // 1 hour — matches DexScreener discovery tracking window
 const MAX_POSITIONS         = 10;
@@ -322,6 +326,7 @@ async function loadSlippageSkippedMintsFromDB(): Promise<void> {
 
 async function markMintSlippageSkipped(mint: string, slipPct: number): Promise<void> {
   slippageSkippedMints.add(mint);
+  void diagTokenRejected(mint, `Slippage: token pumped ${slipPct.toFixed(1)}% too fast before entry`).catch(() => {});
   try {
     await query(
       `INSERT INTO slippage_skipped_mints (mint, skipped_at, slip_pct) VALUES ($1, $2, $3) ON CONFLICT (mint) DO NOTHING`,
@@ -1042,6 +1047,7 @@ async function enterSniperPosition(
     // and will return the pre-buyer-pump price, making our entry price completely wrong.
     if (delayedPrice === 0) {
       logger.warn({ mint: mint.slice(0, 12), symbol }, 'Sniper engine: all price sources failed — skipping entry (will retry on next buyer buy)');
+      void diagTechError('PRICE_FETCH_FAILED', 'All price sources failed — entry skipped', mint.slice(0, 12)).catch(() => {});
       if (tok) tok.entryTriggered = false; // allow future qualifying buys to trigger
       return;
     }
@@ -1126,6 +1132,18 @@ async function enterSniperPosition(
     openPositions.set(mint, pos);
     void saveSniperPosition(pos);
     void markMintTraded(mint);
+    void diagTokenTraded(mint, {
+      entryTime:              entryTimestamp,
+      entryPrice:             finalEntryPrice,
+      entryMc:                mcapAtEntry,
+      walletScore:            entryScore,
+      qualifyingWalletsCount,
+      entryMode,
+      riskTier:               `Tier ${tpTier}`,
+      entryReason:            entryMode === 'solo'
+        ? `Solo conviction (score ${entryScore} >= 95)`
+        : `Consensus (${qualifyingWalletsCount} wallets >= 80)`,
+    }).catch(() => {});
 
     if (tok) tok.entryTriggered = true;
 
@@ -1318,6 +1336,7 @@ async function handleVolumeUpdate(
     // Elevated to warn — this was silently swallowed at debug level before,
     // making GMGN failures invisible in production logs.
     logger.warn({ mint: mint.slice(0, 12), err: err?.message }, 'Sniper engine: consensus evaluation failed — skipping buy');
+    void diagTechError('CONSENSUS_EVAL_FAILED', err?.message ?? 'unknown error', mint.slice(0, 12)).catch(() => {});
     return;
   }
 
@@ -1328,6 +1347,21 @@ async function handleVolumeUpdate(
     walletScore: result.score, consensusMode: result.mode,
     qualifyingWalletsCount: result.qualifyingWallets.length,
   };
+
+  // ── Diagnostic: record every evaluated buy (fire-and-forget) ─────────────
+  void diagTokenScanned(mint, {
+    name:   tok.name,
+    symbol: tok.symbol,
+    currentMc:           tok.mcap,
+    currentLiquidity:    tok.liquidity,
+    currentVolume:       tok.volume24h,
+    currentBuySellRatio: (tok.txnsH1Buys != null && tok.txnsH1Sells != null && tok.txnsH1Sells > 0)
+      ? tok.txnsH1Buys / tok.txnsH1Sells : undefined,
+    walletScore:            result.score,
+    qualifyingWalletsCount: result.qualifyingWallets.length,
+    ageMinutes:             (Date.now() - (tok.pairCreatedAt ?? tok.migrationTime)) / 60_000,
+    passedWallet:           result.trigger,
+  }).catch(() => {});
 
   if (!result.trigger) {
     // Every evaluated buyer is logged for visibility, even scores below the
@@ -1362,6 +1396,7 @@ async function handleVolumeUpdate(
   const liqAtSignal = tok.liquidity ?? 0;
   if (liqAtSignal < 30_000) {
     entry.skipReason = `Low liquidity ${liqAtSignal.toFixed(0)} < $30,000 min`;
+    void diagTokenRejected(mint, `Liquidity: ${liqAtSignal.toFixed(0)} < $30,000 min`).catch(() => {});
     buyLog.unshift(entry); if (buyLog.length > MAX_BUY_LOG) buyLog.pop();
     broadcastSniperStatus(); return;
   }
@@ -1372,6 +1407,7 @@ async function handleVolumeUpdate(
   const pooledSolEst = liqAtSignal / 2 / solPx;
   if (pooledSolEst < 100) {
     entry.skipReason = `Pooled SOL ~${pooledSolEst.toFixed(1)} SOL < 100 SOL min (liq ${liqAtSignal.toFixed(0)}, SOL ${solPx.toFixed(0)})`;
+    void diagTokenRejected(mint, `Pooled SOL: ~${pooledSolEst.toFixed(1)} SOL < 100 SOL min`).catch(() => {});
     buyLog.unshift(entry); if (buyLog.length > MAX_BUY_LOG) buyLog.pop();
     broadcastSniperStatus(); return;
   }
@@ -1382,6 +1418,7 @@ async function handleVolumeUpdate(
   const ageMinutes = (Date.now() - poolBornMs) / 60_000;
   if (ageMinutes < 10) {
     entry.skipReason = `Token too new — ${ageMinutes.toFixed(1)} min old (min 10 min)`;
+    void diagTokenRejected(mint, `Too new: ${ageMinutes.toFixed(1)} min old (min 10 min)`).catch(() => {});
     buyLog.unshift(entry); if (buyLog.length > MAX_BUY_LOG) buyLog.pop();
     broadcastSniperStatus(); return;
   }
@@ -1390,6 +1427,7 @@ async function handleVolumeUpdate(
   const freezable = await isMintFreezable(mint);
   if (freezable) {
     entry.skipReason = 'Freeze authority present — token is freezable, skipped';
+    void diagTokenRejected(mint, 'Freeze authority present').catch(() => {});
     buyLog.unshift(entry); if (buyLog.length > MAX_BUY_LOG) buyLog.pop();
     broadcastSniperStatus(); return;
   }
@@ -1861,6 +1899,7 @@ function pruneExpiredTracking(): void {
     // Do NOT close the position when tracking window expires — positions are
     // held indefinitely and exited only by TP/SL/liquidity/stagnation rules.
     // monitorPositions() continues to track the mint independently via openPositions.
+    void diagTokenExpired(mint).catch(() => {});
     pruned++;
   }
   const keep = signalQueue.filter(s => trackedTokens.has(s.mint));
@@ -1979,6 +2018,7 @@ async function validateOrPrune(mint: string, activatedAt: number): Promise<void>
           { mint: mint.slice(0, 12), liq: liq.toFixed(0), minLiq: MIN_POOL_LIQUIDITY_USD },
           'Sniper engine: pool liquidity below minimum — pruning token (micro/seeded grad)',
         );
+        void diagTokenRejected(mint, `Pool liquidity ${liq.toFixed(0)} < ${MIN_POOL_LIQUIDITY_USD} minimum (micro/seeded grad)`).catch(() => {});
         pruneToken(mint);
         return;
       }
@@ -1991,6 +2031,7 @@ async function validateOrPrune(mint: string, activatedAt: number): Promise<void>
   // Deadline reached: no qualified pool found → re-check entry state before pruning
   if (!trackedTokens.get(mint)?.entryTriggered && !openPositions.has(mint)) {
     logger.warn({ mint: mint.slice(0, 12) }, 'Sniper engine: no qualified post-grad pool within 60s — pruning token');
+    void diagTokenRejected(mint, 'No qualified pool within validation timeout').catch(() => {});
     pruneToken(mint);
   }
 }
@@ -2109,6 +2150,7 @@ export function addGraduatedToken(ev: { mint: string; poolAddress?: string; ts: 
     poolAddress: ev.poolAddress,
     detectedAt,
   });
+  void diagTokenDiscovered(ev.mint, 'gecko_terminal', {}).catch(() => {});
 
   logger.info(
     { mint: ev.mint.slice(0, 16), pool: ev.poolAddress?.slice(0, 16) },
