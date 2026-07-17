@@ -1983,11 +1983,27 @@ async function activateTrackingNow(mint: string): Promise<void> {
 // Real graduates (~$1-3k seed liquidity) clear the bar well within the timeout.
 // Buys can still be detected and entered during the 20s window — in practice
 // nobody can buy $500+ into a $2-liquidity pool, so no false entries occur.
+//
+// IMPORTANT: When DexScreener returns a pair with liq=0 or liq<MIN, we do NOT
+// prune immediately. DexScreener commonly shows liq=0 for 30–90s after a new
+// PumpSwap pool is created, because the liquidity data hasn't propagated through
+// their indexer yet. We keep retrying until the deadline and only prune then
+// if liquidity has never reached MIN_POOL_LIQUIDITY_USD. This prevents good
+// tokens from being rejected due to DexScreener indexing lag.
+//
+// Only exception: if the same pool consistently shows a non-zero but very low
+// liquidity (< PRUNE_MICRO_LIQ_USD) across multiple checks, it is a genuine
+// micro/seeded grad and we prune early to free the slot.
+const PRUNE_MICRO_LIQ_USD      = 50;    // if liq is this low after 2 checks, it's genuinely micro
+const MICRO_LIQ_CONFIRM_CHECKS = 2;     // require this many consecutive low-liq reads before early prune
+
 async function validateOrPrune(mint: string, activatedAt: number): Promise<void> {
   // Wait before first check — real pools take ~5-15s to appear on DexScreener
   await new Promise(r => setTimeout(r, VALIDATION_DELAY_MS));
 
   const deadline = activatedAt + VALIDATION_TIMEOUT_MS;
+  let consecutiveLowLiq = 0;
+  let lastSeenLiq = -1;
 
   while (Date.now() < deadline) {
     const tok = trackedTokens.get(mint);
@@ -2008,6 +2024,8 @@ async function validateOrPrune(mint: string, activatedAt: number): Promise<void>
 
       if (postGradPairs.length > 0) {
         const liq = postGradPairs[0]?.liquidity?.usd ?? 0;
+        lastSeenLiq = liq;
+
         if (liq >= MIN_POOL_LIQUIDITY_USD) {
           // Pool qualifies — token is a real graduate
           logger.info(
@@ -2016,18 +2034,33 @@ async function validateOrPrune(mint: string, activatedAt: number): Promise<void>
           );
           return; // enrichMetadataAsync will continue updating market data
         }
-        // Pool exists but liquidity is too low → re-check entry state AFTER the await
-        // before pruning (entry may have started while DexScreener responded)
-        if (trackedTokens.get(mint)?.entryTriggered || openPositions.has(mint)) return;
-        logger.warn(
-          { mint: mint.slice(0, 12), liq: liq.toFixed(0), minLiq: MIN_POOL_LIQUIDITY_USD },
-          'Sniper engine: pool liquidity below minimum — pruning token (micro/seeded grad)',
+
+        // Pool is indexed but liquidity is below the minimum.
+        // liq=0 or very low often means DexScreener indexing lag (30–90s window).
+        // Only prune early if it's consistently non-zero but very low (genuine micro pool).
+        if (liq > 0 && liq < PRUNE_MICRO_LIQ_USD) {
+          consecutiveLowLiq++;
+          if (consecutiveLowLiq >= MICRO_LIQ_CONFIRM_CHECKS) {
+            if (trackedTokens.get(mint)?.entryTriggered || openPositions.has(mint)) return;
+            logger.warn(
+              { mint: mint.slice(0, 12), liq: liq.toFixed(0), checks: consecutiveLowLiq, minLiq: MIN_POOL_LIQUIDITY_USD },
+              'Sniper engine: pool confirmed micro/seeded grad (non-zero low liq across multiple checks) — pruning',
+            );
+            void diagTokenRejected(mint, `Pool liquidity ${liq.toFixed(0)} consistently < ${PRUNE_MICRO_LIQ_USD} (micro/seeded grad after ${consecutiveLowLiq} checks)`).catch(() => {});
+            pruneToken(mint);
+            return;
+          }
+        } else {
+          // liq=0 (indexing lag) or moderate liq — reset consecutive counter
+          consecutiveLowLiq = 0;
+        }
+
+        logger.info(
+          { mint: mint.slice(0, 12), liq: liq.toFixed(0), minLiq: MIN_POOL_LIQUIDITY_USD, consecutiveLowLiq },
+          'Sniper engine: pool indexed but liq below min — retrying (DexScreener indexing lag likely)',
         );
-        void diagTokenRejected(mint, `Pool liquidity ${liq.toFixed(0)} < ${MIN_POOL_LIQUIDITY_USD} minimum (micro/seeded grad)`).catch(() => {});
-        pruneToken(mint);
-        return;
       }
-      // No post-grad pair yet — keep retrying until deadline
+      // No post-grad pair yet or liq below min — keep retrying until deadline
     } catch { /* non-fatal — retry */ }
 
     await new Promise(r => setTimeout(r, VALIDATION_POLL_MS));
@@ -2035,8 +2068,12 @@ async function validateOrPrune(mint: string, activatedAt: number): Promise<void>
 
   // Deadline reached: no qualified pool found → re-check entry state before pruning
   if (!trackedTokens.get(mint)?.entryTriggered && !openPositions.has(mint)) {
-    logger.warn({ mint: mint.slice(0, 12) }, 'Sniper engine: no qualified post-grad pool within 60s — pruning token');
-    void diagTokenRejected(mint, 'No qualified pool within validation timeout').catch(() => {});
+    const liqStr = lastSeenLiq >= 0 ? String(Math.round(lastSeenLiq)) : 'none';
+    logger.warn(
+      { mint: mint.slice(0, 12), lastSeenLiq: liqStr },
+      'Sniper engine: no qualified post-grad pool within validation window — pruning token',
+    );
+    void diagTokenRejected(mint, 'No qualified pool within ' + (VALIDATION_TIMEOUT_MS / 60_000) + 'min timeout (last seen liq: ' + liqStr + ')').catch(() => {});
     pruneToken(mint);
   }
 }
