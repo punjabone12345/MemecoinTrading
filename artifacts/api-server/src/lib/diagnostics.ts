@@ -289,14 +289,19 @@ export async function getDiagTokens(opts: {
   status?: string;
   limit?: number;
   offset?: number;
+  since?: number;  // unix ms — only include tokens first seen at or after this time
 }): Promise<{ rows: unknown[]; total: number }> {
   const conditions: string[] = [];
   const params: unknown[] = [];
   let p = 1;
 
   if (opts.status) {
-    conditions.push(`status = $${p++}`);
+    conditions.push('status = $' + p++);
     params.push(opts.status);
+  }
+  if (opts.since != null) {
+    conditions.push('first_seen_at >= $' + p++);
+    params.push(opts.since);
   }
 
   const where  = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
@@ -319,7 +324,18 @@ export async function getDiagTokens(opts: {
   return { rows, total: parseInt(countResult[0]?.count ?? '0', 10) };
 }
 
-export async function getDiagTopRejected(): Promise<unknown[]> {
+export async function getDiagTopRejected(opts: { since?: number } = {}): Promise<unknown[]> {
+  const conditions: string[] = [`status IN ('REJECTED', 'EXPIRED')`];
+  const params: unknown[] = [];
+  let p = 1;
+
+  if (opts.since != null) {
+    conditions.push('first_seen_at >= $' + p++);
+    params.push(opts.since);
+  }
+
+  const where = `WHERE ${conditions.join(' AND ')}`;
+
   return query<unknown>(`
     SELECT *,
       -- Proximity score 0–100: how close this token came to being traded
@@ -337,12 +353,12 @@ export async function getDiagTopRejected(): Promise<unknown[]> {
       to_char(to_timestamp(first_seen_at / 1000) AT TIME ZONE 'UTC',         'YYYY-MM-DD HH24:MI:SS') AS first_seen_utc,
       to_char(to_timestamp(first_seen_at / 1000) AT TIME ZONE 'Asia/Kolkata','YYYY-MM-DD HH24:MI:SS') AS first_seen_ist
     FROM diag_tokens
-    WHERE status IN ('REJECTED', 'EXPIRED')
+    ${where}
     ORDER BY
       proximity_score DESC,
       highest_wallet_score DESC
     LIMIT 20
-  `);
+  `, params);
 }
 
 export async function getDiagDailySummary(date?: string): Promise<unknown> {
@@ -436,9 +452,10 @@ export async function getDiagErrors(opts: { limit?: number; errorType?: string }
   `, params);
 }
 
-export async function getDiagFunnelStats(): Promise<unknown> {
-  // Funnel stats — all time (or last 7 days)
+export async function getDiagFunnelStats(opts: { since?: number } = {}): Promise<unknown> {
+  // Funnel stats — current session or last 7 days, whichever is more restrictive
   const sevenDaysAgo = Date.now() - 7 * 86_400_000;
+  const cutoff = opts.since != null ? Math.max(opts.since, sevenDaysAgo) : sevenDaysAgo;
 
   const funnel = await query<{
     total: string;
@@ -487,7 +504,7 @@ export async function getDiagFunnelStats(): Promise<unknown> {
                           AND reject_reason NOT ILIKE '%prune%')::text      AS rejected_other
     FROM diag_tokens
     WHERE created_at >= $1
-  `, [sevenDaysAgo]);
+  `, [cutoff]);
 
   return funnel[0] ?? {};
 }

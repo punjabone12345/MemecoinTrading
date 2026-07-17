@@ -277,7 +277,7 @@ export default function App() {
             {tab === 'analytics' && (
               <MemoAnalytics balance={portfolioValue} freeBalance={freeBalance} onRefresh={refreshAll} sniperStatus={sniperStatus} />
             )}
-            {tab === 'diagnostics' && <MemoDiagnostics />}
+            {tab === 'diagnostics' && <MemoDiagnostics sniperStatus={sniperStatus} />}
             {tab === 'settings' && (
               <MemoSettings settings={effectiveSettings} onUpdate={(s) => setSettings(s)} />
             )}

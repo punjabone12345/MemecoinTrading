@@ -24,7 +24,8 @@ router.get('/tokens', async (req, res) => {
     const status = typeof req.query.status === 'string' ? req.query.status : undefined;
     const limit  = req.query.limit  ? parseInt(req.query.limit  as string, 10) : 100;
     const offset = req.query.offset ? parseInt(req.query.offset as string, 10) : 0;
-    const result = await getDiagTokens({ status, limit, offset });
+    const since  = req.query.since  ? parseInt(req.query.since  as string, 10) : undefined;
+    const result = await getDiagTokens({ status, limit, offset, since });
     res.json(result);
   } catch (err: any) {
     res.status(500).json({ error: err?.message ?? 'Internal error' });
@@ -35,9 +36,10 @@ router.get('/tokens', async (req, res) => {
  * GET /api/diagnostics/top-rejected
  * Top 20 tokens that came closest to being traded (proximity score descending).
  */
-router.get('/top-rejected', async (_req, res) => {
+router.get('/top-rejected', async (req, res) => {
   try {
-    const rows = await getDiagTopRejected();
+    const since = req.query.since ? parseInt(req.query.since as string, 10) : undefined;
+    const rows = await getDiagTopRejected({ since });
     res.json({ rows });
   } catch (err: any) {
     res.status(500).json({ error: err?.message ?? 'Internal error' });
@@ -79,9 +81,10 @@ router.get('/errors', async (req, res) => {
  * GET /api/diagnostics/funnel
  * Aggregated funnel stats for the last 7 days: how many tokens passed each filter stage.
  */
-router.get('/funnel', async (_req, res) => {
+router.get('/funnel', async (req, res) => {
   try {
-    const stats = await getDiagFunnelStats();
+    const since = req.query.since ? parseInt(req.query.since as string, 10) : undefined;
+    const stats = await getDiagFunnelStats({ since });
     res.json(stats);
   } catch (err: any) {
     res.status(500).json({ error: err?.message ?? 'Internal error' });

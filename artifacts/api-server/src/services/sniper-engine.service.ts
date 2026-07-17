@@ -2245,6 +2245,7 @@ export function addGraduatedToken(ev: { mint: string; poolAddress?: string; ts: 
 
 export function getSniperStatus() {
   return {
+    serverStartMs:    SERVER_START_MS,   // unix ms when this server process started — used by UI to filter diagnostics to current session
     trackedTokens:    Array.from(trackedTokens.values()),
     openPositions:    Array.from(openPositions.values()),
     closedPositions:  closedPositions.slice(0, 200),   // full history for accurate stats
@@ -2271,7 +2272,7 @@ function broadcastSniperStatus(): void {
 
 // ── Periodic market data refresh for active tracked tokens ────────────────────
 
-const MARKET_REFRESH_MS     = 30_000; // refresh every 30s
+const MARKET_REFRESH_MS     = 10_000; // refresh every 10s (was 30s — too slow for active tracking)
 const MARKET_REFRESH_STAGGER = 500;   // ms between each token to avoid rate-limit spikes
 
 async function refreshTrackedTokensMarketData(): Promise<void> {

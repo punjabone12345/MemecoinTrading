@@ -42,7 +42,7 @@ export interface TrackedToken {
   expiresAt: number;
   entryTriggered: boolean;
   buyerActivity: BuyerActivity[];
-  // Live market data (refreshed every 30s by the server from DexScreener)
+  // Live market data (refreshed every 10s by the server from DexScreener)
   dexId?: string;
   price?: number;
   mcap?: number;
@@ -232,6 +232,7 @@ export interface DiagDailySummary {
 }
 
 export interface SniperStatus {
+  serverStartMs: number;   // unix ms when the server process started — use to filter funnel to current session
   trackedTokens: TrackedToken[];
   openPositions: SniperPosition[];
   closedPositions: ClosedSniperPosition[];

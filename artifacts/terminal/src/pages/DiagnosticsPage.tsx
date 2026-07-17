@@ -9,7 +9,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { api } from '../lib/api.js';
 import {
-  DiagToken, DiagError, DiagFunnelStats, DiagDailySummary,
+  DiagToken, DiagError, DiagFunnelStats, DiagDailySummary, SniperStatus,
 } from '../lib/types.js';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -376,7 +376,7 @@ function TokenDetail({ tok }: { tok: DiagToken }) {
 
 type StatusFilter = 'ALL' | 'TRACKED' | 'REJECTED' | 'EXPIRED' | 'TRADED';
 
-function TokenTable() {
+function TokenTable({ since }: { since?: number }) {
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('ALL');
   const [rows, setRows]         = useState<DiagToken[]>([]);
   const [total, setTotal]       = useState(0);
@@ -392,15 +392,16 @@ function TokenTable() {
         status: status === 'ALL' ? undefined : status,
         limit: LIMIT,
         offset: p * LIMIT,
+        since,
       });
       setRows(result.rows);
       setTotal(result.total);
     } catch { /* ignore */ } finally {
       setLoading(false);
     }
-  }, []);
+  }, [since]);
 
-  useEffect(() => { load(statusFilter, page); }, [statusFilter, page, load]);
+  useEffect(() => { load(statusFilter, page); }, [statusFilter, page, load, since]);
 
   const tabs: { id: StatusFilter; label: string; color: string }[] = [
     { id: 'ALL',       label: 'All',      color: C.text },
@@ -493,18 +494,18 @@ function TokenTable() {
 
 // ── Top Rejected Panel ────────────────────────────────────────────────────────
 
-function TopRejectedPanel() {
+function TopRejectedPanel({ since }: { since?: number }) {
   const [rows, setRows] = useState<DiagToken[]>([]);
   const [loading, setLoading] = useState(false);
   const [expanded, setExpanded] = useState<string | null>(null);
 
   useEffect(() => {
     setLoading(true);
-    api.getDiagTopRejected()
+    api.getDiagTopRejected({ since })
       .then(r => setRows(r.rows))
       .catch(() => {})
       .finally(() => setLoading(false));
-  }, []);
+  }, [since]);
 
   return (
     <div style={{ ...C.card, marginBottom: 10 }}>
@@ -657,15 +658,22 @@ function ErrorLogPanel() {
 
 // ── Main page ─────────────────────────────────────────────────────────────────
 
-export default function DiagnosticsPage() {
+interface DiagnosticsPageProps {
+  sniperStatus?: SniperStatus | null;
+}
+
+export default function DiagnosticsPage({ sniperStatus }: DiagnosticsPageProps) {
   const [funnel,  setFunnel]  = useState<DiagFunnelStats | null>(null);
   const [summary, setSummary] = useState<DiagDailySummary | null>(null);
   const [tab, setTab]         = useState<'funnel' | 'tokens' | 'top' | 'errors'>('funnel');
 
+  // Only show tokens from the current server session — reset cleanly after each push/restart
+  const since = sniperStatus?.serverStartMs;
+
   useEffect(() => {
-    api.getDiagFunnel().then(setFunnel).catch(() => {});
+    api.getDiagFunnel({ since }).then(setFunnel).catch(() => {});
     api.getDiagSummary().then(setSummary).catch(() => {});
-  }, []);
+  }, [since]);
 
   const tabDefs: { id: typeof tab; label: string }[] = [
     { id: 'funnel',  label: '📊 Funnel' },
@@ -683,8 +691,15 @@ export default function DiagnosticsPage() {
       {/* Header summary */}
       <div style={{ ...C.card, marginBottom: 10, background: 'linear-gradient(135deg,rgba(155,89,255,0.06),rgba(0,191,255,0.04))', borderColor: 'rgba(155,89,255,0.2)' }}>
         <div style={{ padding: '12px 14px 0' }}>
-          <div style={{ fontSize: 16, fontWeight: 900, color: C.purple }}>🔍 TRADE FUNNEL DIAGNOSTICS</div>
-          <div style={{ fontSize: 9, color: C.gray, marginTop: 1 }}>Why is the bot taking few trades? Click any token to see its filter breakdown.</div>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 6 }}>
+            <div style={{ fontSize: 16, fontWeight: 900, color: C.purple }}>🔍 TRADE FUNNEL DIAGNOSTICS</div>
+            {since && (
+              <div style={{ fontSize: 9, fontWeight: 700, padding: '2px 8px', borderRadius: 5, background: 'rgba(0,255,136,0.08)', border: '1px solid rgba(0,255,136,0.2)', color: '#00ff88' }}>
+                ✓ This session only · started {timeAgo(since)}
+              </div>
+            )}
+          </div>
+          <div style={{ fontSize: 9, color: C.gray, marginTop: 1 }}>Showing only tokens discovered since the last server start. Push to GitHub → Render restart clears this automatically.</div>
         </div>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 1, background: 'rgba(255,255,255,0.04)', marginTop: 10 }}>
           <MiniStat label="Discovered Today"   value={totalDiscovered}                             color={C.blue} />
@@ -713,8 +728,8 @@ export default function DiagnosticsPage() {
       </div>
 
       {tab === 'funnel'  && <><FunnelPanel funnel={funnel} /><SummaryPanel summary={summary} /></>}
-      {tab === 'tokens'  && <TokenTable />}
-      {tab === 'top'     && <TopRejectedPanel />}
+      {tab === 'tokens'  && <TokenTable since={since} />}
+      {tab === 'top'     && <TopRejectedPanel since={since} />}
       {tab === 'errors'  && <ErrorLogPanel />}
     </div>
   );

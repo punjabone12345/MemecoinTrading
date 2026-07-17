@@ -50,16 +50,21 @@ export const api = {
     apiFetch<{ success: boolean }>(`/sniper/closed/${id}`, { method: 'DELETE' }),
 
   // ── Diagnostics ────────────────────────────────────────────────────────────
-  getDiagTokens: (opts?: { status?: string; limit?: number; offset?: number }) => {
+  getDiagTokens: (opts?: { status?: string; limit?: number; offset?: number; since?: number }) => {
     const params = new URLSearchParams();
     if (opts?.status) params.set('status', opts.status);
     if (opts?.limit  != null) params.set('limit',  String(opts.limit));
     if (opts?.offset != null) params.set('offset', String(opts.offset));
+    if (opts?.since  != null) params.set('since',  String(opts.since));
     const qs = params.toString();
     return apiFetch<{ rows: DiagToken[]; total: number }>(`/diagnostics/tokens${qs ? '?' + qs : ''}`);
   },
-  getDiagTopRejected: () =>
-    apiFetch<{ rows: DiagToken[] }>('/diagnostics/top-rejected'),
+  getDiagTopRejected: (opts?: { since?: number }) => {
+    const params = new URLSearchParams();
+    if (opts?.since != null) params.set('since', String(opts.since));
+    const qs = params.toString();
+    return apiFetch<{ rows: DiagToken[] }>(`/diagnostics/top-rejected${qs ? '?' + qs : ''}`);
+  },
   getDiagSummary: (date?: string) =>
     apiFetch<DiagDailySummary>(`/diagnostics/summary${date ? '?date=' + date : ''}`),
   getDiagErrors: (opts?: { limit?: number; errorType?: string }) => {
@@ -69,8 +74,12 @@ export const api = {
     const qs = params.toString();
     return apiFetch<{ rows: DiagError[] }>(`/diagnostics/errors${qs ? '?' + qs : ''}`);
   },
-  getDiagFunnel: () =>
-    apiFetch<DiagFunnelStats>('/diagnostics/funnel'),
+  getDiagFunnel: (opts?: { since?: number }) => {
+    const params = new URLSearchParams();
+    if (opts?.since != null) params.set('since', String(opts.since));
+    const qs = params.toString();
+    return apiFetch<DiagFunnelStats>(`/diagnostics/funnel${qs ? '?' + qs : ''}`);
+  },
 };
 
 // WebSocket with auto-reconnect
