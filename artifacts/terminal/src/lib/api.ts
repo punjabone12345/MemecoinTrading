@@ -1,4 +1,4 @@
-import { Settings, SniperStatus, SniperPosition, ClosedSniperPosition } from './types.js';
+import { Settings, SniperStatus, SniperPosition, ClosedSniperPosition, DiagToken, DiagError, DiagFunnelStats, DiagDailySummary } from './types.js';
 
 // In local dev VITE_API_URL is empty — Vite proxy forwards /api → :8080.
 // On Vercel set VITE_API_URL=https://your-app.onrender.com so the static
@@ -48,6 +48,29 @@ export const api = {
     apiFetch<ClosedSniperPosition>(`/sniper/closed/${id}`, { method: 'PATCH', body: JSON.stringify(updates) }),
   deleteClosedSniperPosition: (id: string) =>
     apiFetch<{ success: boolean }>(`/sniper/closed/${id}`, { method: 'DELETE' }),
+
+  // ── Diagnostics ────────────────────────────────────────────────────────────
+  getDiagTokens: (opts?: { status?: string; limit?: number; offset?: number }) => {
+    const params = new URLSearchParams();
+    if (opts?.status) params.set('status', opts.status);
+    if (opts?.limit  != null) params.set('limit',  String(opts.limit));
+    if (opts?.offset != null) params.set('offset', String(opts.offset));
+    const qs = params.toString();
+    return apiFetch<{ rows: DiagToken[]; total: number }>(`/diagnostics/tokens${qs ? '?' + qs : ''}`);
+  },
+  getDiagTopRejected: () =>
+    apiFetch<{ rows: DiagToken[] }>('/diagnostics/top-rejected'),
+  getDiagSummary: (date?: string) =>
+    apiFetch<DiagDailySummary>(`/diagnostics/summary${date ? '?date=' + date : ''}`),
+  getDiagErrors: (opts?: { limit?: number; errorType?: string }) => {
+    const params = new URLSearchParams();
+    if (opts?.limit     != null) params.set('limit',     String(opts.limit));
+    if (opts?.errorType)         params.set('errorType', opts.errorType);
+    const qs = params.toString();
+    return apiFetch<{ rows: DiagError[] }>(`/diagnostics/errors${qs ? '?' + qs : ''}`);
+  },
+  getDiagFunnel: () =>
+    apiFetch<DiagFunnelStats>('/diagnostics/funnel'),
 };
 
 // WebSocket with auto-reconnect

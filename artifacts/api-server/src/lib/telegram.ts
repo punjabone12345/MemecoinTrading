@@ -116,19 +116,28 @@ export async function notifySniperTrade(params: {
   buyAmountUsd: number; sizePct: number; sizeSol: number;
   entryPrice: number; priceAtBuyDetection: number; slippagePct: number;
   buyerWallet?: string;
+  qualifyingWallets?: string[];
   entryMode?: 'solo' | 'consensus'; entryScore?: number; qualifyingWalletsCount?: number;
   priceSource?: 'vault' | 'pool-account' | 'jupiter'; tpTier?: 1 | 2 | 3;
 }): Promise<void> {
   const {
     name, symbol, mint, buyAmountUsd, sizePct, sizeSol, entryPrice, priceAtBuyDetection, slippagePct, buyerWallet,
-    entryMode, entryScore, qualifyingWalletsCount, priceSource, tpTier,
+    qualifyingWallets, entryMode, entryScore, qualifyingWalletsCount, priceSource, tpTier,
   } = params;
   const actualSlip = priceAtBuyDetection > 0
     ? ((entryPrice - priceAtBuyDetection) / priceAtBuyDetection * 100).toFixed(1)
     : '0.0';
-  const walletLine = buyerWallet && buyerWallet !== 'unknown'
-    ? `Buyer Wallet: <code>${buyerWallet}</code>\n`
-    : '';
+
+  // For consensus mode: show ALL qualifying wallet addresses; for solo: show the single buyer wallet
+  let walletLine = '';
+  if (entryMode === 'consensus' && qualifyingWallets && qualifyingWallets.length > 0) {
+    walletLine = qualifyingWallets
+      .map((w, i) => `Wallet ${i + 1}: <code>${w}</code>`)
+      .join('\n') + '\n';
+  } else if (buyerWallet && buyerWallet !== 'unknown') {
+    walletLine = `Buyer Wallet: <code>${buyerWallet}</code>\n`;
+  }
+
   const modeLine = entryMode === 'consensus'
     ? `✅ Entry Mode: Consensus (${qualifyingWalletsCount ?? '?'} wallets ≥80, top score ${entryScore ?? '?'})\n`
     : `✅ Entry Mode: Solo conviction (score ${entryScore ?? '?'} ≥ 95)\n`;
