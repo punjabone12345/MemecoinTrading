@@ -1,19 +1,12 @@
 /**
  * Token Discovery Service — GMGN-first architecture
  *
- * Primary discovery source: GMGN API — three parallel pollers:
- *   • /defi/quotation/v1/rank/sol/swaps/1m  — short-burst new tokens  (every 15 s)
- *   • /defi/quotation/v1/rank/sol/swaps/5m  — 5-min trending          (every 30 s)
- *   • /defi/quotation/v1/rank/sol/swaps/1h  — 1-hour trending         (every 60 s)
+ * Primary discovery source: GMGN API — single poller:
+ *   • /defi/quotation/v1/rank/sol/swaps/1h  — 1-hour trending (every 60 s)
  *
- * Each source is labelled so that downstream analytics can compare their
- * performance independently:
- *   discoverySource in DiscoveryEvent → 'rank_1m' | 'rank_5m' | 'rank_1h'
- *   DB column source                  → 'gmgn_rank_1m' | 'gmgn_rank_5m' | 'gmgn_rank_1h'
- *                                       (+ '_refire' suffix for re-appearances)
- *
- * Market data validation: DexScreener (unchanged — handled downstream in sniper engine)
- * Wallet analysis:        GMGN (unchanged — handled in wallet-score.service.ts)
+ * Each token is labelled with discoverySource = 'rank_1h' for analytics.
+ * Market data validation: DexScreener (handled downstream in sniper engine)
+ * Wallet analysis:        GMGN (handled in wallet-score.service.ts)
  */
 
 import { logger } from '../lib/logger.js';
@@ -26,11 +19,7 @@ import {
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-const RANK_1M_INTERVAL_MS    = 15_000;  // poll rank/1m every 15 s
-const RANK_5M_INTERVAL_MS    = 30_000;  // poll rank/5m every 30 s
 const RANK_1H_INTERVAL_MS    = 60_000;  // poll rank/1h every 60 s
-const NEW_PAIRS_INTERVAL_MS  = RANK_1M_INTERVAL_MS; // alias kept for diagnostics compat
-const TRENDING_INTERVAL_MS   = RANK_5M_INTERVAL_MS; // alias kept for diagnostics compat
 const BOOT_DELAY_MS          = 5_000;   // let previous instance clear before first request
 const MAX_FEED               = 50;
 const TRACKING_WINDOW_MS     = 60 * 60_000; // 1 hour default suppression
@@ -38,7 +27,7 @@ const TRACKING_WINDOW_MS     = 60 * 60_000; // 1 hour default suppression
 // Only fire tokens created/opened within the last 2 hours to avoid spamming old pools
 const MAX_TOKEN_AGE_MS       = 2 * 60 * 60_000;
 
-// Retry budget: if both endpoints return null, wait this long before retrying
+// Retry budget: if endpoint returns null, wait this long before retrying
 const BACKOFF_BASE_MS        = 15_000;
 const BACKOFF_MAX_MS         = 120_000;
 
@@ -54,7 +43,7 @@ const IGNORE_MINTS = new Set([
 
 // ── Discovery event ────────────────────────────────────────────────────────────
 
-export type GmgnDiscoverySource = 'rank_1m' | 'rank_5m' | 'rank_1h';
+export type GmgnDiscoverySource = 'rank_1h';
 
 export interface DiscoveryEvent {
   mint:            string;
@@ -83,22 +72,14 @@ let totalTokensSkippedIgnore = 0;
 
 // ── Diagnostics ───────────────────────────────────────────────────────────────
 
-let newPairsPollCount           = 0;  // rank/1m
-let trendingPollCount           = 0;  // rank/5m
-let trending1hPollCount         = 0;  // rank/1h
-let lastNewPairsSuccessMs       = 0;
-let lastTrendingSuccessMs       = 0;
-let lastTrending1hSuccessMs     = 0;
-let consecutiveNewPairsFailures  = 0;
-let consecutiveTrendingFailures  = 0;
+let trending1hPollCount          = 0;
+let lastTrending1hSuccessMs      = 0;
 let consecutiveTrending1hFailures = 0;
-let lastNewPairsError: string | null   = null;
-let lastTrendingError: string | null   = null;
 let lastTrending1hError: string | null = null;
 
-// Per-source fired counts for performance comparison
-const firedBySource: Record<GmgnDiscoverySource, number> = { rank_1m: 0, rank_5m: 0, rank_1h: 0 };
-let sessionStartMs             = 0;
+// Per-source fired counts
+const firedBySource: Record<GmgnDiscoverySource, number> = { rank_1h: 0 };
+let sessionStartMs = 0;
 
 /**
  * Rolling discovery delay tracker:
@@ -166,7 +147,7 @@ export function getSourceActivity() {
   };
 }
 
-// ── Core token processor (shared by both polls) ───────────────────────────────
+// ── Core token processor ──────────────────────────────────────────────────────
 
 /**
  * Process a list of tokens returned by a GMGN endpoint.
@@ -265,62 +246,7 @@ function processTokens(tokens: GmgnDiscoveredToken[], source: GmgnDiscoverySourc
   return fired;
 }
 
-// ── rank/1m poller ────────────────────────────────────────────────────────────
-// Replaces broken new_pairs endpoint; returns the most recently-active tokens.
-
-async function pollNewPairs(): Promise<void> {
-  const bannedUntil = getDiscoveryBannedUntil();
-  if (bannedUntil > Date.now()) return;
-
-  const tokens = await fetchTrendingTokens('1m', 100);
-
-  if (tokens === null) {
-    consecutiveNewPairsFailures++;
-    lastNewPairsError = 'API returned null (rate-limited or error)';
-    logger.debug({ failures: consecutiveNewPairsFailures }, 'GMGN discovery: rank/1m fetch failed');
-    return;
-  }
-
-  const fired = processTokens(tokens, 'rank_1m');
-  consecutiveNewPairsFailures = 0;
-  lastNewPairsError = null;
-  newPairsPollCount++;
-  lastNewPairsSuccessMs = Date.now();
-
-  if (fired > 0) {
-    logger.info({ fired, total: totalDiscovered }, 'GMGN discovery: new tokens queued from rank/1m');
-  }
-}
-
-// ── rank/5m poller ────────────────────────────────────────────────────────────
-
-async function pollTrending(): Promise<void> {
-  const bannedUntil = getDiscoveryBannedUntil();
-  if (bannedUntil > Date.now()) return;
-
-  const tokens = await fetchTrendingTokens('5m', 100);
-
-  if (tokens === null) {
-    consecutiveTrendingFailures++;
-    lastTrendingError = 'API returned null (rate-limited or error)';
-    logger.debug({ failures: consecutiveTrendingFailures }, 'GMGN discovery: rank/5m fetch failed');
-    return;
-  }
-
-  const fired = processTokens(tokens, 'rank_5m');
-  consecutiveTrendingFailures = 0;
-  lastTrendingError = null;
-  trendingPollCount++;
-  lastTrendingSuccessMs = Date.now();
-
-  if (fired > 0) {
-    logger.info({ fired, total: totalDiscovered }, 'GMGN discovery: new tokens queued from rank/5m');
-  }
-}
-
 // ── rank/1h poller ────────────────────────────────────────────────────────────
-// Longer trending window — surfaces tokens that have sustained activity over an
-// hour, complementing the short-burst 1m and 5m signals.
 
 async function pollTrending1h(): Promise<void> {
   const bannedUntil = getDiscoveryBannedUntil();
@@ -349,8 +275,6 @@ async function pollTrending1h(): Promise<void> {
 // ── Lifecycle ─────────────────────────────────────────────────────────────────
 
 let started              = false;
-let newPairsTimer:   ReturnType<typeof setTimeout> | null = null;
-let trendingTimer:   ReturnType<typeof setTimeout> | null = null;
 let trending1hTimer: ReturnType<typeof setTimeout> | null = null;
 
 function makeScheduler(
@@ -368,14 +292,9 @@ function makeScheduler(
   return schedule;
 }
 
-// Wrap mutable timer vars in objects so makeScheduler can mutate them by reference
-const _np  = { current: null as ReturnType<typeof setTimeout> | null };
-const _t5  = { current: null as ReturnType<typeof setTimeout> | null };
 const _t1h = { current: null as ReturnType<typeof setTimeout> | null };
 
-const scheduleNewPairs   = makeScheduler(pollNewPairs,    _np,  RANK_1M_INTERVAL_MS);
-const scheduleTrending   = makeScheduler(pollTrending,    _t5,  RANK_5M_INTERVAL_MS);
-const scheduleTrending1h = makeScheduler(pollTrending1h,  _t1h, RANK_1H_INTERVAL_MS);
+const scheduleTrending1h = makeScheduler(pollTrending1h, _t1h, RANK_1H_INTERVAL_MS);
 
 export function startTrenchesScanner(): void {
   if (started) return;
@@ -385,30 +304,24 @@ export function startTrenchesScanner(): void {
   const gmgnKeySet = !!process.env.GMGN_API_KEY;
   logger.info(
     {
-      rank1mIntervalMs:  RANK_1M_INTERVAL_MS,
-      rank5mIntervalMs:  RANK_5M_INTERVAL_MS,
       rank1hIntervalMs:  RANK_1H_INTERVAL_MS,
       bootDelayMs:       BOOT_DELAY_MS,
       gmgnApiKeySet:     gmgnKeySet,
     },
-    'GMGN discovery: starting (rank/1m + rank/5m + rank/1h pollers)',
+    'GMGN discovery: starting (rank/1h poller only)',
   );
 
   if (!gmgnKeySet) {
     logger.warn('GMGN_API_KEY not set — discovery will attempt unauthenticated requests; rate limits will be stricter');
   }
 
-  // Stagger the three pollers: 5 s, 12.5 s, 20 s after boot
-  _np.current = setTimeout(async () => { await pollNewPairs();   scheduleNewPairs();   }, BOOT_DELAY_MS);
-  _t5.current = setTimeout(async () => { await pollTrending();   scheduleTrending();   }, BOOT_DELAY_MS + 7_500);
-  _t1h.current = setTimeout(async () => { await pollTrending1h(); scheduleTrending1h(); }, BOOT_DELAY_MS + 15_000);
+  // Start the 1h poller after boot delay
+  _t1h.current = setTimeout(async () => { await pollTrending1h(); scheduleTrending1h(); }, BOOT_DELAY_MS);
 }
 
 export function stopTrenchesScanner(): void {
   if (!started) return;
   started = false;
-  if (_np.current)  { clearTimeout(_np.current);  _np.current  = null; }
-  if (_t5.current)  { clearTimeout(_t5.current);  _t5.current  = null; }
   if (_t1h.current) { clearTimeout(_t1h.current); _t1h.current = null; }
   logger.info('GMGN discovery: stopped');
 }
@@ -436,44 +349,18 @@ export function getTrenchesDiagnostics() {
 
   const bannedUntil   = getDiscoveryBannedUntil();
 
-  // Derive combined "last success" and failure counts from all three pollers
-  const lastPollSuccessMs   = Math.max(lastNewPairsSuccessMs, lastTrendingSuccessMs, lastTrending1hSuccessMs);
-  const consecutiveFailures = consecutiveNewPairsFailures + consecutiveTrendingFailures + consecutiveTrending1hFailures;
-  const lastPollError       = lastNewPairsError ?? lastTrendingError ?? lastTrending1hError ?? null;
-  const pollCount           = newPairsPollCount + trendingPollCount + trending1hPollCount;
-
   return {
-    source:               'gmgn_rank_1m_5m_1h',
+    source:               'gmgn_rank_1h',
     sessionStartMs,
-    pollCount,
-    lastPollSuccessMs,
-    lastPollAgoSec:       lastPollSuccessMs ? Math.round((Date.now() - lastPollSuccessMs) / 1_000) : null,
-    consecutiveFailures,
-    lastPollError,
-    pollIntervalMs:       RANK_1M_INTERVAL_MS,
+    pollCount:            trending1hPollCount,
+    lastPollSuccessMs:    lastTrending1hSuccessMs,
+    lastPollAgoSec:       lastTrending1hSuccessMs ? Math.round((Date.now() - lastTrending1hSuccessMs) / 1_000) : null,
+    consecutiveFailures:  consecutiveTrending1hFailures,
+    lastPollError:        lastTrending1hError,
+    pollIntervalMs:       RANK_1H_INTERVAL_MS,
 
-    // Per-poller breakdown (labelled by GMGN window)
+    // Per-poller breakdown
     pollers: {
-      newPairs: {
-        label:               'rank/1m',
-        pollCount:           newPairsPollCount,
-        lastSuccessMs:       lastNewPairsSuccessMs,
-        lastSuccessAgoSec:   lastNewPairsSuccessMs ? Math.round((Date.now() - lastNewPairsSuccessMs) / 1_000) : null,
-        consecutiveFailures: consecutiveNewPairsFailures,
-        lastError:           lastNewPairsError,
-        intervalMs:          RANK_1M_INTERVAL_MS,
-        firedTotal:          firedBySource['rank_1m'],
-      },
-      trending: {
-        label:               'rank/5m',
-        pollCount:           trendingPollCount,
-        lastSuccessMs:       lastTrendingSuccessMs,
-        lastSuccessAgoSec:   lastTrendingSuccessMs ? Math.round((Date.now() - lastTrendingSuccessMs) / 1_000) : null,
-        consecutiveFailures: consecutiveTrendingFailures,
-        lastError:           lastTrendingError,
-        intervalMs:          RANK_5M_INTERVAL_MS,
-        firedTotal:          firedBySource['rank_5m'],
-      },
       trending1h: {
         label:               'rank/1h',
         pollCount:           trending1hPollCount,
@@ -517,11 +404,11 @@ export function getTrenchesDiagnostics() {
 
     // Legacy fields for route compatibility
     activeMints:              suppressedUntil.size,
-    isBootstrap:              pollCount === 0,
+    isBootstrap:              trending1hPollCount === 0,
     lastSeenSig:              null,
-    consecutivePollFailures:  consecutiveFailures,
-    pollDelayMs:              RANK_1M_INTERVAL_MS,
-    pagesPerPoll:             3,    // rank/1m + rank/5m + rank/1h
+    consecutivePollFailures:  consecutiveTrending1hFailures,
+    pollDelayMs:              RANK_1H_INTERVAL_MS,
+    pagesPerPoll:             1,    // rank/1h only
     pumpfunMintsTotal:        totalDiscovered,
     heliusWsConfigured:       false,
     heliusApiKeySet:          !!process.env.HELIUS_API_KEY,
