@@ -24,7 +24,6 @@ import {
   getDiscoveryBannedUntil,
   type GmgnDiscoveredToken,
 } from '../lib/gmgn-discovery.js';
-import https from 'node:https';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -262,80 +261,12 @@ function processTokens(tokens: GmgnDiscoveredToken[], source: 'new_pairs' | 'tre
   return fired;
 }
 
-// ── GeckoTerminal fallback ────────────────────────────────────────────────────
-//
-// GeckoTerminal's public API has no Cloudflare protection and works from any
-// cloud IP (including Render's datacenter IPs). Used as a fallback whenever
-// GMGN returns null — typically because Render's IP is Cloudflare-blocked
-// without GMGN_API_KEY set.
-
-async function fetchGeckoTerminalNewPools(): Promise<GmgnDiscoveredToken[] | null> {
-  return new Promise((resolve) => {
-    const opts = {
-      hostname: 'api.geckoterminal.com',
-      path: '/api/v2/networks/solana/new_pools?page=1',
-      method: 'GET',
-      headers: {
-        'Accept': 'application/json',
-        'User-Agent': 'Mozilla/5.0',
-      },
-      timeout: 10_000,
-    };
-    const req = https.request(opts, (res) => {
-      let buf = '';
-      res.on('data', (chunk: Buffer) => { buf += chunk.toString(); });
-      res.on('end', () => {
-        try {
-          const json = JSON.parse(buf);
-          const items: any[] = json?.data ?? [];
-          const out: GmgnDiscoveredToken[] = [];
-          for (const item of items) {
-            const attrs = item.attributes ?? {};
-            const baseId: string = item.relationships?.base_token?.data?.id ?? '';
-            const mint = baseId.startsWith('solana_') ? baseId.slice(7) : '';
-            if (!mint || mint.length < 20) continue;
-            // Only include DEX pools (pumpswap, raydium, orca…) — not bonding curve
-            const dexId: string = item.relationships?.dex?.data?.id ?? '';
-            if (dexId === 'pump_fun' || dexId === 'pumpfun') continue;
-            const poolAddress: string = attrs.address ?? (item.id ?? '').replace('solana_', '');
-            const reserveUsd = parseFloat(attrs.reserve_in_usd ?? '0') || 0;
-            if (reserveUsd < 100) continue; // skip micro/seeded pools
-            const createdAt = attrs.pool_created_at
-              ? Math.floor(new Date(attrs.pool_created_at).getTime() / 1000)
-              : undefined;
-            out.push({
-              mint,
-              poolAddress,
-              name:          attrs.name?.split(' / ')[0] ?? undefined,
-              symbol:        attrs.name?.split(' / ')[0] ?? undefined,
-              openTimestamp: createdAt,
-              liquidity:     reserveUsd,
-              marketCap:     parseFloat(attrs.market_cap_usd ?? '0') || undefined,
-              volume1h:      parseFloat(attrs.volume_usd?.h1 ?? '0') || undefined,
-              priceUsd:      parseFloat(attrs.base_token_price_usd ?? '0') || undefined,
-            });
-          }
-          resolve(out.length > 0 ? out : null);
-        } catch {
-          resolve(null);
-        }
-      });
-    });
-    req.on('error', () => resolve(null));
-    req.on('timeout', () => { req.destroy(); resolve(null); });
-    req.end();
-  });
-}
-
 // ── Short-window rank poller (1m) — replaces broken new_pairs endpoint ────────
 //
 // The /tokens/new_pairs/sol GMGN endpoint returns "invalid argument" (code 40000300)
 // regardless of parameters. The /rank/sol/swaps/1m endpoint is fully functional,
 // returns tokens with activity in the last minute, and serves the same purpose
 // (surfacing the newest, most-actively-traded tokens).
-//
-// If GMGN is unreachable (e.g. Cloudflare-blocked on Render without GMGN_API_KEY),
-// GeckoTerminal new pools is used as a fallback after 3 consecutive failures.
 
 async function pollNewPairs(): Promise<void> {
   const bannedUntil = getDiscoveryBannedUntil();
@@ -346,22 +277,6 @@ async function pollNewPairs(): Promise<void> {
   if (tokens === null) {
     consecutiveNewPairsFailures++;
     lastNewPairsError = 'API returned null (rate-limited or error)';
-
-    // After 3 consecutive GMGN failures, try GeckoTerminal as a fallback
-    if (consecutiveNewPairsFailures >= 3) {
-      const gtTokens = await fetchGeckoTerminalNewPools();
-      if (gtTokens && gtTokens.length > 0) {
-        const fired = processTokens(gtTokens, 'new_pairs');
-        if (fired > 0) {
-          logger.info(
-            { fired, total: totalDiscovered, gmgnFailures: consecutiveNewPairsFailures },
-            'GMGN discovery: new tokens queued from GeckoTerminal fallback (GMGN unavailable)',
-          );
-        }
-        return;
-      }
-    }
-
     logger.debug({ failures: consecutiveNewPairsFailures }, 'GMGN discovery: rank/1m fetch failed');
     return;
   }
