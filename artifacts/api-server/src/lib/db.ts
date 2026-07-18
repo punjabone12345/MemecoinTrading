@@ -571,7 +571,14 @@ export async function initDB(): Promise<void> {
       entry_reason              TEXT,
       -- Timestamps
       last_updated              BIGINT NOT NULL DEFAULT 0,
-      created_at                BIGINT NOT NULL
+      created_at                BIGINT NOT NULL,
+      -- Discovery pipeline lifecycle milestones (added via migration; included here for fresh DBs)
+      first_dexscreener_pair_at BIGINT,
+      first_nonzero_liq_at      BIGINT,
+      liq_min_crossed_at        BIGINT,
+      validation_outcome        TEXT,
+      rediscovery_count         INTEGER NOT NULL DEFAULT 0,
+      initial_reserve_usd       NUMERIC
     )
   `);
   await query(`CREATE INDEX IF NOT EXISTS idx_diag_tokens_status      ON diag_tokens (status)`);
