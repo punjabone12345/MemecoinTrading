@@ -16,7 +16,7 @@ import {
 } from '../lib/diagnostics.js';
 import { releaseForRediscovery } from './trenches.service.js';
 
-const MAX_TRACKING_MS       = 60 * 60 * 1_000; // 1 hour — matches DexScreener discovery tracking window
+const MAX_TRACKING_MS       = 60 * 60 * 1_000; // 1 hour — matches GMGN discovery tracking window
 const MAX_POSITIONS         = 10;
 const POLL_INTERVAL_MS      = 2_000;   // reduced from 5s for faster detection
 // Reduced from 2000ms: vault addresses are captured directly from the buyer's
@@ -1500,13 +1500,13 @@ async function handleVolumeUpdate(
   // known pool address, read the WSOL vault balance directly from on-chain.
   // This bypasses DexScreener's 30–120s cache entirely and catches tokens that
   // have already crossed $30k in reality but appear below it in DexScreener.
-  if (tok.liquidity < 30_000 && tok.poolAddress) {
+  if ((tok.liquidity ?? 0) < 30_000 && tok.poolAddress) {
     try {
       await fetchSolPrice();
       const onChainLiq = await fetchOnChainLiqUsd(tok.poolAddress, cachedSolPrice);
       if (onChainLiq > 0) {
         logger.info(
-          { mint: mint.slice(0, 12), dexLiq: tok.liquidity.toFixed(0), onChainLiq: onChainLiq.toFixed(0) },
+          { mint: mint.slice(0, 12), dexLiq: (tok.liquidity ?? 0).toFixed(0), onChainLiq: onChainLiq.toFixed(0) },
           'Sniper engine: on-chain liq override at entry (DexScreener was stale)',
         );
         tok.liquidity = onChainLiq;
@@ -2057,7 +2057,7 @@ const VALIDATION_POLL_MS              = 5_000;       // retry DexScreener every 
 // Uses pairCreatedAt from DexScreener; falls back to activatedAt as a conservative proxy.
 const MAX_TOKEN_AGE_FOR_VALIDATION_MS = 15 * 60_000;
 // After a transient validation failure (indexing lag / liq=0 / timeout), shorten the
-// 1-hour GeckoTerminal re-discovery suppression to this delay so the token gets
+// 1-hour GMGN re-discovery suppression to this delay so the token gets
 // a second validation attempt once DexScreener finishes indexing.
 const TRANSIENT_RETRY_DELAY_MS        = 3 * 60_000;
 
@@ -2256,7 +2256,7 @@ async function validateOrPrune(mint: string, activatedAt: number): Promise<void>
     // ── Release for re-discovery ──────────────────────────────────────────────
     // The timeout is almost always caused by DexScreener indexing lag, not by
     // the pool having zero liquidity. Shortening the 1-hour suppression window
-    // lets GeckoTerminal re-fire the token after TRANSIENT_RETRY_DELAY_MS so
+    // lets GMGN re-fire the token after TRANSIENT_RETRY_DELAY_MS so
     // a fresh validateOrPrune attempt can see the (now-indexed) pool.
     // If DexScreener still shows nothing on the retry, the token will age out
     // naturally via the MAX_TOKEN_AGE_FOR_VALIDATION_MS cap.
@@ -2401,7 +2401,7 @@ export function addGraduatedToken(ev: { mint: string; poolAddress?: string; ts: 
     poolAddress: ev.poolAddress,
     detectedAt,
   });
-  void diagTokenDiscovered(ev.mint, 'gecko_terminal', { initialLiquidity: ev.reserveUsd }).catch(() => {});
+  void diagTokenDiscovered(ev.mint, 'gmgn', { initialLiquidity: ev.reserveUsd }).catch(() => {});
 
   logger.info(
     { mint: ev.mint.slice(0, 16), pool: ev.poolAddress?.slice(0, 16) },

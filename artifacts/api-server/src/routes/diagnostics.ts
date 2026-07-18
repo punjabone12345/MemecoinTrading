@@ -95,7 +95,7 @@ router.get('/funnel', async (req, res) => {
 
 /**
  * GET /api/diagnostics/coverage
- * Discovery pipeline coverage: GeckoTerminal pool counts, DexScreener indexing delays,
+ * Discovery pipeline coverage: GMGN discovery stats, DexScreener validation delays,
  * validation outcome breakdown, and re-discovery stats.
  * Combines in-memory scanner stats (from trenches service) with DB-computed lifecycle timing.
  * Query param: since (unix ms, defaults to last 24 h)

@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { getDiscoveryFeed, getDiscoveryTotal } from '../services/trenches.service.js';
+import { getDiscoveryFeed, getDiscoveryTotal, getSourceActivity, getTrenchesDiagnostics } from '../services/trenches.service.js';
 import { query } from '../lib/db.js';
 
 const router = Router();
@@ -7,11 +7,22 @@ const router = Router();
 router.get('/sources', (_req, res) => {
   const total = getDiscoveryTotal();
   const feed  = getDiscoveryFeed();
+  const diag  = getTrenchesDiagnostics();
 
   res.json({
+    // Legacy field kept for frontend compatibility
     dexscreener: {
       total,
       recent: feed,
+    },
+    // GMGN-first discovery stats
+    gmgn: {
+      total,
+      recent: feed,
+      pollers: diag.pollers,
+      avgDiscoveryDelaySec: diag.avgDiscoveryDelaySec,
+      gmgnApiKeySet: diag.gmgnApiKeySet,
+      gmgnBanned: diag.gmgnBanned,
     },
   });
 });

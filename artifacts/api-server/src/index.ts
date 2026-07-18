@@ -21,7 +21,7 @@ async function main(): Promise<void> {
     logger.info({ port: PORT }, 'Apex Meme Trader API running');
   });
 
-  // Wire DexScreener token discovery → sniper engine
+  // Wire GMGN token discovery → sniper engine
   setOnGraduation(addGraduatedToken);
   startTrenchesScanner();
   await startSniperEngine();
