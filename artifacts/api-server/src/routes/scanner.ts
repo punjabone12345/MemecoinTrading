@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { getDiscoveryFeed, getDiscoveryTotal, getSourceActivity, getTrenchesDiagnostics } from '../services/trenches.service.js';
 import { query } from '../lib/db.js';
+import { probeGmgnConnection } from '../lib/gmgn-discovery.js';
 
 const router = Router();
 
@@ -25,6 +26,12 @@ router.get('/sources', (_req, res) => {
       gmgnBanned: diag.gmgnBanned,
     },
   });
+});
+
+/** Diagnostic: tests curl + GMGN connectivity. Call GET /api/scanner/gmgn-probe to debug Render issues. */
+router.get('/gmgn-probe', async (_req, res) => {
+  const result = await probeGmgnConnection();
+  res.json(result);
 });
 
 router.get('/migrations', async (_req, res) => {

@@ -180,7 +180,8 @@ async function discoveryGet<T = any>(
     try {
       body = JSON.parse(stdout);
     } catch {
-      logger.debug({ path, rawLen: stdout.length }, 'GMGN discovery: non-JSON response (Cloudflare HTML?)');
+      // Log first 200 chars so Render production logs reveal the actual Cloudflare error
+      logger.warn({ path, rawLen: stdout.length, rawHead: stdout.slice(0, 200) }, 'GMGN discovery: non-JSON response (Cloudflare block or bad key?)');
       return null;
     }
 
@@ -194,11 +195,50 @@ async function discoveryGet<T = any>(
     }
     return body as T;
   } catch (err: any) {
-    // curl exit codes: 28 = timeout, 6 = DNS, 7 = connection refused
+    // curl exit codes: 28 = timeout, 6 = DNS, 7 = connection refused, ENOENT = curl not found
     const exitCode = err?.code;
-    logger.debug({ path, exitCode, err: err?.message?.slice(0, 120) }, 'GMGN discovery: curl subprocess failed');
+    logger.warn({ path, exitCode, err: err?.message?.slice(0, 200) }, 'GMGN discovery: curl subprocess failed');
     return null;
   }
+}
+
+// ── Startup diagnostics ───────────────────────────────────────────────────────
+
+/** Run once at module load — logs curl availability and key presence for Render debugging */
+(async () => {
+  const keySet = !!process.env.GMGN_API_KEY;
+  try {
+    const { stdout } = await execFileAsync('which', ['curl'], { timeout: 3_000 });
+    logger.info({ curlPath: stdout.trim(), keySet }, 'GMGN discovery: curl available');
+  } catch {
+    logger.warn({ keySet }, 'GMGN discovery: curl NOT found in PATH — discovery will fail');
+  }
+})();
+
+/** Returns diagnostic info callable via GET /api/scanner/gmgn-probe */
+export async function probeGmgnConnection(): Promise<Record<string, any>> {
+  const keySet = !!process.env.GMGN_API_KEY;
+  let curlPath = 'not found';
+  try { const r = await execFileAsync('which', ['curl'], { timeout: 3_000 }); curlPath = r.stdout.trim(); } catch {}
+
+  const testUrl = `${GMGN_QUOTATION_HOST}/defi/quotation/v1/rank/sol/swaps/1m?limit=1&orderby=swaps&direction=desc`;
+  const authHeaders = buildAuthHeaders();
+  const curlArgs = ['-s', '--max-time', '8', '--compressed'];
+  for (const [k, v] of Object.entries(authHeaders)) curlArgs.push('-H', `${k}: ${v}`);
+  curlArgs.push(testUrl);
+
+  let rawResponse = '';
+  let parsed: any = null;
+  let error = '';
+  try {
+    const { stdout } = await execFileAsync('curl', curlArgs, { timeout: 10_000 });
+    rawResponse = stdout.slice(0, 300);
+    try { parsed = JSON.parse(stdout); } catch { error = 'non-JSON response'; }
+  } catch (e: any) {
+    error = e?.message?.slice(0, 200) ?? 'unknown';
+  }
+
+  return { keySet, curlPath, rawHead: rawResponse, code: parsed?.code, msg: parsed?.msg, error };
 }
 
 // ── New Pairs endpoint ─────────────────────────────────────────────────────────
