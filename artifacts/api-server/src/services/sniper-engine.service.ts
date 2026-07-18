@@ -547,6 +547,47 @@ async function fetchOnChainReservePrice(poolAddress: string, solPriceUsd: number
   }
 }
 
+/**
+ * Compute total pool liquidity in USD directly from on-chain WSOL vault balance.
+ * Reuses the same PumpSwap account-offset reading as fetchOnChainReservePrice and
+ * the shared pumpswapVaultCache, so a vault lookup cached by a previous price read
+ * is free.
+ *
+ * liq ≈ 2 × quoteVault_WSOL × solPriceUsd
+ * (PumpSwap is a constant-product AMM — both sides are equal by value.)
+ *
+ * Returns 0 on any error so callers fall back to DexScreener gracefully.
+ */
+async function fetchOnChainLiqUsd(poolAddress: string, solPriceUsd: number, priority = false): Promise<number> {
+  if (!poolAddress || solPriceUsd <= 0) return 0;
+  try {
+    const conn = getConn();
+    let vaults = pumpswapVaultCache.get(poolAddress);
+
+    if (!vaults) {
+      const poolPk = new PublicKey(poolAddress);
+      const info   = await withHeliusLimit(() => conn.getAccountInfo(poolPk), { priority });
+      if (!info || info.data.length < POOL_MIN_ACCOUNT_BYTES) return 0;
+      const baseVault  = new PublicKey(info.data.subarray(POOL_BASE_VAULT_OFFSET,  POOL_BASE_VAULT_OFFSET  + POOL_VAULT_LEN));
+      const quoteVault = new PublicKey(info.data.subarray(POOL_QUOTE_VAULT_OFFSET, POOL_QUOTE_VAULT_OFFSET + POOL_VAULT_LEN));
+      vaults = { baseVault, quoteVault };
+      pumpswapVaultCache.set(poolAddress, vaults);
+    }
+
+    const quoteBal = await withHeliusLimit(
+      () => conn.getTokenAccountBalance(vaults!.quoteVault), { priority }
+    ).catch(() => null);
+
+    const quoteAmount = quoteBal?.value?.uiAmount ?? 0; // WSOL reserve
+    if (quoteAmount <= 0) return 0;
+
+    return quoteAmount * solPriceUsd * 2; // × 2 because SOL side = half of total liq
+  } catch {
+    pumpswapVaultCache.delete(poolAddress);
+    return 0;
+  }
+}
+
 // fetchPriceFresh: genuine on-chain reserve-ratio price is the SOURCE OF TRUTH.
 //
 // WHY on-chain, not Jupiter/DexScreener max():
@@ -1433,10 +1474,11 @@ async function handleVolumeUpdate(
   // with a clear skip reason rather than silently disappearing.
 
   // Refresh market data immediately before quality filters.
-  // tok.liquidity is updated by enrichTokenMetadataAsync (15 s cadence) which
-  // may be up to 15 s stale.  DexScreener also underreports liquidity for
-  // 30–90 s after pool creation due to indexing lag.  A fresh fetch here
-  // ensures the entry decision uses real-time data and not a stale cached value.
+  // tok.liquidity is updated by the batch refresh (~30s cycle for 2700+ tokens),
+  // so cached data can be significantly stale when a wallet signal fires.
+  // A fresh DexScreener fetch here ensures we use the latest available data.
+  // DexScreener itself caches pool data for 30–120s; the on-chain fallback below
+  // is the ground-truth override for tokens close to the $30k threshold.
   try {
     const freshData = await fetchTokenPrice(mint);
     if (freshData.liquidity > 0) {
@@ -1452,6 +1494,25 @@ async function handleVolumeUpdate(
       'Sniper engine: pre-entry fresh DexScreener fetch',
     );
   } catch { /* non-fatal — fall back to cached tok.liquidity */ }
+
+  // ── On-chain liquidity ground-truth override ─────────────────────────────────
+  // If DexScreener still shows liq below the $30k entry threshold and we have a
+  // known pool address, read the WSOL vault balance directly from on-chain.
+  // This bypasses DexScreener's 30–120s cache entirely and catches tokens that
+  // have already crossed $30k in reality but appear below it in DexScreener.
+  if (tok.liquidity < 30_000 && tok.poolAddress) {
+    try {
+      await fetchSolPrice();
+      const onChainLiq = await fetchOnChainLiqUsd(tok.poolAddress, cachedSolPrice);
+      if (onChainLiq > 0) {
+        logger.info(
+          { mint: mint.slice(0, 12), dexLiq: tok.liquidity.toFixed(0), onChainLiq: onChainLiq.toFixed(0) },
+          'Sniper engine: on-chain liq override at entry (DexScreener was stale)',
+        );
+        tok.liquidity = onChainLiq;
+      }
+    } catch { /* non-fatal */ }
+  }
 
   // 1. Minimum pool liquidity: $30,000
   const liqAtSignal = tok.liquidity ?? 0;

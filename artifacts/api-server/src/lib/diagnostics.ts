@@ -10,6 +10,7 @@
 
 import { query } from './db.js';
 import { logger } from './logger.js';
+import { SESSION_START_MS } from './startup.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Public types
@@ -422,12 +423,15 @@ export async function getDiagTopRejected(opts: { since?: number } = {}): Promise
 }
 
 export async function getDiagDailySummary(date?: string): Promise<unknown> {
-  // Default: today UTC midnight
+  // When an explicit date is given show that full UTC day.
+  // When called without a date (the normal UI path) restrict to the current
+  // server session so stats always start at zero after a restart.
   const dayStart = date
     ? new Date(date + 'T00:00:00Z')
     : (() => { const d = new Date(); d.setUTCHours(0, 0, 0, 0); return d; })();
-  const dayStartMs  = dayStart.getTime();
-  const dayEndMs    = dayStartMs + 86_400_000;
+  // Lower bound: session start (resets on restart) unless a specific date was requested.
+  const dayStartMs  = date ? dayStart.getTime() : SESSION_START_MS;
+  const dayEndMs    = dayStart.getTime() + 86_400_000; // always end-of-day so today's data is included
 
   const [summary] = await query<{
     total_discovered: string;
@@ -513,9 +517,9 @@ export async function getDiagErrors(opts: { limit?: number; errorType?: string }
 }
 
 export async function getDiagFunnelStats(opts: { since?: number } = {}): Promise<unknown> {
-  // Funnel stats — current session or last 7 days, whichever is more restrictive
-  const sevenDaysAgo = Date.now() - 7 * 86_400_000;
-  const cutoff = opts.since != null ? Math.max(opts.since, sevenDaysAgo) : sevenDaysAgo;
+  // Default to SESSION_START_MS so the funnel resets on every server restart.
+  // Callers can override with an explicit since timestamp (e.g. for historical views).
+  const cutoff = opts.since ?? SESSION_START_MS;
 
   const funnel = await query<{
     total: string;
@@ -575,7 +579,7 @@ export async function getDiagFunnelStats(opts: { since?: number } = {}): Promise
  * Covers the last 24 hours unless `since` is specified.
  */
 export async function getDiagCoverageStats(opts: { since?: number } = {}): Promise<unknown> {
-  const cutoff = opts.since ?? (Date.now() - 24 * 3_600_000);
+  const cutoff = opts.since ?? SESSION_START_MS;
 
   const [lifecycle] = await query<{
     total: string;
