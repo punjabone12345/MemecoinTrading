@@ -179,16 +179,6 @@ function processTokens(tokens: GmgnDiscoveredToken[], source: 'new_pairs' | 'tre
 
     totalTokensSeen++;
 
-    // Skip tokens with no GMGN-reported DEX liquidity — they are still on the
-    // pumpfun bonding curve and will never have a DexScreener DEX pool.
-    // Tracking them causes the sniper's validateOrPrune loop to spin for the
-    // full 10-minute deadline with liq=0 from DexScreener, wasting pipeline
-    // capacity and preventing any real graduates from being wallet-scored.
-    if (!liquidity || liquidity < 100) {
-      totalTokensSkippedIgnore++;
-      continue;
-    }
-
     // Age filter — only fire tokens opened within the last 2 hours
     if (openTimestamp) {
       const ageMs = now - openTimestamp * 1000;
