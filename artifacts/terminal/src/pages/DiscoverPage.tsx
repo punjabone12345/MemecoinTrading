@@ -71,19 +71,19 @@ function useSniperStatusFallback(skip: boolean) {
 
 // ── Discovery source feed hook ────────────────────────────────────────────────
 
-interface DiscoveryEvent { mint: string; ts: number; description?: string; icon?: string; isMigration: boolean; }
-interface GmgnPollerStats { pollCount: number; lastSuccessAgoSec: number | null; consecutiveFailures: number; lastError: string | null; intervalMs: number; }
+type GmgnDiscoverySource = 'rank_1m' | 'rank_5m' | 'rank_1h';
+interface DiscoveryEvent { mint: string; ts: number; description?: string; icon?: string; isMigration: boolean; discoverySource?: GmgnDiscoverySource; }
+interface GmgnPollerStats { label?: string; pollCount: number; lastSuccessAgoSec: number | null; consecutiveFailures: number; lastError: string | null; intervalMs: number; firedTotal?: number; }
 interface SourceActivity {
-  // Legacy field kept for compatibility
   dexscreener: { total: number; recent: DiscoveryEvent[] };
-  // GMGN-first discovery stats
   gmgn: {
     total: number;
     recent: DiscoveryEvent[];
-    pollers?: { newPairs: GmgnPollerStats; trending: GmgnPollerStats };
+    pollers?: { newPairs: GmgnPollerStats; trending: GmgnPollerStats; trending1h?: GmgnPollerStats };
     avgDiscoveryDelaySec?: number | null;
     gmgnApiKeySet?: boolean;
     gmgnBanned?: boolean;
+    firedBySource?: { rank_1m: number; rank_5m: number; rank_1h: number };
   };
 }
 
@@ -405,8 +405,26 @@ function DiscoveryFeed() {
       ) : (
         events.slice(0, 8).map((ev, i) => (
           <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '4px 0', borderBottom: i < 7 ? '1px solid rgba(255,255,255,0.03)' : 'none' }}>
-            <div style={{ fontSize: 9, color: '#c0c8e0', fontFamily: 'monospace', display: 'flex', alignItems: 'center', gap: 6 }}>
+            <div style={{ fontSize: 9, color: '#c0c8e0', fontFamily: 'monospace', display: 'flex', alignItems: 'center', gap: 5 }}>
               {ev.mint.slice(0, 8)}…{ev.mint.slice(-6)}
+              {ev.discoverySource && (
+                <span style={{
+                  fontSize: 7, fontWeight: 700, padding: '1px 4px', borderRadius: 3,
+                  background: ev.discoverySource === 'rank_1h'
+                    ? 'rgba(0,200,100,0.12)'
+                    : ev.discoverySource === 'rank_5m'
+                    ? 'rgba(80,160,255,0.12)'
+                    : 'rgba(200,80,255,0.12)',
+                  color: ev.discoverySource === 'rank_1h'
+                    ? '#00c864'
+                    : ev.discoverySource === 'rank_5m'
+                    ? '#50a0ff'
+                    : '#c850ff',
+                  border: `1px solid ${ev.discoverySource === 'rank_1h' ? 'rgba(0,200,100,0.25)' : ev.discoverySource === 'rank_5m' ? 'rgba(80,160,255,0.25)' : 'rgba(200,80,255,0.25)'}`,
+                }}>
+                  {ev.discoverySource === 'rank_1h' ? '1H' : ev.discoverySource === 'rank_5m' ? '5M' : '1M'}
+                </span>
+              )}
               {ev.isMigration && (
                 <span style={{ fontSize: 7, fontWeight: 800, padding: '1px 4px', borderRadius: 3, background: 'rgba(255,215,0,0.12)', color: C.yellow, border: '1px solid rgba(255,215,0,0.25)' }}>RE-TRACKED</span>
               )}

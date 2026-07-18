@@ -1,20 +1,19 @@
 /**
  * Token Discovery Service — GMGN-first architecture
  *
- * Primary discovery source: GMGN API
- *   • /defi/quotation/v1/tokens/new_pairs/sol  — newest token pairs (every 15 s)
- *   • /defi/quotation/v1/rank/sol/swaps/5m     — trending by swap count (every 30 s)
+ * Primary discovery source: GMGN API — three parallel pollers:
+ *   • /defi/quotation/v1/rank/sol/swaps/1m  — short-burst new tokens  (every 15 s)
+ *   • /defi/quotation/v1/rank/sol/swaps/5m  — 5-min trending          (every 30 s)
+ *   • /defi/quotation/v1/rank/sol/swaps/1h  — 1-hour trending         (every 60 s)
+ *
+ * Each source is labelled so that downstream analytics can compare their
+ * performance independently:
+ *   discoverySource in DiscoveryEvent → 'rank_1m' | 'rank_5m' | 'rank_1h'
+ *   DB column source                  → 'gmgn_rank_1m' | 'gmgn_rank_5m' | 'gmgn_rank_1h'
+ *                                       (+ '_refire' suffix for re-appearances)
  *
  * Market data validation: DexScreener (unchanged — handled downstream in sniper engine)
  * Wallet analysis:        GMGN (unchanged — handled in wallet-score.service.ts)
- *
- * Suppression model (same as before):
- *   suppressedUntil: Map<mint, unix-ms>
- *   • Normal new fire       → suppressedUntil = now + TRACKING_WINDOW_MS (1 hour)
- *   • releaseForRediscovery → suppressedUntil = now + delayMs (short window for transient failures)
- *
- * Exported interface is intentionally identical to the old GeckoTerminal implementation
- * so that index.ts, sniper-engine.service.ts, and all routes need no changes.
  */
 
 import { logger } from '../lib/logger.js';
@@ -27,8 +26,11 @@ import {
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-const NEW_PAIRS_INTERVAL_MS  = 15_000;  // poll new_pairs every 15 s
-const TRENDING_INTERVAL_MS   = 30_000;  // poll trending every 30 s
+const RANK_1M_INTERVAL_MS    = 15_000;  // poll rank/1m every 15 s
+const RANK_5M_INTERVAL_MS    = 30_000;  // poll rank/5m every 30 s
+const RANK_1H_INTERVAL_MS    = 60_000;  // poll rank/1h every 60 s
+const NEW_PAIRS_INTERVAL_MS  = RANK_1M_INTERVAL_MS; // alias kept for diagnostics compat
+const TRENDING_INTERVAL_MS   = RANK_5M_INTERVAL_MS; // alias kept for diagnostics compat
 const BOOT_DELAY_MS          = 5_000;   // let previous instance clear before first request
 const MAX_FEED               = 50;
 const TRACKING_WINDOW_MS     = 60 * 60_000; // 1 hour default suppression
@@ -52,14 +54,17 @@ const IGNORE_MINTS = new Set([
 
 // ── Discovery event ────────────────────────────────────────────────────────────
 
+export type GmgnDiscoverySource = 'rank_1m' | 'rank_5m' | 'rank_1h';
+
 export interface DiscoveryEvent {
-  mint:         string;
-  poolAddress?: string;
-  ts:           number;
-  name?:        string;
-  symbol?:      string;
-  isMigration:  boolean;
-  reserveUsd?:  number;
+  mint:            string;
+  poolAddress?:    string;
+  ts:              number;
+  name?:           string;
+  symbol?:         string;
+  isMigration:     boolean;
+  reserveUsd?:     number;
+  discoverySource: GmgnDiscoverySource;
 }
 
 // ── In-memory state ───────────────────────────────────────────────────────────
@@ -78,14 +83,21 @@ let totalTokensSkippedIgnore = 0;
 
 // ── Diagnostics ───────────────────────────────────────────────────────────────
 
-let newPairsPollCount          = 0;
-let trendingPollCount          = 0;
-let lastNewPairsSuccessMs      = 0;
-let lastTrendingSuccessMs      = 0;
-let consecutiveNewPairsFailures = 0;
-let consecutiveTrendingFailures = 0;
-let lastNewPairsError: string | null  = null;
-let lastTrendingError: string | null  = null;
+let newPairsPollCount           = 0;  // rank/1m
+let trendingPollCount           = 0;  // rank/5m
+let trending1hPollCount         = 0;  // rank/1h
+let lastNewPairsSuccessMs       = 0;
+let lastTrendingSuccessMs       = 0;
+let lastTrending1hSuccessMs     = 0;
+let consecutiveNewPairsFailures  = 0;
+let consecutiveTrendingFailures  = 0;
+let consecutiveTrending1hFailures = 0;
+let lastNewPairsError: string | null   = null;
+let lastTrendingError: string | null   = null;
+let lastTrending1hError: string | null = null;
+
+// Per-source fired counts for performance comparison
+const firedBySource: Record<GmgnDiscoverySource, number> = { rank_1m: 0, rank_5m: 0, rank_1h: 0 };
 let sessionStartMs             = 0;
 
 /**
@@ -161,7 +173,7 @@ export function getSourceActivity() {
  * Applies age filter, suppression, dedup, then fires onGraduation.
  * Returns the number of new tokens fired.
  */
-function processTokens(tokens: GmgnDiscoveredToken[], source: 'new_pairs' | 'trending'): number {
+function processTokens(tokens: GmgnDiscoveredToken[], source: GmgnDiscoverySource): number {
   const now = Date.now();
   let fired = 0;
 
@@ -203,6 +215,7 @@ function processTokens(tokens: GmgnDiscoveredToken[], source: 'new_pairs' | 'tre
 
     if (isNew) {
       totalDiscovered++;
+      firedBySource[source]++;
       recordDiscoveryDelay(openTimestamp);
     }
 
@@ -212,11 +225,12 @@ function processTokens(tokens: GmgnDiscoveredToken[], source: 'new_pairs' | 'tre
     const ev: DiscoveryEvent = {
       mint,
       poolAddress,
-      ts:          now,
+      ts:              now,
       name,
       symbol,
-      isMigration: isReFire,
+      isMigration:     isReFire,
       reserveUsd,
+      discoverySource: source,
     };
 
     discoveryFeed.unshift(ev);
@@ -228,7 +242,7 @@ function processTokens(tokens: GmgnDiscoveredToken[], source: 'new_pairs' | 'tre
 
     totalTokensFired++;
 
-    // Persist to DB (non-blocking)
+    // Persist to DB with source label so analytics can slice by discovery window
     const dbSource = isReFire ? `gmgn_${source}_refire` : `gmgn_${source}`;
     query(
       `INSERT INTO detected_migrations
@@ -251,16 +265,12 @@ function processTokens(tokens: GmgnDiscoveredToken[], source: 'new_pairs' | 'tre
   return fired;
 }
 
-// ── Short-window rank poller (1m) — replaces broken new_pairs endpoint ────────
-//
-// The /tokens/new_pairs/sol GMGN endpoint returns "invalid argument" (code 40000300)
-// regardless of parameters. The /rank/sol/swaps/1m endpoint is fully functional,
-// returns tokens with activity in the last minute, and serves the same purpose
-// (surfacing the newest, most-actively-traded tokens).
+// ── rank/1m poller ────────────────────────────────────────────────────────────
+// Replaces broken new_pairs endpoint; returns the most recently-active tokens.
 
 async function pollNewPairs(): Promise<void> {
   const bannedUntil = getDiscoveryBannedUntil();
-  if (bannedUntil > Date.now()) return; // respect discovery rate-limit ban
+  if (bannedUntil > Date.now()) return;
 
   const tokens = await fetchTrendingTokens('1m', 100);
 
@@ -271,7 +281,7 @@ async function pollNewPairs(): Promise<void> {
     return;
   }
 
-  const fired = processTokens(tokens, 'new_pairs');
+  const fired = processTokens(tokens, 'rank_1m');
   consecutiveNewPairsFailures = 0;
   lastNewPairsError = null;
   newPairsPollCount++;
@@ -282,7 +292,7 @@ async function pollNewPairs(): Promise<void> {
   }
 }
 
-// ── Trending poller ───────────────────────────────────────────────────────────
+// ── rank/5m poller ────────────────────────────────────────────────────────────
 
 async function pollTrending(): Promise<void> {
   const bannedUntil = getDiscoveryBannedUntil();
@@ -293,57 +303,79 @@ async function pollTrending(): Promise<void> {
   if (tokens === null) {
     consecutiveTrendingFailures++;
     lastTrendingError = 'API returned null (rate-limited or error)';
-    logger.debug({ failures: consecutiveTrendingFailures }, 'GMGN discovery: trending fetch failed');
+    logger.debug({ failures: consecutiveTrendingFailures }, 'GMGN discovery: rank/5m fetch failed');
     return;
   }
 
-  const fired = processTokens(tokens, 'trending');
+  const fired = processTokens(tokens, 'rank_5m');
   consecutiveTrendingFailures = 0;
   lastTrendingError = null;
   trendingPollCount++;
   lastTrendingSuccessMs = Date.now();
 
   if (fired > 0) {
-    logger.info({ fired, total: totalDiscovered }, 'GMGN discovery: new tokens queued from trending');
+    logger.info({ fired, total: totalDiscovered }, 'GMGN discovery: new tokens queued from rank/5m');
+  }
+}
+
+// ── rank/1h poller ────────────────────────────────────────────────────────────
+// Longer trending window — surfaces tokens that have sustained activity over an
+// hour, complementing the short-burst 1m and 5m signals.
+
+async function pollTrending1h(): Promise<void> {
+  const bannedUntil = getDiscoveryBannedUntil();
+  if (bannedUntil > Date.now()) return;
+
+  const tokens = await fetchTrendingTokens('1h', 100);
+
+  if (tokens === null) {
+    consecutiveTrending1hFailures++;
+    lastTrending1hError = 'API returned null (rate-limited or error)';
+    logger.debug({ failures: consecutiveTrending1hFailures }, 'GMGN discovery: rank/1h fetch failed');
+    return;
+  }
+
+  const fired = processTokens(tokens, 'rank_1h');
+  consecutiveTrending1hFailures = 0;
+  lastTrending1hError = null;
+  trending1hPollCount++;
+  lastTrending1hSuccessMs = Date.now();
+
+  if (fired > 0) {
+    logger.info({ fired, total: totalDiscovered }, 'GMGN discovery: new tokens queued from rank/1h');
   }
 }
 
 // ── Lifecycle ─────────────────────────────────────────────────────────────────
 
 let started              = false;
-let newPairsTimer: ReturnType<typeof setTimeout> | null  = null;
-let trendingTimer: ReturnType<typeof setTimeout> | null  = null;
+let newPairsTimer:   ReturnType<typeof setTimeout> | null = null;
+let trendingTimer:   ReturnType<typeof setTimeout> | null = null;
+let trending1hTimer: ReturnType<typeof setTimeout> | null = null;
 
-function scheduleNewPairs(): void {
-  if (newPairsTimer) { clearTimeout(newPairsTimer); newPairsTimer = null; }
-  if (!started) return;
-
-  // If in ban window, delay until the ban clears (+ 2 s jitter)
-  const banned = getDiscoveryBannedUntil();
-  const delay  = banned > Date.now()
-    ? (banned - Date.now() + 2_000)
-    : NEW_PAIRS_INTERVAL_MS;
-
-  newPairsTimer = setTimeout(async () => {
-    await pollNewPairs();
-    scheduleNewPairs();
-  }, delay);
+function makeScheduler(
+  poll: () => Promise<void>,
+  timerRef: { current: ReturnType<typeof setTimeout> | null },
+  intervalMs: number,
+): () => void {
+  function schedule(): void {
+    if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null; }
+    if (!started) return;
+    const banned = getDiscoveryBannedUntil();
+    const delay  = banned > Date.now() ? (banned - Date.now() + 2_000) : intervalMs;
+    timerRef.current = setTimeout(async () => { await poll(); schedule(); }, delay);
+  }
+  return schedule;
 }
 
-function scheduleTrending(): void {
-  if (trendingTimer) { clearTimeout(trendingTimer); trendingTimer = null; }
-  if (!started) return;
+// Wrap mutable timer vars in objects so makeScheduler can mutate them by reference
+const _np  = { current: null as ReturnType<typeof setTimeout> | null };
+const _t5  = { current: null as ReturnType<typeof setTimeout> | null };
+const _t1h = { current: null as ReturnType<typeof setTimeout> | null };
 
-  const banned = getDiscoveryBannedUntil();
-  const delay  = banned > Date.now()
-    ? (banned - Date.now() + 2_000)
-    : TRENDING_INTERVAL_MS;
-
-  trendingTimer = setTimeout(async () => {
-    await pollTrending();
-    scheduleTrending();
-  }, delay);
-}
+const scheduleNewPairs   = makeScheduler(pollNewPairs,    _np,  RANK_1M_INTERVAL_MS);
+const scheduleTrending   = makeScheduler(pollTrending,    _t5,  RANK_5M_INTERVAL_MS);
+const scheduleTrending1h = makeScheduler(pollTrending1h,  _t1h, RANK_1H_INTERVAL_MS);
 
 export function startTrenchesScanner(): void {
   if (started) return;
@@ -353,37 +385,31 @@ export function startTrenchesScanner(): void {
   const gmgnKeySet = !!process.env.GMGN_API_KEY;
   logger.info(
     {
-      rank1mIntervalMs:  NEW_PAIRS_INTERVAL_MS,
-      rank5mIntervalMs:  TRENDING_INTERVAL_MS,
+      rank1mIntervalMs:  RANK_1M_INTERVAL_MS,
+      rank5mIntervalMs:  RANK_5M_INTERVAL_MS,
+      rank1hIntervalMs:  RANK_1H_INTERVAL_MS,
       bootDelayMs:       BOOT_DELAY_MS,
       gmgnApiKeySet:     gmgnKeySet,
     },
-    'GMGN discovery: starting (rank/1m + rank/5m pollers)',
+    'GMGN discovery: starting (rank/1m + rank/5m + rank/1h pollers)',
   );
 
   if (!gmgnKeySet) {
-    logger.warn(
-      'GMGN_API_KEY not set — discovery will attempt unauthenticated requests; rate limits will be stricter',
-    );
+    logger.warn('GMGN_API_KEY not set — discovery will attempt unauthenticated requests; rate limits will be stricter');
   }
 
-  // Stagger the two pollers so they don't fire simultaneously
-  newPairsTimer = setTimeout(async () => {
-    await pollNewPairs();
-    scheduleNewPairs();
-  }, BOOT_DELAY_MS);
-
-  trendingTimer = setTimeout(async () => {
-    await pollTrending();
-    scheduleTrending();
-  }, BOOT_DELAY_MS + 7_500); // offset by 7.5 s so requests interleave
+  // Stagger the three pollers: 5 s, 12.5 s, 20 s after boot
+  _np.current = setTimeout(async () => { await pollNewPairs();   scheduleNewPairs();   }, BOOT_DELAY_MS);
+  _t5.current = setTimeout(async () => { await pollTrending();   scheduleTrending();   }, BOOT_DELAY_MS + 7_500);
+  _t1h.current = setTimeout(async () => { await pollTrending1h(); scheduleTrending1h(); }, BOOT_DELAY_MS + 15_000);
 }
 
 export function stopTrenchesScanner(): void {
   if (!started) return;
   started = false;
-  if (newPairsTimer) { clearTimeout(newPairsTimer); newPairsTimer = null; }
-  if (trendingTimer) { clearTimeout(trendingTimer); trendingTimer = null; }
+  if (_np.current)  { clearTimeout(_np.current);  _np.current  = null; }
+  if (_t5.current)  { clearTimeout(_t5.current);  _t5.current  = null; }
+  if (_t1h.current) { clearTimeout(_t1h.current); _t1h.current = null; }
   logger.info('GMGN discovery: stopped');
 }
 
@@ -410,45 +436,60 @@ export function getTrenchesDiagnostics() {
 
   const bannedUntil   = getDiscoveryBannedUntil();
 
-  // Derive combined "last success" and failure counts from the two pollers
-  const lastPollSuccessMs   = Math.max(lastNewPairsSuccessMs, lastTrendingSuccessMs);
-  const consecutiveFailures = consecutiveNewPairsFailures + consecutiveTrendingFailures;
-  const lastPollError       = lastNewPairsError ?? lastTrendingError ?? null;
-  const pollCount           = newPairsPollCount + trendingPollCount;
+  // Derive combined "last success" and failure counts from all three pollers
+  const lastPollSuccessMs   = Math.max(lastNewPairsSuccessMs, lastTrendingSuccessMs, lastTrending1hSuccessMs);
+  const consecutiveFailures = consecutiveNewPairsFailures + consecutiveTrendingFailures + consecutiveTrending1hFailures;
+  const lastPollError       = lastNewPairsError ?? lastTrendingError ?? lastTrending1hError ?? null;
+  const pollCount           = newPairsPollCount + trendingPollCount + trending1hPollCount;
 
   return {
-    source:               'gmgn_new_pairs_and_trending',
+    source:               'gmgn_rank_1m_5m_1h',
     sessionStartMs,
     pollCount,
     lastPollSuccessMs,
     lastPollAgoSec:       lastPollSuccessMs ? Math.round((Date.now() - lastPollSuccessMs) / 1_000) : null,
     consecutiveFailures,
     lastPollError,
-    pollIntervalMs:       NEW_PAIRS_INTERVAL_MS,
+    pollIntervalMs:       RANK_1M_INTERVAL_MS,
 
-    // Per-poller breakdown
+    // Per-poller breakdown (labelled by GMGN window)
     pollers: {
       newPairs: {
+        label:               'rank/1m',
         pollCount:           newPairsPollCount,
         lastSuccessMs:       lastNewPairsSuccessMs,
         lastSuccessAgoSec:   lastNewPairsSuccessMs ? Math.round((Date.now() - lastNewPairsSuccessMs) / 1_000) : null,
         consecutiveFailures: consecutiveNewPairsFailures,
         lastError:           lastNewPairsError,
-        intervalMs:          NEW_PAIRS_INTERVAL_MS,
+        intervalMs:          RANK_1M_INTERVAL_MS,
+        firedTotal:          firedBySource['rank_1m'],
       },
       trending: {
+        label:               'rank/5m',
         pollCount:           trendingPollCount,
         lastSuccessMs:       lastTrendingSuccessMs,
         lastSuccessAgoSec:   lastTrendingSuccessMs ? Math.round((Date.now() - lastTrendingSuccessMs) / 1_000) : null,
         consecutiveFailures: consecutiveTrendingFailures,
         lastError:           lastTrendingError,
-        intervalMs:          TRENDING_INTERVAL_MS,
+        intervalMs:          RANK_5M_INTERVAL_MS,
+        firedTotal:          firedBySource['rank_5m'],
+      },
+      trending1h: {
+        label:               'rank/1h',
+        pollCount:           trending1hPollCount,
+        lastSuccessMs:       lastTrending1hSuccessMs,
+        lastSuccessAgoSec:   lastTrending1hSuccessMs ? Math.round((Date.now() - lastTrending1hSuccessMs) / 1_000) : null,
+        consecutiveFailures: consecutiveTrending1hFailures,
+        lastError:           lastTrending1hError,
+        intervalMs:          RANK_1H_INTERVAL_MS,
+        firedTotal:          firedBySource['rank_1h'],
       },
     },
 
-    // Discovered / fired
+    // Discovered / fired — total and by source
     totalDiscovered,
     tokensPerHour,
+    firedBySource,
 
     // GMGN discovery delay (time from token creation to our detection)
     avgDiscoveryDelaySec:  avgDiscoveryDelaySec(),
@@ -479,8 +520,8 @@ export function getTrenchesDiagnostics() {
     isBootstrap:              pollCount === 0,
     lastSeenSig:              null,
     consecutivePollFailures:  consecutiveFailures,
-    pollDelayMs:              NEW_PAIRS_INTERVAL_MS,
-    pagesPerPoll:             2,    // new_pairs + trending = 2 sources
+    pollDelayMs:              RANK_1M_INTERVAL_MS,
+    pagesPerPoll:             3,    // rank/1m + rank/5m + rank/1h
     pumpfunMintsTotal:        totalDiscovered,
     heliusWsConfigured:       false,
     heliusApiKeySet:          !!process.env.HELIUS_API_KEY,
@@ -489,6 +530,7 @@ export function getTrenchesDiagnostics() {
     recentFeed: discoveryFeed.slice(0, 5).map(e => ({
       mint:            e.mint.slice(0, 12),
       instructionType: e.isMigration ? 'refire' : 'new_token',
+      discoverySource: e.discoverySource,
       ts:              e.ts,
       reserveUsd:      e.reserveUsd,
     })),

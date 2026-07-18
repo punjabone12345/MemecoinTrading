@@ -31,7 +31,7 @@ export const api = {
   getScannerSources: () => apiFetch<{
     dexscreener: {
       total: number;
-      recent: { mint: string; ts: number; description?: string; icon?: string; isMigration: boolean }[];
+      recent: { mint: string; ts: number; description?: string; icon?: string; isMigration: boolean; discoverySource?: string }[];
     };
   }>('/scanner/sources'),
 
