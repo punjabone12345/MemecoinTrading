@@ -37,3 +37,4 @@
 - [Migration-discovery blackout during Helius rate-limit episodes](trenches-cooldown-blackout.md) — scanner skipped entirely during Helius cooldown instead of using its public-RPC fallback, causing multi-minute dark periods + burst catch-up; also added WS zombie-connection watchdog
 - [GeckoTerminal new_pools discovery](gecko-discovery.md) — DexScreener token-profiles/latest/v1 is 429-blocked from Replit IP; switched to GeckoTerminal new_pools (2 pages/20s); mint from relationships.base_token.data.id strip "solana_"; 1hr window; 2hr pool-age filter on boot
 - [Market data batch refresh](market-batch-refresh.md) — serial 128-token loop (64s/cycle) replaced with DexScreener batch endpoint (30 mints/request, 5 batches × 300ms = ~2s); broadcast after each batch for incremental UI updates
+- [Discovery pipeline improvements](discovery-pipeline.md) — suppression model, validation timeout/age-cap, lifecycle columns, coverage endpoint

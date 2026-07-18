@@ -12,7 +12,9 @@ import { isGmgnConfigured, getGmgnBannedUntil } from '../lib/gmgn-client.js';
 import {
   diagTokenDiscovered, diagTokenScanned, diagTokenRejected,
   diagTokenTraded, diagTokenExpired, diagTechError,
+  diagTokenValidationMilestone, diagTokenReleased,
 } from '../lib/diagnostics.js';
+import { releaseForRediscovery } from './trenches.service.js';
 
 const MAX_TRACKING_MS       = 60 * 60 * 1_000; // 1 hour — matches DexScreener discovery tracking window
 const MAX_POSITIONS         = 10;
@@ -1986,10 +1988,17 @@ function pruneExpiredTracking(): void {
 // Minimum post-grad pool liquidity required to keep a token tracked.
 // Tokens that never reach this (micro/seeded grads, false detections) are pruned after
 // VALIDATION_DELAY_MS. Real pump.fun grads seed ~$1-3k liquidity — $500 is conservative.
-const MIN_POOL_LIQUIDITY_USD = 500;
-const VALIDATION_DELAY_MS   = 20_000;      // wait 20s before first quality check
-const VALIDATION_TIMEOUT_MS = 5 * 60_000;  // prune if not validated within 5 min of activation (was 60s — too short for PumpSwap pools which take 2-5 min to index on DexScreener)
-const VALIDATION_POLL_MS    = 5_000;       // retry DexScreener every 5s during validation
+const MIN_POOL_LIQUIDITY_USD           = 500;
+const VALIDATION_DELAY_MS             = 20_000;      // wait 20s before first quality check
+const VALIDATION_TIMEOUT_MS           = 10 * 60_000; // hard cap: 10 min (extended from 5 min — covers slow DexScreener indexing)
+const VALIDATION_POLL_MS              = 5_000;       // retry DexScreener every 5s during validation
+// Stop retrying if the pool was already created > 15 min ago (too late for a meaningful entry).
+// Uses pairCreatedAt from DexScreener; falls back to activatedAt as a conservative proxy.
+const MAX_TOKEN_AGE_FOR_VALIDATION_MS = 15 * 60_000;
+// After a transient validation failure (indexing lag / liq=0 / timeout), shorten the
+// 1-hour GeckoTerminal re-discovery suppression to this delay so the token gets
+// a second validation attempt once DexScreener finishes indexing.
+const TRANSIENT_RETRY_DELAY_MS        = 3 * 60_000;
 
 async function activateTrackingNow(mint: string): Promise<void> {
   const pending: PendingGraduation | undefined = pendingGraduations.get(mint);
@@ -2056,9 +2065,16 @@ async function validateOrPrune(mint: string, activatedAt: number): Promise<void>
   // Wait before first check — real pools take ~5-15s to appear on DexScreener
   await new Promise(r => setTimeout(r, VALIDATION_DELAY_MS));
 
+  // Two-condition deadline:
+  //   1. Hard 10-min cap from activation (VALIDATION_TIMEOUT_MS)
+  //   2. Token age cap: stop retrying once pairCreatedAt > MAX_TOKEN_AGE_FOR_VALIDATION_MS
+  //      (checked per-loop as soon as DexScreener returns pairCreatedAt)
   const deadline = activatedAt + VALIDATION_TIMEOUT_MS;
-  let consecutiveLowLiq = 0;
-  let lastSeenLiq = -1;
+  let consecutiveLowLiq    = 0;
+  let lastSeenLiq          = -1;
+  // Lifecycle milestone flags — each fires its DB write exactly once
+  let firstPairSeenAt: number | null     = null;
+  let firstNonzeroLiqAt: number | null   = null;
 
   while (Date.now() < deadline) {
     const tok = trackedTokens.get(mint);
@@ -2078,21 +2094,59 @@ async function validateOrPrune(mint: string, activatedAt: number): Promise<void>
       const postGradPairs = pumpswapValidate.length > 0 ? pumpswapValidate : byLiqValidate;
 
       if (postGradPairs.length > 0) {
+        const now = Date.now();
+
+        // ── Milestone: first DexScreener pair seen ──────────────────────────
+        if (firstPairSeenAt === null) {
+          firstPairSeenAt = now;
+          void diagTokenValidationMilestone(mint, 'first_dexscreener_pair_at', now).catch(() => {});
+          logger.debug(
+            { mint: mint.slice(0, 12), delaySec: Math.round((now - activatedAt) / 1_000) },
+            'Sniper engine: DexScreener pair first seen during validation',
+          );
+        }
+
         const liq = postGradPairs[0]?.liquidity?.usd ?? 0;
         lastSeenLiq = liq;
 
+        // ── Milestone: first non-zero liquidity ──────────────────────────────
+        if (liq > 0 && firstNonzeroLiqAt === null) {
+          firstNonzeroLiqAt = now;
+          void diagTokenValidationMilestone(mint, 'first_nonzero_liq_at', now).catch(() => {});
+        }
+
+        // ── Age cap via pairCreatedAt ─────────────────────────────────────────
+        // Once DexScreener returns pairCreatedAt we know the true pool age.
+        // Stop retrying if the pool is already too old for a timely entry.
+        const pairCreatedAt: number | undefined = postGradPairs[0]?.pairCreatedAt;
+        const tokenAgeMs = pairCreatedAt ? now - pairCreatedAt : now - activatedAt;
+        if (tokenAgeMs > MAX_TOKEN_AGE_FOR_VALIDATION_MS) {
+          logger.info(
+            { mint: mint.slice(0, 12), ageMin: (tokenAgeMs / 60_000).toFixed(1), liq: liq.toFixed(0) },
+            'Sniper engine: token exceeded age cap — pruning (too old for worthwhile entry)',
+          );
+          void diagTokenRejected(mint, 'Token age ' + (tokenAgeMs / 60_000).toFixed(1) + ' min exceeded ' + (MAX_TOKEN_AGE_FOR_VALIDATION_MS / 60_000) + ' min cap').catch(() => {});
+          void diagTokenValidationMilestone(mint, 'validation_outcome', 'failed_age_cap').catch(() => {});
+          if (!trackedTokens.get(mint)?.entryTriggered && !openPositions.has(mint)) pruneToken(mint);
+          // No release — the token is already too old; re-discovery would hit the same cap
+          return;
+        }
+
         if (liq >= MIN_POOL_LIQUIDITY_USD) {
           // Pool qualifies — token is a real graduate
+          void diagTokenValidationMilestone(mint, 'liq_min_crossed_at', now).catch(() => {});
+          void diagTokenValidationMilestone(mint, 'validation_outcome', 'passed').catch(() => {});
           logger.info(
-            { mint: mint.slice(0, 12), liq: liq.toFixed(0) },
+            { mint: mint.slice(0, 12), liq: liq.toFixed(0), delaySec: Math.round((now - activatedAt) / 1_000) },
             'Sniper engine: pool quality validated — keeping token',
           );
           return; // enrichMetadataAsync will continue updating market data
         }
 
         // Pool is indexed but liquidity is below the minimum.
-        // liq=0 or very low often means DexScreener indexing lag (30–90s window).
-        // Only prune early if it's consistently non-zero but very low (genuine micro pool).
+        // liq=0 often means DexScreener indexing lag (30–90 s window) — keep retrying.
+        // Only prune early if the pool consistently shows a non-zero but very low value,
+        // which indicates a genuine micro/seeded pool rather than an indexing delay.
         if (liq > 0 && liq < PRUNE_MICRO_LIQ_USD) {
           consecutiveLowLiq++;
           if (consecutiveLowLiq >= MICRO_LIQ_CONFIRM_CHECKS) {
@@ -2101,8 +2155,10 @@ async function validateOrPrune(mint: string, activatedAt: number): Promise<void>
               { mint: mint.slice(0, 12), liq: liq.toFixed(0), checks: consecutiveLowLiq, minLiq: MIN_POOL_LIQUIDITY_USD },
               'Sniper engine: pool confirmed micro/seeded grad (non-zero low liq across multiple checks) — pruning',
             );
-            void diagTokenRejected(mint, `Pool liquidity ${liq.toFixed(0)} consistently < ${PRUNE_MICRO_LIQ_USD} (micro/seeded grad after ${consecutiveLowLiq} checks)`).catch(() => {});
+            void diagTokenRejected(mint, 'Pool liquidity ' + liq.toFixed(0) + ' consistently < ' + PRUNE_MICRO_LIQ_USD + ' (micro/seeded grad after ' + consecutiveLowLiq + ' checks)').catch(() => {});
+            void diagTokenValidationMilestone(mint, 'validation_outcome', 'failed_micro').catch(() => {});
             pruneToken(mint);
+            // Do NOT release — this is a genuine micro pool, not an indexing delay
             return;
           }
         } else {
@@ -2123,13 +2179,32 @@ async function validateOrPrune(mint: string, activatedAt: number): Promise<void>
 
   // Deadline reached: no qualified pool found → re-check entry state before pruning
   if (!trackedTokens.get(mint)?.entryTriggered && !openPositions.has(mint)) {
-    const liqStr = lastSeenLiq >= 0 ? String(Math.round(lastSeenLiq)) : 'none';
+    const liqStr     = lastSeenLiq >= 0 ? String(Math.round(lastSeenLiq)) : 'none';
+    const hadPairs   = firstPairSeenAt !== null;
+    const outcomeKey = hadPairs ? 'failed_timeout' : 'failed_no_pairs';
+
     logger.warn(
-      { mint: mint.slice(0, 12), lastSeenLiq: liqStr },
+      { mint: mint.slice(0, 12), lastSeenLiq: liqStr, hadPairs },
       'Sniper engine: no qualified post-grad pool within validation window — pruning token',
     );
     void diagTokenRejected(mint, 'No qualified pool within ' + (VALIDATION_TIMEOUT_MS / 60_000) + 'min timeout (last seen liq: ' + liqStr + ')').catch(() => {});
+    void diagTokenValidationMilestone(mint, 'validation_outcome', outcomeKey).catch(() => {});
+
     pruneToken(mint);
+
+    // ── Release for re-discovery ──────────────────────────────────────────────
+    // The timeout is almost always caused by DexScreener indexing lag, not by
+    // the pool having zero liquidity. Shortening the 1-hour suppression window
+    // lets GeckoTerminal re-fire the token after TRANSIENT_RETRY_DELAY_MS so
+    // a fresh validateOrPrune attempt can see the (now-indexed) pool.
+    // If DexScreener still shows nothing on the retry, the token will age out
+    // naturally via the MAX_TOKEN_AGE_FOR_VALIDATION_MS cap.
+    releaseForRediscovery(mint, TRANSIENT_RETRY_DELAY_MS);
+    void diagTokenReleased(mint).catch(() => {});
+    logger.info(
+      { mint: mint.slice(0, 12), retryInSec: Math.round(TRANSIENT_RETRY_DELAY_MS / 1_000) },
+      'Sniper engine: token released for re-discovery (DexScreener indexing lag)',
+    );
   }
 }
 
@@ -2235,7 +2310,7 @@ async function enrichTokenMetadataAsync(mint: string, activatedAt: number): Prom
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
-export function addGraduatedToken(ev: { mint: string; poolAddress?: string; ts: number }): void {
+export function addGraduatedToken(ev: { mint: string; poolAddress?: string; ts: number; reserveUsd?: number }): void {
   // Filter genuinely pre-startup graduation events (e.g. historical backfill that
   // somehow leaked through). We do NOT use a fixed time window (the old 5-min limit)
   // because rate-limited polling retries can legitimately take many minutes to process
@@ -2265,7 +2340,7 @@ export function addGraduatedToken(ev: { mint: string; poolAddress?: string; ts: 
     poolAddress: ev.poolAddress,
     detectedAt,
   });
-  void diagTokenDiscovered(ev.mint, 'gecko_terminal', {}).catch(() => {});
+  void diagTokenDiscovered(ev.mint, 'gecko_terminal', { initialLiquidity: ev.reserveUsd }).catch(() => {});
 
   logger.info(
     { mint: ev.mint.slice(0, 16), pool: ev.poolAddress?.slice(0, 16) },

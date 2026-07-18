@@ -281,6 +281,66 @@ export async function diagTechError(
   }
 }
 
+// ── Discovery pipeline lifecycle events ───────────────────────────────────────
+
+/**
+ * Records a key milestone timestamp during the validation phase.
+ * Uses COALESCE to preserve the first-ever value across re-discovery attempts.
+ *
+ * Timestamp fields:
+ *   first_dexscreener_pair_at — when the validator first got a DexScreener pair
+ *   first_nonzero_liq_at      — when the validator first saw liq > 0
+ *   liq_min_crossed_at        — when liq first crossed the configured minimum ($500)
+ *
+ * Text field:
+ *   validation_outcome — final result: 'passed' | 'failed_timeout' | 'failed_no_pairs'
+ *                        | 'failed_micro' | 'failed_age_cap'
+ */
+export async function diagTokenValidationMilestone(
+  mint: string,
+  field: 'first_dexscreener_pair_at' | 'first_nonzero_liq_at' | 'liq_min_crossed_at' | 'validation_outcome',
+  value: number | string,
+): Promise<void> {
+  const now = Date.now();
+  try {
+    let p = 1;
+    if (field === 'validation_outcome') {
+      // Overwrite: the last outcome wins (re-discovery may change it to 'passed')
+      await query(
+        'UPDATE diag_tokens SET validation_outcome = $' + p++ + ', last_updated = $' + p++ + ' WHERE mint = $' + p++,
+        [value, now, mint],
+      );
+    } else {
+      // Use COALESCE: keep only the first-ever timestamp (re-discoveries don't reset)
+      await query(
+        'UPDATE diag_tokens SET ' + field + ' = COALESCE(diag_tokens.' + field + ', $' + p++ + '), last_updated = $' + p++ + ' WHERE mint = $' + p++,
+        [value, now, mint],
+      );
+    }
+  } catch (err: any) {
+    logger.debug({ err: err?.message, mint, field }, 'diag: validationMilestone write failed (non-fatal)');
+  }
+}
+
+/**
+ * Called when the sniper engine releases a token for re-discovery after a
+ * transient validation failure (DexScreener indexing lag, liq = 0, timeout).
+ * Increments rediscovery_count so we can see how many tokens needed multiple
+ * discovery attempts before passing validation.
+ */
+export async function diagTokenReleased(mint: string): Promise<void> {
+  const now = Date.now();
+  try {
+    let p = 1;
+    await query(
+      'UPDATE diag_tokens SET rediscovery_count = COALESCE(rediscovery_count, 0) + 1, last_updated = $' + p++ + ' WHERE mint = $' + p++,
+      [now, mint],
+    );
+  } catch (err: any) {
+    logger.debug({ err: err?.message, mint }, 'diag: tokenReleased write failed (non-fatal)');
+  }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Read API — used by the /api/diagnostics route
 // ─────────────────────────────────────────────────────────────────────────────
@@ -507,4 +567,64 @@ export async function getDiagFunnelStats(opts: { since?: number } = {}): Promise
   `, [cutoff]);
 
   return funnel[0] ?? {};
+}
+
+/**
+ * Discovery pipeline coverage stats — validation lifecycle timing and outcome
+ * breakdown. Computed from the new lifecycle columns added to diag_tokens.
+ * Covers the last 24 hours unless `since` is specified.
+ */
+export async function getDiagCoverageStats(opts: { since?: number } = {}): Promise<unknown> {
+  const cutoff = opts.since ?? (Date.now() - 24 * 3_600_000);
+
+  const [lifecycle] = await query<{
+    total: string;
+    ever_had_pair: string;
+    ever_had_nonzero_liq: string;
+    ever_crossed_min: string;
+    avg_pair_delay_sec: string | null;
+    avg_nonzero_liq_delay_sec: string | null;
+    avg_min_crossed_delay_sec: string | null;
+    total_rediscoveries: string;
+    tokens_with_rediscovery: string;
+  }>(`
+    SELECT
+      COUNT(*)::text                                                          AS total,
+      COUNT(*) FILTER (WHERE first_dexscreener_pair_at IS NOT NULL)::text    AS ever_had_pair,
+      COUNT(*) FILTER (WHERE first_nonzero_liq_at      IS NOT NULL)::text    AS ever_had_nonzero_liq,
+      COUNT(*) FILTER (WHERE liq_min_crossed_at        IS NOT NULL)::text    AS ever_crossed_min,
+      ROUND(AVG(
+        CASE WHEN first_dexscreener_pair_at IS NOT NULL
+             THEN (first_dexscreener_pair_at - first_seen_at) / 1000.0 END
+      ), 1)::text                                                            AS avg_pair_delay_sec,
+      ROUND(AVG(
+        CASE WHEN first_nonzero_liq_at IS NOT NULL
+             THEN (first_nonzero_liq_at - first_seen_at) / 1000.0 END
+      ), 1)::text                                                            AS avg_nonzero_liq_delay_sec,
+      ROUND(AVG(
+        CASE WHEN liq_min_crossed_at IS NOT NULL
+             THEN (liq_min_crossed_at - first_seen_at) / 1000.0 END
+      ), 1)::text                                                            AS avg_min_crossed_delay_sec,
+      COALESCE(SUM(rediscovery_count), 0)::text                              AS total_rediscoveries,
+      COUNT(*) FILTER (WHERE rediscovery_count > 0)::text                    AS tokens_with_rediscovery
+    FROM diag_tokens
+    WHERE first_seen_at >= $1
+  `, [cutoff]);
+
+  const outcomes = await query<{ validation_outcome: string; count: string }>(`
+    SELECT
+      COALESCE(validation_outcome, 'pending') AS validation_outcome,
+      COUNT(*)::text AS count
+    FROM diag_tokens
+    WHERE first_seen_at >= $1
+    GROUP BY validation_outcome
+    ORDER BY COUNT(*) DESC
+  `, [cutoff]);
+
+  return {
+    windowMs:    Date.now() - cutoff,
+    windowHours: Math.round((Date.now() - cutoff) / 3_600_000),
+    ...lifecycle,
+    outcomeBreakdown: outcomes,
+  };
 }

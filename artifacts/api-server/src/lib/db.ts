@@ -258,6 +258,15 @@ export async function initDB(): Promise<void> {
     `ALTER TABLE sniper_positions ADD COLUMN IF NOT EXISTS max_slippage_pct NUMERIC`,
     // Ensure sniperStagnationPct seed exists (no-op if already set by user)
     `INSERT INTO settings (key, value) VALUES ('sniperStagnationPct', '5') ON CONFLICT (key) DO NOTHING`,
+    // ── Discovery pipeline lifecycle columns (diag_tokens) ─────────────────
+    // Track when each key milestone was first reached during validation.
+    // COALESCE in write queries preserves the first-ever value across rediscoveries.
+    `ALTER TABLE diag_tokens ADD COLUMN IF NOT EXISTS first_dexscreener_pair_at BIGINT`,
+    `ALTER TABLE diag_tokens ADD COLUMN IF NOT EXISTS first_nonzero_liq_at      BIGINT`,
+    `ALTER TABLE diag_tokens ADD COLUMN IF NOT EXISTS liq_min_crossed_at        BIGINT`,
+    `ALTER TABLE diag_tokens ADD COLUMN IF NOT EXISTS validation_outcome         TEXT`,
+    `ALTER TABLE diag_tokens ADD COLUMN IF NOT EXISTS rediscovery_count         INTEGER NOT NULL DEFAULT 0`,
+    `ALTER TABLE diag_tokens ADD COLUMN IF NOT EXISTS initial_reserve_usd       NUMERIC`,
   ];
 
   for (const sql of migrations) {

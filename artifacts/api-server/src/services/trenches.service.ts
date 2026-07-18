@@ -5,11 +5,19 @@
  * consistently 429-blocked from Replit's shared IP.
  *
  * GeckoTerminal free tier: ~30 req/min.
- * We poll 2 pages every 20 seconds = 6 req/min — very safe.
+ * We poll 2 pages every 25 seconds = ~5 req/min — very safe.
  *
- * Tracking window: 1 hour per token from first discovery.
- * Migration handling: if a mint reappears after its window has elapsed
- * it is re-fired with a fresh 1-hour window.
+ * Suppression model (replaces simple 1-hour firedAt):
+ *   suppressedUntil: Map<mint, unix-ms>
+ *   • Normal new fire      → suppressedUntil = now + TRACKING_WINDOW_MS (1 hour)
+ *   • releaseForRediscovery(mint, delayMs) → suppressedUntil = now + delayMs
+ *     This lets the sniper engine shorten the suppression window when the
+ *     rejection reason was transient (DexScreener indexing lag, liq = 0, etc.)
+ *   • Truly permanent outcomes (traded, rugcheck, holder, etc.) keep the full
+ *     1-hour window set by the normal first fire.
+ *
+ * Coverage counters track how many pools are seen, fired, and skipped so
+ * the /api/diagnostics/coverage endpoint can report discovery health.
  */
 
 import { logger } from '../lib/logger.js';
@@ -17,13 +25,13 @@ import { query } from '../lib/db.js';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-const GECKO_BASE = 'https://api.geckoterminal.com/api/v2/networks/solana/new_pools';
+const GECKO_BASE       = 'https://api.geckoterminal.com/api/v2/networks/solana/new_pools';
 const PAGES_PER_POLL   = 2;            // pages 1 & 2 — ~40 newest pools
 const PAGE_STAGGER_MS  = 800;          // stagger between page requests
 const POLL_INTERVAL_MS = 25_000;       // 25 s base → ~5 req/min (2 pages × 2.4/min)
 const BOOT_DELAY_MS    = 8_000;        // wait after startup before first poll (let old instance clear)
 const MAX_FEED         = 50;
-const TRACKING_WINDOW_MS = 60 * 60_000;  // 1 hour — matches MAX_TRACKING_MS in sniper engine
+const TRACKING_WINDOW_MS = 60 * 60_000;  // 1 hour — default suppression for normal fires
 
 // Backoff for GeckoTerminal 429s
 const GT_BACKOFF_BASE_MS = 15_000;
@@ -51,13 +59,30 @@ export interface DiscoveryEvent {
   ts:          number;
   name?:       string;
   isMigration: boolean;
+  reserveUsd?: number;  // GeckoTerminal reserve_in_usd at discovery time (proxy for initial liquidity)
 }
 
 // ── In-memory state ───────────────────────────────────────────────────────────
 
-const firedAt = new Map<string, number>();        // mint → last fired ts
+/**
+ * suppressedUntil maps mint → unix-ms when the suppression expires.
+ * Until that time, the token will not re-fire onGraduation.
+ *
+ * Normal first fire: suppressedUntil = now + TRACKING_WINDOW_MS (1 hour)
+ * releaseForRediscovery: overrides to now + delayMs (short window for transient failures)
+ */
+const suppressedUntil = new Map<string, number>();
+
 const discoveryFeed: DiscoveryEvent[] = [];
 let totalDiscovered = 0;
+
+// ── Coverage counters ─────────────────────────────────────────────────────────
+
+let totalPoolsSeen        = 0;   // total pool items returned by GeckoTerminal
+let totalPoolsFired       = 0;   // total onGraduation callbacks fired
+let totalPoolsSkippedAge  = 0;   // skipped: pool older than MAX_POOL_AGE_MS
+let totalPoolsSkippedDupe = 0;   // skipped: still within suppression window
+let totalPoolsSkippedIgnore = 0; // skipped: in IGNORE_MINTS or invalid mint
 
 // ── Diagnostics ───────────────────────────────────────────────────────────────
 
@@ -69,12 +94,32 @@ let sessionStartMs      = 0;
 
 // ── Callbacks ─────────────────────────────────────────────────────────────────
 
-let onGraduation: ((ev: { mint: string; poolAddress?: string; ts: number }) => void) | null = null;
+let onGraduation: ((ev: { mint: string; poolAddress?: string; ts: number; reserveUsd?: number }) => void) | null = null;
 
 export function setOnGraduation(
-  cb: (ev: { mint: string; poolAddress?: string; ts: number }) => void,
+  cb: (ev: { mint: string; poolAddress?: string; ts: number; reserveUsd?: number }) => void,
 ): void {
   onGraduation = cb;
+}
+
+// ── Suppression control (called by sniper engine on transient failures) ────────
+
+/**
+ * Shorten the suppression window for a mint that was pruned due to a transient
+ * reason (DexScreener indexing lag, liq = 0, validation timeout).
+ *
+ * After delayMs, the next GeckoTerminal poll will re-fire this mint so the
+ * validation can be attempted again with a fresh DexScreener check.
+ *
+ * Do NOT call this for permanent rejections (rugcheck, holder limits, traded).
+ * Those should keep the full 1-hour suppression window.
+ */
+export function releaseForRediscovery(mint: string, delayMs: number): void {
+  suppressedUntil.set(mint, Date.now() + delayMs);
+  logger.debug(
+    { mint: mint.slice(0, 12), retryInSec: Math.round(delayMs / 1_000) },
+    'Discovery: released for re-discovery (transient failure)',
+  );
 }
 
 // ── Public feed accessors ─────────────────────────────────────────────────────
@@ -101,9 +146,9 @@ export function getSourceActivity() {
 interface GeckoPool {
   id: string;
   attributes: {
-    name?:           string;
+    name?:            string;
     pool_created_at?: string;
-    reserve_in_usd?: string;
+    reserve_in_usd?:  string;
   };
   relationships: {
     base_token: { data: { id: string } };
@@ -130,8 +175,8 @@ async function fetchNewPoolsPage(page: number): Promise<GeckoPool[]> {
 
 // ── Rate-limit backoff state ──────────────────────────────────────────────────
 
-let gtBackoffUntil      = 0;   // unix ms — block all polls until this time
-let gtConsecutive429s   = 0;
+let gtBackoffUntil    = 0;   // unix ms — block all polls until this time
+let gtConsecutive429s = 0;
 
 function reportGecko429(): void {
   gtConsecutive429s++;
@@ -154,10 +199,11 @@ async function pollGeckoNewPools(): Promise<void> {
   // Respect backoff from previous 429s
   if (Date.now() < gtBackoffUntil) return;
 
-  const now = Date.now();
-  let fired       = 0;
-  let pagesOk     = 0;
-  let got429      = false;
+  const now     = Date.now();
+  let fired     = 0;
+  let pagesOk   = 0;
+  let got429    = false;
+  let poolsSeen = 0;
 
   for (let page = 1; page <= PAGES_PER_POLL; page++) {
     if (page > 1) await new Promise(r => setTimeout(r, PAGE_STAGGER_MS));
@@ -178,12 +224,20 @@ async function pollGeckoNewPools(): Promise<void> {
       continue;
     }
 
+    poolsSeen += pools.length;
+
     for (const pool of pools) {
       // Extract mint from "solana_<MINT>" relationship ID
       const baseId = pool.relationships?.base_token?.data?.id ?? '';
       const mint   = baseId.startsWith('solana_') ? baseId.slice(7) : '';
-      if (!mint || mint.length < 20) continue;
-      if (IGNORE_MINTS.has(mint)) continue;
+      if (!mint || mint.length < 20) {
+        totalPoolsSkippedIgnore++;
+        continue;
+      }
+      if (IGNORE_MINTS.has(mint)) {
+        totalPoolsSkippedIgnore++;
+        continue;
+      }
 
       // Extract pool address from "solana_<POOL>" pool ID
       const poolId      = pool.id ?? '';
@@ -193,20 +247,33 @@ async function pollGeckoNewPools(): Promise<void> {
       const createdAt = pool.attributes?.pool_created_at;
       if (createdAt) {
         const createdMs = new Date(createdAt).getTime();
-        if (Number.isFinite(createdMs) && now - createdMs > MAX_POOL_AGE_MS) continue;
+        if (Number.isFinite(createdMs) && now - createdMs > MAX_POOL_AGE_MS) {
+          totalPoolsSkippedAge++;
+          continue;
+        }
       }
 
-      const previousFire = firedAt.get(mint);
-      const isMigration  = previousFire !== undefined && now - previousFire >= TRACKING_WINDOW_MS;
-      const isNew        = previousFire === undefined;
+      // Suppression check — skip if within suppression window
+      const suppressExpiry = suppressedUntil.get(mint);
+      if (suppressExpiry !== undefined && now < suppressExpiry) {
+        totalPoolsSkippedDupe++;
+        continue;
+      }
 
-      if (!isNew && !isMigration) continue;
+      // Whether this is a re-fire (was previously suppressed) or brand new
+      const isMigration = suppressExpiry !== undefined; // had a previous fire whose window expired or was released
+      const isNew       = suppressExpiry === undefined;
 
-      // Fire
-      firedAt.set(mint, now);
+      // Set new suppression window (default: 1 hour)
+      // releaseForRediscovery() can shorten this after transient failures
+      suppressedUntil.set(mint, now + TRACKING_WINDOW_MS);
+
       if (isNew) totalDiscovered++;
 
-      const tokenName = pool.attributes?.name?.split(' / ')[0]?.trim();
+      // Parse initial reserve (proxy for initial liquidity)
+      const rawReserve  = pool.attributes?.reserve_in_usd;
+      const reserveUsd  = rawReserve ? parseFloat(rawReserve) : undefined;
+      const tokenName   = pool.attributes?.name?.split(' / ')[0]?.trim();
 
       const ev: DiscoveryEvent = {
         mint,
@@ -214,14 +281,17 @@ async function pollGeckoNewPools(): Promise<void> {
         ts:          now,
         name:        tokenName,
         isMigration,
+        reserveUsd,
       };
 
       discoveryFeed.unshift(ev);
       if (discoveryFeed.length > MAX_FEED) discoveryFeed.pop();
 
       if (onGraduation) {
-        onGraduation({ mint, poolAddress, ts: now });
+        onGraduation({ mint, poolAddress, ts: now, reserveUsd });
       }
+
+      totalPoolsFired++;
 
       // Persist discovery to DB (non-blocking)
       const source = isMigration ? 'dexscreener_migration' : 'dexscreener';
@@ -236,12 +306,15 @@ async function pollGeckoNewPools(): Promise<void> {
       if (isMigration) {
         logger.info(
           { mint: mint.slice(0, 16) },
-          'DexScreener discovery: migration re-appeared — fresh 1h window',
+          'DexScreener discovery: token re-appeared after suppression window — fresh tracking',
         );
       }
       fired++;
     }
   }
+
+  // Update global coverage counters
+  totalPoolsSeen += poolsSeen;
 
   if (got429) {
     // 429: apply exponential backoff; do NOT count as a success
@@ -314,30 +387,73 @@ export function stopTrenchesScanner(): void {
 // ── Diagnostics ───────────────────────────────────────────────────────────────
 
 export function getTrenchesDiagnostics() {
+  const elapsedMs      = sessionStartMs ? Date.now() - sessionStartMs : 0;
+  const elapsedHours   = elapsedMs / 3_600_000;
+  const tokensPerHour  = elapsedHours > 0.05 ? Math.round(totalDiscovered / elapsedHours) : null;
+
+  // Count currently-active suppression entries (mint still within its window)
+  const nowMs = Date.now();
+  let suppressedCount = 0;
+  for (const expiry of suppressedUntil.values()) {
+    if (nowMs < expiry) suppressedCount++;
+  }
+
+  // Discovery rate: fraction of seen pools that were actually fired
+  const eligibleSeen = totalPoolsSeen - totalPoolsSkippedIgnore - totalPoolsSkippedAge;
+  const discoveryRate = eligibleSeen > 0
+    ? Math.round((totalPoolsFired / eligibleSeen) * 100)
+    : null;
+
+  // Coverage health flag: if >80% of eligible pools are dupes, we may be missing fresh ones
+  const dupeFraction  = eligibleSeen > 0 ? totalPoolsSkippedDupe / eligibleSeen : 0;
+  const coverageAlert = dupeFraction > 0.8 && totalPoolsSeen > 50;
+
   return {
-    source:            'gecko_terminal_new_pools',
+    source:             'gecko_terminal_new_pools',
     sessionStartMs,
     pollCount,
     lastPollSuccessMs,
-    lastPollAgoSec:    lastPollSuccessMs ? Math.round((Date.now() - lastPollSuccessMs) / 1_000) : null,
+    lastPollAgoSec:     lastPollSuccessMs ? Math.round((Date.now() - lastPollSuccessMs) / 1_000) : null,
     consecutiveFailures,
     lastPollError,
-    pollIntervalMs:    POLL_INTERVAL_MS,
+    pollIntervalMs:     POLL_INTERVAL_MS,
+    pagesPerPoll:       PAGES_PER_POLL,
+
+    // Discovered / fired
     totalDiscovered,
-    trackingWindowMs:  TRACKING_WINDOW_MS,
-    activeMints:       firedAt.size,
-    isBootstrap:       pollCount === 0,
-    lastSeenSig:       null,
+    tokensPerHour,
+
+    // Raw pool counts
+    totalPoolsSeen,
+    totalPoolsFired,
+    totalPoolsSkippedAge,
+    totalPoolsSkippedDupe,
+    totalPoolsSkippedIgnore,
+
+    // Coverage estimates
+    discoveryRatePct:   discoveryRate,    // % of eligible pools that were fired (excluding ignored + aged)
+    coverageAlert,                        // true if most eligible pools are dupes (possible gap in pages)
+    dupeFraction:       Math.round(dupeFraction * 100),
+
+    // Suppression state
+    suppressedCount,    // how many mints are currently within their suppression window
+    trackingWindowMs:   TRACKING_WINDOW_MS,
+
+    // Legacy fields kept for compatibility
+    activeMints:        suppressedUntil.size,
+    isBootstrap:        pollCount === 0,
+    lastSeenSig:        null,
     consecutivePollFailures: consecutiveFailures,
-    pollDelayMs:       POLL_INTERVAL_MS,
-    pumpfunMintsTotal: totalDiscovered,
+    pollDelayMs:        POLL_INTERVAL_MS,
+    pumpfunMintsTotal:  totalDiscovered,
     heliusWsConfigured: false,
-    heliusApiKeySet:   !!process.env.HELIUS_API_KEY,
-    rpcEndpoint:       process.env.RPC_ENDPOINT ?? (process.env.HELIUS_API_KEY ? 'helius-http' : 'public-mainnet'),
+    heliusApiKeySet:    !!process.env.HELIUS_API_KEY,
+    rpcEndpoint:        process.env.RPC_ENDPOINT ?? (process.env.HELIUS_API_KEY ? 'helius-http' : 'public-mainnet'),
     recentFeed: discoveryFeed.slice(0, 5).map(e => ({
       mint:            e.mint.slice(0, 12),
       instructionType: e.isMigration ? 'migration' : 'new_token',
       ts:              e.ts,
+      reserveUsd:      e.reserveUsd,
     })),
   };
 }

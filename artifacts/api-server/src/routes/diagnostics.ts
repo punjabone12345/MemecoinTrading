@@ -10,7 +10,9 @@ import {
   getDiagDailySummary,
   getDiagErrors,
   getDiagFunnelStats,
+  getDiagCoverageStats,
 } from '../lib/diagnostics.js';
+import { getTrenchesDiagnostics } from '../services/trenches.service.js';
 
 const router = Router();
 
@@ -86,6 +88,24 @@ router.get('/funnel', async (req, res) => {
     const since = req.query.since ? parseInt(req.query.since as string, 10) : undefined;
     const stats = await getDiagFunnelStats({ since });
     res.json(stats);
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message ?? 'Internal error' });
+  }
+});
+
+/**
+ * GET /api/diagnostics/coverage
+ * Discovery pipeline coverage: GeckoTerminal pool counts, DexScreener indexing delays,
+ * validation outcome breakdown, and re-discovery stats.
+ * Combines in-memory scanner stats (from trenches service) with DB-computed lifecycle timing.
+ * Query param: since (unix ms, defaults to last 24 h)
+ */
+router.get('/coverage', async (req, res) => {
+  try {
+    const since   = req.query.since ? parseInt(req.query.since as string, 10) : undefined;
+    const scanner = getTrenchesDiagnostics();
+    const db      = await getDiagCoverageStats({ since });
+    res.json({ scanner, db });
   } catch (err: any) {
     res.status(500).json({ error: err?.message ?? 'Internal error' });
   }
