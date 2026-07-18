@@ -1,9 +1,12 @@
 import { Settings, SniperStatus, SniperPosition, ClosedSniperPosition, DiagToken, DiagError, DiagFunnelStats, DiagDailySummary } from './types.js';
 
-// In local dev VITE_API_URL is empty — Vite proxy forwards /api → :8080.
-// On Vercel set VITE_API_URL=https://your-app.onrender.com so the static
-// build can reach the Render backend directly.
-const BACKEND = (import.meta.env.VITE_API_URL as string | undefined)?.replace(/\/$/, '') ?? '';
+// In dev mode always use the Vite proxy (/api → localhost:8080) so local
+// changes are visible immediately, regardless of VITE_API_URL.
+// In production builds VITE_API_URL is used so the static bundle on Vercel/CDN
+// can reach the Render backend directly.
+const BACKEND = import.meta.env.DEV
+  ? ''
+  : (import.meta.env.VITE_API_URL as string | undefined)?.replace(/\/$/, '') ?? '';
 const API_BASE = BACKEND ? `${BACKEND}/api` : '/api';
 
 async function apiFetch<T>(path: string, opts?: RequestInit): Promise<T> {

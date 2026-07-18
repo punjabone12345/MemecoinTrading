@@ -270,10 +270,10 @@ interface GmgnRawRankItem {
 
 /**
  * Fetches trending Solana tokens by swap count over the given period.
- * period: '5m' | '1h' | '6h' | '24h'
+ * period: '1m' | '5m' | '1h' | '6h' | '24h'
  */
 export async function fetchTrendingTokens(
-  period: '5m' | '1h' | '6h' | '24h' = '5m',
+  period: '1m' | '5m' | '1h' | '6h' | '24h' = '5m',
   limit = 50,
 ): Promise<GmgnDiscoveredToken[] | null> {
   const data = await discoveryGet<GmgnRankResponse>(
