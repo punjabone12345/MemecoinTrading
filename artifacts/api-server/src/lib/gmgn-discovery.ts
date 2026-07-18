@@ -15,17 +15,25 @@
 
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import axios from 'axios';
 import { logger } from './logger.js';
 
 const execFileAsync = promisify(execFile);
 
 // ── Config ────────────────────────────────────────────────────────────────────
 //
-// Discovery endpoints live on gmgn.ai (the web-app quotation API), NOT on
-// openapi.gmgn.ai (which is the wallet-analytics OpenAPI only).
-// Sending X-APIKEY to gmgn.ai bypasses its Cloudflare bot-detection layer,
-// so discovery only works from environments where GMGN_API_KEY is set.
+// Two discovery transport strategies, chosen at request time:
 //
+//   WITH GMGN_API_KEY  → openapi.gmgn.ai via axios (X-APIKEY header + auth
+//                        params, same transport as wallet scoring). No
+//                        Cloudflare on this host — works from any IP including
+//                        Render's datacenter IPs.
+//
+//   WITHOUT key        → gmgn.ai via curl subprocess. curl's libcurl TLS
+//                        fingerprint bypasses Cloudflare on Replit IPs. Used
+//                        only for keyless local/Replit testing.
+//
+const GMGN_OPEN_API_HOST    = process.env.GMGN_API_HOST       || 'https://openapi.gmgn.ai';
 const GMGN_QUOTATION_HOST   = process.env.GMGN_QUOTATION_HOST || 'https://gmgn.ai';
 const REQUEST_TIMEOUT_MS    = 8_000;
 const MIN_REQUEST_INTERVAL  = 500;   // 2 req/s cap — leaves headroom for other callers
@@ -126,65 +134,35 @@ function cryptoUUID(): string {
 
 // ── Generic GET helper ────────────────────────────────────────────────────────
 //
-// Uses a `curl` subprocess instead of axios/fetch.
+// Two transport strategies depending on whether GMGN_API_KEY is set:
 //
-// Rationale: Cloudflare on gmgn.ai blocks Node.js HTTP clients (axios, fetch,
-// undici) based on their TLS/JA3 fingerprint even when X-APIKEY is present,
-// returning 403. The system `curl` binary uses libcurl's TLS stack which
-// Cloudflare allows through. Spawning curl is the simplest reliable workaround
-// and is available on both Replit and Render without any extra packages.
+//   WITH key  → axios to openapi.gmgn.ai (identical transport to wallet
+//               scoring). No Cloudflare on this host — works from Render
+//               datacenter IPs. X-APIKEY sent as header; timestamp +
+//               client_id sent as query params.
+//
+//   WITHOUT key → curl subprocess to gmgn.ai. curl's libcurl TLS fingerprint
+//               bypasses the Cloudflare WAF on Replit's IP space, so keyless
+//               local/Replit testing still works.
 
-async function discoveryGet<T = any>(
-  host: string,
+async function discoveryGetAxios<T = any>(
   path: string,
   params: Record<string, any> = {},
 ): Promise<T | null> {
+  const key = process.env.GMGN_API_KEY!;
+  const allParams = {
+    ...params,
+    timestamp: Math.floor(Date.now() / 1000),
+    client_id: cryptoUUID(),
+  };
   try {
-    await reserveSlot();
-  } catch (err) {
-    if (err instanceof GmgnDiscoveryBannedError) return null;
-    throw err;
-  }
-
-  const authParams  = buildAuthParams();
-  const authHeaders = buildAuthHeaders();
-
-  // Build query string
-  const allParams = { ...params, ...authParams };
-  const qs = Object.entries(allParams)
-    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`)
-    .join('&');
-  const url = `${host}${path}${qs ? '?' + qs : ''}`;
-
-  // Build curl args
-  const curlArgs: string[] = [
-    '-s',                                       // silent
-    '--max-time', String(Math.round(REQUEST_TIMEOUT_MS / 1_000)),
-    '--compressed',                             // accept gzip
-  ];
-  for (const [k, v] of Object.entries(authHeaders)) {
-    curlArgs.push('-H', `${k}: ${v}`);
-  }
-  curlArgs.push(url);
-
-  try {
-    const { stdout } = await execFileAsync('curl', curlArgs, { timeout: REQUEST_TIMEOUT_MS + 2_000 });
-
-    // Clear ban state on success
-    if (bannedUntilMs && bannedUntilMs <= Date.now()) {
-      bannedUntilMs   = 0;
-      consecutiveBans = 0;
-    }
-
-    let body: any;
-    try {
-      body = JSON.parse(stdout);
-    } catch {
-      // Log first 200 chars so Render production logs reveal the actual Cloudflare error
-      logger.warn({ path, rawLen: stdout.length, rawHead: stdout.slice(0, 200) }, 'GMGN discovery: non-JSON response (Cloudflare block or bad key?)');
-      return null;
-    }
-
+    const res = await axios.get<any>(`${GMGN_OPEN_API_HOST}${path}`, {
+      headers: { 'X-APIKEY': key, 'Content-Type': 'application/json' },
+      params:  allParams,
+      timeout: REQUEST_TIMEOUT_MS,
+    });
+    const body = res.data;
+    if (bannedUntilMs && bannedUntilMs <= Date.now()) { bannedUntilMs = 0; consecutiveBans = 0; }
     if (body && typeof body === 'object' && 'code' in body) {
       if (body.code !== 0) {
         applyBanIfPresent(body);
@@ -195,50 +173,89 @@ async function discoveryGet<T = any>(
     }
     return body as T;
   } catch (err: any) {
-    // curl exit codes: 28 = timeout, 6 = DNS, 7 = connection refused, ENOENT = curl not found
-    const exitCode = err?.code;
-    logger.warn({ path, exitCode, err: err?.message?.slice(0, 200) }, 'GMGN discovery: curl subprocess failed');
+    const status = err?.response?.status;
+    logger.warn({ path, status, err: err?.message?.slice(0, 200) }, 'GMGN discovery: axios request failed');
     return null;
   }
 }
 
+async function discoveryGetCurl<T = any>(
+  path: string,
+  params: Record<string, any> = {},
+): Promise<T | null> {
+  const authHeaders = buildAuthHeaders();
+  const qs = Object.entries(params)
+    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`)
+    .join('&');
+  const url = `${GMGN_QUOTATION_HOST}${path}${qs ? '?' + qs : ''}`;
+  const curlArgs: string[] = [
+    '-s', '--max-time', String(Math.round(REQUEST_TIMEOUT_MS / 1_000)), '--compressed',
+  ];
+  for (const [k, v] of Object.entries(authHeaders)) curlArgs.push('-H', `${k}: ${v}`);
+  curlArgs.push(url);
+  try {
+    const { stdout } = await execFileAsync('curl', curlArgs, { timeout: REQUEST_TIMEOUT_MS + 2_000 });
+    if (bannedUntilMs && bannedUntilMs <= Date.now()) { bannedUntilMs = 0; consecutiveBans = 0; }
+    let body: any;
+    try { body = JSON.parse(stdout); } catch {
+      logger.warn({ path, rawLen: stdout.length, rawHead: stdout.slice(0, 200) }, 'GMGN discovery: non-JSON response (Cloudflare block?)');
+      return null;
+    }
+    if (body && typeof body === 'object' && 'code' in body) {
+      if (body.code !== 0) { applyBanIfPresent(body); logger.warn({ path, code: body.code, msg: body.msg }, 'GMGN discovery: non-zero response code'); return null; }
+      return (body.data ?? body) as T;
+    }
+    return body as T;
+  } catch (err: any) {
+    logger.warn({ path, exitCode: err?.code, err: err?.message?.slice(0, 200) }, 'GMGN discovery: curl subprocess failed');
+    return null;
+  }
+}
+
+async function discoveryGet<T = any>(
+  _host: string,
+  path: string,
+  params: Record<string, any> = {},
+): Promise<T | null> {
+  try {
+    await reserveSlot();
+  } catch (err) {
+    if (err instanceof GmgnDiscoveryBannedError) return null;
+    throw err;
+  }
+
+  if (process.env.GMGN_API_KEY) {
+    // Key present → use axios to openapi.gmgn.ai (no Cloudflare, works on Render)
+    return discoveryGetAxios<T>(path, params);
+  }
+  // No key → curl to gmgn.ai (libcurl TLS fingerprint bypasses Cloudflare on Replit)
+  return discoveryGetCurl<T>(path, params);
+}
+
 // ── Startup diagnostics ───────────────────────────────────────────────────────
 
-/** Run once at module load — logs curl availability and key presence for Render debugging */
 (async () => {
   const keySet = !!process.env.GMGN_API_KEY;
-  try {
-    const { stdout } = await execFileAsync('which', ['curl'], { timeout: 3_000 });
-    logger.info({ curlPath: stdout.trim(), keySet }, 'GMGN discovery: curl available');
-  } catch {
-    logger.warn({ keySet }, 'GMGN discovery: curl NOT found in PATH — discovery will fail');
+  const transport = keySet ? `axios → ${GMGN_OPEN_API_HOST}` : `curl → ${GMGN_QUOTATION_HOST}`;
+  if (!keySet) {
+    try {
+      const { stdout } = await execFileAsync('which', ['curl'], { timeout: 3_000 });
+      logger.info({ curlPath: stdout.trim(), keySet, transport }, 'GMGN discovery: transport selected');
+    } catch {
+      logger.warn({ keySet, transport }, 'GMGN discovery: curl NOT found in PATH — discovery will fail without API key');
+    }
+  } else {
+    logger.info({ keySet, transport }, 'GMGN discovery: transport selected');
   }
 })();
 
 /** Returns diagnostic info callable via GET /api/scanner/gmgn-probe */
 export async function probeGmgnConnection(): Promise<Record<string, any>> {
   const keySet = !!process.env.GMGN_API_KEY;
-  let curlPath = 'not found';
-  try { const r = await execFileAsync('which', ['curl'], { timeout: 3_000 }); curlPath = r.stdout.trim(); } catch {}
-
-  const testUrl = `${GMGN_QUOTATION_HOST}/defi/quotation/v1/rank/sol/swaps/1m?limit=1&orderby=swaps&direction=desc`;
-  const authHeaders = buildAuthHeaders();
-  const curlArgs = ['-s', '--max-time', '8', '--compressed'];
-  for (const [k, v] of Object.entries(authHeaders)) curlArgs.push('-H', `${k}: ${v}`);
-  curlArgs.push(testUrl);
-
-  let rawResponse = '';
-  let parsed: any = null;
-  let error = '';
-  try {
-    const { stdout } = await execFileAsync('curl', curlArgs, { timeout: 10_000 });
-    rawResponse = stdout.slice(0, 300);
-    try { parsed = JSON.parse(stdout); } catch { error = 'non-JSON response'; }
-  } catch (e: any) {
-    error = e?.message?.slice(0, 200) ?? 'unknown';
-  }
-
-  return { keySet, curlPath, rawHead: rawResponse, code: parsed?.code, msg: parsed?.msg, error };
+  const transport = keySet ? `axios → ${GMGN_OPEN_API_HOST}` : `curl → ${GMGN_QUOTATION_HOST}`;
+  const path = '/defi/quotation/v1/rank/sol/swaps/1m';
+  const result = await discoveryGet<any>(keySet ? GMGN_OPEN_API_HOST : GMGN_QUOTATION_HOST, path, { limit: 1, orderby: 'swaps', direction: 'desc' });
+  return { keySet, transport, success: result !== null, tokenCount: Array.isArray(result?.rank) ? result.rank.length : (result !== null ? 1 : 0) };
 }
 
 // ── New Pairs endpoint ─────────────────────────────────────────────────────────
