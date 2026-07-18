@@ -217,6 +217,7 @@ interface PendingGraduation {
   mint: string;
   poolAddress?: string;
   detectedAt: number;
+  migrationTime: number; // actual token creation time (openTimestamp * 1000), or detectedAt as fallback
 }
 
 // ── Helius WebSocket — instant buyer-buy detection per tracked mint ───────────
@@ -1611,12 +1612,22 @@ async function pollTokenBuys(mint: string, priority = false): Promise<void> {
   const pairAddr = tok?.poolAddress;
 
   try {
+    // Detect whether this is a GMGN-discovered token (migrationTime = actual creation
+    // time, potentially minutes in the past) vs a real-time Helius WS graduation
+    // (migrationTime ≈ Date.now()). For GMGN tokens we use a smaller fetch window
+    // and skip pagination entirely — fetching 1000 sigs + 5 pages for a 10-15 min
+    // old token that may have thousands of historical transactions floods Helius and
+    // blocks wallet scoring for all other tracked tokens in the sequential poll loop.
+    const isHistoricalDiscovery = tok != null && tok.migrationTime < Date.now() - 3 * 60_000;
+
     // First poll: fetch a much larger window of sigs so we never truncate before
     // reaching the graduation moment — a delayed first poll (e.g. after Helius
     // rate-limit backoff) can otherwise have >100 sigs already posted, silently
     // hiding the earliest (and most important) buyer buys beyond the fetch window.
     // 1000 is the RPC's max per-call limit for getSignaturesForAddress.
-    const sigLimit = mintCheckpointed.has(mint) ? 30 : 1_000;
+    // For GMGN-discovered tokens we cap at 200 — enough to cover ~10 min of
+    // activity on even the most active tokens, without pulling full history.
+    const sigLimit = mintCheckpointed.has(mint) ? 30 : (isHistoricalDiscovery ? 200 : 1_000);
     const sigs = await withHeliusLimit(() => conn.getSignaturesForAddress(pk, { limit: sigLimit }), { priority });
     if (!sigs.length) return;
 
@@ -1638,7 +1649,11 @@ async function pollTokenBuys(mint: string, priority = false): Promise<void> {
       // migration timestamp — that means there is unseen history further back.
       // Rather than silently missing it, page backwards with `before` until we
       // reach the migration time or run out of history.
-      if (sigs.length === sigLimit) {
+      // Skip pagination for GMGN-discovered tokens — they set migrationTime to the
+      // actual on-chain creation time, so the first 200 sigs already cover the full
+      // 10-min scoring window. Paginating further only pulls older history we don't
+      // need and generates a burst of Helius calls that 429s the whole pipeline.
+      if (!isHistoricalDiscovery && sigs.length === sigLimit) {
         let before = sigs[sigs.length - 1].signature;
         for (let page = 0; page < 5; page++) {
           const older = await withHeliusLimit(() => conn.getSignaturesForAddress(pk, { limit: 1_000, before })).catch(() => []);
@@ -1655,10 +1670,15 @@ async function pollTokenBuys(mint: string, priority = false): Promise<void> {
         }
       }
 
-      if (earlyBuys.length === 0) return;
+      // Cap earlyBuys processing for historical discoveries: scoring 50 recent buyers
+      // is sufficient for the consensus decision; beyond that we only risk triggering
+      // more 429s and blocking the poll loop for other tokens.
+      const earlyBuysCapped = isHistoricalDiscovery ? earlyBuys.slice(0, 50) : earlyBuys;
+
+      if (earlyBuysCapped.length === 0) return;
 
       logger.info(
-        { mint: mint.slice(0, 12), count: earlyBuys.length },
+        { mint: mint.slice(0, 12), count: earlyBuysCapped.length, capped: isHistoricalDiscovery },
         'Sniper engine: baseline — scanning recent txns for early buyer buys',
       );
 
@@ -1667,12 +1687,7 @@ async function pollTokenBuys(mint: string, priority = false): Promise<void> {
 
       // Process from oldest → newest to trigger on the FIRST qualifying buy.
       // Batch in groups of 5 (parallel) to maximise speed. Stop as soon as we enter.
-      // NOTE: no artificial depth cap here — capping silently dropped candidate
-      // buyer buys that occurred after the cutoff, which could BE the first
-      // qualifying buy. The loop already breaks out immediately on entry, so the
-      // real-world cost is bounded by however many non-qualifying buys preceded
-      // the first buyer buy, not by an arbitrary constant.
-      const toFetchEarly = earlyBuys.slice().reverse().map(s => s.signature);
+      const toFetchEarly = earlyBuysCapped.slice().reverse().map(s => s.signature);
 
       const BATCH = 5;
       outer:
@@ -2081,7 +2096,7 @@ async function activateTrackingNow(mint: string): Promise<void> {
     name:          mint.slice(0, 6) + '…',
     symbol:        mint.slice(0, 4).toUpperCase(),
     poolAddress:   pending.poolAddress,
-    migrationTime: pending.detectedAt,
+    migrationTime: pending.migrationTime,
     expiresAt:     pending.detectedAt + MAX_TRACKING_MS,
     entryTriggered: false,
     buyerActivity:     [],
@@ -2379,7 +2394,7 @@ async function enrichTokenMetadataAsync(mint: string, activatedAt: number): Prom
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
-export function addGraduatedToken(ev: { mint: string; poolAddress?: string; ts: number; reserveUsd?: number }): void {
+export function addGraduatedToken(ev: { mint: string; poolAddress?: string; ts: number; openTimestamp?: number; reserveUsd?: number }): void {
   // Filter genuinely pre-startup graduation events (e.g. historical backfill that
   // somehow leaked through). We do NOT use a fixed time window (the old 5-min limit)
   // because rate-limited polling retries can legitimately take many minutes to process
@@ -2393,21 +2408,41 @@ export function addGraduatedToken(ev: { mint: string; poolAddress?: string; ts: 
     return;
   }
 
+  // Pre-filter tokens whose on-chain openTimestamp is already older than the
+  // validation age cap. These would be activated into trackedTokens and then
+  // immediately pruned by validateOrPrune — wasting a poll-loop slot for up to
+  // 15 min and flooding the sequential sweep with dead-weight tokens.
+  // Doing the check here keeps trackedTokens lean and scoring uninterrupted.
+  if (ev.openTimestamp) {
+    const tokenAgeMs = Date.now() - ev.openTimestamp * 1_000;
+    if (tokenAgeMs > MAX_TOKEN_AGE_FOR_VALIDATION_MS) {
+      logger.debug(
+        { mint: ev.mint.slice(0, 12), ageMin: (tokenAgeMs / 60_000).toFixed(1) },
+        'Sniper engine: pre-filtering GMGN token — already exceeds age cap before activation',
+      );
+      return;
+    }
+  }
+
   if (trackedTokens.has(ev.mint) || pendingGraduations.has(ev.mint)) return;
   if (everTradedMints.has(ev.mint) || slippageSkippedMints.has(ev.mint)) {
     logger.debug({ mint: ev.mint.slice(0, 12) }, 'Sniper engine: ignoring graduation of already-traded/slippage-skipped mint');
     return;
   }
 
-  // Use Date.now() as detectedAt (not the on-chain blockTime) so that the pool-wait
-  // deadline and 30-min tracking window start from when WE detected it — not from when
-  // the block was mined, which could be several minutes earlier after rate-limited retries.
+  // Use Date.now() as detectedAt so the pool-wait deadline and tracking window
+  // start from when WE detected the token, not when the block was mined.
+  // migrationTime uses the token's actual on-chain openTimestamp (seconds → ms)
+  // so the baseline scan's earlyBuys filter correctly captures historical buyers
+  // since creation rather than filtering to "blockTime >= now" (always empty).
   const detectedAt = Date.now();
+  const migrationTime = ev.openTimestamp ? ev.openTimestamp * 1_000 : detectedAt;
 
   pendingGraduations.set(ev.mint, {
     mint:       ev.mint,
     poolAddress: ev.poolAddress,
     detectedAt,
+    migrationTime,
   });
   void diagTokenDiscovered(ev.mint, 'gmgn', { initialLiquidity: ev.reserveUsd }).catch(() => {});
 

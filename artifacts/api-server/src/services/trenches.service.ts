@@ -105,10 +105,10 @@ function avgDiscoveryDelaySec(): number | null {
 
 // ── Callbacks ─────────────────────────────────────────────────────────────────
 
-let onGraduation: ((ev: { mint: string; poolAddress?: string; ts: number; reserveUsd?: number }) => void) | null = null;
+let onGraduation: ((ev: { mint: string; poolAddress?: string; ts: number; openTimestamp?: number; reserveUsd?: number }) => void) | null = null;
 
 export function setOnGraduation(
-  cb: (ev: { mint: string; poolAddress?: string; ts: number; reserveUsd?: number }) => void,
+  cb: (ev: { mint: string; poolAddress?: string; ts: number; openTimestamp?: number; reserveUsd?: number }) => void,
 ): void {
   onGraduation = cb;
 }
@@ -218,7 +218,7 @@ function processTokens(tokens: GmgnDiscoveredToken[], source: GmgnDiscoverySourc
     if (discoveryFeed.length > MAX_FEED) discoveryFeed.pop();
 
     if (onGraduation) {
-      onGraduation({ mint, poolAddress, ts: now, reserveUsd });
+      onGraduation({ mint, poolAddress, ts: now, openTimestamp, reserveUsd });
     }
 
     totalTokensFired++;
