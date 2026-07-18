@@ -13,8 +13,11 @@
  * On 429 the client backs off exponentially and re-queues from where it left off.
  */
 
-import axios from 'axios';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { logger } from './logger.js';
+
+const execFileAsync = promisify(execFile);
 
 // ── Config ────────────────────────────────────────────────────────────────────
 //
@@ -122,6 +125,14 @@ function cryptoUUID(): string {
 }
 
 // ── Generic GET helper ────────────────────────────────────────────────────────
+//
+// Uses a `curl` subprocess instead of axios/fetch.
+//
+// Rationale: Cloudflare on gmgn.ai blocks Node.js HTTP clients (axios, fetch,
+// undici) based on their TLS/JA3 fingerprint even when X-APIKEY is present,
+// returning 403. The system `curl` binary uses libcurl's TLS stack which
+// Cloudflare allows through. Spawning curl is the simplest reliable workaround
+// and is available on both Replit and Render without any extra packages.
 
 async function discoveryGet<T = any>(
   host: string,
@@ -135,44 +146,57 @@ async function discoveryGet<T = any>(
     throw err;
   }
 
-  const authParams = buildAuthParams();
+  const authParams  = buildAuthParams();
   const authHeaders = buildAuthHeaders();
 
+  // Build query string
+  const allParams = { ...params, ...authParams };
+  const qs = Object.entries(allParams)
+    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`)
+    .join('&');
+  const url = `${host}${path}${qs ? '?' + qs : ''}`;
+
+  // Build curl args
+  const curlArgs: string[] = [
+    '-s',                                       // silent
+    '--max-time', String(Math.round(REQUEST_TIMEOUT_MS / 1_000)),
+    '--compressed',                             // accept gzip
+  ];
+  for (const [k, v] of Object.entries(authHeaders)) {
+    curlArgs.push('-H', `${k}: ${v}`);
+  }
+  curlArgs.push(url);
+
   try {
-    const res = await axios.get(`${host}${path}`, {
-      params: { ...params, ...authParams },
-      headers: authHeaders,
-      timeout: REQUEST_TIMEOUT_MS,
-    });
+    const { stdout } = await execFileAsync('curl', curlArgs, { timeout: REQUEST_TIMEOUT_MS + 2_000 });
 
     // Clear ban state on success
     if (bannedUntilMs && bannedUntilMs <= Date.now()) {
-      bannedUntilMs  = 0;
+      bannedUntilMs   = 0;
       consecutiveBans = 0;
     }
 
-    const body = res.data;
+    let body: any;
+    try {
+      body = JSON.parse(stdout);
+    } catch {
+      logger.debug({ path, rawLen: stdout.length }, 'GMGN discovery: non-JSON response (Cloudflare HTML?)');
+      return null;
+    }
+
     if (body && typeof body === 'object' && 'code' in body) {
       if (body.code !== 0) {
         applyBanIfPresent(body);
-        logger.debug({ path, code: body.code, msg: body.msg }, 'GMGN discovery: non-zero response code');
+        logger.warn({ path, code: body.code, msg: body.msg }, 'GMGN discovery: non-zero response code');
         return null;
       }
       return (body.data ?? body) as T;
     }
     return body as T;
   } catch (err: any) {
-    const status = err?.response?.status;
-    applyBanIfPresent(err?.response?.data);
-    if (status === 429) {
-      // No reset_at in headers — apply a default 60s ban
-      const backoff = Math.min(60_000 * Math.pow(2, consecutiveBans), 300_000);
-      consecutiveBans++;
-      bannedUntilMs = Date.now() + backoff;
-      logger.warn({ path, backoffSec: Math.round(backoff / 1000) }, 'GMGN discovery: 429 — exponential backoff');
-      return null;
-    }
-    logger.debug({ path, status, err: err?.message }, 'GMGN discovery: request failed');
+    // curl exit codes: 28 = timeout, 6 = DNS, 7 = connection refused
+    const exitCode = err?.code;
+    logger.debug({ path, exitCode, err: err?.message?.slice(0, 120) }, 'GMGN discovery: curl subprocess failed');
     return null;
   }
 }
