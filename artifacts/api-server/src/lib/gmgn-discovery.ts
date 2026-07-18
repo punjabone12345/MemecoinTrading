@@ -134,83 +134,12 @@ function cryptoUUID(): string {
 
 // ── Generic GET helper ────────────────────────────────────────────────────────
 //
-// Two transport strategies depending on whether GMGN_API_KEY is set:
+// Uses a `curl` subprocess to gmgn.ai.
 //
-//   WITH key  → axios to openapi.gmgn.ai (identical transport to wallet
-//               scoring). No Cloudflare on this host — works from Render
-//               datacenter IPs. X-APIKEY sent as header; timestamp +
-//               client_id sent as query params.
-//
-//   WITHOUT key → curl subprocess to gmgn.ai. curl's libcurl TLS fingerprint
-//               bypasses the Cloudflare WAF on Replit's IP space, so keyless
-//               local/Replit testing still works.
-
-async function discoveryGetAxios<T = any>(
-  path: string,
-  params: Record<string, any> = {},
-): Promise<T | null> {
-  const key = process.env.GMGN_API_KEY!;
-  const allParams = {
-    ...params,
-    timestamp: Math.floor(Date.now() / 1000),
-    client_id: cryptoUUID(),
-  };
-  try {
-    const res = await axios.get<any>(`${GMGN_OPEN_API_HOST}${path}`, {
-      headers: { 'X-APIKEY': key, 'Content-Type': 'application/json' },
-      params:  allParams,
-      timeout: REQUEST_TIMEOUT_MS,
-    });
-    const body = res.data;
-    if (bannedUntilMs && bannedUntilMs <= Date.now()) { bannedUntilMs = 0; consecutiveBans = 0; }
-    if (body && typeof body === 'object' && 'code' in body) {
-      if (body.code !== 0) {
-        applyBanIfPresent(body);
-        logger.warn({ path, code: body.code, msg: body.msg }, 'GMGN discovery: non-zero response code');
-        return null;
-      }
-      return (body.data ?? body) as T;
-    }
-    return body as T;
-  } catch (err: any) {
-    const status = err?.response?.status;
-    logger.warn({ path, status, err: err?.message?.slice(0, 200) }, 'GMGN discovery: axios request failed');
-    return null;
-  }
-}
-
-async function discoveryGetCurl<T = any>(
-  path: string,
-  params: Record<string, any> = {},
-): Promise<T | null> {
-  const authHeaders = buildAuthHeaders();
-  const qs = Object.entries(params)
-    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`)
-    .join('&');
-  const url = `${GMGN_QUOTATION_HOST}${path}${qs ? '?' + qs : ''}`;
-  const curlArgs: string[] = [
-    '-s', '--max-time', String(Math.round(REQUEST_TIMEOUT_MS / 1_000)), '--compressed',
-  ];
-  for (const [k, v] of Object.entries(authHeaders)) curlArgs.push('-H', `${k}: ${v}`);
-  curlArgs.push(url);
-  try {
-    const { stdout } = await execFileAsync('curl', curlArgs, { timeout: REQUEST_TIMEOUT_MS + 2_000 });
-    if (bannedUntilMs && bannedUntilMs <= Date.now()) { bannedUntilMs = 0; consecutiveBans = 0; }
-    let body: any;
-    try { body = JSON.parse(stdout); } catch {
-      logger.warn({ path, rawLen: stdout.length, rawHead: stdout.slice(0, 200) }, 'GMGN discovery: non-JSON response (Cloudflare block?)');
-      return null;
-    }
-    if (body && typeof body === 'object' && 'code' in body) {
-      if (body.code !== 0) { applyBanIfPresent(body); logger.warn({ path, code: body.code, msg: body.msg }, 'GMGN discovery: non-zero response code'); return null; }
-      return (body.data ?? body) as T;
-    }
-    return body as T;
-  } catch (err: any) {
-    logger.warn({ path, exitCode: err?.code, err: err?.message?.slice(0, 200) }, 'GMGN discovery: curl subprocess failed');
-    return null;
-  }
-}
+// Rationale: gmgn.ai's quotation endpoints (/defi/quotation/v1/...) live
+// ONLY on gmgn.ai, not on openapi.gmgn.ai (which 403s these paths).
+// Cloudflare protects gmgn.ai — X-APIKEY + browser-like headers bypass the
+// bot-detection. curl's libcurl TLS fingerprint also helps avoid JA3 blocks.
 
 async function discoveryGet<T = any>(
   _host: string,
@@ -224,38 +153,132 @@ async function discoveryGet<T = any>(
     throw err;
   }
 
-  if (process.env.GMGN_API_KEY) {
-    // Key present → use axios to openapi.gmgn.ai (no Cloudflare, works on Render)
-    return discoveryGetAxios<T>(path, params);
+  const authHeaders = buildAuthHeaders();
+  const authParams  = buildAuthParams();
+
+  // Build query string (auth params inlined into URL so Cloudflare sees them)
+  const allParams = { ...params, ...authParams };
+  const qs = Object.entries(allParams)
+    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`)
+    .join('&');
+  const url = `${GMGN_QUOTATION_HOST}${path}${qs ? '?' + qs : ''}`;
+
+  // Use --write-out to get the HTTP status code on its own line after the body,
+  // separated by a sentinel — this lets us log the actual HTTP status even when
+  // the response body isn't JSON (Cloudflare challenge pages, etc.)
+  const SENTINEL = '\n__HTTP_STATUS__';
+  const curlArgs: string[] = [
+    '-s',
+    '--max-time', String(Math.round(REQUEST_TIMEOUT_MS / 1_000)),
+    '--compressed',
+    '-w', `${SENTINEL}%{http_code}`,
+  ];
+  for (const [k, v] of Object.entries(authHeaders)) {
+    curlArgs.push('-H', `${k}: ${v}`);
   }
-  // No key → curl to gmgn.ai (libcurl TLS fingerprint bypasses Cloudflare on Replit)
-  return discoveryGetCurl<T>(path, params);
+  curlArgs.push(url);
+
+  try {
+    const { stdout } = await execFileAsync('curl', curlArgs, { timeout: REQUEST_TIMEOUT_MS + 2_000 });
+
+    // Split body from status code
+    const sentinelIdx = stdout.lastIndexOf(SENTINEL);
+    const rawBody     = sentinelIdx >= 0 ? stdout.slice(0, sentinelIdx) : stdout;
+    const httpStatus  = sentinelIdx >= 0 ? parseInt(stdout.slice(sentinelIdx + SENTINEL.length).trim(), 10) : 0;
+
+    if (httpStatus >= 400) {
+      logger.warn(
+        { path, httpStatus, rawHead: rawBody.slice(0, 300) },
+        'GMGN discovery: HTTP error from gmgn.ai (Cloudflare block or auth issue)',
+      );
+      return null;
+    }
+
+    // Clear ban state on a clean success
+    if (bannedUntilMs && bannedUntilMs <= Date.now()) {
+      bannedUntilMs   = 0;
+      consecutiveBans = 0;
+    }
+
+    let body: any;
+    try {
+      body = JSON.parse(rawBody);
+    } catch {
+      logger.warn(
+        { path, httpStatus, rawLen: rawBody.length, rawHead: rawBody.slice(0, 300) },
+        'GMGN discovery: non-JSON response',
+      );
+      return null;
+    }
+
+    if (body && typeof body === 'object' && 'code' in body) {
+      if (body.code !== 0) {
+        applyBanIfPresent(body);
+        logger.warn({ path, code: body.code, msg: body.msg }, 'GMGN discovery: non-zero response code');
+        return null;
+      }
+      return (body.data ?? body) as T;
+    }
+    return body as T;
+  } catch (err: any) {
+    const exitCode = err?.code;
+    logger.warn({ path, exitCode, err: err?.message?.slice(0, 200) }, 'GMGN discovery: curl subprocess failed');
+    return null;
+  }
 }
 
 // ── Startup diagnostics ───────────────────────────────────────────────────────
 
+/** Run once at module load — logs curl availability and key presence for Render debugging */
 (async () => {
   const keySet = !!process.env.GMGN_API_KEY;
-  const transport = keySet ? `axios → ${GMGN_OPEN_API_HOST}` : `curl → ${GMGN_QUOTATION_HOST}`;
-  if (!keySet) {
-    try {
-      const { stdout } = await execFileAsync('which', ['curl'], { timeout: 3_000 });
-      logger.info({ curlPath: stdout.trim(), keySet, transport }, 'GMGN discovery: transport selected');
-    } catch {
-      logger.warn({ keySet, transport }, 'GMGN discovery: curl NOT found in PATH — discovery will fail without API key');
-    }
-  } else {
-    logger.info({ keySet, transport }, 'GMGN discovery: transport selected');
+  try {
+    const { stdout } = await execFileAsync('which', ['curl'], { timeout: 3_000 });
+    logger.info({ curlPath: stdout.trim(), keySet, host: GMGN_QUOTATION_HOST }, 'GMGN discovery: curl available');
+  } catch {
+    logger.warn({ keySet }, 'GMGN discovery: curl NOT found in PATH — discovery will fail');
   }
 })();
 
 /** Returns diagnostic info callable via GET /api/scanner/gmgn-probe */
 export async function probeGmgnConnection(): Promise<Record<string, any>> {
   const keySet = !!process.env.GMGN_API_KEY;
-  const transport = keySet ? `axios → ${GMGN_OPEN_API_HOST}` : `curl → ${GMGN_QUOTATION_HOST}`;
+  let curlPath = 'not found';
+  try { const r = await execFileAsync('which', ['curl'], { timeout: 3_000 }); curlPath = r.stdout.trim(); } catch {}
+
+  // Fire a real discovery call and capture the raw outcome
+  const SENTINEL = '\n__HTTP_STATUS__';
   const path = '/defi/quotation/v1/rank/sol/swaps/1m';
-  const result = await discoveryGet<any>(keySet ? GMGN_OPEN_API_HOST : GMGN_QUOTATION_HOST, path, { limit: 1, orderby: 'swaps', direction: 'desc' });
-  return { keySet, transport, success: result !== null, tokenCount: Array.isArray(result?.rank) ? result.rank.length : (result !== null ? 1 : 0) };
+  const authHeaders = buildAuthHeaders();
+  const curlArgs = ['-s', '--max-time', '8', '--compressed', '-w', `${SENTINEL}%{http_code}`];
+  for (const [k, v] of Object.entries(authHeaders)) curlArgs.push('-H', `${k}: ${v}`);
+  curlArgs.push(`${GMGN_QUOTATION_HOST}${path}?limit=1&orderby=swaps&direction=desc`);
+
+  let rawBody = '';
+  let httpStatus = 0;
+  let parsed: any = null;
+  let error = '';
+  try {
+    const { stdout } = await execFileAsync('curl', curlArgs, { timeout: 10_000 });
+    const si = stdout.lastIndexOf(SENTINEL);
+    rawBody    = si >= 0 ? stdout.slice(0, si) : stdout;
+    httpStatus = si >= 0 ? parseInt(stdout.slice(si + SENTINEL.length).trim(), 10) : 0;
+    try { parsed = JSON.parse(rawBody); } catch { error = 'non-JSON response'; }
+  } catch (e: any) {
+    error = e?.message?.slice(0, 200) ?? 'unknown';
+  }
+
+  return {
+    keySet,
+    curlPath,
+    host: GMGN_QUOTATION_HOST,
+    httpStatus,
+    rawHead: rawBody.slice(0, 400),
+    gmgnCode: parsed?.code,
+    gmgnMsg:  parsed?.msg,
+    tokenCount: Array.isArray(parsed?.data?.rank) ? parsed.data.rank.length : 0,
+    error,
+  };
 }
 
 // ── New Pairs endpoint ─────────────────────────────────────────────────────────
