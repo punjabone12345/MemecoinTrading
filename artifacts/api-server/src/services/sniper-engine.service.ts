@@ -2151,7 +2151,15 @@ async function validateOrPrune(mint: string, activatedAt: number): Promise<void>
       const pumpswapValidate = allPairs
         .filter((p: any) => (p.dexId ?? '').toLowerCase() === 'pumpswap')
         .sort((a: any, b: any) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0));
-      const byLiqValidate = [...allPairs].sort((a: any, b: any) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0));
+      // Exclude raw pumpfun bonding-curve pairs from post-grad validation.
+      // Bonding-curve pairs always report liq=0 because there is no DEX pool yet;
+      // including them causes the "pool indexed but liq below min" loop to run
+      // for the full 10-min deadline (consecutiveLowLiq resets to 0 on every
+      // liq=0 read, so it never prunes early). Only pumpswap / raydium / orca
+      // etc. signal a real graduation.
+      const byLiqValidate = [...allPairs]
+        .filter((p: any) => (p.dexId ?? '').toLowerCase() !== 'pumpfun')
+        .sort((a: any, b: any) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0));
       const postGradPairs = pumpswapValidate.length > 0 ? pumpswapValidate : byLiqValidate;
 
       if (postGradPairs.length > 0) {
