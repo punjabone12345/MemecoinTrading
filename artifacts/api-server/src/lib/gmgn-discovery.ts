@@ -17,9 +17,13 @@ import axios from 'axios';
 import { logger } from './logger.js';
 
 // ── Config ────────────────────────────────────────────────────────────────────
-
-const GMGN_HOST             = process.env.GMGN_API_HOST || 'https://gmgn.ai';
-const OPEN_API_HOST         = process.env.GMGN_OPEN_API_HOST || 'https://openapi.gmgn.ai';
+//
+// Discovery endpoints live on gmgn.ai (the web-app quotation API), NOT on
+// openapi.gmgn.ai (which is the wallet-analytics OpenAPI only).
+// Sending X-APIKEY to gmgn.ai bypasses its Cloudflare bot-detection layer,
+// so discovery only works from environments where GMGN_API_KEY is set.
+//
+const GMGN_QUOTATION_HOST   = process.env.GMGN_QUOTATION_HOST || 'https://gmgn.ai';
 const REQUEST_TIMEOUT_MS    = 8_000;
 const MIN_REQUEST_INTERVAL  = 500;   // 2 req/s cap — leaves headroom for other callers
 
@@ -95,8 +99,16 @@ function buildAuthParams(): Record<string, any> {
 
 function buildAuthHeaders(): Record<string, string> {
   const key = process.env.GMGN_API_KEY;
-  if (!key) return { 'User-Agent': 'Mozilla/5.0 (compatible; apex-meme-trader/1.0)' };
-  return { 'X-APIKEY': key, 'Content-Type': 'application/json' };
+  // Always send browser-like headers; X-APIKEY is what bypasses Cloudflare on gmgn.ai
+  const base: Record<string, string> = {
+    'Accept':          'application/json, text/plain, */*',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'User-Agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+    'Referer':         'https://gmgn.ai/',
+    'Origin':          'https://gmgn.ai',
+  };
+  if (key) base['X-APIKEY'] = key;
+  return base;
 }
 
 function cryptoUUID(): string {
@@ -195,9 +207,8 @@ interface GmgnRawPair {
  * Returns normalised GmgnDiscoveredToken[] or null on any error.
  */
 export async function fetchNewPairs(limit = 50): Promise<GmgnDiscoveredToken[] | null> {
-  // Try openapi.gmgn.ai first (authenticated endpoint), fall back to public endpoint
   const data = await discoveryGet<GmgnNewPairsResponse>(
-    OPEN_API_HOST,
+    GMGN_QUOTATION_HOST,
     '/defi/quotation/v1/tokens/new_pairs/sol',
     { limit, orderby: 'open_timestamp', direction: 'desc' },
   );
@@ -242,7 +253,7 @@ export async function fetchTrendingTokens(
   limit = 50,
 ): Promise<GmgnDiscoveredToken[] | null> {
   const data = await discoveryGet<GmgnRankResponse>(
-    OPEN_API_HOST,
+    GMGN_QUOTATION_HOST,
     `/defi/quotation/v1/rank/sol/swaps/${period}`,
     { orderby: 'swaps', direction: 'desc', limit },
   );

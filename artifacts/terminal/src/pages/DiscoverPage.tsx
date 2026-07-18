@@ -72,8 +72,19 @@ function useSniperStatusFallback(skip: boolean) {
 // ── Discovery source feed hook ────────────────────────────────────────────────
 
 interface DiscoveryEvent { mint: string; ts: number; description?: string; icon?: string; isMigration: boolean; }
+interface GmgnPollerStats { pollCount: number; lastSuccessAgoSec: number | null; consecutiveFailures: number; lastError: string | null; intervalMs: number; }
 interface SourceActivity {
+  // Legacy field kept for compatibility
   dexscreener: { total: number; recent: DiscoveryEvent[] };
+  // GMGN-first discovery stats
+  gmgn: {
+    total: number;
+    recent: DiscoveryEvent[];
+    pollers?: { newPairs: GmgnPollerStats; trending: GmgnPollerStats };
+    avgDiscoveryDelaySec?: number | null;
+    gmgnApiKeySet?: boolean;
+    gmgnBanned?: boolean;
+  };
 }
 
 function useSourceActivity() {
@@ -348,35 +359,56 @@ function BuyerActivityRow({ entry }: { entry: BuyerActivityLog }) {
   );
 }
 
-// ── Source feed (DexScreener discovery events) ───────────────────────────────
+// ── Source feed (GMGN discovery events) ──────────────────────────────────────
 
 function DiscoveryFeed() {
   const data = useSourceActivity();
-  const [tick, setTick] = useState(0);
-  useEffect(() => { const id = setInterval(() => setTick(t => t + 1), 5_000); return () => clearInterval(id); }, []);
-  void tick;
 
-  const events = data?.dexscreener?.recent ?? [];
+  const gmgn        = data?.gmgn;
+  const events      = gmgn?.recent ?? data?.dexscreener?.recent ?? [];
+  const total       = gmgn?.total  ?? data?.dexscreener?.total ?? 0;
+  const keySet      = gmgn?.gmgnApiKeySet ?? true;  // optimistic until first response
+  const banned      = gmgn?.gmgnBanned ?? false;
+  const avgDelaySec = gmgn?.avgDiscoveryDelaySec;
+
+  // Status dot colour
+  const dotColor = !keySet ? C.yellow : banned ? C.red : C.green;
+  const statusLabel = !keySet ? 'NO KEY' : banned ? 'BANNED' : 'LIVE';
 
   return (
     <div style={C.card}>
+      {/* Header row */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
-        <span style={C.label}>📡 LATEST TOKENS (GECKOTERMINAL)</span>
-        <span style={{ fontSize: 9, color: C.green, fontWeight: 700 }}>
-          <span style={{ display: 'inline-block', width: 5, height: 5, borderRadius: '50%', background: C.green, boxShadow: `0 0 6px ${C.green}`, marginRight: 4, verticalAlign: 'middle' }} />
-          LIVE
+        <span style={C.label}>📡 LATEST TOKENS (GMGN)</span>
+        <span style={{ fontSize: 9, color: dotColor, fontWeight: 700 }}>
+          <span style={{ display: 'inline-block', width: 5, height: 5, borderRadius: '50%', background: dotColor, boxShadow: `0 0 6px ${dotColor}`, marginRight: 4, verticalAlign: 'middle' }} />
+          {statusLabel}
         </span>
-        {data && <span style={{ fontSize: 9, color: C.gray, marginLeft: 'auto' }}>discovered: {data.dexscreener?.total ?? 0}</span>}
+        <span style={{ fontSize: 9, color: C.gray, marginLeft: 'auto' }}>
+          discovered: {total}
+          {avgDelaySec != null && ` · avg ${avgDelaySec}s delay`}
+        </span>
       </div>
-      {events.length === 0 ? (
-        <div style={{ fontSize: 9, color: C.gray }}>Scanning DexScreener token profiles…</div>
+
+      {/* Status messages */}
+      {!keySet ? (
+        <div style={{ fontSize: 9, color: C.yellow, padding: '6px 0' }}>
+          GMGN_API_KEY not set — discovery requires the key to bypass Cloudflare.<br />
+          <span style={{ color: '#2a3a50' }}>Key is configured on Render; push changes to see live tokens.</span>
+        </div>
+      ) : banned ? (
+        <div style={{ fontSize: 9, color: C.red, padding: '6px 0' }}>
+          GMGN rate-limited — discovery paused until ban clears.
+        </div>
+      ) : events.length === 0 ? (
+        <div style={{ fontSize: 9, color: C.gray }}>Scanning GMGN for new token pairs…</div>
       ) : (
         events.slice(0, 8).map((ev, i) => (
           <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '4px 0', borderBottom: i < 7 ? '1px solid rgba(255,255,255,0.03)' : 'none' }}>
             <div style={{ fontSize: 9, color: '#c0c8e0', fontFamily: 'monospace', display: 'flex', alignItems: 'center', gap: 6 }}>
               {ev.mint.slice(0, 8)}…{ev.mint.slice(-6)}
               {ev.isMigration && (
-                <span style={{ fontSize: 7, fontWeight: 800, padding: '1px 4px', borderRadius: 3, background: 'rgba(255,215,0,0.12)', color: C.yellow, border: '1px solid rgba(255,215,0,0.25)' }}>MIGRATED</span>
+                <span style={{ fontSize: 7, fontWeight: 800, padding: '1px 4px', borderRadius: 3, background: 'rgba(255,215,0,0.12)', color: C.yellow, border: '1px solid rgba(255,215,0,0.25)' }}>RE-TRACKED</span>
               )}
             </div>
             <span style={{ fontSize: 8, color: C.gray }}>{timeAgo(ev.ts)}</span>
@@ -417,7 +449,7 @@ export default function DiscoverPage({ sniperStatus: wsProp, wsConnected = false
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 }}>
           <div>
             <div style={{ fontSize: 18, fontWeight: 900, color: C.accent, letterSpacing: '0.04em' }}>🎯 SNIPER ENGINE</div>
-            <div style={{ fontSize: 9, color: C.gray, marginTop: 2 }}>Tracking GeckoTerminal tokens · Paper mode</div>
+            <div style={{ fontSize: 9, color: C.gray, marginTop: 2 }}>Tracking GMGN tokens · Paper mode</div>
           </div>
           <div style={{ textAlign: 'right', fontSize: 9, color: C.gray }}>
             SOL<br />
@@ -475,7 +507,7 @@ export default function DiscoverPage({ sniperStatus: wsProp, wsConnected = false
         </div>
         {tracked.length === 0 ? (
           <div style={{ ...C.card, color: C.gray, fontSize: 11, textAlign: 'center', padding: '24px 16px' }}>
-            Scanning GeckoTerminal for new tokens…<br />
+            Scanning GMGN for new tokens…<br />
             <span style={{ fontSize: 9, color: '#2a3a50', marginTop: 6, display: 'block' }}>Every discovered token is tracked for 1 hour</span>
           </div>
         ) : (
