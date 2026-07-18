@@ -20,7 +20,6 @@
 import { logger } from '../lib/logger.js';
 import { query } from '../lib/db.js';
 import {
-  fetchNewPairs,
   fetchTrendingTokens,
   getDiscoveryBannedUntil,
   type GmgnDiscoveredToken,
@@ -252,18 +251,23 @@ function processTokens(tokens: GmgnDiscoveredToken[], source: 'new_pairs' | 'tre
   return fired;
 }
 
-// ── New Pairs poller ──────────────────────────────────────────────────────────
+// ── Short-window rank poller (1m) — replaces broken new_pairs endpoint ────────
+//
+// The /tokens/new_pairs/sol GMGN endpoint returns "invalid argument" (code 40000300)
+// regardless of parameters. The /rank/sol/swaps/1m endpoint is fully functional,
+// returns tokens with activity in the last minute, and serves the same purpose
+// (surfacing the newest, most-actively-traded tokens).
 
 async function pollNewPairs(): Promise<void> {
   const bannedUntil = getDiscoveryBannedUntil();
   if (bannedUntil > Date.now()) return; // respect discovery rate-limit ban
 
-  const tokens = await fetchNewPairs(100);
+  const tokens = await fetchTrendingTokens('1m', 100);
 
   if (tokens === null) {
     consecutiveNewPairsFailures++;
     lastNewPairsError = 'API returned null (rate-limited or error)';
-    logger.debug({ failures: consecutiveNewPairsFailures }, 'GMGN discovery: new_pairs fetch failed');
+    logger.debug({ failures: consecutiveNewPairsFailures }, 'GMGN discovery: rank/1m fetch failed');
     return;
   }
 
@@ -274,7 +278,7 @@ async function pollNewPairs(): Promise<void> {
   lastNewPairsSuccessMs = Date.now();
 
   if (fired > 0) {
-    logger.info({ fired, total: totalDiscovered }, 'GMGN discovery: new tokens queued from new_pairs');
+    logger.info({ fired, total: totalDiscovered }, 'GMGN discovery: new tokens queued from rank/1m');
   }
 }
 
@@ -349,12 +353,12 @@ export function startTrenchesScanner(): void {
   const gmgnKeySet = !!process.env.GMGN_API_KEY;
   logger.info(
     {
-      newPairsIntervalMs:  NEW_PAIRS_INTERVAL_MS,
-      trendingIntervalMs:  TRENDING_INTERVAL_MS,
-      bootDelayMs:         BOOT_DELAY_MS,
-      gmgnApiKeySet:       gmgnKeySet,
+      rank1mIntervalMs:  NEW_PAIRS_INTERVAL_MS,
+      rank5mIntervalMs:  TRENDING_INTERVAL_MS,
+      bootDelayMs:       BOOT_DELAY_MS,
+      gmgnApiKeySet:     gmgnKeySet,
     },
-    'GMGN discovery: starting (new_pairs + trending pollers)',
+    'GMGN discovery: starting (rank/1m + rank/5m pollers)',
   );
 
   if (!gmgnKeySet) {
