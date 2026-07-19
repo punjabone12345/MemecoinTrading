@@ -2684,17 +2684,19 @@ function scheduleBuyPoll(gen = _loopGen): void {
       // trading window is closed, and the UI never shows them as removed.
       pruneExpiredTracking();
 
-      // Skip buy-scanning when outside the trading window (no entries allowed)
-      const s = await getSettings();
-      if (isInTradingWindow(s)) {
-        const mints = Array.from(trackedTokens.keys());
-        // Poll all tracked mints in parallel batches — per-mint pollLocks
-        // prevent any single mint from overlapping with itself.
-        for (let i = 0; i < mints.length; i += POLL_CONCURRENCY) {
-          await Promise.all(
-            mints.slice(i, i + POLL_CONCURRENCY).map(mint => pollTokenBuys(mint, false)),
-          );
-        }
+      // Always poll — handleVolumeUpdate's own trading-window guard blocks
+      // actual entries when outside the window, but wallet scoring and the
+      // signal feed must run 24/7 so the UI always shows buy activity.
+      // Previously this block was gated on isInTradingWindow(), which caused
+      // the signal feed to show "No buyer wallets scored yet" for the entire
+      // off-hours period (e.g. 00:00–17:00 IST when window=17:00–00:00).
+      const mints = Array.from(trackedTokens.keys());
+      // Poll all tracked mints in parallel batches — per-mint pollLocks
+      // prevent any single mint from overlapping with itself.
+      for (let i = 0; i < mints.length; i += POLL_CONCURRENCY) {
+        await Promise.all(
+          mints.slice(i, i + POLL_CONCURRENCY).map(mint => pollTokenBuys(mint, false)),
+        );
       }
     } catch { /* non-fatal */ }
     if (_sniperEngineRunning && _loopGen === gen) scheduleBuyPoll(gen);
