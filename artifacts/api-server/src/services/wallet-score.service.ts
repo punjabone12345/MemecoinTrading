@@ -2,10 +2,10 @@
 //
 // Scores a Solana wallet 0-100 from its GMGN trading history:
 //   Win rate    > 60%        → 30 pts
-//   Wallet age  > 10 days    → 15 pts
-//   Completed trades >= 20   → 15 pts
-//   Average ROI > 30%        → 25 pts
-//   Avg hold time > 2 min    → 15 pts
+//   Wallet age  > 5 days     → 15 pts  (was 10 — meme coin wallets are often newer)
+//   Completed trades >= 10   → 15 pts  (was 20)
+//   Average ROI > 20%        → 25 pts  (was 30%)
+//   Avg hold time > 1 min    → 15 pts  (was 2 min — scalpers hold shorter)
 //
 // GMGN's public API does not expose "wallet age" or "average hold time" as
 // direct fields, so both are approximated from the closest available data
@@ -150,11 +150,30 @@ async function computeScore(wallet: string): Promise<WalletScoreBreakdown> {
   const avgHoldMinutes = statsAvgHoldMinutes ?? estimateAvgHoldMinutes(activities);
 
   let score = 0;
-  if (winRate !== null && winRate > 0.6) score += 30;
-  if (walletAgeDays !== null && walletAgeDays > 10) score += 15;
-  if (completedTrades !== null && completedTrades >= 20) score += 15;
-  if (avgRoiPct !== null && avgRoiPct > 30) score += 25;
-  if (avgHoldMinutes !== null && avgHoldMinutes > 2) score += 15;
+  const winPts   = (winRate !== null && winRate > 0.6) ? 30 : 0;
+  const agePts   = (walletAgeDays !== null && walletAgeDays > 5) ? 15 : 0;        // was 10 days
+  const tradePts = (completedTrades !== null && completedTrades >= 10) ? 15 : 0;  // was 20
+  const roiPts   = (avgRoiPct !== null && avgRoiPct > 20) ? 25 : 0;              // was 30%
+  const holdPts  = (avgHoldMinutes !== null && avgHoldMinutes > 1) ? 15 : 0;      // was 2 min
+  score = winPts + agePts + tradePts + roiPts + holdPts;
+
+  logger.info(
+    {
+      wallet:    wallet.slice(0, 12),
+      score,
+      winRate:   winRate?.toFixed(2) ?? 'null',
+      winPts,
+      ageDays:   walletAgeDays?.toFixed(1) ?? 'null',
+      agePts,
+      trades:    completedTrades ?? 'null',
+      tradePts,
+      roiPct:    avgRoiPct?.toFixed(1) ?? 'null',
+      roiPts,
+      holdMin:   avgHoldMinutes?.toFixed(1) ?? 'null',
+      holdPts,
+    },
+    'Wallet scoring: breakdown',
+  );
 
   return {
     wallet, score, winRate, avgRoiPct, completedTrades, walletAgeDays, avgHoldMinutes,

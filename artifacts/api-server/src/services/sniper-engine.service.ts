@@ -2673,7 +2673,11 @@ function scheduleMarketRefresh(gen = _loopGen): void {
 // OLD: serial loop with 300ms stagger → 39 tokens × ~500ms = ~20s cycle.
 //      Transactions were 2-6 minutes old by the time they were detected.
 // NEW: parallel batches of POLL_CONCURRENCY → ~2s cycle for 39 tokens.
-const POLL_CONCURRENCY = 10; // poll up to 10 mints concurrently
+// Lowered from 10 to 4: HELIUS_MAX_CONCURRENT=3 means only 3 calls can
+// actually run at once anyway; 10 parallel mints created a burst backlog
+// that triggered back-to-back 429s (5→10→20s cascades) every sweep,
+// freezing wallet scoring for up to 20s at a time.
+const POLL_CONCURRENCY = 4; // poll up to 4 mints concurrently (matches Helius concurrent budget)
 
 function scheduleBuyPoll(gen = _loopGen): void {
   setTimeout(async () => {

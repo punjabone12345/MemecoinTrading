@@ -4,13 +4,13 @@
 // bought when either:
 //
 //   Option A (consensus): at least TWO distinct wallets with a GMGN score
-//     >= 80 buy the same token within a 5-minute window.
-//   Option B (solo conviction): a single wallet with a GMGN score >= 95 buys
+//     >= 65 buy the same token within a 5-minute window.
+//   Option B (solo conviction): a single wallet with a GMGN score >= 85 buys
 //     the token — enter immediately, no need to wait for a second wallet.
 //
 // Position sizing (risk %) is derived from which option fired:
-//   score >= 95            → 1%    risk, tpTier 3 (highest-conviction TP ladder)
-//   consensus (2x >= 80)    → 0.75% risk, tpTier 2
+//   score >= 85            → 1%    risk, tpTier 3 (highest-conviction TP ladder)
+//   consensus (2x >= 65)   → 0.75% risk, tpTier 2
 //
 // Wallet score lookups (wallet-score.service.ts) are async and GMGN-backed;
 // this module only holds lightweight in-memory bookkeeping of qualifying
@@ -20,8 +20,8 @@ import { getWalletScore } from './wallet-score.service.js';
 import { logger } from '../lib/logger.js';
 
 const CONSENSUS_WINDOW_MS = 5 * 60_000; // 5 minutes
-export const SOLO_SCORE_THRESHOLD = 95;
-export const CONSENSUS_SCORE_THRESHOLD = 80;
+export const SOLO_SCORE_THRESHOLD = 85;       // was 95 — easier to hit with relaxed criteria
+export const CONSENSUS_SCORE_THRESHOLD = 65;  // was 80 — win rate (30) + ROI (25) + hold (15) = 70
 export const SOLO_RISK_PCT = 1.0;
 export const CONSENSUS_RISK_PCT = 0.75;
 
@@ -62,7 +62,7 @@ export async function evaluateBuy(mint: string, wallet: string, timestamp: numbe
   const { score } = await getWalletScore(wallet);
 
   if (score >= SOLO_SCORE_THRESHOLD) {
-    logger.info({ mint: mint.slice(0, 12), wallet: wallet.slice(0, 12), score }, 'Wallet consensus: solo trigger (score >= 95)');
+    logger.info({ mint: mint.slice(0, 12), wallet: wallet.slice(0, 12), score }, 'Wallet consensus: solo trigger (score >= 85)');
     return { trigger: true, mode: 'solo', sizePct: SOLO_RISK_PCT, tpTier: 3, score, wallet, qualifyingWallets: [wallet] };
   }
 
@@ -76,7 +76,7 @@ export async function evaluateBuy(mint: string, wallet: string, timestamp: numbe
     if (distinctWallets.length >= 2) {
       logger.info(
         { mint: mint.slice(0, 12), wallets: distinctWallets.map(w => w.slice(0, 12)) },
-        'Wallet consensus: consensus trigger (2+ wallets score >= 80 within 5 min)',
+        'Wallet consensus: consensus trigger (2+ wallets score >= 65 within 5 min)',
       );
       return { trigger: true, mode: 'consensus', sizePct: CONSENSUS_RISK_PCT, tpTier: 2, score, wallet, qualifyingWallets: distinctWallets };
     }
