@@ -2267,8 +2267,25 @@ async function validateOrPrune(mint: string, activatedAt: number): Promise<void>
           );
         }
 
-        const liq = postGradPairs[0]?.liquidity?.usd ?? 0;
+        let liq = postGradPairs[0]?.liquidity?.usd ?? 0;
         lastSeenLiq = liq;
+
+        // ── On-chain liquidity fallback ───────────────────────────────────────
+        // DexScreener commonly shows liq=0 for 30–90s after a new PumpSwap pool
+        // is created (indexing lag). If we have the pool address from graduation,
+        // read on-chain vault balances directly — this is always up-to-date and
+        // is the same technique used at entry time to override stale DexScreener data.
+        if (liq === 0 && tok.poolAddress) {
+          const onChainLiq = await fetchOnChainLiqUsd(tok.poolAddress, cachedSolPrice).catch(() => 0);
+          if (onChainLiq > 0) {
+            logger.info(
+              { mint: mint.slice(0, 12), dexLiq: 0, onChainLiq: onChainLiq.toFixed(0) },
+              'Sniper engine: DexScreener liq=0 (indexing lag) — on-chain vault override during validation',
+            );
+            liq = onChainLiq;
+            lastSeenLiq = liq;
+          }
+        }
 
         // ── Milestone: first non-zero liquidity ──────────────────────────────
         if (liq > 0 && firstNonzeroLiqAt === null) {
@@ -2319,7 +2336,6 @@ async function validateOrPrune(mint: string, activatedAt: number): Promise<void>
         }
 
         // Pool is indexed but liquidity is below the minimum.
-        // liq=0 often means DexScreener indexing lag (30–90 s window) — keep retrying.
         // Only prune early if the pool consistently shows a non-zero but very low value,
         // which indicates a genuine micro/seeded pool rather than an indexing delay.
         if (liq > 0 && liq < PRUNE_MICRO_LIQ_USD) {
@@ -2337,16 +2353,35 @@ async function validateOrPrune(mint: string, activatedAt: number): Promise<void>
             return;
           }
         } else {
-          // liq=0 (indexing lag) or moderate liq — reset consecutive counter
+          // liq=0 (still indexing even after on-chain check) or moderate liq — reset counter
           consecutiveLowLiq = 0;
         }
 
         logger.info(
           { mint: mint.slice(0, 12), liq: liq.toFixed(0), minLiq: MIN_POOL_LIQUIDITY_USD, consecutiveLowLiq },
-          'Sniper engine: pool indexed but liq below min — retrying (DexScreener indexing lag likely)',
+          'Sniper engine: pool indexed but liq below min — retrying',
         );
+      } else {
+        // DexScreener hasn't indexed the token at all yet.
+        // Try on-chain directly if we have the pool address from graduation —
+        // the pool exists on-chain immediately; DexScreener just hasn't caught up.
+        const poolAddr = trackedTokens.get(mint)?.poolAddress;
+        if (poolAddr) {
+          const onChainLiq = await fetchOnChainLiqUsd(poolAddr, cachedSolPrice).catch(() => 0);
+          if (onChainLiq >= MIN_POOL_LIQUIDITY_USD) {
+            const now = Date.now();
+            void diagTokenValidationMilestone(mint, 'liq_min_crossed_at', now).catch(() => {});
+            void diagTokenValidationMilestone(mint, 'validation_outcome', 'passed').catch(() => {});
+            logger.info(
+              { mint: mint.slice(0, 12), onChainLiq: onChainLiq.toFixed(0), delaySec: Math.round((now - activatedAt) / 1_000) },
+              'Sniper engine: no DexScreener pairs yet — validated via on-chain vault liquidity',
+            );
+            return;
+          }
+          if (onChainLiq > 0) lastSeenLiq = onChainLiq;
+        }
       }
-      // No post-grad pair yet or liq below min — keep retrying until deadline
+      // No qualified pool yet — keep retrying until deadline
     } catch { /* non-fatal — retry */ }
 
     await new Promise(r => setTimeout(r, VALIDATION_POLL_MS));
