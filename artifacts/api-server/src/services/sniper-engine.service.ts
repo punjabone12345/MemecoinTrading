@@ -18,7 +18,7 @@ import { releaseForRediscovery } from './trenches.service.js';
 
 const MAX_TRACKING_MS       = 60 * 60 * 1_000; // 1 hour — matches GMGN discovery tracking window
 const MAX_POSITIONS         = 10;
-const POLL_INTERVAL_MS      = 2_000;   // reduced from 5s for faster detection
+const POLL_INTERVAL_MS      = 500;     // time between the end of one sweep and start of the next
 // Reduced from 2000ms: vault addresses are captured directly from the buyer's
 // tx at detection time, so the ground-truth price read (fetchPriceFromVaults)
 // doesn't need to wait for Jupiter/DexScreener to index the pool — it was pure
@@ -2665,11 +2665,16 @@ function scheduleMarketRefresh(gen = _loopGen): void {
   }, MARKET_REFRESH_MS);
 }
 
-// Non-overlapping buy-poll loop: waits for the full sweep (including the
-// 300ms per-mint stagger) to finish before scheduling the next one. Using
-// setInterval here previously allowed cycles to overlap when a sweep took
-// longer than POLL_INTERVAL_MS, causing the same buyer buy to be detected
-// and entered/alerted twice.
+// Non-overlapping buy-poll loop: waits for the full sweep to finish before
+// scheduling the next one so the same buyer buy is never detected twice.
+// Per-mint pollLocks prevent concurrent polls of the same mint, so running
+// mints in parallel batches is safe — per-mint duplicates are impossible.
+//
+// OLD: serial loop with 300ms stagger → 39 tokens × ~500ms = ~20s cycle.
+//      Transactions were 2-6 minutes old by the time they were detected.
+// NEW: parallel batches of POLL_CONCURRENCY → ~2s cycle for 39 tokens.
+const POLL_CONCURRENCY = 10; // poll up to 10 mints concurrently
+
 function scheduleBuyPoll(gen = _loopGen): void {
   setTimeout(async () => {
     if (!_sniperEngineRunning || _loopGen !== gen) return;
@@ -2682,9 +2687,13 @@ function scheduleBuyPoll(gen = _loopGen): void {
       // Skip buy-scanning when outside the trading window (no entries allowed)
       const s = await getSettings();
       if (isInTradingWindow(s)) {
-        for (const mint of Array.from(trackedTokens.keys())) {
-          await pollTokenBuys(mint, false);
-          await new Promise(r => setTimeout(r, 300));
+        const mints = Array.from(trackedTokens.keys());
+        // Poll all tracked mints in parallel batches — per-mint pollLocks
+        // prevent any single mint from overlapping with itself.
+        for (let i = 0; i < mints.length; i += POLL_CONCURRENCY) {
+          await Promise.all(
+            mints.slice(i, i + POLL_CONCURRENCY).map(mint => pollTokenBuys(mint, false)),
+          );
         }
       }
     } catch { /* non-fatal */ }
