@@ -128,8 +128,11 @@ export default function App() {
     return () => { destroyed = true; wsRef.current?.close(); };
   }, []);
 
-  // Fallback poll — keeps settings/balance/sniper status fresh via HTTP
-  // whenever the WebSocket connection is offline.
+  // Fallback poll — keeps settings/balance/sniper status fresh via HTTP.
+  // sniperStatus is refreshed on EVERY tick (even when WS is live) because
+  // mobile WebSocket connections often drop large data frames while
+  // keepalive pings/pongs still succeed, making the LIVE indicator green
+  // but leaving the signal feed stuck on stale (empty) state.
   useEffect(() => {
     const poll = async () => {
       try {
@@ -141,12 +144,16 @@ export default function App() {
           ]);
           setBalance(settingsData.currentBalanceSol);
           setSniperStatus(statusData);
+        } else {
+          // Always refresh the sniper status via HTTP even when WS is connected —
+          // this guarantees the signal feed is never more than ~5s stale on mobile.
+          api.getSniperStatus().then(setSniperStatus).catch(() => {});
         }
       } catch {
         // Silently ignore
       }
     };
-    const id = setInterval(poll, 3000);
+    const id = setInterval(poll, 5000);
     return () => clearInterval(id);
   }, []);
 

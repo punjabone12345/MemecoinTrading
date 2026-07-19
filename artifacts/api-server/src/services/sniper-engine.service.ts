@@ -1404,13 +1404,43 @@ async function handleVolumeUpdate(
   if (txType !== 'buy') return; // sells never trigger entries under Smart Wallet Consensus
 
   // ── Trading window gate ───────────────────────────────────────────────────
+  // Build a partial entry now so we can push to buyLog BEFORE bailing —
+  // the signal feed should always show detected transactions, even those
+  // that are outside the trading window or when settings are unavailable.
+  let outsideTradingWindow = false;
   try {
     const s = await getSettings();
     if (!isInTradingWindow(s)) {
-      logger.info({ mint, symbol: tok.symbol }, 'Sniper engine: outside trading window — entry skipped');
-      return;
+      outsideTradingWindow = true;
     }
-  } catch { /* if settings unavailable, block entry to be safe */ return; }
+  } catch {
+    // If settings are unavailable, block entry to be safe but still log it.
+    const entry: BuyerActivityLog = {
+      mint, name: tok.name, symbol: tok.symbol,
+      wallet, amountUsd: txUsd, timestamp: txTimestamp, detectedAt, txSig,
+      entered: false, priceAtDetection,
+      walletScore: 0, consensusMode: 'none', qualifyingWalletsCount: 0,
+      skipReason: 'Settings unavailable — entry blocked',
+    };
+    buyLog.unshift(entry);
+    if (buyLog.length > MAX_BUY_LOG) buyLog.pop();
+    broadcastSniperStatus();
+    return;
+  }
+  if (outsideTradingWindow) {
+    logger.info({ mint, symbol: tok.symbol }, 'Sniper engine: outside trading window — entry skipped');
+    const entry: BuyerActivityLog = {
+      mint, name: tok.name, symbol: tok.symbol,
+      wallet, amountUsd: txUsd, timestamp: txTimestamp, detectedAt, txSig,
+      entered: false, priceAtDetection,
+      walletScore: 0, consensusMode: 'none', qualifyingWalletsCount: 0,
+      skipReason: 'Outside trading window',
+    };
+    buyLog.unshift(entry);
+    if (buyLog.length > MAX_BUY_LOG) buyLog.pop();
+    broadcastSniperStatus();
+    return;
+  }
 
   // Wallet score lookup is async (GMGN, cached) — awaited here so the entry
   // decision has the score, but this never blocks OTHER tracked mints: each
@@ -1647,8 +1677,14 @@ async function pollTokenBuys(mint: string, priority = false): Promise<void> {
 
       const migrationSec   = tok ? Math.floor(tok.migrationTime / 1_000) : 0;
       const tenMinAgoSec   = Math.floor(Date.now() / 1_000) - 10 * 60;
+      // For GMGN-discovered tokens (isHistoricalDiscovery=true), migrationTime is
+      // the actual on-chain creation time — potentially 40+ min in the past.
+      // Use migrationSec as the floor so we capture ALL transactions since launch,
+      // not just the last 10 min. For real-time graduations, migrationTime ≈ now,
+      // so Math.max correctly avoids pulling pre-graduation history.
+      const earlyBuyFloor  = isHistoricalDiscovery ? migrationSec : Math.max(migrationSec, tenMinAgoSec);
       const earlyBuys    = sigs.filter(
-        s => !s.err && s.blockTime != null && s.blockTime >= Math.max(migrationSec, tenMinAgoSec),
+        s => !s.err && s.blockTime != null && s.blockTime >= earlyBuyFloor,
       );
 
       // Fetch signatures may have hit the RPC page limit without reaching the
