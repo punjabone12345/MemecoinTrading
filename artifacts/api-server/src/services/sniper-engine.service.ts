@@ -1549,7 +1549,7 @@ async function handleVolumeUpdate(
   // known pool address, read the WSOL vault balance directly from on-chain.
   // This bypasses DexScreener's 30–120s cache entirely and catches tokens that
   // have already crossed $30k in reality but appear below it in DexScreener.
-  if ((tok.liquidity ?? 0) < 30_000 && tok.poolAddress) {
+  if ((tok.liquidity ?? 0) < 25_000 && tok.poolAddress) {
     try {
       await fetchSolPrice();
       const onChainLiq = await fetchOnChainLiqUsd(tok.poolAddress, cachedSolPrice);
@@ -1563,11 +1563,11 @@ async function handleVolumeUpdate(
     } catch { /* non-fatal */ }
   }
 
-  // 1. Minimum pool liquidity: $30,000
+  // 1. Minimum pool liquidity: $25,000
   const liqAtSignal = tok.liquidity ?? 0;
-  if (liqAtSignal < 30_000) {
-    entry.skipReason = `Low liquidity ${liqAtSignal.toFixed(0)} < $30,000 min`;
-    void diagTokenRejected(mint, `Liquidity: ${liqAtSignal.toFixed(0)} < $30,000 min`).catch(() => {});
+  if (liqAtSignal < 25_000) {
+    entry.skipReason = `Low liquidity ${liqAtSignal.toFixed(0)} < $25,000 min`;
+    void diagTokenRejected(mint, `Liquidity: ${liqAtSignal.toFixed(0)} < $25,000 min`).catch(() => {});
     buyLog.unshift(entry); if (buyLog.length > MAX_BUY_LOG) buyLog.pop();
     broadcastSniperStatus(); return;
   }
