@@ -38,3 +38,4 @@
 - [GMGN Discovery Architecture](gmgn-discovery-arch.md) — quotation endpoints on gmgn.ai (NOT openapi.gmgn.ai); X-APIKEY bypasses Cloudflare; without key all polls fail; separate rate limiter from wallet scoring
 - [Market data batch refresh](market-batch-refresh.md) — serial 128-token loop (64s/cycle) replaced with DexScreener batch endpoint (30 mints/request, 5 batches × 300ms = ~2s); broadcast after each batch for incremental UI updates
 - [Discovery pipeline improvements](discovery-pipeline.md) — suppression model, validation timeout/age-cap, lifecycle columns, coverage endpoint
+- [Signal feed race condition & gmgnConfigured gate](signal-feed-race-condition.md) — baseline scan race with age-cap prune + frontend gate that hid entries; both fixed

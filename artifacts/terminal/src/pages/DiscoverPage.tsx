@@ -542,15 +542,17 @@ export default function DiscoverPage({ sniperStatus: wsProp, wsConnected = false
         <div style={{ fontSize: 9, color: '#2a3a50', marginBottom: 10 }}>
           Every buyer on a tracked token is scored via GMGN — entry fires on a single ≥95 score (solo conviction) or two+ wallets ≥80 within 5 min (consensus)
         </div>
-        {!gmgnConfigured ? (
-          <div style={{ fontSize: 11, color: C.red, textAlign: 'center', padding: '16px 0' }}>
-            GMGN_API_KEY not set — wallet scoring is disabled, no entries will trigger
+        {!gmgnConfigured && (
+          <div style={{ fontSize: 10, color: C.red, padding: '6px 10px', marginBottom: 8, borderRadius: 6, background: 'rgba(255,68,68,0.08)', border: '1px solid rgba(255,68,68,0.2)' }}>
+            ⚠️ GMGN_API_KEY not set — wallet scores will be 0; entries won't trigger until the key is added
           </div>
-        ) : gmgnBannedUntil > 0 ? (
-          <div style={{ fontSize: 11, color: C.yellow, textAlign: 'center', padding: '16px 0' }}>
-            GMGN rate-limited this server's IP — scoring paused until {new Date(gmgnBannedUntil).toLocaleTimeString()}
+        )}
+        {gmgnBannedUntil > 0 && (
+          <div style={{ fontSize: 10, color: C.yellow, padding: '6px 10px', marginBottom: 8, borderRadius: 6, background: 'rgba(255,200,0,0.08)', border: '1px solid rgba(255,200,0,0.2)' }}>
+            ⏳ GMGN rate-limited — scoring paused until {new Date(gmgnBannedUntil).toLocaleTimeString()}
           </div>
-        ) : buyLogs.length === 0 ? (
+        )}
+        {buyLogs.length === 0 ? (
           <div style={{ fontSize: 11, color: C.gray, textAlign: 'center', padding: '16px 0' }}>No buyer wallets scored yet</div>
         ) : (
           buyLogs.map((log, i) => <BuyerActivityRow key={i} entry={log} />)

@@ -277,6 +277,12 @@ const closeLocks = new Set<string>();
 // sweep from running pollTokenBuys concurrently for the same mint, which would
 // process overlapping signature windows and could produce duplicate buy events.
 const pollLocks  = new Set<string>();
+// Tracks mints that are actively running their initial baseline scan.
+// Used to defer age-cap pruning so the baseline can finish and populate
+// the buyLog before the token is removed from trackedTokens.
+const mintHasActiveBaseline = new Set<string>();
+// Hard cap: even with an active baseline, prune once the token exceeds this age.
+const BASELINE_PRUNE_HARD_CAP_MS = 25 * 60_000; // 25 min
 const seenTxns = new Map<string, Set<string>>();
 const mintCheckpointed = new Set<string>();
 
@@ -1689,47 +1695,59 @@ async function pollTokenBuys(mint: string, priority = false): Promise<void> {
       // Batch in groups of 5 (parallel) to maximise speed. Stop as soon as we enter.
       const toFetchEarly = earlyBuysCapped.slice().reverse().map(s => s.signature);
 
-      const BATCH = 5;
-      outer:
-      for (let i = 0; i < toFetchEarly.length; i += BATCH) {
-        const batch = toFetchEarly.slice(i, i + BATCH);
-        const txns  = await Promise.all(
-          batch.map(sig =>
-            withHeliusLimit(() => conn.getParsedTransaction(sig, { maxSupportedTransactionVersion: 0 }), { priority }).catch(() => null),
-          ),
-        );
-        for (let j = 0; j < txns.length; j++) {
-          const tx = txns[j];
-          if (!tx) continue;
-          // Detect buy or sell — both contribute to the 10s volume window
-          const buy  = detectBuy(tx, mint);
-          const sell = buy ? null : detectSell(tx, mint);
-          const txSolAmount = buy ? buy.solSpent : (sell ? sell.solReceived : 0);
-          if (txSolAmount < 0.001) continue;
-          const txUsd = txSolAmount * cachedSolPrice;
-          if (txUsd < 10) continue;
-          const txWallet = buy ? buy.wallet : (sell ? sell.wallet : 'unknown');
-          // Price at detection: use buyer's avg entry price for buys; 0 for sells (slippage check skipped)
-          const txPrice = (buy && buy.tokensReceived > 0 && cachedSolPrice > 0)
-            ? (buy.solSpent * cachedSolPrice) / buy.tokensReceived : 0;
-          // Store vault addresses from this tx for later on-chain price reads
-          const tokEntry = trackedTokens.get(mint);
-          if (tokEntry) {
-            const bv = buy?.poolBaseVault  ?? sell?.poolBaseVault;
-            const qv = buy?.poolQuoteVault ?? sell?.poolQuoteVault;
-            if (bv && !tokEntry.poolBaseVault)  tokEntry.poolBaseVault  = bv;
-            if (qv && !tokEntry.poolQuoteVault) tokEntry.poolQuoteVault = qv;
-          }
-          const txTs = tx.blockTime ? tx.blockTime * 1_000 : Date.now();
-          logger.info(
-            { mint: mint.slice(0, 12), wallet: txWallet.slice(0, 8), usd: txUsd.toFixed(0),
-              type: buy ? 'buy' : 'sell', sig: batch[j].slice(0, 12) },
-            'Sniper engine: baseline — tx volume found',
+      // Mark this mint as having an active baseline scan so validateOrPrune defers
+      // the age-cap prune until after we finish — otherwise the token gets pruned
+      // during Helius 429 backoffs and handleVolumeUpdate returns null for every buy.
+      mintHasActiveBaseline.add(mint);
+      try {
+        const BATCH = 5;
+        outer:
+        for (let i = 0; i < toFetchEarly.length; i += BATCH) {
+          // If the token was pruned by something other than age-cap (e.g. micro-liq
+          // check), stop processing — there's nobody to receive the handleVolumeUpdate.
+          if (!trackedTokens.has(mint)) break outer;
+
+          const batch = toFetchEarly.slice(i, i + BATCH);
+          const txns  = await Promise.all(
+            batch.map(sig =>
+              withHeliusLimit(() => conn.getParsedTransaction(sig, { maxSupportedTransactionVersion: 0 }), { priority }).catch(() => null),
+            ),
           );
-          await handleVolumeUpdate(mint, txWallet, txUsd, batch[j], txPrice, txTs, buy ? 'buy' : 'sell');
-          if (trackedTokens.get(mint)?.entryTriggered) break outer;
+          for (let j = 0; j < txns.length; j++) {
+            const tx = txns[j];
+            if (!tx) continue;
+            // Detect buy or sell — both contribute to the 10s volume window
+            const buy  = detectBuy(tx, mint);
+            const sell = buy ? null : detectSell(tx, mint);
+            const txSolAmount = buy ? buy.solSpent : (sell ? sell.solReceived : 0);
+            if (txSolAmount < 0.001) continue;
+            const txUsd = txSolAmount * cachedSolPrice;
+            if (txUsd < 10) continue;
+            const txWallet = buy ? buy.wallet : (sell ? sell.wallet : 'unknown');
+            // Price at detection: use buyer's avg entry price for buys; 0 for sells (slippage check skipped)
+            const txPrice = (buy && buy.tokensReceived > 0 && cachedSolPrice > 0)
+              ? (buy.solSpent * cachedSolPrice) / buy.tokensReceived : 0;
+            // Store vault addresses from this tx for later on-chain price reads
+            const tokEntry = trackedTokens.get(mint);
+            if (tokEntry) {
+              const bv = buy?.poolBaseVault  ?? sell?.poolBaseVault;
+              const qv = buy?.poolQuoteVault ?? sell?.poolQuoteVault;
+              if (bv && !tokEntry.poolBaseVault)  tokEntry.poolBaseVault  = bv;
+              if (qv && !tokEntry.poolQuoteVault) tokEntry.poolQuoteVault = qv;
+            }
+            const txTs = tx.blockTime ? tx.blockTime * 1_000 : Date.now();
+            logger.info(
+              { mint: mint.slice(0, 12), wallet: txWallet.slice(0, 8), usd: txUsd.toFixed(0),
+                type: buy ? 'buy' : 'sell', sig: batch[j].slice(0, 12) },
+              'Sniper engine: baseline — tx volume found',
+            );
+            await handleVolumeUpdate(mint, txWallet, txUsd, batch[j], txPrice, txTs, buy ? 'buy' : 'sell');
+            if (trackedTokens.get(mint)?.entryTriggered) break outer;
+          }
+          // No inter-batch pause — speed is critical in the 10s window
         }
-        // No inter-batch pause — speed is critical in the 10s window
+      } finally {
+        mintHasActiveBaseline.delete(mint);
       }
       return;
     }
@@ -2205,15 +2223,29 @@ async function validateOrPrune(mint: string, activatedAt: number): Promise<void>
         const pairCreatedAt: number | undefined = postGradPairs[0]?.pairCreatedAt;
         const tokenAgeMs = pairCreatedAt ? now - pairCreatedAt : now - activatedAt;
         if (tokenAgeMs > MAX_TOKEN_AGE_FOR_VALIDATION_MS) {
-          logger.info(
-            { mint: mint.slice(0, 12), ageMin: (tokenAgeMs / 60_000).toFixed(1), liq: liq.toFixed(0) },
-            'Sniper engine: token exceeded age cap — pruning (too old for worthwhile entry)',
-          );
-          void diagTokenRejected(mint, 'Token age ' + (tokenAgeMs / 60_000).toFixed(1) + ' min exceeded ' + (MAX_TOKEN_AGE_FOR_VALIDATION_MS / 60_000) + ' min cap').catch(() => {});
-          void diagTokenValidationMilestone(mint, 'validation_outcome', 'failed_age_cap').catch(() => {});
-          if (!trackedTokens.get(mint)?.entryTriggered && !openPositions.has(mint)) pruneToken(mint);
-          // No release — the token is already too old; re-discovery would hit the same cap
-          return;
+          // Defer the prune if an initial baseline scan is still in progress —
+          // the baseline needs tok to remain in trackedTokens so handleVolumeUpdate
+          // can push entries to the buyLog. Once the baseline finishes (removes
+          // mint from mintHasActiveBaseline), the next loop iteration will prune.
+          // Hard cap at BASELINE_PRUNE_HARD_CAP_MS to avoid holding forever if the
+          // baseline stalls (e.g. complete Helius outage).
+          if (mintHasActiveBaseline.has(mint) && tokenAgeMs <= BASELINE_PRUNE_HARD_CAP_MS) {
+            logger.debug(
+              { mint: mint.slice(0, 12), ageMin: (tokenAgeMs / 60_000).toFixed(1) },
+              'Sniper engine: age cap reached but baseline active — deferring prune',
+            );
+            // fall through to next VALIDATION_POLL_MS iteration
+          } else {
+            logger.info(
+              { mint: mint.slice(0, 12), ageMin: (tokenAgeMs / 60_000).toFixed(1), liq: liq.toFixed(0) },
+              'Sniper engine: token exceeded age cap — pruning (too old for worthwhile entry)',
+            );
+            void diagTokenRejected(mint, 'Token age ' + (tokenAgeMs / 60_000).toFixed(1) + ' min exceeded ' + (MAX_TOKEN_AGE_FOR_VALIDATION_MS / 60_000) + ' min cap').catch(() => {});
+            void diagTokenValidationMilestone(mint, 'validation_outcome', 'failed_age_cap').catch(() => {});
+            if (!trackedTokens.get(mint)?.entryTriggered && !openPositions.has(mint)) pruneToken(mint);
+            // No release — the token is already too old; re-discovery would hit the same cap
+            return;
+          }
         }
 
         if (liq >= MIN_POOL_LIQUIDITY_USD) {
