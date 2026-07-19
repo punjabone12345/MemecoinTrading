@@ -301,18 +301,23 @@ export function startTrenchesScanner(): void {
   started        = true;
   sessionStartMs = Date.now();
 
-  const gmgnKeySet = !!process.env.GMGN_API_KEY;
+  const gmgnKeySet  = !!process.env.GMGN_API_KEY;
+  const gmgnKey2Set = !!process.env.GMGN_API_KEY_2;
   logger.info(
     {
-      rank1hIntervalMs:  RANK_1H_INTERVAL_MS,
-      bootDelayMs:       BOOT_DELAY_MS,
-      gmgnApiKeySet:     gmgnKeySet,
+      rank1hIntervalMs:         RANK_1H_INTERVAL_MS,
+      bootDelayMs:              BOOT_DELAY_MS,
+      gmgnDiscoveryKeySet:      gmgnKeySet,
+      gmgnWalletScoringKeySet:  gmgnKey2Set,
     },
     'GMGN discovery: starting (rank/1h poller only)',
   );
 
   if (!gmgnKeySet) {
     logger.warn('GMGN_API_KEY not set — discovery will attempt unauthenticated requests; rate limits will be stricter');
+  }
+  if (!gmgnKey2Set) {
+    logger.warn('GMGN_API_KEY_2 not set — wallet scoring will share GMGN_API_KEY with discovery (rate-limit contention possible)');
   }
 
   // Start the 1h poller after boot delay
@@ -413,6 +418,7 @@ export function getTrenchesDiagnostics() {
     heliusWsConfigured:       false,
     heliusApiKeySet:          !!process.env.HELIUS_API_KEY,
     gmgnApiKeySet:            !!process.env.GMGN_API_KEY,
+    gmgnWalletScoringKeySet:  !!process.env.GMGN_API_KEY_2,
     rpcEndpoint:              process.env.RPC_ENDPOINT ?? (process.env.HELIUS_API_KEY ? 'helius-http' : 'public-mainnet'),
     recentFeed: discoveryFeed.slice(0, 5).map(e => ({
       mint:            e.mint.slice(0, 12),

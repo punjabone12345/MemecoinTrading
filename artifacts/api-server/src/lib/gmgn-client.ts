@@ -21,11 +21,14 @@ const REQUEST_TIMEOUT_MS = 4_000;
 
 let loggedMissingKey = false;
 
+// Wallet-scoring uses GMGN_API_KEY_2 when set (dedicated key so discovery
+// polling on GMGN_API_KEY never starves the on-critical-path wallet lookups).
+// Falls back to GMGN_API_KEY so a single-key deployment still works.
 function apiKey(): string | undefined {
-  const key = process.env.GMGN_API_KEY;
+  const key = process.env.GMGN_API_KEY_2 || process.env.GMGN_API_KEY;
   if (!key && !loggedMissingKey) {
     loggedMissingKey = true;
-    logger.warn('GMGN_API_KEY not set — smart wallet consensus scoring disabled (all wallet scores will be 0, no entries will trigger)');
+    logger.warn('Neither GMGN_API_KEY_2 nor GMGN_API_KEY is set — smart wallet consensus scoring disabled (all wallet scores will be 0, no entries will trigger)');
   }
   return key;
 }
@@ -206,7 +209,7 @@ export async function getWalletActivity(chain: string, wallet: string, limit = 5
 }
 
 export function isGmgnConfigured(): boolean {
-  return Boolean(process.env.GMGN_API_KEY);
+  return Boolean(process.env.GMGN_API_KEY_2 || process.env.GMGN_API_KEY);
 }
 
 /** Non-zero when GMGN has temporarily banned this server's IP for rate-limit violations (unix ms, or 0 if not banned). */

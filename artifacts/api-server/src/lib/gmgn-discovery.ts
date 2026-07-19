@@ -232,11 +232,15 @@ async function discoveryGet<T = any>(
 /** Run once at module load — logs curl availability and key presence for Render debugging */
 (async () => {
   const keySet = !!process.env.GMGN_API_KEY;
+  const key2Set = !!process.env.GMGN_API_KEY_2;
   try {
     const { stdout } = await execFileAsync('which', ['curl'], { timeout: 3_000 });
-    logger.info({ curlPath: stdout.trim(), keySet, host: GMGN_QUOTATION_HOST }, 'GMGN discovery: curl available');
+    logger.info(
+      { curlPath: stdout.trim(), discoveryKeySet: keySet, walletScoringKeySet: key2Set, host: GMGN_QUOTATION_HOST },
+      'GMGN discovery: curl available',
+    );
   } catch {
-    logger.warn({ keySet }, 'GMGN discovery: curl NOT found in PATH — discovery will fail');
+    logger.warn({ discoveryKeySet: keySet, walletScoringKeySet: key2Set }, 'GMGN discovery: curl NOT found in PATH — discovery will fail');
   }
 })();
 

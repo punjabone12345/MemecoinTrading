@@ -16,7 +16,7 @@
 // on every buy it makes across different tokens, and lookups are de-duplicated
 // so concurrent buys from the same wallet only trigger one GMGN round-trip.
 
-import { getWalletStats, getWalletActivity, isGmgnConfigured, GmgnWalletActivityItem } from '../lib/gmgn-client.js';
+import { getWalletStats, getWalletActivity, isGmgnConfigured, getGmgnBannedUntil, GmgnWalletActivityItem } from '../lib/gmgn-client.js';
 import { logger } from '../lib/logger.js';
 
 const CHAIN = 'sol';
@@ -101,12 +101,29 @@ async function computeScore(wallet: string): Promise<WalletScoreBreakdown> {
 
   if (!isGmgnConfigured()) return zero;
 
+  // Surface active ban state so "No buyer wallets scored yet" in the UI has a
+  // clear server-side explanation rather than silently returning 0.
+  const bannedUntil = getGmgnBannedUntil();
+  if (bannedUntil > 0) {
+    logger.warn(
+      { wallet: wallet.slice(0, 8), bannedUntil: new Date(bannedUntil).toISOString() },
+      'GMGN wallet scoring: skipped — rate-limit ban active; score will be 0 until ban clears',
+    );
+    return zero;
+  }
+
   const [stats, activity] = await Promise.all([
     getWalletStats(CHAIN, wallet, '30d').catch(() => null),
     getWalletActivity(CHAIN, wallet, 50).catch(() => null),
   ]);
 
-  if (!stats && !activity) return zero;
+  if (!stats && !activity) {
+    logger.warn(
+      { wallet: wallet.slice(0, 8) },
+      'GMGN wallet scoring: both wallet_stats and wallet_activity returned null — score will be 0 (ban or API issue)',
+    );
+    return zero;
+  }
 
   // Win rate and avg holding period live under `pnl_stat` in the real API
   // response, not top-level — reading `stats.winrate` directly always
