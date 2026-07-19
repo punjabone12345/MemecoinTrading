@@ -364,6 +364,18 @@ function getConn(): Connection {
   return _conn;
 }
 
+// Public RPC fallback — used for buy detection when Helius is rate-limit-cooling
+// so wallet transactions keep flowing even during Helius 429 backoff windows.
+// Separate connection object so switching back to Helius never reuses a stale socket.
+let _publicConn: Connection | null = null;
+function getPublicConn(): Connection {
+  if (!_publicConn) {
+    const rpc = process.env.PUBLIC_RPC_ENDPOINT ?? 'https://api.mainnet-beta.solana.com';
+    _publicConn = new Connection(rpc, { commitment: 'confirmed' });
+  }
+  return _publicConn;
+}
+
 // ── SOL price ─────────────────────────────────────────────────────────────────
 // Primary source: Jupiter Price API v2 (always accurate, reflects real-time AMM)
 // Fallback: DexScreener (may lag 30-120s but better than nothing)
@@ -1636,9 +1648,20 @@ async function pollTokenBuys(mint: string, priority = false): Promise<void> {
   if (pollLocks.has(mint)) return;
   pollLocks.add(mint);
 
-  if (isHeliusCoolingDown()) { pollLocks.delete(mint); return; }
+  // When Helius is rate-limit cooling, fall back to the public Solana RPC instead
+  // of bailing out entirely — wallet transaction detection must keep flowing even
+  // during Helius 429 backoff windows (up to 120s) or no buyers ever get scored.
+  const usingFallback = isHeliusCoolingDown();
+  const conn = usingFallback ? getPublicConn() : getConn();
+  if (usingFallback) {
+    logger.debug({ mint: mint.slice(0, 12) }, 'Sniper engine: Helius cooling — using public RPC fallback for buy detection');
+  }
 
-  const conn = getConn();
+  // Helper: route RPC calls through the shared Helius rate-limiter when using
+  // Helius, or call directly when on the public fallback (no shared budget).
+  const rpcCall = <T>(fn: () => Promise<T>): Promise<T> =>
+    usingFallback ? fn() : withHeliusLimit(fn, { priority });
+
   const pk   = new PublicKey(mint);
 
   if (!seenTxns.has(mint)) seenTxns.set(mint, new Set());
@@ -1664,7 +1687,7 @@ async function pollTokenBuys(mint: string, priority = false): Promise<void> {
     // For GMGN-discovered tokens we cap at 200 — enough to cover ~10 min of
     // activity on even the most active tokens, without pulling full history.
     const sigLimit = mintCheckpointed.has(mint) ? 30 : (isHistoricalDiscovery ? 200 : 1_000);
-    const sigs = await withHeliusLimit(() => conn.getSignaturesForAddress(pk, { limit: sigLimit }), { priority });
+    const sigs = await rpcCall(() => conn.getSignaturesForAddress(pk, { limit: sigLimit }));
     if (!sigs.length) return;
 
     // First poll: baseline.
@@ -1698,7 +1721,7 @@ async function pollTokenBuys(mint: string, priority = false): Promise<void> {
       if (!isHistoricalDiscovery && sigs.length === sigLimit) {
         let before = sigs[sigs.length - 1].signature;
         for (let page = 0; page < 5; page++) {
-          const older = await withHeliusLimit(() => conn.getSignaturesForAddress(pk, { limit: 1_000, before })).catch(() => []);
+          const older = await rpcCall(() => conn.getSignaturesForAddress(pk, { limit: 1_000, before })).catch(() => []);
           if (!older.length) break;
           for (const s of older) seen.add(s.signature);
           const olderEarly = older.filter(
@@ -1746,7 +1769,7 @@ async function pollTokenBuys(mint: string, priority = false): Promise<void> {
           const batch = toFetchEarly.slice(i, i + BATCH);
           const txns  = await Promise.all(
             batch.map(sig =>
-              withHeliusLimit(() => conn.getParsedTransaction(sig, { maxSupportedTransactionVersion: 0 }), { priority }).catch(() => null),
+              rpcCall(() => conn.getParsedTransaction(sig, { maxSupportedTransactionVersion: 0 })).catch(() => null),
             ),
           );
           for (let j = 0; j < txns.length; j++) {
@@ -1802,7 +1825,7 @@ async function pollTokenBuys(mint: string, priority = false): Promise<void> {
     const toFetch = newSigs.slice(0, 10);
     const txns    = await Promise.all(
       toFetch.map(sig =>
-        withHeliusLimit(() => conn.getParsedTransaction(sig, { maxSupportedTransactionVersion: 0 }), { priority }).catch(() => null),
+        rpcCall(() => conn.getParsedTransaction(sig, { maxSupportedTransactionVersion: 0 })).catch(() => null),
       ),
     );
 
