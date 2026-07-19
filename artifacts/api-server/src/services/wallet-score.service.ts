@@ -2,10 +2,10 @@
 //
 // Scores a Solana wallet 0-100 from its GMGN trading history:
 //   Win rate    > 60%        → 30 pts
-//   Wallet age  > 5 days     → 15 pts  (was 10 — meme coin wallets are often newer)
-//   Completed trades >= 10   → 15 pts  (was 20)
-//   Average ROI > 20%        → 25 pts  (was 30%)
-//   Avg hold time > 1 min    → 15 pts  (was 2 min — scalpers hold shorter)
+//   Wallet age  > 10 days    → 15 pts
+//   Completed trades >= 20   → 15 pts
+//   Average ROI > 30%        → 25 pts
+//   Avg hold time > 2 min    → 15 pts
 //
 // GMGN's public API does not expose "wallet age" or "average hold time" as
 // direct fields, so both are approximated from the closest available data
@@ -151,10 +151,10 @@ async function computeScore(wallet: string): Promise<WalletScoreBreakdown> {
 
   let score = 0;
   const winPts   = (winRate !== null && winRate > 0.6) ? 30 : 0;
-  const agePts   = (walletAgeDays !== null && walletAgeDays > 5) ? 15 : 0;        // was 10 days
-  const tradePts = (completedTrades !== null && completedTrades >= 10) ? 15 : 0;  // was 20
-  const roiPts   = (avgRoiPct !== null && avgRoiPct > 20) ? 25 : 0;              // was 30%
-  const holdPts  = (avgHoldMinutes !== null && avgHoldMinutes > 1) ? 15 : 0;      // was 2 min
+  const agePts   = (walletAgeDays !== null && walletAgeDays > 10) ? 15 : 0;
+  const tradePts = (completedTrades !== null && completedTrades >= 20) ? 15 : 0;
+  const roiPts   = (avgRoiPct !== null && avgRoiPct > 30) ? 25 : 0;
+  const holdPts  = (avgHoldMinutes !== null && avgHoldMinutes > 2) ? 15 : 0;
   score = winPts + agePts + tradePts + roiPts + holdPts;
 
   logger.info(
