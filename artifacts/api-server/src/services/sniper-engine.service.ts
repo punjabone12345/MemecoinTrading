@@ -1572,18 +1572,7 @@ async function handleVolumeUpdate(
     broadcastSniperStatus(); return;
   }
 
-  // 2. Minimum pooled SOL: 100 SOL
-  // PumpSwap is a balanced CPMM — SOL side ≈ half of total liquidity.
-  const solPx = cachedSolPrice > 0 ? cachedSolPrice : 150;
-  const pooledSolEst = liqAtSignal / 2 / solPx;
-  if (pooledSolEst < 100) {
-    entry.skipReason = `Pooled SOL ~${pooledSolEst.toFixed(1)} SOL < 100 SOL min (liq ${liqAtSignal.toFixed(0)}, SOL ${solPx.toFixed(0)})`;
-    void diagTokenRejected(mint, `Pooled SOL: ~${pooledSolEst.toFixed(1)} SOL < 100 SOL min`).catch(() => {});
-    buyLog.unshift(entry); if (buyLog.length > MAX_BUY_LOG) buyLog.pop();
-    broadcastSniperStatus(); return;
-  }
-
-  // 3. Minimum token age: 10 minutes from pool creation
+  // 2. Minimum token age: 10 minutes from pool creation
   // Use DexScreener pairCreatedAt when available; fall back to migration detection time.
   const poolBornMs = tok.pairCreatedAt ?? tok.migrationTime;
   const ageMinutes = (Date.now() - poolBornMs) / 60_000;
