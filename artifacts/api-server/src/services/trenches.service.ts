@@ -13,6 +13,7 @@ import { logger } from '../lib/logger.js';
 import { query } from '../lib/db.js';
 import {
   fetchTrendingTokens,
+  fetchMigratedTokens,
   getDiscoveryBannedUntil,
   type GmgnDiscoveredToken,
 } from '../lib/gmgn-discovery.js';
@@ -20,6 +21,7 @@ import {
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 const RANK_1H_INTERVAL_MS    = 60_000;  // poll rank/1h every 60 s
+const MIGRATED_INTERVAL_MS   = 30_000;  // poll migrated every 30 s — graduations are time-sensitive
 const BOOT_DELAY_MS          = 5_000;   // let previous instance clear before first request
 const MAX_FEED               = 50;
 const TRACKING_WINDOW_MS     = 60 * 60_000; // 1 hour default suppression
@@ -43,7 +45,7 @@ const IGNORE_MINTS = new Set([
 
 // ── Discovery event ────────────────────────────────────────────────────────────
 
-export type GmgnDiscoverySource = 'rank_1h';
+export type GmgnDiscoverySource = 'rank_1h' | 'migrated';
 
 export interface DiscoveryEvent {
   mint:            string;
@@ -72,13 +74,18 @@ let totalTokensSkippedIgnore = 0;
 
 // ── Diagnostics ───────────────────────────────────────────────────────────────
 
-let trending1hPollCount          = 0;
-let lastTrending1hSuccessMs      = 0;
+let trending1hPollCount           = 0;
+let lastTrending1hSuccessMs       = 0;
 let consecutiveTrending1hFailures = 0;
 let lastTrending1hError: string | null = null;
 
+let migratedPollCount           = 0;
+let lastMigratedSuccessMs       = 0;
+let consecutiveMigratedFailures = 0;
+let lastMigratedError: string | null = null;
+
 // Per-source fired counts
-const firedBySource: Record<GmgnDiscoverySource, number> = { rank_1h: 0 };
+const firedBySource: Record<GmgnDiscoverySource, number> = { rank_1h: 0, migrated: 0 };
 let sessionStartMs = 0;
 
 /**
@@ -272,10 +279,37 @@ async function pollTrending1h(): Promise<void> {
   }
 }
 
+// ── migrated poller ───────────────────────────────────────────────────────────
+
+async function pollMigrated(): Promise<void> {
+  const bannedUntil = getDiscoveryBannedUntil();
+  if (bannedUntil > Date.now()) return;
+
+  const tokens = await fetchMigratedTokens(50);
+
+  if (tokens === null) {
+    consecutiveMigratedFailures++;
+    lastMigratedError = 'API returned null (rate-limited or error)';
+    logger.debug({ failures: consecutiveMigratedFailures }, 'GMGN discovery: migrated fetch failed');
+    return;
+  }
+
+  const fired = processTokens(tokens, 'migrated');
+  consecutiveMigratedFailures = 0;
+  lastMigratedError = null;
+  migratedPollCount++;
+  lastMigratedSuccessMs = Date.now();
+
+  if (fired > 0) {
+    logger.info({ fired, total: totalDiscovered }, 'GMGN discovery: new tokens queued from migrated');
+  }
+}
+
 // ── Lifecycle ─────────────────────────────────────────────────────────────────
 
 let started              = false;
 let trending1hTimer: ReturnType<typeof setTimeout> | null = null;
+let migratedTimer:   ReturnType<typeof setTimeout> | null = null;
 
 function makeScheduler(
   poll: () => Promise<void>,
@@ -292,9 +326,11 @@ function makeScheduler(
   return schedule;
 }
 
-const _t1h = { current: null as ReturnType<typeof setTimeout> | null };
+const _t1h      = { current: null as ReturnType<typeof setTimeout> | null };
+const _tMigrated = { current: null as ReturnType<typeof setTimeout> | null };
 
 const scheduleTrending1h = makeScheduler(pollTrending1h, _t1h, RANK_1H_INTERVAL_MS);
+const scheduleMigrated   = makeScheduler(pollMigrated, _tMigrated, MIGRATED_INTERVAL_MS);
 
 export function startTrenchesScanner(): void {
   if (started) return;
@@ -306,11 +342,12 @@ export function startTrenchesScanner(): void {
   logger.info(
     {
       rank1hIntervalMs:         RANK_1H_INTERVAL_MS,
+      migratedIntervalMs:       MIGRATED_INTERVAL_MS,
       bootDelayMs:              BOOT_DELAY_MS,
       gmgnDiscoveryKeySet:      gmgnKeySet,
       gmgnWalletScoringKeySet:  gmgnKey2Set,
     },
-    'GMGN discovery: starting (rank/1h poller only)',
+    'GMGN discovery: starting (rank/1h + migrated pollers)',
   );
 
   if (!gmgnKeySet) {
@@ -320,14 +357,16 @@ export function startTrenchesScanner(): void {
     logger.warn('GMGN_API_KEY_2 not set — wallet scoring will share GMGN_API_KEY with discovery (rate-limit contention possible)');
   }
 
-  // Start the 1h poller after boot delay
-  _t1h.current = setTimeout(async () => { await pollTrending1h(); scheduleTrending1h(); }, BOOT_DELAY_MS);
+  // Stagger pollers: rank/1h fires first, migrated fires 15 s later to spread API load
+  _t1h.current      = setTimeout(async () => { await pollTrending1h(); scheduleTrending1h(); }, BOOT_DELAY_MS);
+  _tMigrated.current = setTimeout(async () => { await pollMigrated(); scheduleMigrated(); }, BOOT_DELAY_MS + 15_000);
 }
 
 export function stopTrenchesScanner(): void {
   if (!started) return;
   started = false;
-  if (_t1h.current) { clearTimeout(_t1h.current); _t1h.current = null; }
+  if (_t1h.current)      { clearTimeout(_t1h.current);      _t1h.current      = null; }
+  if (_tMigrated.current) { clearTimeout(_tMigrated.current); _tMigrated.current = null; }
   logger.info('GMGN discovery: stopped');
 }
 
@@ -355,10 +394,10 @@ export function getTrenchesDiagnostics() {
   const bannedUntil   = getDiscoveryBannedUntil();
 
   return {
-    source:               'gmgn_rank_1h',
+    source:               'gmgn_rank_1h+migrated',
     sessionStartMs,
-    pollCount:            trending1hPollCount,
-    lastPollSuccessMs:    lastTrending1hSuccessMs,
+    pollCount:            trending1hPollCount + migratedPollCount,
+    lastPollSuccessMs:    Math.max(lastTrending1hSuccessMs, lastMigratedSuccessMs),
     lastPollAgoSec:       lastTrending1hSuccessMs ? Math.round((Date.now() - lastTrending1hSuccessMs) / 1_000) : null,
     consecutiveFailures:  consecutiveTrending1hFailures,
     lastPollError:        lastTrending1hError,
@@ -375,6 +414,16 @@ export function getTrenchesDiagnostics() {
         lastError:           lastTrending1hError,
         intervalMs:          RANK_1H_INTERVAL_MS,
         firedTotal:          firedBySource['rank_1h'],
+      },
+      migrated: {
+        label:               'migrated',
+        pollCount:           migratedPollCount,
+        lastSuccessMs:       lastMigratedSuccessMs,
+        lastSuccessAgoSec:   lastMigratedSuccessMs ? Math.round((Date.now() - lastMigratedSuccessMs) / 1_000) : null,
+        consecutiveFailures: consecutiveMigratedFailures,
+        lastError:           lastMigratedError,
+        intervalMs:          MIGRATED_INTERVAL_MS,
+        firedTotal:          firedBySource['migrated'],
       },
     },
 

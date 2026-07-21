@@ -71,7 +71,7 @@ function useSniperStatusFallback(skip: boolean) {
 
 // ── Discovery source feed hook ────────────────────────────────────────────────
 
-type GmgnDiscoverySource = 'rank_1m' | 'rank_5m' | 'rank_1h';
+type GmgnDiscoverySource = 'rank_1m' | 'rank_5m' | 'rank_1h' | 'migrated';
 interface DiscoveryEvent { mint: string; ts: number; description?: string; icon?: string; isMigration: boolean; discoverySource?: GmgnDiscoverySource; }
 interface GmgnPollerStats { label?: string; pollCount: number; lastSuccessAgoSec: number | null; consecutiveFailures: number; lastError: string | null; intervalMs: number; firedTotal?: number; }
 interface SourceActivity {
@@ -79,11 +79,11 @@ interface SourceActivity {
   gmgn: {
     total: number;
     recent: DiscoveryEvent[];
-    pollers?: { newPairs: GmgnPollerStats; trending: GmgnPollerStats; trending1h?: GmgnPollerStats };
+    pollers?: { newPairs: GmgnPollerStats; trending: GmgnPollerStats; trending1h?: GmgnPollerStats; migrated?: GmgnPollerStats };
     avgDiscoveryDelaySec?: number | null;
     gmgnApiKeySet?: boolean;
     gmgnBanned?: boolean;
-    firedBySource?: { rank_1m: number; rank_5m: number; rank_1h: number };
+    firedBySource?: { rank_1m: number; rank_5m: number; rank_1h: number; migrated: number };
   };
 }
 
@@ -407,24 +407,20 @@ function DiscoveryFeed() {
           <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '4px 0', borderBottom: i < 7 ? '1px solid rgba(255,255,255,0.03)' : 'none' }}>
             <div style={{ fontSize: 9, color: '#c0c8e0', fontFamily: 'monospace', display: 'flex', alignItems: 'center', gap: 5 }}>
               {ev.mint.slice(0, 8)}…{ev.mint.slice(-6)}
-              {ev.discoverySource && (
-                <span style={{
-                  fontSize: 7, fontWeight: 700, padding: '1px 4px', borderRadius: 3,
-                  background: ev.discoverySource === 'rank_1h'
-                    ? 'rgba(0,200,100,0.12)'
-                    : ev.discoverySource === 'rank_5m'
-                    ? 'rgba(80,160,255,0.12)'
-                    : 'rgba(200,80,255,0.12)',
-                  color: ev.discoverySource === 'rank_1h'
-                    ? '#00c864'
-                    : ev.discoverySource === 'rank_5m'
-                    ? '#50a0ff'
-                    : '#c850ff',
-                  border: `1px solid ${ev.discoverySource === 'rank_1h' ? 'rgba(0,200,100,0.25)' : ev.discoverySource === 'rank_5m' ? 'rgba(80,160,255,0.25)' : 'rgba(200,80,255,0.25)'}`,
-                }}>
-                  {ev.discoverySource === 'rank_1h' ? '1H' : ev.discoverySource === 'rank_5m' ? '5M' : '1M'}
-                </span>
-              )}
+              {ev.discoverySource && (() => {
+                const cfg: Record<string, { bg: string; color: string; border: string; label: string }> = {
+                  rank_1h:  { bg: 'rgba(0,200,100,0.12)',   color: '#00c864', border: 'rgba(0,200,100,0.25)',   label: '1H RANK'   },
+                  rank_5m:  { bg: 'rgba(80,160,255,0.12)',  color: '#50a0ff', border: 'rgba(80,160,255,0.25)',  label: '5M RANK'   },
+                  rank_1m:  { bg: 'rgba(200,80,255,0.12)',  color: '#c850ff', border: 'rgba(200,80,255,0.25)',  label: '1M RANK'   },
+                  migrated: { bg: 'rgba(255,140,0,0.12)',   color: '#ff8c00', border: 'rgba(255,140,0,0.25)',   label: 'MIGRATED'  },
+                };
+                const s = cfg[ev.discoverySource] ?? cfg['rank_1h'];
+                return (
+                  <span style={{ fontSize: 7, fontWeight: 700, padding: '1px 4px', borderRadius: 3, background: s.bg, color: s.color, border: `1px solid ${s.border}` }}>
+                    {s.label}
+                  </span>
+                );
+              })()}
               {ev.isMigration && (
                 <span style={{ fontSize: 7, fontWeight: 800, padding: '1px 4px', borderRadius: 3, background: 'rgba(255,215,0,0.12)', color: C.yellow, border: '1px solid rgba(255,215,0,0.25)' }}>RE-TRACKED</span>
               )}

@@ -285,6 +285,69 @@ export async function probeGmgnConnection(): Promise<Record<string, any>> {
   };
 }
 
+// ── Migrated (graduated) tokens endpoint ─────────────────────────────────────
+//
+// GMGN Trenches → "Migrated" tab: tokens that have completed their Pump.fun
+// bonding curve and migrated to Raydium/PumpSwap.  The endpoint shape is the
+// same as new_pairs — each item is a pair with a base_address / pool_address.
+
+export interface GmgnMigratedResponse {
+  pairs?: GmgnRawMigratedItem[];
+  [key: string]: any;
+}
+
+interface GmgnRawMigratedItem {
+  base_address?:       string;
+  address?:            string;
+  pool_address?:       string;
+  name?:               string;
+  symbol?:             string;
+  open_timestamp?:     number;
+  creation_timestamp?: number;
+  complete_timestamp?: number;   // when bonding curve completed
+  liquidity?:          number | string;
+  market_cap?:         number | string;
+  volume?:             { h1?: number; m5?: number } | number;
+  price?:              number | string;
+  base_token_info?:    { name?: string; symbol?: string };
+  [key: string]: any;
+}
+
+/**
+ * Fetches recently migrated (graduated) Pump.fun tokens from GMGN.
+ * These are tokens that have COMPLETED their bonding curve and moved to a DEX.
+ * Returns normalised GmgnDiscoveredToken[] or null on any error.
+ */
+export async function fetchMigratedTokens(limit = 50): Promise<GmgnDiscoveredToken[] | null> {
+  const data = await discoveryGet<GmgnMigratedResponse>(
+    GMGN_QUOTATION_HOST,
+    '/defi/quotation/v1/tokens/sol/migrated',
+    { limit, orderby: 'open_timestamp', direction: 'desc' },
+  );
+
+  if (!data) return null;
+
+  const pairs: GmgnRawMigratedItem[] = Array.isArray(data)
+    ? data
+    : (data.pairs ?? data.data?.pairs ?? data.tokens ?? data.data?.tokens ?? []);
+
+  return pairs.map(normaliseMigratedItem).filter((t): t is GmgnDiscoveredToken => !!t.mint);
+}
+
+function normaliseMigratedItem(p: GmgnRawMigratedItem): GmgnDiscoveredToken {
+  const mint     = p.base_address ?? p.address ?? '';
+  const name     = p.name ?? p.base_token_info?.name;
+  const symbol   = p.symbol ?? p.base_token_info?.symbol;
+  // prefer complete_timestamp (when graduation happened), fall back to open_timestamp
+  const openTs   = p.complete_timestamp ?? p.open_timestamp ?? p.creation_timestamp;
+  const liq      = toNum(p.liquidity);
+  const mc       = toNum(p.market_cap);
+  const vol1h    = typeof p.volume === 'object' ? toNum(p.volume?.h1) : toNum(p.volume as any);
+  const priceUsd = toNum(p.price);
+
+  return { mint, poolAddress: p.pool_address, name, symbol, openTimestamp: openTs, liquidity: liq, marketCap: mc, volume1h: vol1h, priceUsd };
+}
+
 // ── New Pairs endpoint ─────────────────────────────────────────────────────────
 
 export interface GmgnNewPairsResponse {
