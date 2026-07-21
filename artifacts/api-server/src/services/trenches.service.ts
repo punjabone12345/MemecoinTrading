@@ -61,7 +61,8 @@ export interface DiscoveryEvent {
 // ── In-memory state ───────────────────────────────────────────────────────────
 
 const suppressedUntil = new Map<string, number>();
-const discoveryFeed: DiscoveryEvent[] = [];
+const discoveryFeed: DiscoveryEvent[] = [];          // combined feed (all sources)
+const feedBySource: Record<GmgnDiscoverySource, DiscoveryEvent[]> = { rank_1h: [], migrated: [] };
 let totalDiscovered = 0;
 
 // ── Coverage counters ─────────────────────────────────────────────────────────
@@ -141,8 +142,16 @@ export function getDiscoveryFeed(): DiscoveryEvent[] {
   return discoveryFeed.slice(0, MAX_FEED);
 }
 
+export function getDiscoveryFeedBySource(source: GmgnDiscoverySource): DiscoveryEvent[] {
+  return feedBySource[source].slice(0, MAX_FEED);
+}
+
 export function getDiscoveryTotal(): number {
   return totalDiscovered;
+}
+
+export function getFiredBySource(): Record<GmgnDiscoverySource, number> {
+  return { ...firedBySource };
 }
 
 export function getSourceActivity() {
@@ -223,6 +232,8 @@ function processTokens(tokens: GmgnDiscoveredToken[], source: GmgnDiscoverySourc
 
     discoveryFeed.unshift(ev);
     if (discoveryFeed.length > MAX_FEED) discoveryFeed.pop();
+    feedBySource[source].unshift(ev);
+    if (feedBySource[source].length > MAX_FEED) feedBySource[source].pop();
 
     if (onGraduation) {
       onGraduation({ mint, poolAddress, ts: now, openTimestamp, reserveUsd });

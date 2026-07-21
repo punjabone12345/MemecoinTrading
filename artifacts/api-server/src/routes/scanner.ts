@@ -1,14 +1,22 @@
 import { Router } from 'express';
-import { getDiscoveryFeed, getDiscoveryTotal, getSourceActivity, getTrenchesDiagnostics } from '../services/trenches.service.js';
+import {
+  getDiscoveryFeed,
+  getDiscoveryFeedBySource,
+  getDiscoveryTotal,
+  getFiredBySource,
+  getSourceActivity,
+  getTrenchesDiagnostics,
+} from '../services/trenches.service.js';
 import { query } from '../lib/db.js';
 import { probeGmgnConnection } from '../lib/gmgn-discovery.js';
 
 const router = Router();
 
 router.get('/sources', (_req, res) => {
-  const total = getDiscoveryTotal();
-  const feed  = getDiscoveryFeed();
-  const diag  = getTrenchesDiagnostics();
+  const total        = getDiscoveryTotal();
+  const feed         = getDiscoveryFeed();
+  const diag         = getTrenchesDiagnostics();
+  const firedBySource = getFiredBySource();
 
   res.json({
     // Legacy field kept for frontend compatibility
@@ -20,6 +28,12 @@ router.get('/sources', (_req, res) => {
     gmgn: {
       total,
       recent: feed,
+      // Per-source feeds — lets the UI render two separate lists
+      recentBySource: {
+        rank_1h:  getDiscoveryFeedBySource('rank_1h').slice(0, 20),
+        migrated: getDiscoveryFeedBySource('migrated').slice(0, 20),
+      },
+      firedBySource,
       pollers: diag.pollers,
       avgDiscoveryDelaySec: diag.avgDiscoveryDelaySec,
       gmgnApiKeySet: diag.gmgnApiKeySet,

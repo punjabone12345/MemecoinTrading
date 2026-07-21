@@ -72,18 +72,19 @@ function useSniperStatusFallback(skip: boolean) {
 // ── Discovery source feed hook ────────────────────────────────────────────────
 
 type GmgnDiscoverySource = 'rank_1m' | 'rank_5m' | 'rank_1h' | 'migrated';
-interface DiscoveryEvent { mint: string; ts: number; description?: string; icon?: string; isMigration: boolean; discoverySource?: GmgnDiscoverySource; }
-interface GmgnPollerStats { label?: string; pollCount: number; lastSuccessAgoSec: number | null; consecutiveFailures: number; lastError: string | null; intervalMs: number; firedTotal?: number; }
+interface DiscoveryEvent { mint: string; ts: number; name?: string; symbol?: string; description?: string; icon?: string; isMigration: boolean; discoverySource?: GmgnDiscoverySource; reserveUsd?: number; }
+interface GmgnPollerStats { label?: string; pollCount: number; lastSuccessMs?: number; lastSuccessAgoSec: number | null; consecutiveFailures: number; lastError: string | null; intervalMs: number; firedTotal?: number; }
 interface SourceActivity {
   dexscreener: { total: number; recent: DiscoveryEvent[] };
   gmgn: {
     total: number;
     recent: DiscoveryEvent[];
-    pollers?: { newPairs: GmgnPollerStats; trending: GmgnPollerStats; trending1h?: GmgnPollerStats; migrated?: GmgnPollerStats };
+    recentBySource?: { rank_1h: DiscoveryEvent[]; migrated: DiscoveryEvent[] };
+    firedBySource?: { rank_1m?: number; rank_5m?: number; rank_1h: number; migrated: number };
+    pollers?: { trending1h?: GmgnPollerStats; migrated?: GmgnPollerStats; [key: string]: GmgnPollerStats | undefined };
     avgDiscoveryDelaySec?: number | null;
     gmgnApiKeySet?: boolean;
     gmgnBanned?: boolean;
-    firedBySource?: { rank_1m: number; rank_5m: number; rank_1h: number; migrated: number };
   };
 }
 
@@ -361,74 +362,141 @@ function BuyerActivityRow({ entry }: { entry: BuyerActivityLog }) {
 
 // ── Source feed (GMGN discovery events) ──────────────────────────────────────
 
+/** One row in a per-source token list */
+function TokenRow({ ev, i, last }: { ev: DiscoveryEvent; i: number; last: boolean }) {
+  return (
+    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '5px 0', borderBottom: last ? 'none' : '1px solid rgba(255,255,255,0.04)' }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+          {ev.symbol && <span style={{ fontSize: 10, fontWeight: 800, color: '#e0e8ff' }}>{ev.symbol}</span>}
+          {ev.name && <span style={{ fontSize: 8, color: C.gray }}>{ev.name.slice(0, 18)}</span>}
+          {ev.isMigration && (
+            <span style={{ fontSize: 6, fontWeight: 800, padding: '1px 3px', borderRadius: 3, background: 'rgba(255,215,0,0.12)', color: C.yellow, border: '1px solid rgba(255,215,0,0.2)' }}>RE-FIRE</span>
+          )}
+        </div>
+        <span style={{ fontSize: 8, color: '#4a5a70', fontFamily: 'monospace' }}>
+          {ev.mint.slice(0, 8)}…{ev.mint.slice(-5)}
+        </span>
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 2 }}>
+        {ev.reserveUsd != null && ev.reserveUsd > 0 && (
+          <span style={{ fontSize: 8, color: C.green, fontWeight: 700 }}>
+            ${ev.reserveUsd >= 1000 ? (ev.reserveUsd / 1000).toFixed(1) + 'k' : ev.reserveUsd.toFixed(0)} liq
+          </span>
+        )}
+        <span style={{ fontSize: 8, color: C.gray }}>{timeAgo(ev.ts)}</span>
+      </div>
+    </div>
+  );
+}
+
+/** Status pill: poller health */
+function PollerPill({ stats, color }: { stats?: GmgnPollerStats; color: string }) {
+  if (!stats) return <span style={{ fontSize: 8, color: '#2a3a50' }}>—</span>;
+  const ok = stats.consecutiveFailures === 0 && (stats.firedTotal ?? 0) >= 0;
+  const agoSec = stats.lastSuccessAgoSec;
+  return (
+    <span style={{ fontSize: 8, color: ok ? color : C.red }}>
+      {stats.firedTotal ?? 0} found · {agoSec != null ? `${agoSec}s ago` : 'never'} · {Math.round(stats.intervalMs / 1000)}s poll
+      {stats.consecutiveFailures > 0 && ` · ⚠️ ${stats.consecutiveFailures} fail`}
+    </span>
+  );
+}
+
 function DiscoveryFeed() {
   const data = useSourceActivity();
 
   const gmgn        = data?.gmgn;
-  const events      = gmgn?.recent ?? data?.dexscreener?.recent ?? [];
-  const total       = gmgn?.total  ?? data?.dexscreener?.total ?? 0;
-  const keySet      = gmgn?.gmgnApiKeySet ?? true;  // optimistic until first response
+  const keySet      = gmgn?.gmgnApiKeySet ?? true;
   const banned      = gmgn?.gmgnBanned ?? false;
+  const totalAll    = gmgn?.total ?? 0;
   const avgDelaySec = gmgn?.avgDiscoveryDelaySec;
 
-  // Status dot colour
-  const dotColor = !keySet ? C.yellow : banned ? C.red : C.green;
+  const rank1hEvents = gmgn?.recentBySource?.rank_1h ?? gmgn?.recent?.filter(e => e.discoverySource === 'rank_1h') ?? [];
+  const migrEvents   = gmgn?.recentBySource?.migrated ?? gmgn?.recent?.filter(e => e.discoverySource === 'migrated') ?? [];
+  const rank1hCount  = gmgn?.firedBySource?.rank_1h ?? 0;
+  const migrCount    = gmgn?.firedBySource?.migrated ?? 0;
+
+  const pollerRank   = gmgn?.pollers?.trending1h;
+  const pollerMigr   = gmgn?.pollers?.migrated;
+
+  const dotColor    = !keySet ? C.yellow : banned ? C.red : C.green;
   const statusLabel = !keySet ? 'NO KEY' : banned ? 'BANNED' : 'LIVE';
 
   return (
-    <div style={C.card}>
-      {/* Header row */}
+    <div>
+      {/* ── Section header ── */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
-        <span style={C.label}>📡 LATEST TOKENS (GMGN)</span>
-        <span style={{ fontSize: 9, color: dotColor, fontWeight: 700 }}>
-          <span style={{ display: 'inline-block', width: 5, height: 5, borderRadius: '50%', background: dotColor, boxShadow: `0 0 6px ${dotColor}`, marginRight: 4, verticalAlign: 'middle' }} />
+        <span style={C.label}>📡 TOKEN DISCOVERY (GMGN)</span>
+        <span style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 9, color: dotColor, fontWeight: 700 }}>
+          <span style={{ display: 'inline-block', width: 5, height: 5, borderRadius: '50%', background: dotColor, boxShadow: `0 0 6px ${dotColor}` }} />
           {statusLabel}
         </span>
         <span style={{ fontSize: 9, color: C.gray, marginLeft: 'auto' }}>
-          discovered: {total}
-          {avgDelaySec != null && ` · avg ${avgDelaySec}s delay`}
+          {totalAll} total{avgDelaySec != null && ` · avg ${avgDelaySec}s delay`}
         </span>
       </div>
 
-      {/* Status messages */}
-      {!keySet ? (
-        <div style={{ fontSize: 9, color: C.yellow, padding: '6px 0' }}>
-          GMGN_API_KEY not set — discovery requires the key to bypass Cloudflare.<br />
-          <span style={{ color: '#2a3a50' }}>Key is configured on Render; push changes to see live tokens.</span>
+      {/* ── Global status banners ── */}
+      {!keySet && (
+        <div style={{ fontSize: 9, color: C.yellow, padding: '6px 8px', marginBottom: 10, borderRadius: 6, background: 'rgba(255,200,0,0.07)', border: '1px solid rgba(255,200,0,0.18)' }}>
+          GMGN_API_KEY not set — discovery requires the key to bypass Cloudflare. Configured on Render.
         </div>
-      ) : banned ? (
-        <div style={{ fontSize: 9, color: C.red, padding: '6px 0' }}>
+      )}
+      {banned && (
+        <div style={{ fontSize: 9, color: C.red, padding: '6px 8px', marginBottom: 10, borderRadius: 6, background: 'rgba(255,68,68,0.07)', border: '1px solid rgba(255,68,68,0.18)' }}>
           GMGN rate-limited — discovery paused until ban clears.
         </div>
-      ) : events.length === 0 ? (
-        <div style={{ fontSize: 9, color: C.gray }}>Scanning GMGN for new token pairs…</div>
-      ) : (
-        events.slice(0, 8).map((ev, i) => (
-          <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '4px 0', borderBottom: i < 7 ? '1px solid rgba(255,255,255,0.03)' : 'none' }}>
-            <div style={{ fontSize: 9, color: '#c0c8e0', fontFamily: 'monospace', display: 'flex', alignItems: 'center', gap: 5 }}>
-              {ev.mint.slice(0, 8)}…{ev.mint.slice(-6)}
-              {ev.discoverySource && (() => {
-                const cfg: Record<string, { bg: string; color: string; border: string; label: string }> = {
-                  rank_1h:  { bg: 'rgba(0,200,100,0.12)',   color: '#00c864', border: 'rgba(0,200,100,0.25)',   label: '1H RANK'   },
-                  rank_5m:  { bg: 'rgba(80,160,255,0.12)',  color: '#50a0ff', border: 'rgba(80,160,255,0.25)',  label: '5M RANK'   },
-                  rank_1m:  { bg: 'rgba(200,80,255,0.12)',  color: '#c850ff', border: 'rgba(200,80,255,0.25)',  label: '1M RANK'   },
-                  migrated: { bg: 'rgba(255,140,0,0.12)',   color: '#ff8c00', border: 'rgba(255,140,0,0.25)',   label: 'MIGRATED'  },
-                };
-                const s = cfg[ev.discoverySource] ?? cfg['rank_1h'];
-                return (
-                  <span style={{ fontSize: 7, fontWeight: 700, padding: '1px 4px', borderRadius: 3, background: s.bg, color: s.color, border: `1px solid ${s.border}` }}>
-                    {s.label}
-                  </span>
-                );
-              })()}
-              {ev.isMigration && (
-                <span style={{ fontSize: 7, fontWeight: 800, padding: '1px 4px', borderRadius: 3, background: 'rgba(255,215,0,0.12)', color: C.yellow, border: '1px solid rgba(255,215,0,0.25)' }}>RE-TRACKED</span>
-              )}
-            </div>
-            <span style={{ fontSize: 8, color: C.gray }}>{timeAgo(ev.ts)}</span>
-          </div>
-        ))
       )}
+
+      {/* ── Two-column source cards ── */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+
+        {/* ── 1H RANKING ── */}
+        <div style={{ background: 'rgba(0,200,100,0.04)', border: '1px solid rgba(0,200,100,0.15)', borderRadius: 10, padding: '10px 12px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span style={{ fontSize: 8, fontWeight: 800, padding: '2px 6px', borderRadius: 4, background: 'rgba(0,200,100,0.15)', color: '#00c864', border: '1px solid rgba(0,200,100,0.3)' }}>1H RANK</span>
+              <span style={{ fontSize: 9, fontWeight: 800, color: '#00c864' }}>{rank1hCount}</span>
+            </div>
+          </div>
+          <div style={{ fontSize: 8, color: '#2a4a38', marginBottom: 8 }}>
+            <PollerPill stats={pollerRank} color="#00c864" />
+          </div>
+          {rank1hEvents.length === 0 ? (
+            <div style={{ fontSize: 9, color: '#2a4a38', padding: '12px 0', textAlign: 'center' }}>
+              {keySet ? 'Scanning 1h trending…' : 'Waiting for API key'}
+            </div>
+          ) : (
+            rank1hEvents.slice(0, 8).map((ev, i) => (
+              <TokenRow key={ev.mint + i} ev={ev} i={i} last={i === Math.min(rank1hEvents.length, 8) - 1} />
+            ))
+          )}
+        </div>
+
+        {/* ── MIGRATED (graduated) ── */}
+        <div style={{ background: 'rgba(255,140,0,0.04)', border: '1px solid rgba(255,140,0,0.18)', borderRadius: 10, padding: '10px 12px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span style={{ fontSize: 8, fontWeight: 800, padding: '2px 6px', borderRadius: 4, background: 'rgba(255,140,0,0.15)', color: '#ff8c00', border: '1px solid rgba(255,140,0,0.35)' }}>MIGRATED</span>
+              <span style={{ fontSize: 9, fontWeight: 800, color: '#ff8c00' }}>{migrCount}</span>
+            </div>
+          </div>
+          <div style={{ fontSize: 8, color: '#4a3a20', marginBottom: 8 }}>
+            <PollerPill stats={pollerMigr} color="#ff8c00" />
+          </div>
+          {migrEvents.length === 0 ? (
+            <div style={{ fontSize: 9, color: '#4a3a20', padding: '12px 0', textAlign: 'center' }}>
+              {keySet ? 'Scanning graduated tokens…' : 'Waiting for API key'}
+            </div>
+          ) : (
+            migrEvents.slice(0, 8).map((ev, i) => (
+              <TokenRow key={ev.mint + i} ev={ev} i={i} last={i === Math.min(migrEvents.length, 8) - 1} />
+            ))
+          )}
+        </div>
+
+      </div>
     </div>
   );
 }
