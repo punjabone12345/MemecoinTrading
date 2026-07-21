@@ -315,23 +315,27 @@ interface GmgnRawMigratedItem {
 
 /**
  * Fetches recently migrated (graduated) Pump.fun tokens from GMGN.
- * These are tokens that have COMPLETED their bonding curve and moved to a DEX.
+ * These are tokens that have COMPLETED their bonding curve and moved to PumpSwap.
+ *
+ * The old /defi/quotation/v1/tokens/sol/migrated path does not exist (code 40000300).
+ * The correct approach is the rank/1h endpoint filtered by launchpad=pumpswap, sorted
+ * by open_timestamp desc so the newest graduates appear first.
  * Returns normalised GmgnDiscoveredToken[] or null on any error.
  */
 export async function fetchMigratedTokens(limit = 50): Promise<GmgnDiscoveredToken[] | null> {
-  const data = await discoveryGet<GmgnMigratedResponse>(
+  const data = await discoveryGet<GmgnRankResponse>(
     GMGN_QUOTATION_HOST,
-    '/defi/quotation/v1/tokens/sol/migrated',
-    { limit, orderby: 'open_timestamp', direction: 'desc' },
+    '/defi/quotation/v1/rank/sol/swaps/1h',
+    { launchpad: 'pumpswap', orderby: 'open_timestamp', direction: 'desc', limit },
   );
 
   if (!data) return null;
 
-  const pairs: GmgnRawMigratedItem[] = Array.isArray(data)
+  const items: GmgnRawRankItem[] = Array.isArray(data)
     ? data
-    : (data.pairs ?? data.data?.pairs ?? data.tokens ?? data.data?.tokens ?? []);
+    : (data.rank ?? data.data?.rank ?? []);
 
-  return pairs.map(normaliseMigratedItem).filter((t): t is GmgnDiscoveredToken => !!t.mint);
+  return items.map(normaliseRawRankItem).filter((t): t is GmgnDiscoveredToken => !!t.mint);
 }
 
 function normaliseMigratedItem(p: GmgnRawMigratedItem): GmgnDiscoveredToken {
