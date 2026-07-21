@@ -1489,7 +1489,7 @@ async function handleVolumeUpdate(
       ? tok.txnsH1Buys / tok.txnsH1Sells : undefined,
     walletScore:            result.score,
     qualifyingWalletsCount: result.qualifyingWallets.length,
-    ageMinutes:             (Date.now() - (tok.pairCreatedAt ?? tok.migrationTime)) / 60_000,
+    ageMinutes:             (Date.now() - Math.min(tok.migrationTime, tok.pairCreatedAt && tok.pairCreatedAt > 0 ? tok.pairCreatedAt : Infinity)) / 60_000,
     passedWallet:           result.trigger,
   }).catch(() => {});
 
@@ -1572,9 +1572,16 @@ async function handleVolumeUpdate(
     broadcastSniperStatus(); return;
   }
 
-  // 2. Minimum token age: 10 minutes from pool creation
-  // Use DexScreener pairCreatedAt when available; fall back to migration detection time.
-  const poolBornMs = tok.pairCreatedAt ?? tok.migrationTime;
+  // 2. Minimum token age: 10 minutes from pool creation.
+  // Use the EARLIEST of all available timestamps:
+  //   - migrationTime: actual on-chain openTimestamp from GMGN (most accurate)
+  //   - pairCreatedAt: when DexScreener *indexed* the pair (can lag by minutes after
+  //     on-chain creation, so using it alone makes new pools look younger than they are)
+  // Taking the minimum ensures we always use the oldest known reference point.
+  const poolBornMs = Math.min(
+    tok.migrationTime,
+    tok.pairCreatedAt && tok.pairCreatedAt > 0 ? tok.pairCreatedAt : Infinity,
+  );
   const ageMinutes = (Date.now() - poolBornMs) / 60_000;
   if (ageMinutes < 10) {
     entry.skipReason = `Token too new — ${ageMinutes.toFixed(1)} min old (min 10 min)`;
@@ -2605,17 +2612,24 @@ function broadcastSniperStatus(): void {
 // Old approach: 128 tokens × 500ms stagger = 64s per cycle (completely broken).
 // New approach: ceil(128/30) = 5 batches × 300ms inter-batch pause = ~5s per cycle.
 
-const MARKET_REFRESH_MS       = 10_000; // interval between refresh cycles
+const MARKET_REFRESH_MS       = 3_000;  // interval between refresh cycles (3s for near-live data)
 const MARKET_BATCH_SIZE       = 30;     // DexScreener batch limit
 const MARKET_BATCH_PAUSE_MS   = 300;    // pause between batches to avoid rate-limits
 
 function applyDexData(tok: TrackedToken, d: DexMarketData): void {
   tok.lastMarketUpdate = Date.now();
+  // Always capture pool identity + timestamps regardless of price
+  if (!tok.poolAddress && d.pairAddress)         tok.poolAddress  = d.pairAddress;
+  if (!tok.pairCreatedAt && d.pairCreatedAt > 0) tok.pairCreatedAt = d.pairCreatedAt;
+  if (tok.name.endsWith('…') && d.name)          { tok.name = d.name; tok.symbol = d.symbol; }
+  // Update liquidity/mcap even when price=0 (DexScreener can return price=0 briefly
+  // while still having accurate liquidity; keeping stale low-liq causes false rejections).
+  if (d.liquidity > 0)  tok.liquidity = d.liquidity;
+  if (d.mcap > 0)       tok.mcap      = d.mcap;
+  // Price-dependent fields only update when we have a valid price
   if (d.price > 0) {
     tok.dexId           = d.dexId;
     tok.price           = d.price;
-    tok.mcap            = d.mcap;
-    tok.liquidity       = d.liquidity;
     tok.priceChange5m   = d.priceChange5m;
     tok.priceChange1h   = d.priceChange1h;
     tok.priceChange24h  = d.priceChange24h;
@@ -2626,9 +2640,6 @@ function applyDexData(tok: TrackedToken, d: DexMarketData): void {
     tok.txnsH1Sells     = d.txnsH1Sells;
     tok.txnsH24Buys     = d.txnsH24Buys;
     tok.txnsH24Sells    = d.txnsH24Sells;
-    if (!tok.poolAddress && d.pairAddress)  tok.poolAddress  = d.pairAddress;
-    if (!tok.pairCreatedAt && d.pairCreatedAt) tok.pairCreatedAt = d.pairCreatedAt;
-    if (tok.name.endsWith('…') && d.name)   { tok.name = d.name; tok.symbol = d.symbol; }
   }
 }
 

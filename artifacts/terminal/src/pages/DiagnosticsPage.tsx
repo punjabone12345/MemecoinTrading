@@ -21,9 +21,11 @@ function fmtNum(n: string | number | null | undefined): string {
   return v.toFixed(0);
 }
 
-function fmtTs(ms: number | null | undefined): string {
+function fmtTs(ms: number | string | null | undefined): string {
   if (!ms) return '—';
-  return new Date(ms).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  const n = Number(ms); // node-pg returns BIGINT as string; coerce to number before Date()
+  if (!Number.isFinite(n) || n <= 0) return '—';
+  return new Date(n).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
 function timeAgo(ms: number | null | undefined): string {
