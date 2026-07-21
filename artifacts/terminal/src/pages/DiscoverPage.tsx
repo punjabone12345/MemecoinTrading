@@ -1,13 +1,11 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect } from 'react';
 import { SniperStatus, TrackedToken, BuyerActivityLog, PendingSignal } from '../lib/types.js';
 import { api } from '../lib/api.js';
 
 // ── Props ─────────────────────────────────────────────────────────────────────
 
 interface Props {
-  /** Real-time sniper status pushed via App-level WebSocket. */
   sniperStatus?: SniperStatus | null;
-  /** True when the App-level WebSocket is connected. Polling resumes when false. */
   wsConnected?: boolean;
 }
 
@@ -29,7 +27,7 @@ function countdown(expiresAt: number): string {
 }
 
 function countdownPct(migrationTime: number, expiresAt: number): number {
-  const total = expiresAt - migrationTime;
+  const total   = expiresAt - migrationTime;
   const elapsed = Date.now() - migrationTime;
   return Math.min(100, Math.max(0, (elapsed / total) * 100));
 }
@@ -39,19 +37,29 @@ function fmtUsd(n: number): string {
   return `$${n.toFixed(0)}`;
 }
 
-function fmtPnl(pct: number): string {
-  return (pct >= 0 ? '+' : '') + pct.toFixed(1) + '%';
-}
-
 function shortAddr(addr: string): string {
   return addr.slice(0, 4) + '…' + addr.slice(-4);
 }
 
-// ── Sniper status hook (polling fallback when WS data is absent) ───────────────
+function fmtCompact(n?: number): string {
+  if (!n) return '—';
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+  return `${n.toFixed(2)}`;
+}
+
+function fmtPrice(p?: number): string {
+  if (!p) return '—';
+  if (p < 0.000001) return `${p.toExponential(2)}`;
+  if (p < 0.01) return `${p.toFixed(6)}`;
+  if (p < 1) return `${p.toFixed(4)}`;
+  return `${p.toFixed(2)}`;
+}
+
+// ── Sniper status hook ────────────────────────────────────────────────────────
 
 function useSniperStatusFallback(skip: boolean) {
   const [status, setStatus] = useState<SniperStatus | null>(null);
-
   useEffect(() => {
     if (skip) return;
     let cancelled = false;
@@ -65,47 +73,80 @@ function useSniperStatusFallback(skip: boolean) {
     const id = setInterval(poll, 3_000);
     return () => { cancelled = true; clearInterval(id); };
   }, [skip]);
-
   return status;
 }
 
-// ── Discovery source feed hook ────────────────────────────────────────────────
+// ── Discovery data types ──────────────────────────────────────────────────────
 
-type GmgnDiscoverySource = 'rank_1m' | 'rank_5m' | 'rank_1h' | 'migrated';
-interface DiscoveryEvent { mint: string; ts: number; name?: string; symbol?: string; description?: string; icon?: string; isMigration: boolean; discoverySource?: GmgnDiscoverySource; reserveUsd?: number; }
-interface GmgnPollerStats { label?: string; pollCount: number; lastSuccessMs?: number; lastSuccessAgoSec: number | null; consecutiveFailures: number; lastError: string | null; intervalMs: number; firedTotal?: number; }
-interface SourceActivity {
-  dexscreener: { total: number; recent: DiscoveryEvent[] };
-  gmgn: {
+interface MigrationEvent {
+  mint:             string;
+  ts:               number;
+  name?:            string;
+  symbol?:          string;
+  isMigration:      boolean;
+  reserveUsd?:      number;
+  discoverySource?: string;
+  txSignature?:     string;
+  instructionType?: string;
+}
+
+interface PumpfunTrackerData {
+  total:               number;
+  recent:              MigrationEvent[];
+  walletAddress?:      string;
+  pollCount?:          number;
+  lastPollAgoSec?:     number | null;
+  consecutiveFailures?: number;
+  lastError?:          string | null;
+  heliusApiKeySet?:    boolean;
+  rpcEndpoint?:        string;
+  tokensPerHour?:      number | null;
+  txFetchErrorRate?:   number;
+}
+
+interface SourcesResponse {
+  pumpfun?: PumpfunTrackerData;
+  // legacy fallback
+  gmgn?: {
     total: number;
-    recent: DiscoveryEvent[];
-    recentBySource?: { rank_1h: DiscoveryEvent[]; migrated: DiscoveryEvent[] };
-    firedBySource?: { rank_1m?: number; rank_5m?: number; rank_1h: number; migrated: number };
-    pollers?: { trending1h?: GmgnPollerStats; migrated?: GmgnPollerStats; [key: string]: GmgnPollerStats | undefined };
-    avgDiscoveryDelaySec?: number | null;
-    gmgnApiKeySet?: boolean;
-    gmgnBanned?: boolean;
+    recent: MigrationEvent[];
+    pollers?: { migrated?: { pollCount: number; lastSuccessAgoSec: number | null; consecutiveFailures: number; firedTotal?: number; intervalMs: number; lastError: string | null } };
   };
 }
 
-function useSourceActivity() {
-  const [data, setData] = useState<SourceActivity | null>(null);
+function useTrackerData(): { data: PumpfunTrackerData | null; loading: boolean } {
+  const [data, setData] = useState<PumpfunTrackerData | null>(null);
+  const [loading, setLoading] = useState(true);
+
   useEffect(() => {
     let cancelled = false;
     async function poll() {
       try {
-        const json = await api.getScannerSources();
-        if (!cancelled) setData(json as unknown as SourceActivity);
+        const json = (await api.getScannerSources()) as unknown as SourcesResponse;
+        if (!cancelled) {
+          // Prefer new pumpfun shape; fall back to legacy gmgn
+          const pf = json.pumpfun;
+          const gm = json.gmgn;
+          setData(pf ?? {
+            total:    gm?.total ?? 0,
+            recent:   gm?.recent ?? [],
+            pollCount: gm?.pollers?.migrated?.pollCount,
+            lastPollAgoSec: gm?.pollers?.migrated?.lastSuccessAgoSec,
+            consecutiveFailures: gm?.pollers?.migrated?.consecutiveFailures,
+          } as PumpfunTrackerData);
+          setLoading(false);
+        }
       } catch { /* ignore */ }
     }
     poll();
-    const id = setInterval(poll, 5_000);
+    const id = setInterval(poll, 2_000);
     return () => { cancelled = true; clearInterval(id); };
   }, []);
-  return data;
+
+  return { data, loading };
 }
 
-// ── Sub-components ────────────────────────────────────────────────────────────
+// ── Design tokens ─────────────────────────────────────────────────────────────
 
 const C = {
   card:   { background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.07)', borderRadius: 12, padding: '12px 14px', marginBottom: 10 } as React.CSSProperties,
@@ -114,17 +155,19 @@ const C = {
   green:  '#00ff88',
   red:    '#ff4466',
   yellow: '#ffd700',
+  orange: '#ff8c00',
   gray:   '#4a6080',
+  pump:   '#a855f7',  // purple brand colour for pump.fun migrations
 };
 
-function dexUrl(mintOrPool: string): string {
-  return `https://dexscreener.com/solana/${mintOrPool}`;
+function dexUrl(mint: string): string {
+  return `https://dexscreener.com/solana/${mint}`;
 }
 
-function DexLink({ mint, pool }: { mint: string; pool?: string }) {
+function DexLink({ mint }: { mint: string }) {
   return (
     <a
-      href={dexUrl(pool ?? mint)}
+      href={dexUrl(mint)}
       target="_blank"
       rel="noopener noreferrer"
       onClick={e => e.stopPropagation()}
@@ -132,15 +175,33 @@ function DexLink({ mint, pool }: { mint: string; pool?: string }) {
         display: 'inline-flex', alignItems: 'center', gap: 3,
         fontSize: 8, fontWeight: 800, letterSpacing: '0.05em',
         padding: '2px 6px', borderRadius: 4,
-        background: 'rgba(255,196,0,0.08)',
-        color: '#ffc400',
+        background: 'rgba(255,196,0,0.08)', color: '#ffc400',
         border: '1px solid rgba(255,196,0,0.25)',
-        textDecoration: 'none',
-        cursor: 'pointer',
-        flexShrink: 0,
+        textDecoration: 'none', cursor: 'pointer', flexShrink: 0,
       }}
     >
       ↗ DEX
+    </a>
+  );
+}
+
+function PumpLink({ mint }: { mint: string }) {
+  return (
+    <a
+      href={`https://pump.fun/${mint}`}
+      target="_blank"
+      rel="noopener noreferrer"
+      onClick={e => e.stopPropagation()}
+      style={{
+        display: 'inline-flex', alignItems: 'center', gap: 3,
+        fontSize: 8, fontWeight: 800, letterSpacing: '0.05em',
+        padding: '2px 6px', borderRadius: 4,
+        background: 'rgba(168,85,247,0.10)', color: C.pump,
+        border: '1px solid rgba(168,85,247,0.25)',
+        textDecoration: 'none', cursor: 'pointer', flexShrink: 0,
+      }}
+    >
+      🚀 PUMP
     </a>
   );
 }
@@ -152,23 +213,6 @@ function StatPill({ label, value, color }: { label: string; value: string | numb
       <span style={{ fontSize: 8, fontWeight: 800, letterSpacing: '0.1em', color: C.gray, textTransform: 'uppercase' }}>{label}</span>
     </div>
   );
-}
-
-// ── Market-data helpers ───────────────────────────────────────────────────────
-
-function fmtCompact(n?: number): string {
-  if (!n) return '—';
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
-  if (n >= 1_000)     return `${(n / 1_000).toFixed(1)}K`;
-  return `${n.toFixed(2)}`;
-}
-
-function fmtPrice(p?: number): string {
-  if (!p) return '—';
-  if (p < 0.000001) return `${p.toExponential(2)}`;
-  if (p < 0.01)     return `${p.toFixed(6)}`;
-  if (p < 1)        return `${p.toFixed(4)}`;
-  return `${p.toFixed(2)}`;
 }
 
 function PctBadge({ value, label }: { value?: number; label: string }) {
@@ -199,8 +243,6 @@ function TrackedCard({ tok, tick }: { tok: TrackedToken; tick: number }) {
       ...C.card, marginBottom: 8,
       borderColor: tok.entryTriggered ? 'rgba(0,255,136,0.25)' : biggestBuy >= 750 ? 'rgba(0,191,255,0.3)' : 'rgba(255,255,255,0.07)',
     }}>
-
-      {/* ── Header ── */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
         <div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -212,7 +254,7 @@ function TrackedCard({ tok, tick }: { tok: TrackedToken; tick: number }) {
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 3 }}>
             <span style={{ fontSize: 9, color: C.gray, fontFamily: 'monospace' }}>{shortAddr(tok.mint)}</span>
-            <DexLink mint={tok.mint} pool={tok.poolAddress} />
+            <DexLink mint={tok.mint} />
           </div>
         </div>
         <div style={{ textAlign: 'right' }}>
@@ -223,16 +265,9 @@ function TrackedCard({ tok, tick }: { tok: TrackedToken; tick: number }) {
         </div>
       </div>
 
-      {/* ── Market stats grid ── */}
       {hasMarket ? (
         <div style={{ margin: '10px 0 6px' }}>
-          {/* Row 1: price / mcap / liq / vol 24h */}
-          <div style={{
-            display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)',
-            gap: 6, padding: '8px 10px',
-            borderRadius: '8px 8px 0 0', background: 'rgba(0,191,255,0.04)',
-            border: '1px solid rgba(0,191,255,0.08)', borderBottom: 'none',
-          }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 6, padding: '8px 10px', borderRadius: '8px 8px 0 0', background: 'rgba(0,191,255,0.04)', border: '1px solid rgba(0,191,255,0.08)', borderBottom: 'none' }}>
             <div style={{ textAlign: 'center' }}>
               <div style={{ fontSize: 10, fontWeight: 800, color: '#e0e8ff', fontVariantNumeric: 'tabular-nums' }}>{fmtPrice(tok.price)}</div>
               <div style={{ fontSize: 8, color: C.gray }}>price</div>
@@ -250,18 +285,12 @@ function TrackedCard({ tok, tick }: { tok: TrackedToken; tick: number }) {
               <div style={{ fontSize: 8, color: C.gray }}>{tok.volume24h != null ? 'vol 24h' : tok.volume1h != null ? 'vol 1h' : 'vol 5m'}</div>
             </div>
           </div>
-          {/* Row 2: price changes / txns / updated */}
-          <div style={{
-            display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)',
-            gap: 6, padding: '6px 10px',
-            borderRadius: '0 0 8px 8px', background: 'rgba(0,191,255,0.02)',
-            border: '1px solid rgba(0,191,255,0.08)',
-          }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 6, padding: '6px 10px', borderRadius: '0 0 8px 8px', background: 'rgba(0,191,255,0.02)', border: '1px solid rgba(0,191,255,0.08)' }}>
             <PctBadge value={tok.priceChange5m} label="5m chg" />
             <PctBadge value={tok.priceChange1h} label="1h chg" />
             <PctBadge value={tok.priceChange24h} label="24h chg" />
             <div style={{ textAlign: 'center' }}>
-              {(tok.txnsH24Buys != null && tok.txnsH24Buys > 0) || (tok.txnsH24Sells != null && tok.txnsH24Sells > 0) ? (
+              {(tok.txnsH24Buys ?? 0) > 0 || (tok.txnsH24Sells ?? 0) > 0 ? (
                 <>
                   <div style={{ fontSize: 9, fontWeight: 800, fontVariantNumeric: 'tabular-nums' }}>
                     <span style={{ color: C.green }}>{tok.txnsH24Buys ?? 0}B</span>
@@ -280,32 +309,24 @@ function TrackedCard({ tok, tick }: { tok: TrackedToken; tick: number }) {
           </div>
         </div>
       ) : (
-        <div style={{ fontSize: 9, color: C.gray, margin: '8px 0 4px', fontStyle: 'italic' }}>
-          Fetching market data…
-        </div>
+        <div style={{ fontSize: 9, color: C.gray, margin: '8px 0 4px', fontStyle: 'italic' }}>Fetching market data…</div>
       )}
 
-      {/* ── Progress bar ── */}
       <div style={{ margin: '6px 0 6px', height: 3, borderRadius: 2, background: 'rgba(255,255,255,0.06)', overflow: 'hidden' }}>
         <div style={{ width: `${pct}%`, height: '100%', borderRadius: 2, background: expired ? C.red : pct > 80 ? `linear-gradient(90deg,${C.yellow},${C.red})` : `linear-gradient(90deg,${C.accent},#7b5ea7)`, transition: 'width 1s linear' }} />
       </div>
 
-      {/* ── Buyer activity chips ── */}
       {tok.buyerActivity.length > 0 && (
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 2 }}>
           {tok.buyerActivity.slice(0, 5).map((b, i) => (
-            <span key={i} style={{
-              fontSize: 9, fontWeight: 800, padding: '2px 6px', borderRadius: 4,
-              background: b.amountUsd >= 2250 ? 'rgba(0,191,255,0.18)' : b.amountUsd >= 1500 ? 'rgba(0,191,255,0.11)' : 'rgba(0,191,255,0.06)',
-              color: C.accent, border: '1px solid rgba(0,191,255,0.2)',
-            }}>
+            <span key={i} style={{ fontSize: 9, fontWeight: 800, padding: '2px 6px', borderRadius: 4, background: b.amountUsd >= 2250 ? 'rgba(0,191,255,0.18)' : b.amountUsd >= 1500 ? 'rgba(0,191,255,0.11)' : 'rgba(0,191,255,0.06)', color: C.accent, border: '1px solid rgba(0,191,255,0.2)' }}>
               📈 {fmtUsd(b.amountUsd)} · {timeAgo(b.detectedAt ?? b.timestamp)}
             </span>
           ))}
         </div>
       )}
       {!hasMarket && tok.buyerActivity.length === 0 && (
-        <div style={{ fontSize: 9, color: C.gray }}>Monitoring 10s volume…</div>
+        <div style={{ fontSize: 9, color: C.gray }}>Monitoring wallet activity…</div>
       )}
     </div>
   );
@@ -319,16 +340,8 @@ function BuyerActivityRow({ entry }: { entry: BuyerActivityLog }) {
     : entry.consensusMode === 'tracking' ? `${entry.qualifyingWalletsCount ?? 0}/2 QUALIFYING`
     : null;
   return (
-    <div style={{
-      display: 'flex', alignItems: 'flex-start', gap: 10,
-      padding: '8px 0', borderBottom: '1px solid rgba(255,255,255,0.04)',
-    }}>
-      <div style={{
-        flexShrink: 0, marginTop: 1, width: 34, height: 34, borderRadius: 8,
-        display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-        background: `rgba(${score != null && score >= 95 ? '0,255,136' : score != null && score >= 80 ? '0,191,255' : '255,255,255'},0.1)`,
-        border: `1px solid ${scoreColor}55`,
-      }}>
+    <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '8px 0', borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
+      <div style={{ flexShrink: 0, marginTop: 1, width: 34, height: 34, borderRadius: 8, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', background: `rgba(${score != null && score >= 95 ? '0,255,136' : score != null && score >= 80 ? '0,191,255' : '255,255,255'},0.1)`, border: `1px solid ${scoreColor}55` }}>
         <span style={{ fontSize: 12, fontWeight: 900, color: scoreColor, lineHeight: 1 }}>{score ?? '—'}</span>
         <span style={{ fontSize: 6, color: C.gray, lineHeight: 1 }}>GMGN</span>
       </div>
@@ -338,18 +351,12 @@ function BuyerActivityRow({ entry }: { entry: BuyerActivityLog }) {
           <span style={{ fontSize: 10, color: '#e0e8ff', fontWeight: 700 }}>buy on {entry.symbol}</span>
           <DexLink mint={entry.mint} />
           {modeLabel && (
-            <span style={{ fontSize: 8, fontWeight: 800, padding: '1px 5px', borderRadius: 3, background: 'rgba(155,89,255,0.12)', color: '#9b59ff', border: '1px solid rgba(155,89,255,0.3)' }}>
-              {modeLabel}
-            </span>
+            <span style={{ fontSize: 8, fontWeight: 800, padding: '1px 5px', borderRadius: 3, background: 'rgba(155,89,255,0.12)', color: '#9b59ff', border: '1px solid rgba(155,89,255,0.3)' }}>{modeLabel}</span>
           )}
           {entry.entered ? (
-            <span style={{ fontSize: 8, fontWeight: 800, padding: '1px 5px', borderRadius: 3, background: 'rgba(0,255,136,0.12)', color: C.green, border: '1px solid rgba(0,255,136,0.25)' }}>
-              ENTERED
-            </span>
+            <span style={{ fontSize: 8, fontWeight: 800, padding: '1px 5px', borderRadius: 3, background: 'rgba(0,255,136,0.12)', color: C.green, border: '1px solid rgba(0,255,136,0.25)' }}>ENTERED</span>
           ) : (
-            <span style={{ fontSize: 8, padding: '1px 5px', borderRadius: 3, background: 'rgba(255,255,255,0.04)', color: C.gray }}>
-              {entry.skipReason ?? 'skipped'}
-            </span>
+            <span style={{ fontSize: 8, padding: '1px 5px', borderRadius: 3, background: 'rgba(255,255,255,0.04)', color: C.gray }}>{entry.skipReason ?? 'skipped'}</span>
           )}
         </div>
         <div style={{ fontSize: 8, color: C.gray, marginTop: 2 }}>
@@ -360,25 +367,35 @@ function BuyerActivityRow({ entry }: { entry: BuyerActivityLog }) {
   );
 }
 
-// ── Source feed (GMGN discovery events) ──────────────────────────────────────
+// ── Migration event row ───────────────────────────────────────────────────────
 
-/** One row in a per-source token list */
-function TokenRow({ ev, i, last }: { ev: DiscoveryEvent; i: number; last: boolean }) {
+function MigrationRow({ ev, last }: { ev: MigrationEvent; last: boolean }) {
+  const instrLabel = ev.instructionType ?? 'migrate';
+  const instrColor = instrLabel === 'pool_create' || instrLabel === 'create_pool'
+    ? C.orange
+    : instrLabel.includes('v2')
+    ? C.pump
+    : '#a0b8d8';
+
   return (
-    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '5px 0', borderBottom: last ? 'none' : '1px solid rgba(255,255,255,0.04)' }}>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '7px 0', borderBottom: last ? 'none' : '1px solid rgba(255,255,255,0.04)' }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 3, minWidth: 0 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap' }}>
+          <span style={{ fontSize: 8, fontWeight: 800, padding: '1px 5px', borderRadius: 3, background: 'rgba(168,85,247,0.12)', color: instrColor, border: `1px solid ${instrColor}44` }}>
+            {instrLabel.toUpperCase()}
+          </span>
           {ev.symbol && <span style={{ fontSize: 10, fontWeight: 800, color: '#e0e8ff' }}>{ev.symbol}</span>}
-          {ev.name && <span style={{ fontSize: 8, color: C.gray }}>{ev.name.slice(0, 18)}</span>}
-          {ev.isMigration && (
-            <span style={{ fontSize: 6, fontWeight: 800, padding: '1px 3px', borderRadius: 3, background: 'rgba(255,215,0,0.12)', color: C.yellow, border: '1px solid rgba(255,215,0,0.2)' }}>RE-FIRE</span>
-          )}
+          {ev.name && <span style={{ fontSize: 8, color: C.gray }}>{ev.name.slice(0, 16)}</span>}
         </div>
-        <span style={{ fontSize: 8, color: '#4a5a70', fontFamily: 'monospace' }}>
-          {ev.mint.slice(0, 8)}…{ev.mint.slice(-5)}
-        </span>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+          <span style={{ fontSize: 8, color: '#3a5070', fontFamily: 'monospace' }}>
+            {ev.mint.slice(0, 8)}…{ev.mint.slice(-5)}
+          </span>
+          <DexLink mint={ev.mint} />
+          <PumpLink mint={ev.mint} />
+        </div>
       </div>
-      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 2 }}>
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 2, flexShrink: 0, marginLeft: 10 }}>
         {ev.reserveUsd != null && ev.reserveUsd > 0 && (
           <span style={{ fontSize: 8, color: C.green, fontWeight: 700 }}>
             ${ev.reserveUsd >= 1000 ? (ev.reserveUsd / 1000).toFixed(1) + 'k' : ev.reserveUsd.toFixed(0)} liq
@@ -390,112 +407,125 @@ function TokenRow({ ev, i, last }: { ev: DiscoveryEvent; i: number; last: boolea
   );
 }
 
-/** Status pill: poller health */
-function PollerPill({ stats, color }: { stats?: GmgnPollerStats; color: string }) {
-  if (!stats) return <span style={{ fontSize: 8, color: '#2a3a50' }}>—</span>;
-  const ok = stats.consecutiveFailures === 0 && (stats.firedTotal ?? 0) >= 0;
-  const agoSec = stats.lastSuccessAgoSec;
-  return (
-    <span style={{ fontSize: 8, color: ok ? color : C.red }}>
-      {stats.firedTotal ?? 0} found · {agoSec != null ? `${agoSec}s ago` : 'never'} · {Math.round(stats.intervalMs / 1000)}s poll
-      {stats.consecutiveFailures > 0 && ` · ⚠️ ${stats.consecutiveFailures} fail`}
-    </span>
-  );
-}
+// ── Migration Tracker panel ───────────────────────────────────────────────────
 
-function DiscoveryFeed() {
-  const data = useSourceActivity();
+function MigrationFeed() {
+  const { data, loading } = useTrackerData();
 
-  const gmgn        = data?.gmgn;
-  const keySet      = gmgn?.gmgnApiKeySet ?? true;
-  const banned      = gmgn?.gmgnBanned ?? false;
-  const totalAll    = gmgn?.total ?? 0;
-  const avgDelaySec = gmgn?.avgDiscoveryDelaySec;
+  const total              = data?.total ?? 0;
+  const events             = data?.recent ?? [];
+  const pollCount          = data?.pollCount ?? 0;
+  const lastAgoSec         = data?.lastPollAgoSec;
+  const failures           = data?.consecutiveFailures ?? 0;
+  const lastError          = data?.lastError ?? null;
+  const heliusSet          = data?.heliusApiKeySet ?? false;
+  const rpc                = data?.rpcEndpoint ?? 'unknown';
+  const tokensPerHour      = data?.tokensPerHour;
+  const txErrRate          = data?.txFetchErrorRate ?? 0;
+  const walletAddr         = data?.walletAddress ?? '39azUYFWPz3VHgKCf3VChUwbpURdCHRxjWVowf5jUJjg';
 
-  const rank1hEvents = gmgn?.recentBySource?.rank_1h ?? gmgn?.recent?.filter(e => e.discoverySource === 'rank_1h') ?? [];
-  const migrEvents   = gmgn?.recentBySource?.migrated ?? gmgn?.recent?.filter(e => e.discoverySource === 'migrated') ?? [];
-  const rank1hCount  = gmgn?.firedBySource?.rank_1h ?? 0;
-  const migrCount    = gmgn?.firedBySource?.migrated ?? 0;
-
-  const pollerRank   = gmgn?.pollers?.trending1h;
-  const pollerMigr   = gmgn?.pollers?.migrated;
-
-  const dotColor    = !keySet ? C.yellow : banned ? C.red : C.green;
-  const statusLabel = !keySet ? 'NO KEY' : banned ? 'BANNED' : 'LIVE';
+  const isLive  = failures === 0 && pollCount > 0;
+  const dotColor = loading ? C.gray : failures > 3 ? C.red : failures > 0 ? C.yellow : isLive ? C.green : C.gray;
+  const statusLabel = loading ? 'INIT' : failures > 3 ? 'ERROR' : failures > 0 ? 'WARN' : isLive ? 'LIVE' : 'STARTING';
 
   return (
     <div>
       {/* ── Section header ── */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
-        <span style={C.label}>📡 TOKEN DISCOVERY (GMGN)</span>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+        <span style={{ fontSize: 10, fontWeight: 800, letterSpacing: '0.12em', color: '#5a4080' }}>
+          🚀 PUMP.FUN MIGRATION TRACKER
+        </span>
         <span style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 9, color: dotColor, fontWeight: 700 }}>
-          <span style={{ display: 'inline-block', width: 5, height: 5, borderRadius: '50%', background: dotColor, boxShadow: `0 0 6px ${dotColor}` }} />
+          <span style={{ display: 'inline-block', width: 6, height: 6, borderRadius: '50%', background: dotColor, boxShadow: `0 0 6px ${dotColor}` }} />
           {statusLabel}
         </span>
         <span style={{ fontSize: 9, color: C.gray, marginLeft: 'auto' }}>
-          {totalAll} total{avgDelaySec != null && ` · avg ${avgDelaySec}s delay`}
+          {total} total{tokensPerHour != null && ` · ${tokensPerHour}/hr`}
         </span>
       </div>
 
-      {/* ── Global status banners ── */}
-      {!keySet && (
-        <div style={{ fontSize: 9, color: C.yellow, padding: '6px 8px', marginBottom: 10, borderRadius: 6, background: 'rgba(255,200,0,0.07)', border: '1px solid rgba(255,200,0,0.18)' }}>
-          GMGN_API_KEY not set — discovery requires the key to bypass Cloudflare. Configured on Render.
-        </div>
-      )}
-      {banned && (
-        <div style={{ fontSize: 9, color: C.red, padding: '6px 8px', marginBottom: 10, borderRadius: 6, background: 'rgba(255,68,68,0.07)', border: '1px solid rgba(255,68,68,0.18)' }}>
-          GMGN rate-limited — discovery paused until ban clears.
-        </div>
-      )}
-
-      {/* ── Two-column source cards ── */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-
-        {/* ── 1H RANKING ── */}
-        <div style={{ background: 'rgba(0,200,100,0.04)', border: '1px solid rgba(0,200,100,0.15)', borderRadius: 10, padding: '10px 12px' }}>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-              <span style={{ fontSize: 8, fontWeight: 800, padding: '2px 6px', borderRadius: 4, background: 'rgba(0,200,100,0.15)', color: '#00c864', border: '1px solid rgba(0,200,100,0.3)' }}>1H RANK</span>
-              <span style={{ fontSize: 9, fontWeight: 800, color: '#00c864' }}>{rank1hCount}</span>
-            </div>
+      {/* ── Tracker info card ── */}
+      <div style={{ background: 'rgba(168,85,247,0.04)', border: '1px solid rgba(168,85,247,0.15)', borderRadius: 10, padding: '10px 14px', marginBottom: 14 }}>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, alignItems: 'center' }}>
+          <div>
+            <div style={{ fontSize: 8, color: C.gray, marginBottom: 2 }}>MIGRATION WALLET</div>
+            <a
+              href={`https://solscan.io/account/${walletAddr}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              style={{ fontSize: 9, fontFamily: 'monospace', color: C.pump, textDecoration: 'none' }}
+            >
+              {walletAddr.slice(0, 8)}…{walletAddr.slice(-6)}
+            </a>
           </div>
-          <div style={{ fontSize: 8, color: '#2a4a38', marginBottom: 8 }}>
-            <PollerPill stats={pollerRank} color="#00c864" />
+          <div style={{ width: 1, background: 'rgba(255,255,255,0.07)', alignSelf: 'stretch' }} />
+          <div>
+            <div style={{ fontSize: 8, color: C.gray, marginBottom: 2 }}>RPC</div>
+            <span style={{ fontSize: 9, color: heliusSet ? C.green : C.yellow, fontWeight: 700 }}>
+              {heliusSet ? '⚡ HELIUS' : '🌐 PUBLIC'}
+            </span>
           </div>
-          {rank1hEvents.length === 0 ? (
-            <div style={{ fontSize: 9, color: '#2a4a38', padding: '12px 0', textAlign: 'center' }}>
-              {keySet ? 'Scanning 1h trending…' : 'Waiting for API key'}
-            </div>
-          ) : (
-            rank1hEvents.slice(0, 8).map((ev, i) => (
-              <TokenRow key={ev.mint + i} ev={ev} i={i} last={i === Math.min(rank1hEvents.length, 8) - 1} />
-            ))
+          <div style={{ width: 1, background: 'rgba(255,255,255,0.07)', alignSelf: 'stretch' }} />
+          <div>
+            <div style={{ fontSize: 8, color: C.gray, marginBottom: 2 }}>POLLS</div>
+            <span style={{ fontSize: 9, color: '#e0e8ff', fontVariantNumeric: 'tabular-nums' }}>{pollCount}</span>
+          </div>
+          <div style={{ width: 1, background: 'rgba(255,255,255,0.07)', alignSelf: 'stretch' }} />
+          <div>
+            <div style={{ fontSize: 8, color: C.gray, marginBottom: 2 }}>LAST POLL</div>
+            <span style={{ fontSize: 9, color: lastAgoSec == null ? C.gray : lastAgoSec < 5 ? C.green : lastAgoSec < 15 ? C.yellow : C.red, fontVariantNumeric: 'tabular-nums' }}>
+              {lastAgoSec == null ? 'never' : `${lastAgoSec}s ago`}
+            </span>
+          </div>
+          {txErrRate > 0 && (
+            <>
+              <div style={{ width: 1, background: 'rgba(255,255,255,0.07)', alignSelf: 'stretch' }} />
+              <div>
+                <div style={{ fontSize: 8, color: C.gray, marginBottom: 2 }}>TX ERR</div>
+                <span style={{ fontSize: 9, color: txErrRate > 20 ? C.red : C.yellow, fontVariantNumeric: 'tabular-nums' }}>{txErrRate}%</span>
+              </div>
+            </>
           )}
         </div>
 
-        {/* ── MIGRATED (graduated) ── */}
-        <div style={{ background: 'rgba(255,140,0,0.04)', border: '1px solid rgba(255,140,0,0.18)', borderRadius: 10, padding: '10px 12px' }}>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-              <span style={{ fontSize: 8, fontWeight: 800, padding: '2px 6px', borderRadius: 4, background: 'rgba(255,140,0,0.15)', color: '#ff8c00', border: '1px solid rgba(255,140,0,0.35)' }}>MIGRATED</span>
-              <span style={{ fontSize: 9, fontWeight: 800, color: '#ff8c00' }}>{migrCount}</span>
-            </div>
+        {/* Error / warning banners */}
+        {!heliusSet && (
+          <div style={{ marginTop: 8, fontSize: 9, color: C.yellow, padding: '5px 8px', borderRadius: 6, background: 'rgba(255,200,0,0.07)', border: '1px solid rgba(255,200,0,0.18)' }}>
+            ⚠ HELIUS_API_KEY not set — using public RPC. Higher latency &amp; rate limits. Set HELIUS_API_KEY on Render for reliable tracking.
           </div>
-          <div style={{ fontSize: 8, color: '#4a3a20', marginBottom: 8 }}>
-            <PollerPill stats={pollerMigr} color="#ff8c00" />
+        )}
+        {failures > 0 && lastError && (
+          <div style={{ marginTop: 8, fontSize: 9, color: failures > 3 ? C.red : C.yellow, padding: '5px 8px', borderRadius: 6, background: failures > 3 ? 'rgba(255,68,68,0.07)' : 'rgba(255,200,0,0.07)', border: `1px solid ${failures > 3 ? 'rgba(255,68,68,0.2)' : 'rgba(255,200,0,0.2)'}` }}>
+            {failures > 3 ? '⛔' : '⚠'} {lastError} ({failures} consecutive failures)
           </div>
-          {migrEvents.length === 0 ? (
-            <div style={{ fontSize: 9, color: '#4a3a20', padding: '12px 0', textAlign: 'center' }}>
-              {keySet ? 'Scanning graduated tokens…' : 'Waiting for API key'}
-            </div>
-          ) : (
-            migrEvents.slice(0, 8).map((ev, i) => (
-              <TokenRow key={ev.mint + i} ev={ev} i={i} last={i === Math.min(migrEvents.length, 8) - 1} />
-            ))
-          )}
+        )}
+      </div>
+
+      {/* ── Migration event list ── */}
+      <div style={{ background: 'rgba(168,85,247,0.03)', border: '1px solid rgba(168,85,247,0.12)', borderRadius: 10, padding: '10px 14px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+          <span style={{ fontSize: 8, fontWeight: 800, letterSpacing: '0.1em', color: C.pump }}>
+            GRADUATED TOKENS ({total})
+          </span>
+          <span style={{ fontSize: 8, color: C.gray }}>polling every 1s</span>
         </div>
 
+        {events.length === 0 ? (
+          <div style={{ padding: '20px 0', textAlign: 'center', color: C.gray, fontSize: 11 }}>
+            {loading
+              ? 'Initialising tracker…'
+              : pollCount === 0
+              ? 'Waiting for first poll…'
+              : 'No migrations detected yet — watching wallet'}
+            <div style={{ fontSize: 9, color: '#2a3a50', marginTop: 6 }}>
+              Tracking {walletAddr.slice(0, 8)}…{walletAddr.slice(-6)}
+            </div>
+          </div>
+        ) : (
+          events.slice(0, 15).map((ev, i) => (
+            <MigrationRow key={ev.mint + i} ev={ev} last={i === Math.min(events.length, 15) - 1} />
+          ))
+        )}
       </div>
     </div>
   );
@@ -504,7 +534,6 @@ function DiscoveryFeed() {
 // ── Main page ─────────────────────────────────────────────────────────────────
 
 export default function DiscoverPage({ sniperStatus: wsProp, wsConnected = false }: Props) {
-  // Poll only when WebSocket is offline; WS pushes sniper_status in real time when connected
   const polled = useSniperStatusFallback(wsConnected);
   const status = wsConnected ? (wsProp ?? polled) : (polled ?? wsProp);
 
@@ -514,24 +543,22 @@ export default function DiscoverPage({ sniperStatus: wsProp, wsConnected = false
     return () => clearInterval(id);
   }, []);
 
-  // Filter out locally-expired tokens client-side so the UI clears them immediately
-  // even before the next backend prune broadcast arrives (every 2s poll cycle).
   const now      = Date.now();
   const tracked  = (status?.trackedTokens ?? []).filter(t => t.expiresAt > now || t.entryTriggered);
-  const buyLogs  = status?.recentBuyLog   ?? [];
-  const queued   = status?.queuedSignals  ?? [];
+  const buyLogs  = status?.recentBuyLog ?? [];
+  const queued   = status?.queuedSignals ?? [];
   const stats    = status?.stats ?? { tracking: 0, positions: 0, queued: 0, pending: 0 };
-  const gmgnConfigured  = status?.gmgnConfigured ?? true; // avoid a false "not set" flash before the first status arrives
+  const gmgnConfigured  = status?.gmgnConfigured ?? true;
   const gmgnBannedUntil = status?.gmgnBannedUntil ?? 0;
 
   return (
     <div>
-      {/* ── Header ── */}
+      {/* ── Sniper Engine header ── */}
       <div style={{ ...C.card, marginBottom: 16, background: 'linear-gradient(135deg,rgba(0,191,255,0.06),rgba(123,94,167,0.06))', borderColor: 'rgba(0,191,255,0.2)' }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 }}>
           <div>
             <div style={{ fontSize: 18, fontWeight: 900, color: C.accent, letterSpacing: '0.04em' }}>🎯 SNIPER ENGINE</div>
-            <div style={{ fontSize: 9, color: C.gray, marginTop: 2 }}>Tracking GMGN tokens · Paper mode</div>
+            <div style={{ fontSize: 9, color: C.gray, marginTop: 2 }}>Pump.fun migration wallet · Smart Wallet Consensus</div>
           </div>
           <div style={{ textAlign: 'right', fontSize: 9, color: C.gray }}>
             SOL<br />
@@ -540,25 +567,24 @@ export default function DiscoverPage({ sniperStatus: wsProp, wsConnected = false
         </div>
 
         <div style={{ display: 'flex', justifyContent: 'space-around', padding: '10px 0', borderTop: '1px solid rgba(255,255,255,0.06)', borderBottom: '1px solid rgba(255,255,255,0.06)', margin: '0 -2px' }}>
-          <StatPill label="Pending" value={stats.pending ?? 0} color={(stats.pending ?? 0) > 0 ? C.accent : C.gray} />
+          <StatPill label="Pending"    value={stats.pending ?? 0}          color={(stats.pending ?? 0) > 0 ? C.accent : C.gray} />
           <div style={{ width: 1, background: 'rgba(255,255,255,0.06)' }} />
-          <StatPill label="Tracking" value={stats.tracking} />
+          <StatPill label="Tracking"   value={stats.tracking} />
           <div style={{ width: 1, background: 'rgba(255,255,255,0.06)' }} />
-          <StatPill label={`Positions`} value={`${stats.positions}/10`} color={stats.positions >= 10 ? C.yellow : C.green} />
+          <StatPill label="Positions"  value={`${stats.positions}/10`}     color={stats.positions >= 10 ? C.yellow : C.green} />
           <div style={{ width: 1, background: 'rgba(255,255,255,0.06)' }} />
-          <StatPill label="Queued" value={stats.queued} color={stats.queued > 0 ? C.yellow : C.gray} />
+          <StatPill label="Queued"     value={stats.queued}                color={stats.queued > 0 ? C.yellow : C.gray} />
         </div>
 
-        {/* Strategy summary */}
         <div style={{ marginTop: 12, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
           {[
-            { label: 'Solo score ≥95 → 1%',        color: 'rgba(0,255,136,0.18)' },
-            { label: 'Consensus 2x ≥80 → 0.75%',   color: 'rgba(0,191,255,0.22)' },
-            { label: 'GMGN wallet scoring',         color: 'rgba(155,89,255,0.18)' },
-            { label: 'TP +100%',      color: 'rgba(0,255,136,0.15)' },
-            { label: 'SL price -30%', color: 'rgba(255,68,102,0.12)' },
-            { label: 'SL liq -40%',   color: 'rgba(255,68,102,0.12)' },
-            { label: '1hr window',    color: 'rgba(255,215,0,0.10)' },
+            { label: 'Solo score ≥95 → 1%',      color: 'rgba(0,255,136,0.18)' },
+            { label: 'Consensus 2x ≥80 → 0.75%', color: 'rgba(0,191,255,0.22)' },
+            { label: 'GMGN wallet scoring',       color: 'rgba(155,89,255,0.18)' },
+            { label: 'TP +100%',                  color: 'rgba(0,255,136,0.15)' },
+            { label: 'SL price -30%',             color: 'rgba(255,68,102,0.12)' },
+            { label: 'SL liq -40%',               color: 'rgba(255,68,102,0.12)' },
+            { label: '1hr window',                color: 'rgba(255,215,0,0.10)' },
           ].map(({ label, color }) => (
             <span key={label} style={{ fontSize: 8, fontWeight: 700, padding: '2px 7px', borderRadius: 4, background: color, color: '#c0c8e0', border: '1px solid rgba(255,255,255,0.08)' }}>{label}</span>
           ))}
@@ -569,7 +595,7 @@ export default function DiscoverPage({ sniperStatus: wsProp, wsConnected = false
       {queued.length > 0 && (
         <div style={{ ...C.card, marginBottom: 16, borderColor: 'rgba(255,215,0,0.2)' }}>
           <div style={{ ...C.label, marginBottom: 8 }}>⏳ QUEUED SIGNALS ({queued.length})</div>
-          {queued.map((sig, i) => (
+          {queued.map((sig: PendingSignal, i: number) => (
             <div key={i} style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', borderBottom: i < queued.length - 1 ? '1px solid rgba(255,255,255,0.04)' : 'none' }}>
               <span style={{ fontSize: 10, color: '#e0e8ff', fontWeight: 700 }}>{sig.symbol}</span>
               <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
@@ -589,8 +615,10 @@ export default function DiscoverPage({ sniperStatus: wsProp, wsConnected = false
         </div>
         {tracked.length === 0 ? (
           <div style={{ ...C.card, color: C.gray, fontSize: 11, textAlign: 'center', padding: '24px 16px' }}>
-            Scanning GMGN for new tokens…<br />
-            <span style={{ fontSize: 9, color: '#2a3a50', marginTop: 6, display: 'block' }}>Every discovered token is tracked for 1 hour</span>
+            Watching for qualified wallet consensus…<br />
+            <span style={{ fontSize: 9, color: '#2a3a50', marginTop: 6, display: 'block' }}>
+              Each graduated token tracked 1 hour for buyer wallet scoring
+            </span>
           </div>
         ) : (
           tracked
@@ -619,12 +647,12 @@ export default function DiscoverPage({ sniperStatus: wsProp, wsConnected = false
         {buyLogs.length === 0 ? (
           <div style={{ fontSize: 11, color: C.gray, textAlign: 'center', padding: '16px 0' }}>No buyer wallets scored yet</div>
         ) : (
-          buyLogs.map((log, i) => <BuyerActivityRow key={i} entry={log} />)
+          buyLogs.map((log: BuyerActivityLog, i: number) => <BuyerActivityRow key={i} entry={log} />)
         )}
       </div>
 
-      {/* ── DexScreener discovery feed ── */}
-      <DiscoveryFeed />
+      {/* ── Migration tracker feed ── */}
+      <MigrationFeed />
     </div>
   );
 }
