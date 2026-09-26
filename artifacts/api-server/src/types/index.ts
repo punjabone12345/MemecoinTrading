@@ -152,7 +152,7 @@ export interface PaperPosition {
 export interface ClosedPaperPosition extends PaperPosition {
   closeTime: number;
   closePrice: number;
-  closeReason: 'TP_HIT' | 'SL_HIT' | 'MANUAL_EXIT' | 'INVALIDATED';
+  closeReason: 'TP_HIT' | 'SL_HIT' | 'MANUAL_EXIT' | 'INVALIDATED' | (string & {});
   realizedPnlUsd: number;
   realizedPnlPct: number;
   finalR: number;

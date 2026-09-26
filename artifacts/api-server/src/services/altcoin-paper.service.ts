@@ -1,6 +1,6 @@
 import { getSettings, getBalance, adjustBalance, setBalance } from './settings.service.js';
-import { fetchAltcoinMarketSignals } from './altcoin-market.service.js';
 import {
+  Settings,
   PaperPortfolio,
   PaperPosition,
   ClosedPaperPosition,
@@ -100,9 +100,9 @@ export async function getPaperPortfolio(): Promise<PaperPortfolio> {
   };
 }
 
-export async function processPaperTradingEngine(inputSignals?: AltcoinSignal[]): Promise<AltcoinStatusResponse> {
+export async function processPaperTradingEngine(inputSignals: AltcoinSignal[] = []): Promise<AltcoinStatusResponse> {
   const settings = await getSettings();
-  const signals = inputSignals || await fetchAltcoinMarketSignals();
+  const signals = inputSignals;
   lastScannerRunMs = Date.now();
 
   // 1. Update Open Positions with latest prices and check SL / TP exits
@@ -182,7 +182,7 @@ export async function processPaperTradingEngine(inputSignals?: AltcoinSignal[]):
   };
 }
 
-async function executePaperEntry(sig: AltcoinSignal, settings: any): Promise<void> {
+async function executePaperEntry(sig: AltcoinSignal, settings: Settings): Promise<void> {
   const currentBalance = await getBalance();
   const riskPct = settings.riskPerTradePct || 0.5;
   const riskAmountUsd = (currentBalance * riskPct) / 100;
@@ -222,7 +222,7 @@ async function executePaperEntry(sig: AltcoinSignal, settings: any): Promise<voi
   logger.info({ symbol: newPos.symbol, size: newPos.positionSizeUsd, entry: newPos.entryPrice }, 'Paper Position Opened');
 }
 
-async function closePositionInternal(id: string, closePrice: number, reason: 'TP_HIT' | 'SL_HIT' | 'MANUAL_EXIT' | 'INVALIDATED'): Promise<ClosedPaperPosition | null> {
+async function closePositionInternal(id: string, closePrice: number, reason: 'TP_HIT' | 'SL_HIT' | 'MANUAL_EXIT' | 'INVALIDATED' | (string & {})): Promise<ClosedPaperPosition | null> {
   const idx = openPositions.findIndex(p => p.id === id);
   if (idx === -1) return null;
 
@@ -257,7 +257,7 @@ export async function closePaperPosition(positionId: string, reason = 'MANUAL_EX
   const pos = openPositions.find(p => p.id === positionId);
   if (!pos) return false;
 
-  const result = await closePositionInternal(pos.id, pos.currentPrice, reason as any);
+  const result = await closePositionInternal(pos.id, pos.currentPrice, reason);
   return result !== null;
 }
 

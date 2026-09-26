@@ -24,7 +24,8 @@ router.get('/status', async (_req, res) => {
 /** Close an open paper position at its last known price */
 router.post('/:id/close', async (req, res) => {
   const { reason } = req.body as { reason?: string };
-  const ok = await closePaperPosition(req.params.id, reason?.trim() || 'Manual user close');
+  const positionId = String(req.params.id || '');
+  const ok = await closePaperPosition(positionId, reason?.trim() || 'Manual user close');
   if (!ok) {
     res.status(404).json({ error: 'Position not found or already closed' });
     return;

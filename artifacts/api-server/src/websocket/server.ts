@@ -16,11 +16,11 @@ export function initWebSocket(server: Server): void {
     ws.on('pong', () => { (ws as WebSocket & { isAlive?: boolean }).isAlive = true; });
 
     try {
-      const { processPaperTradingEngine } = await import('../services/altcoin-paper.service.js');
+      const { getAltcoinStatus } = await import('../services/altcoin-market.service.js');
       const { getBalance, getSettings } = await import('../services/settings.service.js');
 
       const [status, balance, settings] = await Promise.all([
-        processPaperTradingEngine(),
+        getAltcoinStatus(),
         getBalance(),
         getSettings(),
       ]);
@@ -37,8 +37,8 @@ export function initWebSocket(server: Server): void {
   setInterval(async () => {
     if (!wss || wss.clients.size === 0) return;
     try {
-      const { processPaperTradingEngine } = await import('../services/altcoin-paper.service.js');
-      const status = await processPaperTradingEngine();
+      const { getAltcoinStatus } = await import('../services/altcoin-market.service.js');
+      const status = await getAltcoinStatus();
       broadcast({ type: 'altcoin_status', data: status });
       broadcast({ type: 'sniper_status', data: status });
     } catch (err) {

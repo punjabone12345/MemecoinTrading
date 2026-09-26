@@ -81,7 +81,7 @@ let signalsCache: AltcoinSignal[] = [];
 let lastFetchTimestamp = 0;
 const CACHE_TTL_MS = 15_000;
 let isScanning = false;
-let scanTimer: NodeJS.Timeout | null = null;
+let scanTimer: ReturnType<typeof setInterval> | null = null;
 
 export async function fetchAltcoinMarketSignals(): Promise<AltcoinSignal[]> {
   const now = Date.now();
@@ -98,7 +98,12 @@ export async function fetchAltcoinMarketSignals(): Promise<AltcoinSignal[]> {
 
     if (Array.isArray(marketData) && marketData.length > 0) {
       signalsCache = marketData.map((coin: any, index: number) => {
-        const seed = SEED_ALTCOINS.find(s => s.id === coin.id) || { category: 'Altcoin' };
+        const seed = SEED_ALTCOINS.find(s => s.id === coin.id) || {
+          id: String(coin.id ?? 'alt'),
+          symbol: String(coin.symbol ?? 'ALT').toUpperCase(),
+          name: String(coin.name ?? 'Altcoin'),
+          category: 'Altcoin'
+        };
         return computeSignalForCoin(coin, seed.category, index + 1);
       });
       lastFetchTimestamp = now;
