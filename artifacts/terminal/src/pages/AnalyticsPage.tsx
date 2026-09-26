@@ -77,7 +77,7 @@ export default function AnalyticsPage({ status }: Props) {
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14, maxWidth: 1200, margin: '0 auto' }}>
       
       {/* Analytics Stats Grid */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: 8 }}>
         <StatCard label="Account Equity" value={`$${equity.toFixed(2)}`} color="#00d4ff" sub="Starting Balance: $100.00" />
         <StatCard label="Available Balance" value={`$${available.toFixed(2)}`} color="#7090b0" />
         <StatCard label="Realized P&L" value={`${realizedPnl >= 0 ? '+' : ''}$${realizedPnl.toFixed(2)}`} color={realizedPnl >= 0 ? '#00ff88' : '#ff4466'} />
@@ -92,12 +92,12 @@ export default function AnalyticsPage({ status }: Props) {
       <EquityChart positions={closedPositions} />
 
       {/* Setup Performance Breakdown */}
-      <div style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.07)', borderRadius: 12, padding: '16px' }}>
-        <div style={{ fontSize: 11, fontWeight: 800, color: '#00d4ff', letterSpacing: '0.08em', marginBottom: 12, textTransform: 'uppercase' }}>
+      <div style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.07)', borderRadius: 12, padding: '14px' }}>
+        <div style={{ fontSize: 11, fontWeight: 800, color: '#00d4ff', letterSpacing: '0.08em', marginBottom: 10, textTransform: 'uppercase' }}>
           🎯 QUANTITATIVE RISK & STRATEGY ATTRIBUTES
         </div>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12, fontSize: 11 }}>
-          <div style={{ background: 'rgba(0,0,0,0.2)', padding: 12, borderRadius: 8 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 8, fontSize: 11 }}>
+          <div style={{ background: 'rgba(0,0,0,0.2)', padding: 10, borderRadius: 8 }}>
             <div style={{ color: '#9b59ff', fontWeight: 800, marginBottom: 4 }}>Position Sizing Model</div>
             <div style={{ color: '#7090b0', lineHeight: 1.5 }}>
               Risk-based sizing: <b>0.5% max risk per trade ($0.50 USD)</b>.<br/>
@@ -105,7 +105,7 @@ export default function AnalyticsPage({ status }: Props) {
             </div>
           </div>
 
-          <div style={{ background: 'rgba(0,0,0,0.2)', padding: 12, borderRadius: 8 }}>
+          <div style={{ background: 'rgba(0,0,0,0.2)', padding: 10, borderRadius: 8 }}>
             <div style={{ color: '#00ff88', fontWeight: 800, marginBottom: 4 }}>AI Gate Thresholds</div>
             <div style={{ color: '#7090b0', lineHeight: 1.5 }}>
               Minimum AI Score for entry: <b>75 / 100</b>.<br/>
@@ -113,7 +113,7 @@ export default function AnalyticsPage({ status }: Props) {
             </div>
           </div>
 
-          <div style={{ background: 'rgba(0,0,0,0.2)', padding: 12, borderRadius: 8 }}>
+          <div style={{ background: 'rgba(0,0,0,0.2)', padding: 10, borderRadius: 8 }}>
             <div style={{ color: '#ffd700', fontWeight: 800, marginBottom: 4 }}>Execution Safety</div>
             <div style={{ color: '#7090b0', lineHeight: 1.5 }}>
               Paper Simulation Mode enabled.<br/>

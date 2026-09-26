@@ -111,27 +111,27 @@ export default function DiscoverPage({ status }: Props) {
           </div>
         </div>
 
-        {/* Primary Metric Pills */}
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 8, paddingTop: 12, borderTop: '1px solid rgba(255,255,255,0.06)' }}>
-          <div style={{ textAlign: 'center' }}>
-            <div style={{ fontSize: 18, fontWeight: 900, color: '#00d4ff' }}>{stats.totalTracked}</div>
-            <div style={{ fontSize: 9, color: '#4a6080', fontWeight: 800, textTransform: 'uppercase' }}>Tracked Assets</div>
+        {/* Primary Metric Pills (Responsive auto-fit for Android & Desktop) */}
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(64px, 1fr))', gap: 6, paddingTop: 10, borderTop: '1px solid rgba(255,255,255,0.06)' }}>
+          <div style={{ textAlign: 'center', background: 'rgba(0,0,0,0.2)', padding: '6px 4px', borderRadius: 8 }}>
+            <div style={{ fontSize: 16, fontWeight: 900, color: '#00d4ff' }}>{stats.totalTracked}</div>
+            <div style={{ fontSize: 8, color: '#4a6080', fontWeight: 800, textTransform: 'uppercase' }}>Assets</div>
           </div>
-          <div style={{ textAlign: 'center' }}>
-            <div style={{ fontSize: 18, fontWeight: 900, color: '#9b59ff' }}>{stats.watching}</div>
-            <div style={{ fontSize: 9, color: '#4a6080', fontWeight: 800, textTransform: 'uppercase' }}>Watching</div>
+          <div style={{ textAlign: 'center', background: 'rgba(0,0,0,0.2)', padding: '6px 4px', borderRadius: 8 }}>
+            <div style={{ fontSize: 16, fontWeight: 900, color: '#9b59ff' }}>{stats.watching}</div>
+            <div style={{ fontSize: 8, color: '#4a6080', fontWeight: 800, textTransform: 'uppercase' }}>Watching</div>
           </div>
-          <div style={{ textAlign: 'center' }}>
-            <div style={{ fontSize: 18, fontWeight: 900, color: '#ffd700' }}>{stats.nearEntry}</div>
-            <div style={{ fontSize: 9, color: '#4a6080', fontWeight: 800, textTransform: 'uppercase' }}>Near Entry</div>
+          <div style={{ textAlign: 'center', background: 'rgba(0,0,0,0.2)', padding: '6px 4px', borderRadius: 8 }}>
+            <div style={{ fontSize: 16, fontWeight: 900, color: '#ffd700' }}>{stats.nearEntry}</div>
+            <div style={{ fontSize: 8, color: '#4a6080', fontWeight: 800, textTransform: 'uppercase' }}>Near</div>
           </div>
-          <div style={{ textAlign: 'center' }}>
-            <div style={{ fontSize: 18, fontWeight: 900, color: '#00ff88' }}>{stats.entryReady}</div>
-            <div style={{ fontSize: 9, color: '#4a6080', fontWeight: 800, textTransform: 'uppercase' }}>Entry Ready</div>
+          <div style={{ textAlign: 'center', background: 'rgba(0,0,0,0.2)', padding: '6px 4px', borderRadius: 8 }}>
+            <div style={{ fontSize: 16, fontWeight: 900, color: '#00ff88' }}>{stats.entryReady}</div>
+            <div style={{ fontSize: 8, color: '#4a6080', fontWeight: 800, textTransform: 'uppercase' }}>Ready</div>
           </div>
-          <div style={{ textAlign: 'center' }}>
-            <div style={{ fontSize: 18, fontWeight: 900, color: '#ff8844' }}>{stats.openPositions}</div>
-            <div style={{ fontSize: 9, color: '#4a6080', fontWeight: 800, textTransform: 'uppercase' }}>In Position</div>
+          <div style={{ textAlign: 'center', background: 'rgba(0,0,0,0.2)', padding: '6px 4px', borderRadius: 8 }}>
+            <div style={{ fontSize: 16, fontWeight: 900, color: '#ff8844' }}>{stats.openPositions}</div>
+            <div style={{ fontSize: 8, color: '#4a6080', fontWeight: 800, textTransform: 'uppercase' }}>Position</div>
           </div>
         </div>
       </div>
@@ -139,10 +139,10 @@ export default function DiscoverPage({ status }: Props) {
       {/* ── Top Opportunities Highlights ── */}
       {topOps.length > 0 && (
         <div>
-          <div style={{ fontSize: 11, fontWeight: 800, color: '#9b59ff', letterSpacing: '0.08em', marginBottom: 8, textTransform: 'uppercase' }}>
+          <div style={{ fontSize: 10, fontWeight: 800, color: '#9b59ff', letterSpacing: '0.08em', marginBottom: 8, textTransform: 'uppercase' }}>
             🔥 TOP AI OPPORTUNITIES (HIGHEST SCORES)
           </div>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 10 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 8 }}>
             {topOps.slice(0, 3).map((sig) => {
               const b = getStatusBadge(sig.status);
               return (
@@ -152,8 +152,7 @@ export default function DiscoverPage({ status }: Props) {
                   style={{
                     background: 'rgba(255,255,255,0.03)',
                     border: '1px solid rgba(0,212,255,0.25)',
-                    borderRadius: 12, padding: '14px', cursor: 'pointer',
-                    transition: 'transform 0.2s, border-color 0.2s',
+                    borderRadius: 12, padding: '12px', cursor: 'pointer',
                   }}
                   className="hover-card"
                 >
@@ -161,27 +160,26 @@ export default function DiscoverPage({ status }: Props) {
                     <div>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                         <span style={{ fontSize: 15, fontWeight: 900, color: '#ffffff' }}>{sig.symbol}</span>
-                        <span style={{ fontSize: 9, color: CATEGORY_COLORS[sig.category] || '#8099bb', fontWeight: 800, padding: '2px 6px', borderRadius: 4, background: `${CATEGORY_COLORS[sig.category] || '#8099bb'}18` }}>
+                        <span style={{ fontSize: 8.5, color: CATEGORY_COLORS[sig.category] || '#8099bb', fontWeight: 800, padding: '1px 5px', borderRadius: 4, background: `${CATEGORY_COLORS[sig.category] || '#8099bb'}18` }}>
                           {sig.category}
                         </span>
                       </div>
-                      <div style={{ fontSize: 11, color: '#7090b0', marginTop: 2 }}>{sig.name}</div>
+                      <div style={{ fontSize: 10, color: '#7090b0', marginTop: 1 }}>{sig.name}</div>
                     </div>
                     <ScoreBadge score={sig.aiScore} />
                   </div>
 
-                  <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: 10 }}>
+                  <div style={{ display: 'flex', gap: 3, flexWrap: 'wrap', marginBottom: 8 }}>
                     <TrendPill tf="4H" trend={sig.mtfTrend.tf4h} />
                     <TrendPill tf="1H" trend={sig.mtfTrend.tf1h} />
                     <TrendPill tf="15M" trend={sig.mtfTrend.tf15m} />
-                    <TrendPill tf="5M" trend={sig.mtfTrend.tf5m} />
                   </div>
 
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingTop: 8, borderTop: '1px solid rgba(255,255,255,0.05)' }}>
-                    <span style={{ fontSize: 9, fontWeight: 800, padding: '3px 8px', borderRadius: 6, background: b.bg, color: b.color, border: `1px solid ${b.border}` }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingTop: 6, borderTop: '1px solid rgba(255,255,255,0.05)' }}>
+                    <span style={{ fontSize: 8.5, fontWeight: 800, padding: '2px 6px', borderRadius: 5, background: b.bg, color: b.color, border: `1px solid ${b.border}` }}>
                       {b.label}
                     </span>
-                    <span style={{ fontSize: 11, fontWeight: 800, color: '#00d4ff' }}>
+                    <span style={{ fontSize: 12, fontWeight: 800, color: '#00d4ff' }}>
                       ${sig.price < 1 ? sig.price.toFixed(4) : sig.price.toFixed(2)}
                     </span>
                   </div>
@@ -192,9 +190,9 @@ export default function DiscoverPage({ status }: Props) {
         </div>
       )}
 
-      {/* ── Filter Bar ── */}
-      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center', marginTop: 4 }}>
-        <span style={{ fontSize: 10, fontWeight: 800, color: '#3a5070', marginRight: 4 }}>FILTER BY:</span>
+      {/* ── Horizontally Scrollable Filter Bar for Android & Desktop ── */}
+      <div style={{ display: 'flex', gap: 6, overflowX: 'auto', whiteSpace: 'nowrap', paddingBottom: 4, scrollbarWidth: 'none', alignItems: 'center' }}>
+        <span style={{ fontSize: 9.5, fontWeight: 800, color: '#3a5070', marginRight: 2, flexShrink: 0 }}>FILTER:</span>
         {[
           { id: 'ALL', label: `ALL (${signals.length})` },
           { id: 'ENTRY_READY', label: `ENTRY READY (${signals.filter(s => s.status === 'ENTRY_READY').length})` },
@@ -206,11 +204,11 @@ export default function DiscoverPage({ status }: Props) {
             key={f.id}
             onClick={() => setFilter(f.id)}
             style={{
-              padding: '6px 12px', borderRadius: 8, fontSize: 10, fontWeight: 800,
+              padding: '5px 11px', borderRadius: 7, fontSize: 9.5, fontWeight: 800, flexShrink: 0,
               border: filter === f.id ? '1px solid #00d4ff' : '1px solid rgba(255,255,255,0.08)',
               background: filter === f.id ? 'rgba(0,212,255,0.15)' : 'rgba(255,255,255,0.03)',
               color: filter === f.id ? '#00d4ff' : '#7090b0',
-              cursor: 'pointer', transition: 'all 0.2s',
+              cursor: 'pointer', transition: 'all 0.2s', minHeight: 32, touchAction: 'manipulation',
             }}
           >
             {f.label}
@@ -220,7 +218,9 @@ export default function DiscoverPage({ status }: Props) {
 
       {/* ── Signals & Assets List ── */}
       <div style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.06)', borderRadius: 12, overflow: 'hidden' }}>
-        <div style={{ display: 'grid', gridTemplateColumns: '2.5fr 1.5fr 1.5fr 2fr 1.5fr 1.5fr', padding: '12px 16px', background: 'rgba(0,0,0,0.3)', borderBottom: '1px solid rgba(255,255,255,0.06)', fontSize: 10, fontWeight: 800, color: '#3a5070', letterSpacing: '0.06em' }}>
+        
+        {/* Desktop Table Header (Hidden on Android / Mobile) */}
+        <div className="desktop-table-header" style={{ display: 'grid', gridTemplateColumns: '2.2fr 1.5fr 1.2fr 2fr 1.5fr 1.8fr', padding: '10px 14px', background: 'rgba(0,0,0,0.3)', borderBottom: '1px solid rgba(255,255,255,0.06)', fontSize: 9.5, fontWeight: 800, color: '#3a5070', letterSpacing: '0.06em' }}>
           <div>ASSET</div>
           <div>PRICE & 24H</div>
           <div>AI SCORE</div>
@@ -238,67 +238,124 @@ export default function DiscoverPage({ status }: Props) {
             const b = getStatusBadge(sig.status);
             const isPos24h = sig.priceChange24h >= 0;
             return (
-              <div
-                key={sig.assetId}
-                onClick={() => setSelectedSignal(sig)}
-                style={{
-                  display: 'grid', gridTemplateColumns: '2.5fr 1.5fr 1.5fr 2fr 1.5fr 1.5fr',
-                  padding: '12px 16px', borderBottom: '1px solid rgba(255,255,255,0.04)',
-                  alignItems: 'center', cursor: 'pointer', transition: 'background 0.2s',
-                }}
-                className="hover-row"
-              >
-                {/* Asset */}
-                <div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                    <span style={{ fontSize: 13, fontWeight: 900, color: '#ffffff' }}>{sig.symbol}</span>
-                    <span style={{ fontSize: 9, color: CATEGORY_COLORS[sig.category] || '#8099bb', fontWeight: 800, padding: '1px 5px', borderRadius: 4, background: `${CATEGORY_COLORS[sig.category] || '#8099bb'}18` }}>
-                      {sig.category}
+              <div key={sig.assetId}>
+                
+                {/* Desktop Row */}
+                <div
+                  onClick={() => setSelectedSignal(sig)}
+                  style={{
+                    display: 'grid', gridTemplateColumns: '2.2fr 1.5fr 1.2fr 2fr 1.5fr 1.8fr',
+                    padding: '11px 14px', borderBottom: '1px solid rgba(255,255,255,0.04)',
+                    alignItems: 'center', cursor: 'pointer',
+                  }}
+                  className="desktop-table-row hover-row"
+                >
+                  <div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <span style={{ fontSize: 13, fontWeight: 900, color: '#ffffff' }}>{sig.symbol}</span>
+                      <span style={{ fontSize: 8.5, color: CATEGORY_COLORS[sig.category] || '#8099bb', fontWeight: 800, padding: '1px 5px', borderRadius: 4, background: `${CATEGORY_COLORS[sig.category] || '#8099bb'}18` }}>
+                        {sig.category}
+                      </span>
+                    </div>
+                    <div style={{ fontSize: 10, color: '#4a6080', marginTop: 1 }}>{sig.name}</div>
+                  </div>
+
+                  <div>
+                    <div style={{ fontSize: 12, fontWeight: 800, color: '#ffffff', fontVariantNumeric: 'tabular-nums' }}>
+                      ${sig.price < 1 ? sig.price.toFixed(4) : sig.price.toFixed(2)}
+                    </div>
+                    <div style={{ fontSize: 9.5, fontWeight: 800, color: isPos24h ? '#00ff88' : '#ff4466' }}>
+                      {isPos24h ? '+' : ''}{sig.priceChange24h.toFixed(1)}% 24h
+                    </div>
+                  </div>
+
+                  <div>
+                    <ScoreBadge score={sig.aiScore} />
+                  </div>
+
+                  <div style={{ display: 'flex', gap: 3, flexWrap: 'wrap' }}>
+                    <TrendPill tf="4H" trend={sig.mtfTrend.tf4h} />
+                    <TrendPill tf="1H" trend={sig.mtfTrend.tf1h} />
+                    <TrendPill tf="15M" trend={sig.mtfTrend.tf15m} />
+                  </div>
+
+                  <div>
+                    <span style={{ fontSize: 9, fontWeight: 800, padding: '3px 8px', borderRadius: 6, background: b.bg, color: b.color, border: `1px solid ${b.border}` }}>
+                      {b.label}
                     </span>
                   </div>
-                  <div style={{ fontSize: 10, color: '#4a6080', marginTop: 1 }}>{sig.name}</div>
-                </div>
 
-                {/* Price */}
-                <div>
-                  <div style={{ fontSize: 12, fontWeight: 800, color: '#ffffff', fontVariantNumeric: 'tabular-nums' }}>
-                    ${sig.price < 1 ? sig.price.toFixed(4) : sig.price.toFixed(2)}
+                  <div>
+                    {sig.missingCondition ? (
+                      <span style={{ fontSize: 9.5, color: '#ffd700', fontStyle: 'italic' }}>
+                        ⚠️ {sig.missingCondition}
+                      </span>
+                    ) : (
+                      <span style={{ fontSize: 9.5, color: '#00ff88', fontWeight: 700 }}>
+                        ✅ R:R {sig.tradeThesis.riskRewardRatio.toFixed(1)} Setup
+                      </span>
+                    )}
                   </div>
-                  <div style={{ fontSize: 10, fontWeight: 800, color: isPos24h ? '#00ff88' : '#ff4466' }}>
-                    {isPos24h ? '+' : ''}{sig.priceChange24h.toFixed(1)}% 24h
+                </div>
+
+                {/* Mobile / Android Card Row */}
+                <div
+                  onClick={() => setSelectedSignal(sig)}
+                  className="mobile-card-row hover-card"
+                  style={{
+                    display: 'none',
+                    flexDirection: 'column',
+                    gap: 7,
+                    padding: '11px 12px',
+                    borderBottom: '1px solid rgba(255,255,255,0.05)',
+                    background: 'rgba(255,255,255,0.02)',
+                    cursor: 'pointer',
+                  }}
+                >
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <span style={{ fontSize: 14, fontWeight: 900, color: '#ffffff' }}>{sig.symbol}</span>
+                      <span style={{ fontSize: 8.5, color: CATEGORY_COLORS[sig.category] || '#8099bb', fontWeight: 800, padding: '1px 5px', borderRadius: 4, background: `${CATEGORY_COLORS[sig.category] || '#8099bb'}18` }}>
+                        {sig.category}
+                      </span>
+                      <span style={{ fontSize: 10, color: '#4a6080' }}>{sig.name}</span>
+                    </div>
+                    <ScoreBadge score={sig.aiScore} />
                   </div>
-                </div>
 
-                {/* Score */}
-                <div>
-                  <ScoreBadge score={sig.aiScore} />
-                </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <div style={{ display: 'flex', alignItems: 'baseline', gap: 6 }}>
+                      <span style={{ fontSize: 14, fontWeight: 900, color: '#00d4ff', fontVariantNumeric: 'tabular-nums' }}>
+                        ${sig.price < 1 ? sig.price.toFixed(4) : sig.price.toFixed(2)}
+                      </span>
+                      <span style={{ fontSize: 9.5, fontWeight: 800, color: isPos24h ? '#00ff88' : '#ff4466' }}>
+                        {isPos24h ? '+' : ''}{sig.priceChange24h.toFixed(2)}%
+                      </span>
+                    </div>
+                    <div style={{ fontSize: 9.5, color: '#7090b0' }}>
+                      24h Vol: ${(sig.volume24h / 1_000_000).toFixed(1)}M
+                    </div>
+                  </div>
 
-                {/* MTF Trends */}
-                <div style={{ display: 'flex', gap: 3, flexWrap: 'wrap' }}>
-                  <TrendPill tf="4H" trend={sig.mtfTrend.tf4h} />
-                  <TrendPill tf="1H" trend={sig.mtfTrend.tf1h} />
-                  <TrendPill tf="15M" trend={sig.mtfTrend.tf15m} />
-                  <TrendPill tf="5M" trend={sig.mtfTrend.tf5m} />
-                </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 6, paddingTop: 4, borderTop: '1px solid rgba(255,255,255,0.04)' }}>
+                    <div style={{ display: 'flex', gap: 3, flexWrap: 'wrap' }}>
+                      <TrendPill tf="4H" trend={sig.mtfTrend.tf4h} />
+                      <TrendPill tf="1H" trend={sig.mtfTrend.tf1h} />
+                      <TrendPill tf="15M" trend={sig.mtfTrend.tf15m} />
+                    </div>
+                    <span style={{ fontSize: 8.5, fontWeight: 800, padding: '2px 7px', borderRadius: 5, background: b.bg, color: b.color, border: `1px solid ${b.border}` }}>
+                      {b.label}
+                    </span>
+                  </div>
 
-                {/* Signal State */}
-                <div>
-                  <span style={{ fontSize: 9, fontWeight: 800, padding: '3px 8px', borderRadius: 6, background: b.bg, color: b.color, border: `1px solid ${b.border}` }}>
-                    {b.label}
-                  </span>
-                </div>
-
-                {/* Missing Condition / Thesis */}
-                <div>
                   {sig.missingCondition ? (
-                    <span style={{ fontSize: 10, color: '#ffd700', fontStyle: 'italic' }}>
+                    <div style={{ fontSize: 9, color: '#ffd700', fontStyle: 'italic', background: 'rgba(255,215,0,0.06)', padding: '3px 7px', borderRadius: 5 }}>
                       ⚠️ {sig.missingCondition}
-                    </span>
+                    </div>
                   ) : (
-                    <span style={{ fontSize: 10, color: '#00ff88', fontWeight: 700 }}>
-                      ✅ R:R {sig.tradeThesis.riskRewardRatio.toFixed(1)} Setup
-                    </span>
+                    <div style={{ fontSize: 9, color: '#00ff88', fontWeight: 700, background: 'rgba(0,255,136,0.06)', padding: '3px 7px', borderRadius: 5 }}>
+                      ✅ Setup: Stop ${sig.tradeThesis.stopLoss} · Target ${sig.tradeThesis.takeProfit} (R:R {sig.tradeThesis.riskRewardRatio.toFixed(1)})
+                    </div>
                   )}
                 </div>
               </div>
@@ -307,62 +364,63 @@ export default function DiscoverPage({ status }: Props) {
         )}
       </div>
 
-      {/* ── Coin Detail Modal ── */}
+      {/* ── Coin Detail Modal (Android Screen Friendly) ── */}
       {selectedSignal && (
         <div
           onClick={() => setSelectedSignal(null)}
           style={{
             position: 'fixed', inset: 0, zIndex: 100, display: 'flex', alignItems: 'center', justifyContent: 'center',
-            padding: 20, background: 'rgba(0,0,0,0.75)', backdropFilter: 'blur(8px)',
+            padding: 12, background: 'rgba(0,0,0,0.8)', backdropFilter: 'blur(8px)',
           }}
         >
           <div
             onClick={(e) => e.stopPropagation()}
             style={{
-              background: '#0c1220', border: '1px solid rgba(0,212,255,0.3)', borderRadius: 20,
-              padding: 24, width: '100%', maxWidth: 500, boxShadow: '0 24px 64px rgba(0,0,0,0.8)',
+              background: '#0c1220', border: '1px solid rgba(0,212,255,0.3)', borderRadius: 16,
+              padding: 16, width: '100%', maxWidth: 460, maxHeight: '88dvh', overflowY: 'auto',
+              boxShadow: '0 24px 64px rgba(0,0,0,0.85)',
             }}
           >
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 16 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12 }}>
               <div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <span style={{ fontSize: 20, fontWeight: 900, color: '#ffffff' }}>{selectedSignal.symbol}</span>
-                  <span style={{ fontSize: 10, fontWeight: 800, padding: '2px 8px', borderRadius: 6, background: 'rgba(0,212,255,0.15)', color: '#00d4ff' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+                  <span style={{ fontSize: 18, fontWeight: 900, color: '#ffffff' }}>{selectedSignal.symbol}</span>
+                  <span style={{ fontSize: 9, fontWeight: 800, padding: '2px 7px', borderRadius: 5, background: 'rgba(0,212,255,0.15)', color: '#00d4ff' }}>
                     {selectedSignal.category}
                   </span>
                 </div>
-                <div style={{ fontSize: 12, color: '#7090b0', marginTop: 2 }}>{selectedSignal.name}</div>
+                <div style={{ fontSize: 11, color: '#7090b0', marginTop: 1 }}>{selectedSignal.name}</div>
               </div>
               <ScoreBadge score={selectedSignal.aiScore} />
             </div>
 
             {/* Score Breakdown */}
-            <div style={{ background: 'rgba(255,255,255,0.03)', borderRadius: 10, padding: 12, marginBottom: 16 }}>
-              <div style={{ fontSize: 10, fontWeight: 800, color: '#9b59ff', letterSpacing: '0.08em', marginBottom: 8 }}>
+            <div style={{ background: 'rgba(255,255,255,0.03)', borderRadius: 10, padding: 10, marginBottom: 12 }}>
+              <div style={{ fontSize: 9.5, fontWeight: 800, color: '#9b59ff', letterSpacing: '0.08em', marginBottom: 6 }}>
                 AI MODEL SUB-SCORES BREAKDOWN
               </div>
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8, textAlign: 'center' }}>
-                <div><div style={{ fontSize: 12, fontWeight: 900, color: '#00d4ff' }}>{selectedSignal.scoreBreakdown.trend}/20</div><div style={{ fontSize: 8, color: '#4a6080' }}>Trend</div></div>
-                <div><div style={{ fontSize: 12, fontWeight: 900, color: '#00ff88' }}>{selectedSignal.scoreBreakdown.momentum}/20</div><div style={{ fontSize: 8, color: '#4a6080' }}>Momentum</div></div>
-                <div><div style={{ fontSize: 12, fontWeight: 900, color: '#ffd700' }}>{selectedSignal.scoreBreakdown.volume}/20</div><div style={{ fontSize: 8, color: '#4a6080' }}>Volume</div></div>
-                <div><div style={{ fontSize: 12, fontWeight: 900, color: '#a855f7' }}>{selectedSignal.scoreBreakdown.structure}/20</div><div style={{ fontSize: 8, color: '#4a6080' }}>Structure</div></div>
-                <div><div style={{ fontSize: 12, fontWeight: 900, color: '#ff8844' }}>{selectedSignal.scoreBreakdown.volatility}/10</div><div style={{ fontSize: 8, color: '#4a6080' }}>Volatility</div></div>
-                <div><div style={{ fontSize: 12, fontWeight: 900, color: '#38bdf8' }}>{selectedSignal.scoreBreakdown.htfAlignment}/10</div><div style={{ fontSize: 8, color: '#4a6080' }}>HTF Align</div></div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6, textAlign: 'center' }}>
+                <div style={{ background: 'rgba(0,0,0,0.2)', padding: 6, borderRadius: 6 }}><div style={{ fontSize: 11, fontWeight: 900, color: '#00d4ff' }}>{selectedSignal.scoreBreakdown.trend}/20</div><div style={{ fontSize: 7.5, color: '#4a6080' }}>Trend</div></div>
+                <div style={{ background: 'rgba(0,0,0,0.2)', padding: 6, borderRadius: 6 }}><div style={{ fontSize: 11, fontWeight: 900, color: '#00ff88' }}>{selectedSignal.scoreBreakdown.momentum}/20</div><div style={{ fontSize: 7.5, color: '#4a6080' }}>Momentum</div></div>
+                <div style={{ background: 'rgba(0,0,0,0.2)', padding: 6, borderRadius: 6 }}><div style={{ fontSize: 11, fontWeight: 900, color: '#ffd700' }}>{selectedSignal.scoreBreakdown.volume}/20</div><div style={{ fontSize: 7.5, color: '#4a6080' }}>Volume</div></div>
+                <div style={{ background: 'rgba(0,0,0,0.2)', padding: 6, borderRadius: 6 }}><div style={{ fontSize: 11, fontWeight: 900, color: '#a855f7' }}>{selectedSignal.scoreBreakdown.structure}/20</div><div style={{ fontSize: 7.5, color: '#4a6080' }}>Structure</div></div>
+                <div style={{ background: 'rgba(0,0,0,0.2)', padding: 6, borderRadius: 6 }}><div style={{ fontSize: 11, fontWeight: 900, color: '#ff8844' }}>{selectedSignal.scoreBreakdown.volatility}/10</div><div style={{ fontSize: 7.5, color: '#4a6080' }}>Volatility</div></div>
+                <div style={{ background: 'rgba(0,0,0,0.2)', padding: 6, borderRadius: 6 }}><div style={{ fontSize: 11, fontWeight: 900, color: '#38bdf8' }}>{selectedSignal.scoreBreakdown.htfAlignment}/10</div><div style={{ fontSize: 7.5, color: '#4a6080' }}>HTF Align</div></div>
               </div>
             </div>
 
             {/* Trade Thesis */}
-            <div style={{ background: 'rgba(0,255,136,0.04)', border: '1px solid rgba(0,255,136,0.15)', borderRadius: 10, padding: 12, marginBottom: 16 }}>
-              <div style={{ fontSize: 10, fontWeight: 800, color: '#00ff88', letterSpacing: '0.08em', marginBottom: 6 }}>
+            <div style={{ background: 'rgba(0,255,136,0.04)', border: '1px solid rgba(0,255,136,0.15)', borderRadius: 10, padding: 10, marginBottom: 12 }}>
+              <div style={{ fontSize: 9.5, fontWeight: 800, color: '#00ff88', letterSpacing: '0.08em', marginBottom: 6 }}>
                 TRADE THESIS ({selectedSignal.tradeThesis.side})
               </div>
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8, fontSize: 11, marginBottom: 8 }}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6, fontSize: 10, marginBottom: 8 }}>
                 <div><span style={{ color: '#4a6080' }}>Entry: </span><b style={{ color: '#ffffff' }}>${selectedSignal.tradeThesis.entryPrice < 1 ? selectedSignal.tradeThesis.entryPrice.toFixed(4) : selectedSignal.tradeThesis.entryPrice.toFixed(2)}</b></div>
-                <div><span style={{ color: '#4a6080' }}>Stop Loss: </span><b style={{ color: '#ff4466' }}>${selectedSignal.tradeThesis.stopLoss < 1 ? selectedSignal.tradeThesis.stopLoss.toFixed(4) : selectedSignal.tradeThesis.stopLoss.toFixed(2)}</b></div>
-                <div><span style={{ color: '#4a6080' }}>Take Profit: </span><b style={{ color: '#00ff88' }}>${selectedSignal.tradeThesis.takeProfit < 1 ? selectedSignal.tradeThesis.takeProfit.toFixed(4) : selectedSignal.tradeThesis.takeProfit.toFixed(2)}</b></div>
+                <div><span style={{ color: '#4a6080' }}>SL: </span><b style={{ color: '#ff4466' }}>${selectedSignal.tradeThesis.stopLoss < 1 ? selectedSignal.tradeThesis.stopLoss.toFixed(4) : selectedSignal.tradeThesis.stopLoss.toFixed(2)}</b></div>
+                <div><span style={{ color: '#4a6080' }}>TP: </span><b style={{ color: '#00ff88' }}>${selectedSignal.tradeThesis.takeProfit < 1 ? selectedSignal.tradeThesis.takeProfit.toFixed(4) : selectedSignal.tradeThesis.takeProfit.toFixed(2)}</b></div>
               </div>
-              <div style={{ fontSize: 11, color: '#7090b0', lineHeight: 1.5 }}>
-                • <b>Risk/Reward</b>: {selectedSignal.tradeThesis.riskRewardRatio.toFixed(2)}:1 (Risk {selectedSignal.tradeThesis.riskDistancePct.toFixed(1)}% / Target +{selectedSignal.tradeThesis.rewardDistancePct.toFixed(1)}%)<br/>
+              <div style={{ fontSize: 10, color: '#7090b0', lineHeight: 1.5 }}>
+                • <b>Risk/Reward</b>: 1:{selectedSignal.tradeThesis.riskRewardRatio.toFixed(2)} (Risk {selectedSignal.tradeThesis.riskDistancePct.toFixed(1)}% / Target +{selectedSignal.tradeThesis.rewardDistancePct.toFixed(1)}%)<br/>
                 {selectedSignal.tradeThesis.explanation.map((exp, idx) => (
                   <span key={idx}>• {exp}<br/></span>
                 ))}
@@ -372,8 +430,9 @@ export default function DiscoverPage({ status }: Props) {
             <button
               onClick={() => setSelectedSignal(null)}
               style={{
-                width: '100%', padding: 12, borderRadius: 10, background: 'rgba(255,255,255,0.05)',
-                border: '1px solid rgba(255,255,255,0.1)', color: '#7090b0', cursor: 'pointer', fontWeight: 700,
+                width: '100%', padding: 10, borderRadius: 8, background: 'rgba(255,255,255,0.06)',
+                border: '1px solid rgba(255,255,255,0.12)', color: '#ffffff', cursor: 'pointer', fontWeight: 800,
+                fontSize: 12, minHeight: 40, touchAction: 'manipulation',
               }}
             >
               Close

@@ -127,20 +127,25 @@ function buildWsUrl(): string {
   return `${protocol}//${window.location.host}/ws`;
 }
 
-export async function createWS(onMessage: WSHandler): Promise<WebSocket> {
+export function createWS(
+  onMessage: WSHandler,
+  onOpen?: () => void,
+  onClose?: () => void,
+  onError?: (err: Event) => void
+): WebSocket {
   const wsUrl = buildWsUrl();
   const ws = new WebSocket(wsUrl);
 
-  ws.onmessage = (evt) => {
+  if (onOpen) ws.addEventListener('open', onOpen);
+  if (onClose) ws.addEventListener('close', onClose);
+  if (onError) ws.addEventListener('error', onError);
+
+  ws.addEventListener('message', (evt) => {
     try {
       const msg = JSON.parse(evt.data as string);
       onMessage(msg);
     } catch {}
-  };
-
-  ws.onerror = () => {
-    // Silent — reconnect logic is in App.tsx onclose handler
-  };
+  });
 
   return ws;
 }

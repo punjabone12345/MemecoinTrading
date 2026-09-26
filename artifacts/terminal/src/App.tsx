@@ -51,11 +51,13 @@ export default function App() {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [altcoinStatus, setAltcoinStatus] = useState<AltcoinStatusResponse | null>(null);
   const [wsConnected, setWsConnected] = useState(false);
+  const [httpConnected, setHttpConnected] = useState(false);
   const [, startTransition] = useTransition();
 
-  const wsConnectedRef = useRef(false);
   const retryRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
+
+  const isOnline = wsConnected || httpConnected;
 
   const loadInitial = useCallback(async () => {
     try {
@@ -65,6 +67,7 @@ export default function App() {
       ]);
       setSettings(settingsData);
       setAltcoinStatus(statusData);
+      setHttpConnected(true);
     } catch {
       retryRef.current = setTimeout(loadInitial, 3000);
     }
@@ -75,33 +78,42 @@ export default function App() {
     return () => { if (retryRef.current) clearTimeout(retryRef.current); };
   }, [loadInitial]);
 
-  // WebSocket connect
+  // WebSocket connect with immediate state detection
   useEffect(() => {
     let reconnectDelay = 500;
     let destroyed = false;
 
-    const connect = async () => {
+    const connect = () => {
       if (destroyed) return;
-      const ws = await createWS((msg) => {
-        if (msg.type === 'settings') setSettings(msg.data as Settings);
-        if (msg.type === 'altcoin_status' || msg.type === 'sniper_status') {
-          setAltcoinStatus(msg.data as AltcoinStatusResponse);
+      const ws = createWS(
+        (msg) => {
+          if (msg.type === 'settings') setSettings(msg.data as Settings);
+          if (msg.type === 'altcoin_status' || msg.type === 'sniper_status') {
+            setAltcoinStatus(msg.data as AltcoinStatusResponse);
+            setHttpConnected(true);
+          }
+        },
+        () => {
+          setWsConnected(true);
+          setHttpConnected(true);
+          reconnectDelay = 500;
+          api.getAltcoinStatus().then((s) => { setAltcoinStatus(s); setHttpConnected(true); }).catch(() => {});
+        },
+        () => {
+          setWsConnected(false);
+          if (!destroyed) setTimeout(connect, reconnectDelay);
+          reconnectDelay = Math.min(reconnectDelay * 1.5, 8000);
+        },
+        () => {
+          setWsConnected(false);
         }
-      });
-      if (destroyed) { ws.close(); return; }
-      ws.onopen = () => {
+      );
+
+      if (ws.readyState === WebSocket.OPEN) {
         setWsConnected(true);
-        wsConnectedRef.current = true;
-        reconnectDelay = 500;
-        api.getAltcoinStatus().then(setAltcoinStatus).catch(() => {});
-      };
-      ws.onclose = () => {
-        setWsConnected(false);
-        wsConnectedRef.current = false;
-        if (!destroyed) setTimeout(connect, reconnectDelay);
-        reconnectDelay = Math.min(reconnectDelay * 1.5, 8000);
-      };
-      ws.onerror = () => { ws.close(); };
+        setHttpConnected(true);
+      }
+
       wsRef.current = ws;
     };
 
@@ -109,14 +121,15 @@ export default function App() {
     return () => { destroyed = true; wsRef.current?.close(); };
   }, []);
 
-  // Fallback HTTP Polling
+  // Fallback HTTP Polling (guarantees LIVE connection even if WS proxy blocks)
   useEffect(() => {
     const poll = async () => {
       try {
         const statusData = await api.getAltcoinStatus();
         setAltcoinStatus(statusData);
+        setHttpConnected(true);
       } catch {
-        // ignore
+        // network offline
       }
     };
     const id = setInterval(poll, 4000);
@@ -143,62 +156,68 @@ export default function App() {
   return (
     <div style={{ height: '100dvh', display: 'flex', flexDirection: 'column', background: '#080d1a', overflow: 'hidden' }}>
 
-      {/* ── Header ── */}
+      {/* ── Responsive Mobile & Android Optimized Header ── */}
       <header style={{
-        flexShrink: 0, height: 60, display: 'flex', alignItems: 'center',
-        justifyContent: 'space-between', padding: '0 20px',
+        flexShrink: 0, minHeight: 54, display: 'flex', alignItems: 'center',
+        justifyContent: 'space-between', padding: '0 12px',
         background: 'linear-gradient(180deg, rgba(0,212,255,0.04) 0%, rgba(8,13,26,0) 100%)',
         borderBottom: '1px solid rgba(0,212,255,0.1)',
-        backdropFilter: 'blur(20px)',
+        backdropFilter: 'blur(20px)', gap: 8,
       }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
           <div style={{
-            width: 36, height: 36, borderRadius: 12,
+            width: 32, height: 32, flexShrink: 0, borderRadius: 10,
             background: 'linear-gradient(135deg, rgba(0,212,255,0.2), rgba(155,89,255,0.2))',
             border: '1px solid rgba(0,212,255,0.35)',
             display: 'flex', alignItems: 'center', justifyContent: 'center',
             boxShadow: '0 0 16px rgba(0,212,255,0.15)',
-            overflow: 'hidden', padding: 4,
+            overflow: 'hidden', padding: 3,
           }}>
             <img src="/favicon.svg" alt="Logo" style={{ width: '100%', height: '100%' }} />
           </div>
           <div>
-            <div style={{ fontSize: 16, fontWeight: 900, letterSpacing: '0.06em', background: 'linear-gradient(90deg, #00d4ff, #9b59ff, #00ff88)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>
-              ALTCOIN
+            <div style={{ fontSize: 14, fontWeight: 900, letterSpacing: '0.04em', background: 'linear-gradient(90deg, #00d4ff, #9b59ff, #00ff88)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent', whiteSpace: 'nowrap' }}>
+              ALTCOIN BOT
             </div>
-            <div style={{ fontSize: 8, color: '#4a6080', letterSpacing: '0.14em', fontWeight: 700, marginTop: -2 }}>
-              TRADING BOT
+            <div style={{ fontSize: 7.5, color: '#4a6080', letterSpacing: '0.1em', fontWeight: 700, marginTop: -2, whiteSpace: 'nowrap' }}>
+              AI INTRADAY
             </div>
           </div>
           <div style={{
-            padding: '3px 9px', borderRadius: 6, fontSize: 9, fontWeight: 800, letterSpacing: '0.07em',
+            padding: '2px 7px', borderRadius: 5, fontSize: 8.5, fontWeight: 800, letterSpacing: '0.04em',
             background: 'rgba(0,212,255,0.1)', color: '#00d4ff', border: '1px solid rgba(0,212,255,0.3)',
+            whiteSpace: 'nowrap',
           }}>
-            📄 PAPER $100.00
+            📄 $100
           </div>
         </div>
 
-        <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
           <div style={{ textAlign: 'right' }}>
-            <div style={{ fontSize: 8, color: '#4a6080', letterSpacing: '0.1em', fontWeight: 700 }}>
-              PORTFOLIO EQUITY{openPositions.length > 0 && (
-                <span style={{ marginLeft: 4, color: unrealizedPnl >= 0 ? '#00ff88' : '#ff4466' }}>
+            <div style={{ fontSize: 7.5, color: '#4a6080', letterSpacing: '0.08em', fontWeight: 700, whiteSpace: 'nowrap' }}>
+              EQUITY{openPositions.length > 0 && (
+                <span style={{ marginLeft: 3, color: unrealizedPnl >= 0 ? '#00ff88' : '#ff4466' }}>
                   {unrealizedPnl >= 0 ? '▲' : '▼'}${Math.abs(unrealizedPnl).toFixed(2)}
                 </span>
               )}
             </div>
-            <div style={{ fontSize: 16, fontWeight: 900, color: '#00d4ff', letterSpacing: '-0.01em', fontVariantNumeric: 'tabular-nums' }}>
-              ${currentEquity.toFixed(2)}<span style={{ fontSize: 9, opacity: 0.6, marginLeft: 3 }}>USD</span>
+            <div style={{ fontSize: 14, fontWeight: 900, color: '#00d4ff', letterSpacing: '-0.01em', fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>
+              ${currentEquity.toFixed(2)}<span style={{ fontSize: 8, opacity: 0.6, marginLeft: 2 }}>USD</span>
             </div>
           </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 5,
+            background: isOnline ? 'rgba(0,255,136,0.08)' : 'rgba(255,68,102,0.08)',
+            border: `1px solid ${isOnline ? 'rgba(0,255,136,0.25)' : 'rgba(255,68,102,0.25)'}`,
+            padding: '4px 8px', borderRadius: 8,
+          }}>
             <div style={{
-              width: 8, height: 8, borderRadius: '50%',
-              background: wsConnected ? '#00ff88' : '#ff4466',
-              boxShadow: wsConnected ? '0 0 8px #00ff88' : 'none',
-            }} className={wsConnected ? 'pulse-live' : ''} />
-            <span style={{ fontSize: 10, fontWeight: 800, letterSpacing: '0.06em', color: wsConnected ? '#00ff88' : '#ff4466' }}>
-              {wsConnected ? 'LIVE' : 'OFFLINE'}
+              width: 7, height: 7, borderRadius: '50%',
+              background: isOnline ? '#00ff88' : '#ff4466',
+              boxShadow: isOnline ? '0 0 8px #00ff88' : 'none',
+            }} className={isOnline ? 'pulse-live' : ''} />
+            <span style={{ fontSize: 9.5, fontWeight: 800, letterSpacing: '0.06em', color: isOnline ? '#00ff88' : '#ff4466' }}>
+              {isOnline ? 'LIVE' : 'OFFLINE'}
             </span>
           </div>
         </div>
@@ -214,9 +233,9 @@ export default function App() {
             animate="center"
             exit="exit"
             transition={pageTrans}
-            style={{ position: 'absolute', inset: 0, overflowY: 'auto', overflowX: 'hidden', WebkitOverflowScrolling: 'touch', padding: '16px 16px 12px' }}
+            style={{ position: 'absolute', inset: 0, overflowY: 'auto', overflowX: 'hidden', WebkitOverflowScrolling: 'touch', padding: '12px 10px 10px' }}
           >
-            {tab === 'discover' && <MemoDiscover status={altcoinStatus} wsConnected={wsConnected} />}
+            {tab === 'discover' && <MemoDiscover status={altcoinStatus} wsConnected={isOnline} />}
             {tab === 'positions' && (
               <MemoPositions
                 status={altcoinStatus}
@@ -234,14 +253,14 @@ export default function App() {
         </AnimatePresence>
       </div>
 
-      {/* ── Bottom Nav ── */}
+      {/* ── Bottom Nav Optimized for Android Safe Area ── */}
       <nav style={{
         flexShrink: 0,
         background: 'rgba(6,10,20,0.97)',
         backdropFilter: 'blur(28px)',
         borderTop: '1px solid rgba(255,255,255,0.06)',
         display: 'flex',
-        paddingBottom: 'env(safe-area-inset-bottom, 4px)',
+        paddingBottom: 'max(env(safe-area-inset-bottom, 8px), 8px)',
         zIndex: 60,
       }}>
         {NAV.map((t) => {
@@ -254,7 +273,8 @@ export default function App() {
               style={{
                 flex: 1, border: 'none', background: 'transparent', cursor: 'pointer',
                 display: 'flex', flexDirection: 'column', alignItems: 'center',
-                justifyContent: 'center', padding: '10px 4px 8px', gap: 5, position: 'relative',
+                justifyContent: 'center', padding: '8px 2px 6px', gap: 4, position: 'relative',
+                minHeight: 48, touchAction: 'manipulation',
               }}
             >
               {active && (
@@ -265,19 +285,19 @@ export default function App() {
                   boxShadow: `0 0 12px ${t.color}99`,
                 }} transition={{ type: 'spring', stiffness: 500, damping: 42 }} />
               )}
-              <div style={{ position: 'relative', color: active ? t.color : '#3a5070', transition: 'color 0.2s, transform 0.2s', transform: active ? 'scale(1.12)' : 'scale(1)' }}>
+              <div style={{ position: 'relative', color: active ? t.color : '#3a5070', transition: 'color 0.2s, transform 0.2s', transform: active ? 'scale(1.08)' : 'scale(1)' }}>
                 {t.icon}
                 {badge > 0 && (
                   <span style={{
                     position: 'absolute', top: -5, right: -7,
-                    minWidth: 16, height: 16, borderRadius: 8,
+                    minWidth: 15, height: 15, borderRadius: 8,
                     background: '#00ff88',
-                    color: '#080d1a', fontSize: 9, fontWeight: 900,
+                    color: '#080d1a', fontSize: 8.5, fontWeight: 900,
                     display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '0 3px',
                   }}>{badge}</span>
                 )}
               </div>
-              <span style={{ fontSize: 9.5, fontWeight: active ? 800 : 500, letterSpacing: '0.05em', color: active ? t.color : '#3a5070', transition: 'color 0.2s' }}>{t.label}</span>
+              <span style={{ fontSize: 9, fontWeight: active ? 800 : 500, letterSpacing: '0.04em', color: active ? t.color : '#3a5070', transition: 'color 0.2s' }}>{t.label}</span>
             </button>
           );
         })}

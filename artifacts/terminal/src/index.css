@@ -186,3 +186,21 @@ body {
 }
 
 .score-ring { transform:rotate(-90deg); transform-origin:center; }
+
+/* ── Mobile / Android Responsiveness ── */
+@media (max-width: 768px) {
+  .desktop-table-header { display: none !important; }
+  .desktop-table-row { display: none !important; }
+  .mobile-card-row { display: flex !important; }
+}
+@media (min-width: 769px) {
+  .mobile-card-row { display: none !important; }
+}
+
+.hover-card {
+  transition: transform 0.15s ease, background 0.15s ease;
+}
+.hover-card:active {
+  transform: scale(0.985);
+  background: rgba(255,255,255,0.05) !important;
+}

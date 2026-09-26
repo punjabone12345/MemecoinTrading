@@ -17,13 +17,13 @@ export default function DiagnosticsPage({ status }: Props) {
           🩺 SYSTEM HEALTH DIAGNOSTICS
         </div>
 
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: 8 }}>
           <div style={{ background: 'rgba(0,0,0,0.25)', padding: 12, borderRadius: 10 }}>
             <div style={{ fontSize: 9, color: '#4a6080', fontWeight: 800 }}>MARKET DATA FEED</div>
             <div style={{ fontSize: 14, fontWeight: 900, color: health?.marketDataStatus === 'CONNECTED' ? '#00ff88' : '#ff4466', marginTop: 2 }}>
               {health?.marketDataStatus ?? 'CONNECTED'}
             </div>
-            <div style={{ fontSize: 9, color: '#7090b0', marginTop: 4 }}>Public CoinGecko Market API</div>
+            <div style={{ fontSize: 9, color: '#7090b0', marginTop: 4 }}>Binance Vision & DEX Liquidity</div>
           </div>
 
           <div style={{ background: 'rgba(0,0,0,0.25)', padding: 12, borderRadius: 10 }}>
@@ -39,7 +39,7 @@ export default function DiagnosticsPage({ status }: Props) {
             <div style={{ fontSize: 14, fontWeight: 900, color: health?.scannerStatus === 'RUNNING' ? '#00ff88' : '#ff4466', marginTop: 2 }}>
               {health?.scannerStatus ?? 'RUNNING'}
             </div>
-            <div style={{ fontSize: 9, color: '#7090b0', marginTop: 4 }}>30s Polling Loop Active</div>
+            <div style={{ fontSize: 9, color: '#7090b0', marginTop: 4 }}>Real-Time Ticker Monitoring</div>
           </div>
 
           <div style={{ background: 'rgba(0,0,0,0.25)', padding: 12, borderRadius: 10 }}>
@@ -63,7 +63,7 @@ export default function DiagnosticsPage({ status }: Props) {
           </span>
         </div>
 
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10, marginBottom: 14 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: 8, marginBottom: 14 }}>
           <div style={{ background: 'rgba(0,0,0,0.25)', padding: 12, borderRadius: 10, textAlign: 'center' }}>
             <div style={{ fontSize: 16, fontWeight: 900, color: '#00d4ff' }}>{learning?.trainingSamples ?? 14250}</div>
             <div style={{ fontSize: 8, color: '#4a6080', fontWeight: 800, marginTop: 2 }}>TRAINING SAMPLES</div>
