@@ -1,604 +1,386 @@
-import { useState, useEffect } from 'react';
-import { SniperStatus, TrackedToken, BuyerActivityLog, PendingSignal, DiagTransaction } from '../lib/types.js';
-import { api } from '../lib/api.js';
-
-// ── Props ─────────────────────────────────────────────────────────────────────
+import { useState } from 'react';
+import { AltcoinStatusResponse, AltcoinSignal, SignalStatus } from '../lib/types.js';
 
 interface Props {
-  sniperStatus?: SniperStatus | null;
+  status?: AltcoinStatusResponse | null;
   wsConnected?: boolean;
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-function timeAgo(ts: number): string {
-  const s = Math.floor((Date.now() - ts) / 1000);
-  if (s < 60) return `${s}s ago`;
-  return `${Math.floor(s / 60)}m ago`;
-}
-
-function countdown(expiresAt: number): string {
-  const ms = expiresAt - Date.now();
-  if (ms <= 0) return 'expired';
-  const s = Math.floor(ms / 1000);
-  const m = Math.floor(s / 60);
-  const ss = s % 60;
-  return `${m}:${ss.toString().padStart(2, '0')}`;
-}
-
-function countdownPct(migrationTime: number, expiresAt: number): number {
-  const total   = expiresAt - migrationTime;
-  const elapsed = Date.now() - migrationTime;
-  return Math.min(100, Math.max(0, (elapsed / total) * 100));
-}
-
-function fmtUsd(n: number): string {
-  if (n >= 1000) return `$${(n / 1000).toFixed(1)}k`;
-  return `$${n.toFixed(0)}`;
-}
-
-function shortAddr(addr: string): string {
-  return addr.slice(0, 4) + '…' + addr.slice(-4);
-}
-
-function fmtCompact(n?: number): string {
-  if (!n) return '—';
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
-  return `${n.toFixed(2)}`;
-}
-
-function fmtPrice(p?: number): string {
-  if (!p) return '—';
-  if (p < 0.000001) return `${p.toExponential(2)}`;
-  if (p < 0.01) return `${p.toFixed(6)}`;
-  if (p < 1) return `${p.toFixed(4)}`;
-  return `${p.toFixed(2)}`;
-}
-
-// ── Sniper status hook ────────────────────────────────────────────────────────
-
-function useSniperStatusFallback(skip: boolean) {
-  const [status, setStatus] = useState<SniperStatus | null>(null);
-  useEffect(() => {
-    if (skip) return;
-    let cancelled = false;
-    async function poll() {
-      try {
-        const data = await api.getSniperStatus();
-        if (!cancelled) setStatus(data);
-      } catch { /* ignore */ }
-    }
-    poll();
-    const id = setInterval(poll, 1_000);
-    return () => { cancelled = true; clearInterval(id); };
-  }, [skip]);
-  return status;
-}
-
-// ── Discovery data types ──────────────────────────────────────────────────────
-
-interface MigrationEvent {
-  mint:             string;
-  ts:               number;
-  name?:            string;
-  symbol?:          string;
-  isMigration:      boolean;
-  reserveUsd?:      number;
-  discoverySource?: string;
-  txSignature?:     string;
-  instructionType?: string;
-}
-
-interface PumpfunTrackerData {
-  total:               number;
-  recent:              MigrationEvent[];
-  walletAddress?:      string;
-  pollCount?:          number;
-  lastPollAgoSec?:     number | null;
-  consecutiveFailures?: number;
-  lastError?:          string | null;
-  heliusApiKeySet?:    boolean;
-  rpcEndpoint?:        string;
-  tokensPerHour?:      number | null;
-  txFetchErrorRate?:   number;
-}
-
-interface SourcesResponse {
-  pumpfun?: PumpfunTrackerData;
-  // legacy fallback
-  gmgn?: {
-    total: number;
-    recent: MigrationEvent[];
-    pollers?: { migrated?: { pollCount: number; lastSuccessAgoSec: number | null; consecutiveFailures: number; firedTotal?: number; intervalMs: number; lastError: string | null } };
-  };
-}
-
-function useTrackerData(): { data: PumpfunTrackerData | null; loading: boolean } {
-  const [data, setData] = useState<PumpfunTrackerData | null>(null);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    let cancelled = false;
-    async function poll() {
-      try {
-        const json = (await api.getScannerSources()) as unknown as SourcesResponse;
-        if (!cancelled) {
-          // Prefer new pumpfun shape; fall back to legacy gmgn
-          const pf = json.pumpfun;
-          const gm = json.gmgn;
-          setData(pf ?? {
-            total:    gm?.total ?? 0,
-            recent:   gm?.recent ?? [],
-            pollCount: gm?.pollers?.migrated?.pollCount,
-            lastPollAgoSec: gm?.pollers?.migrated?.lastSuccessAgoSec,
-            consecutiveFailures: gm?.pollers?.migrated?.consecutiveFailures,
-          } as PumpfunTrackerData);
-          setLoading(false);
-        }
-      } catch { /* ignore */ }
-    }
-    poll();
-    const id = setInterval(poll, 1_000);
-    return () => { cancelled = true; clearInterval(id); };
-  }, []);
-
-  return { data, loading };
-}
-
-// ── Design tokens ─────────────────────────────────────────────────────────────
-
-const C = {
-  card:   { background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.07)', borderRadius: 12, padding: '12px 14px', marginBottom: 10 } as React.CSSProperties,
-  label:  { fontSize: 9, fontWeight: 800, letterSpacing: '0.12em', color: '#3a5070' } as React.CSSProperties,
-  accent: '#00bfff',
-  green:  '#00ff88',
-  red:    '#ff4466',
-  yellow: '#ffd700',
-  orange: '#ff8c00',
-  gray:   '#4a6080',
-  pump:   '#a855f7',  // purple brand colour for pump.fun migrations
-  purple: '#9b59ff',
+const CATEGORY_COLORS: Record<string, string> = {
+  'Layer 1': '#00d4ff',
+  'Layer 2': '#9b59ff',
+  DeFi: '#00ff88',
+  AI: '#ff8844',
+  Infrastructure: '#ffd700',
+  Interop: '#a855f7',
+  RWA: '#38bdf8',
+  Gaming: '#f43f5e',
 };
 
-function dexUrl(mint: string): string {
-  return `https://dexscreener.com/solana/${mint}`;
+function getStatusBadge(status: SignalStatus) {
+  switch (status) {
+    case 'ENTRY_READY':
+      return { label: 'ENTRY READY', bg: 'rgba(0,255,136,0.18)', color: '#00ff88', border: 'rgba(0,255,136,0.4)' };
+    case 'NEAR_ENTRY':
+      return { label: 'NEAR ENTRY', bg: 'rgba(255,215,0,0.18)', color: '#ffd700', border: 'rgba(255,215,0,0.4)' };
+    case 'IN_POSITION':
+      return { label: 'IN POSITION', bg: 'rgba(0,212,255,0.18)', color: '#00d4ff', border: 'rgba(0,212,255,0.4)' };
+    case 'WATCHING':
+      return { label: 'WATCHING', bg: 'rgba(155,89,255,0.15)', color: '#9b59ff', border: 'rgba(155,89,255,0.3)' };
+    case 'COOLDOWN':
+      return { label: 'COOLDOWN', bg: 'rgba(255,136,68,0.15)', color: '#ff8844', border: 'rgba(255,136,68,0.3)' };
+    default:
+      return { label: 'NO SETUP', bg: 'rgba(255,255,255,0.05)', color: '#4a6080', border: 'rgba(255,255,255,0.1)' };
+  }
 }
 
-function DexLink({ mint }: { mint: string }) {
-  return (
-    <a
-      href={dexUrl(mint)}
-      target="_blank"
-      rel="noopener noreferrer"
-      onClick={e => e.stopPropagation()}
-      style={{
-        display: 'inline-flex', alignItems: 'center', gap: 3,
-        fontSize: 8, fontWeight: 800, letterSpacing: '0.05em',
-        padding: '2px 6px', borderRadius: 4,
-        background: 'rgba(255,196,0,0.08)', color: '#ffc400',
-        border: '1px solid rgba(255,196,0,0.25)',
-        textDecoration: 'none', cursor: 'pointer', flexShrink: 0,
-      }}
-    >
-      ↗ DEX
-    </a>
-  );
-}
-
-function PumpLink({ mint }: { mint: string }) {
-  return (
-    <a
-      href={`https://pump.fun/${mint}`}
-      target="_blank"
-      rel="noopener noreferrer"
-      onClick={e => e.stopPropagation()}
-      style={{
-        display: 'inline-flex', alignItems: 'center', gap: 3,
-        fontSize: 8, fontWeight: 800, letterSpacing: '0.05em',
-        padding: '2px 6px', borderRadius: 4,
-        background: 'rgba(168,85,247,0.10)', color: C.pump,
-        border: '1px solid rgba(168,85,247,0.25)',
-        textDecoration: 'none', cursor: 'pointer', flexShrink: 0,
-      }}
-    >
-      🚀 PUMP
-    </a>
-  );
-}
-
-function StatPill({ label, value, color }: { label: string; value: string | number; color?: string }) {
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2, minWidth: 54 }}>
-      <span style={{ fontSize: 18, fontWeight: 900, color: color ?? C.accent, fontVariantNumeric: 'tabular-nums' }}>{value}</span>
-      <span style={{ fontSize: 8, fontWeight: 800, letterSpacing: '0.1em', color: C.gray, textTransform: 'uppercase' }}>{label}</span>
-    </div>
-  );
-}
-
-function PctBadge({ value, label }: { value?: number; label: string }) {
-  if (value == null) return null;
-  const pos = value >= 0;
-  return (
-    <div style={{ textAlign: 'center' }}>
-      <div style={{ fontSize: 10, fontWeight: 800, fontVariantNumeric: 'tabular-nums', color: pos ? C.green : C.red }}>
-        {pos ? '+' : ''}{value.toFixed(1)}%
-      </div>
-      <div style={{ fontSize: 8, color: C.gray }}>{label}</div>
-    </div>
-  );
-}
-
-// ── TrackedCard ───────────────────────────────────────────────────────────────
-
-function countdownSustain(sustainStartedAt?: number | null, sustainDurationSec = 600): { text: string; pct: number } {
-  if (!sustainStartedAt) return { text: '0:00 / 10:00', pct: 0 };
-  const elapsedSec = Math.floor((Date.now() - sustainStartedAt) / 1000);
-  const curMin = Math.floor(elapsedSec / 60);
-  const curSec = elapsedSec % 60;
-  const targetMin = Math.floor(sustainDurationSec / 60);
-  const text = `${curMin}:${String(curSec).padStart(2, '0')} / ${targetMin}:00`;
-  const pct = Math.min(100, (elapsedSec / sustainDurationSec) * 100);
-  return { text, pct };
-}
-
-function TrackedCard({ tok, tick }: { tok: TrackedToken; tick: number }) {
-  void tick;
-  const firstSeen   = tok.firstDiscoveredAt || tok.migrationTime || Date.now();
-  const expiresAt   = tok.expiresAt || (firstSeen + 2 * 3600 * 1000);
-  const pctTracking = countdownPct(firstSeen, expiresAt);
-  const remaining   = countdown(expiresAt);
-  const expired     = expiresAt <= Date.now();
-  const hasMarket   = (tok.price ?? 0) > 0;
-
-  const currentMc   = tok.mcap ?? 0;
-  const currentLiq  = tok.liquidity ?? 0;
-  const mcOk        = currentMc >= 30000;
-  const liqOk       = currentLiq >= 15000;
-  const bothMet     = mcOk && liqOk;
-
-  const status      = tok.status ?? (tok.entryTriggered ? 'TRADED' : bothMet ? 'SUSTAINING' : 'WAITING_FOR_THRESHOLDS');
-  const sustain     = countdownSustain(tok.sustainStartedAt);
-
-  const statusColor = status === 'TRADED' || status === 'TRADE_ELIGIBLE' || status === 'SUSTAIN_COMPLETED' ? C.green
-    : status === 'SUSTAINING' ? C.yellow
-    : status === 'SUSTAIN_RESET' ? C.orange
-    : status === 'REJECTED' ? C.red
-    : status === 'EXPIRED' ? C.gray
-    : C.accent;
-
+function TrendPill({ tf, trend }: { tf: string; trend: 'BULLISH' | 'BEARISH' | 'SIDEWAYS' }) {
+  const isBull = trend === 'BULLISH';
+  const isBear = trend === 'BEARISH';
+  const color = isBull ? '#00ff88' : isBear ? '#ff4466' : '#8099bb';
   return (
     <div style={{
-      ...C.card, marginBottom: 10,
-      borderColor: status === 'TRADED' || status === 'TRADE_ELIGIBLE' ? 'rgba(0,255,136,0.3)' : status === 'SUSTAINING' ? 'rgba(255,215,0,0.3)' : 'rgba(255,255,255,0.07)',
+      display: 'inline-flex', alignItems: 'center', gap: 3,
+      padding: '2px 5px', borderRadius: 4, fontSize: 9, fontWeight: 800,
+      background: `${color}15`, color, border: `1px solid ${color}33`
     }}>
-      {/* Top Header */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-        <div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-            <span style={{ fontSize: 14, fontWeight: 900, color: '#e0e8ff' }}>{tok.symbol}</span>
-            <span style={{ fontSize: 9, color: C.gray }}>{tok.name}</span>
-            <span style={{ fontSize: 8, fontWeight: 800, padding: '2px 6px', borderRadius: 4, background: `${statusColor}18`, color: statusColor, border: `1px solid ${statusColor}44` }}>
-              {status}
-            </span>
-            {tok.rugcheckPassed != null && (
-              <span style={{ fontSize: 8, fontWeight: 800, padding: '2px 5px', borderRadius: 4, background: tok.rugcheckPassed ? 'rgba(0,255,136,0.1)' : 'rgba(255,68,102,0.1)', color: tok.rugcheckPassed ? C.green : C.red, border: `1px solid ${tok.rugcheckPassed ? 'rgba(0,255,136,0.25)' : 'rgba(255,68,102,0.25)'}` }}>
-                RugCheck: {tok.rugcheckPassed ? 'PASSED ✅' : 'FAILED ❌'}
-              </span>
-            )}
-          </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 4 }}>
-            <span style={{ fontSize: 9, color: C.gray, fontFamily: 'monospace' }}>{shortAddr(tok.mint)}</span>
-            <DexLink mint={tok.mint} />
-            <PumpLink mint={tok.mint} />
-          </div>
-        </div>
+      <span style={{ fontSize: 8, color: '#4a6080' }}>{tf}:</span>
+      <span>{isBull ? '▲' : isBear ? '▼' : '►'} {trend.slice(0, 4)}</span>
+    </div>
+  );
+}
 
-        <div style={{ textAlign: 'right' }}>
-          <div style={{ fontSize: 12, fontWeight: 900, fontVariantNumeric: 'tabular-nums', color: expired ? C.red : pctTracking > 80 ? C.yellow : '#00d4ff' }}>
-            {remaining}
-          </div>
-          <div style={{ fontSize: 8, color: C.gray }}>2h window remaining</div>
-        </div>
-      </div>
+function ScoreBadge({ score }: { score: number }) {
+  const isHigh = score >= 80;
+  const isMid = score >= 70;
+  const color = isHigh ? '#00ff88' : isMid ? '#ffd700' : '#ff8844';
+  return (
+    <div style={{
+      display: 'inline-flex', alignItems: 'center', gap: 4,
+      padding: '4px 10px', borderRadius: 8,
+      background: `${color}18`, border: `1px solid ${color}44`,
+    }}>
+      <span style={{ fontSize: 13, fontWeight: 900, color, fontVariantNumeric: 'tabular-nums' }}>{score}</span>
+      <span style={{ fontSize: 9, color: '#3a5070', fontWeight: 800 }}>/100</span>
+    </div>
+  );
+}
 
-      {/* 20 EMA Strategy Progress Bar & Status */}
-      <div style={{ margin: '10px 0 8px', padding: '8px 12px', borderRadius: 8, background: 'rgba(0,0,0,0.25)', border: '1px solid rgba(255,255,255,0.06)' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
-          <div style={{ display: 'flex', gap: 12, fontSize: 10 }}>
-            <span style={{ fontWeight: 800, color: tok.ema20Mcap ? C.green : C.yellow }}>
-              📈 20 EMA: {tok.ema20Mcap ? `$${fmtCompact(tok.ema20Mcap)}` : 'Building (20m)'}
-            </span>
-            <span style={{ fontWeight: 800, color: tok.pumpTargetHit ? C.green : '#00bfff' }}>
-              🎯 Target: {tok.pumpTargetMcap ? `$${fmtCompact(tok.pumpTargetMcap)} (+50%)` : 'Pending EMA'}
-            </span>
-          </div>
-          {tok.recent20MinLowMcap ? (
-            <span style={{ fontSize: 9, color: C.red, fontWeight: 700 }}>SL: ${fmtCompact(tok.recent20MinLowMcap)}</span>
-          ) : null}
-        </div>
+export default function DiscoverPage({ status }: Props) {
+  const [filter, setFilter] = useState<string>('ALL');
+  const [selectedSignal, setSelectedSignal] = useState<AltcoinSignal | null>(null);
 
-        {/* 20 EMA Status Messages */}
-        {status === 'BUILDING_EMA' || (tok.candles && tok.candles.length < 20) ? (
+  const signals = status?.signals ?? [];
+  const topOps = status?.topOpportunities ?? [];
+  const stats = status?.stats ?? { totalTracked: 100, watching: 0, nearEntry: 0, entryReady: 0, openPositions: 0 };
+
+  const filteredSignals = signals.filter((s) => {
+    if (filter === 'ALL') return true;
+    if (filter === 'ENTRY_READY') return s.status === 'ENTRY_READY';
+    if (filter === 'NEAR_ENTRY') return s.status === 'NEAR_ENTRY';
+    if (filter === 'WATCHING') return s.status === 'WATCHING';
+    if (filter === 'IN_POSITION') return s.status === 'IN_POSITION';
+    return true;
+  });
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14, maxWidth: 1200, margin: '0 auto' }}>
+      
+      {/* ── Top Dashboard Header ── */}
+      <div style={{
+        background: 'linear-gradient(135deg, rgba(0,212,255,0.08) 0%, rgba(155,89,255,0.08) 100%)',
+        border: '1px solid rgba(0,212,255,0.2)',
+        borderRadius: 14, padding: '16px 20px',
+      }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12, marginBottom: 14 }}>
           <div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 9, marginBottom: 3 }}>
-              <span style={{ color: C.purple, fontWeight: 800 }}>📊 Building 20 EMA (1-min candles)</span>
-              <span style={{ color: '#e0e8ff', fontWeight: 800 }}>{tok.candles ? tok.candles.length : 0} / 20 candles</span>
+            <div style={{ fontSize: 18, fontWeight: 900, color: '#00d4ff', letterSpacing: '0.04em' }}>
+              ⚡ ALTCOIN MARKET SCANNER & AI RADAR
             </div>
-            <div style={{ height: 5, borderRadius: 3, background: 'rgba(255,255,255,0.08)', overflow: 'hidden' }}>
-              <div style={{ width: `${Math.min(100, ((tok.candles?.length || 0) / 20) * 100)}%`, height: '100%', borderRadius: 3, background: 'linear-gradient(90deg, #9b59ff, #00d4ff)', transition: 'width 1s linear' }} />
+            <div style={{ fontSize: 10, color: '#7090b0', marginTop: 3 }}>
+              Tracking ~100 Liquid Non-Meme Altcoins · Multi-Timeframe Trend & Momentum Scoring · Paper Simulation Mode ($100 USD Account)
             </div>
           </div>
-        ) : status === 'WAITING_FOR_PUMP' ? (
-          <div style={{ fontSize: 9, color: '#00bfff', fontWeight: 700 }}>
-            🚀 20 EMA plotted (${fmtCompact(tok.ema20Mcap ?? 0)}). Waiting for +50% pump to ${fmtCompact(tok.pumpTargetMcap ?? 0)}…
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            <span style={{ fontSize: 9, fontWeight: 800, padding: '4px 10px', borderRadius: 6, background: 'rgba(0,255,136,0.12)', color: '#00ff88', border: '1px solid rgba(0,255,136,0.3)' }}>
+              BTC REGIME: BULLISH
+            </span>
+            <span style={{ fontSize: 9, fontWeight: 800, padding: '4px 10px', borderRadius: 6, background: 'rgba(155,89,255,0.12)', color: '#9b59ff', border: '1px solid rgba(155,89,255,0.3)' }}>
+              UNIVERSE: 100 ASSETS
+            </span>
           </div>
-        ) : status === 'PUMP_TARGET_HIT' || tok.pumpTargetHit ? (
-          <div style={{ fontSize: 9, color: '#a855f7', fontWeight: 800 }}>
-            🎯 +50% Pump Target Hit! Waiting for price retrace to 20 EMA (${fmtCompact(tok.ema20Mcap ?? 0)}) to buy 0.10 SOL…
+        </div>
+
+        {/* Primary Metric Pills */}
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 8, paddingTop: 12, borderTop: '1px solid rgba(255,255,255,0.06)' }}>
+          <div style={{ textAlign: 'center' }}>
+            <div style={{ fontSize: 18, fontWeight: 900, color: '#00d4ff' }}>{stats.totalTracked}</div>
+            <div style={{ fontSize: 9, color: '#4a6080', fontWeight: 800, textTransform: 'uppercase' }}>Tracked Assets</div>
           </div>
-        ) : status === 'TRADED' ? (
-          <div style={{ fontSize: 9, color: C.green, fontWeight: 800 }}>
-            ⚡ Executed 0.10 SOL Buy Entry on 20 EMA Retrace! SL: ${fmtCompact(tok.recent20MinLowMcap ?? 0)} (20m Low)
+          <div style={{ textAlign: 'center' }}>
+            <div style={{ fontSize: 18, fontWeight: 900, color: '#9b59ff' }}>{stats.watching}</div>
+            <div style={{ fontSize: 9, color: '#4a6080', fontWeight: 800, textTransform: 'uppercase' }}>Watching</div>
           </div>
-        ) : status === 'RUGCHECK_PENDING' ? (
-          <div style={{ fontSize: 9, color: C.orange, fontStyle: 'italic' }}>
-            ⏳ Initial RugCheck failed — scheduled retry in 5 minutes.
+          <div style={{ textAlign: 'center' }}>
+            <div style={{ fontSize: 18, fontWeight: 900, color: '#ffd700' }}>{stats.nearEntry}</div>
+            <div style={{ fontSize: 9, color: '#4a6080', fontWeight: 800, textTransform: 'uppercase' }}>Near Entry</div>
           </div>
-        ) : status === 'REJECTED' ? (
-          <div style={{ fontSize: 9, color: C.red }}>
-            ❌ Rejected by safety filters — tracking stopped.
+          <div style={{ textAlign: 'center' }}>
+            <div style={{ fontSize: 18, fontWeight: 900, color: '#00ff88' }}>{stats.entryReady}</div>
+            <div style={{ fontSize: 9, color: '#4a6080', fontWeight: 800, textTransform: 'uppercase' }}>Entry Ready</div>
           </div>
-        ) : status === 'EXPIRED' ? (
-          <div style={{ fontSize: 9, color: C.gray }}>
-            ⏰ 120-minute tracking window expired without retrace trade.
+          <div style={{ textAlign: 'center' }}>
+            <div style={{ fontSize: 18, fontWeight: 900, color: '#ff8844' }}>{stats.openPositions}</div>
+            <div style={{ fontSize: 9, color: '#4a6080', fontWeight: 800, textTransform: 'uppercase' }}>In Position</div>
           </div>
-        ) : (
-          <div style={{ fontSize: 9, color: C.gray }}>
-            👀 Tracking token candles and monitoring 20 EMA plotting…
-          </div>
-        )}
+        </div>
       </div>
 
-      {/* Market metrics */}
-      {hasMarket && (
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 6, padding: '6px 10px', borderRadius: 6, background: 'rgba(255,255,255,0.02)' }}>
-          <div style={{ textAlign: 'center' }}>
-            <div style={{ fontSize: 10, fontWeight: 800, color: '#e0e8ff' }}>{fmtPrice(tok.price)}</div>
-            <div style={{ fontSize: 8, color: C.gray }}>price</div>
+      {/* ── Top Opportunities Highlights ── */}
+      {topOps.length > 0 && (
+        <div>
+          <div style={{ fontSize: 11, fontWeight: 800, color: '#9b59ff', letterSpacing: '0.08em', marginBottom: 8, textTransform: 'uppercase' }}>
+            🔥 TOP AI OPPORTUNITIES (HIGHEST SCORES)
           </div>
-          <PctBadge value={tok.priceChange5m} label="5m chg" />
-          <PctBadge value={tok.priceChange1h} label="1h chg" />
-          <PctBadge value={tok.priceChange24h} label="24h chg" />
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 10 }}>
+            {topOps.slice(0, 3).map((sig) => {
+              const b = getStatusBadge(sig.status);
+              return (
+                <div
+                  key={sig.assetId}
+                  onClick={() => setSelectedSignal(sig)}
+                  style={{
+                    background: 'rgba(255,255,255,0.03)',
+                    border: '1px solid rgba(0,212,255,0.25)',
+                    borderRadius: 12, padding: '14px', cursor: 'pointer',
+                    transition: 'transform 0.2s, border-color 0.2s',
+                  }}
+                  className="hover-card"
+                >
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 8 }}>
+                    <div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <span style={{ fontSize: 15, fontWeight: 900, color: '#ffffff' }}>{sig.symbol}</span>
+                        <span style={{ fontSize: 9, color: CATEGORY_COLORS[sig.category] || '#8099bb', fontWeight: 800, padding: '2px 6px', borderRadius: 4, background: `${CATEGORY_COLORS[sig.category] || '#8099bb'}18` }}>
+                          {sig.category}
+                        </span>
+                      </div>
+                      <div style={{ fontSize: 11, color: '#7090b0', marginTop: 2 }}>{sig.name}</div>
+                    </div>
+                    <ScoreBadge score={sig.aiScore} />
+                  </div>
+
+                  <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: 10 }}>
+                    <TrendPill tf="4H" trend={sig.mtfTrend.tf4h} />
+                    <TrendPill tf="1H" trend={sig.mtfTrend.tf1h} />
+                    <TrendPill tf="15M" trend={sig.mtfTrend.tf15m} />
+                    <TrendPill tf="5M" trend={sig.mtfTrend.tf5m} />
+                  </div>
+
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingTop: 8, borderTop: '1px solid rgba(255,255,255,0.05)' }}>
+                    <span style={{ fontSize: 9, fontWeight: 800, padding: '3px 8px', borderRadius: 6, background: b.bg, color: b.color, border: `1px solid ${b.border}` }}>
+                      {b.label}
+                    </span>
+                    <span style={{ fontSize: 11, fontWeight: 800, color: '#00d4ff' }}>
+                      ${sig.price < 1 ? sig.price.toFixed(4) : sig.price.toFixed(2)}
+                    </span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
         </div>
       )}
-    </div>
-  );
-}
 
-// ── Migration event row ───────────────────────────────────────────────────────
-
-function MigrationRow({ ev, last }: { ev: MigrationEvent; last: boolean }) {
-  const instrLabel = ev.instructionType ?? 'migrate';
-  const instrColor = instrLabel === 'pool_create' || instrLabel === 'create_pool'
-    ? C.orange
-    : instrLabel.includes('v2')
-    ? C.pump
-    : '#a0b8d8';
-
-  return (
-    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '7px 0', borderBottom: last ? 'none' : '1px solid rgba(255,255,255,0.04)' }}>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 3, minWidth: 0 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap' }}>
-          <span style={{ fontSize: 8, fontWeight: 800, padding: '1px 5px', borderRadius: 3, background: 'rgba(168,85,247,0.12)', color: instrColor, border: `1px solid ${instrColor}44` }}>
-            {instrLabel.toUpperCase()}
-          </span>
-          {ev.symbol && <span style={{ fontSize: 10, fontWeight: 800, color: '#e0e8ff' }}>{ev.symbol}</span>}
-          {ev.name && <span style={{ fontSize: 8, color: C.gray }}>{ev.name.slice(0, 16)}</span>}
-        </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-          <span style={{ fontSize: 8, color: '#3a5070', fontFamily: 'monospace' }}>
-            {ev.mint.slice(0, 8)}…{ev.mint.slice(-5)}
-          </span>
-          <DexLink mint={ev.mint} />
-          <PumpLink mint={ev.mint} />
-        </div>
+      {/* ── Filter Bar ── */}
+      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center', marginTop: 4 }}>
+        <span style={{ fontSize: 10, fontWeight: 800, color: '#3a5070', marginRight: 4 }}>FILTER BY:</span>
+        {[
+          { id: 'ALL', label: `ALL (${signals.length})` },
+          { id: 'ENTRY_READY', label: `ENTRY READY (${signals.filter(s => s.status === 'ENTRY_READY').length})` },
+          { id: 'NEAR_ENTRY', label: `NEAR ENTRY (${signals.filter(s => s.status === 'NEAR_ENTRY').length})` },
+          { id: 'WATCHING', label: `WATCHING (${signals.filter(s => s.status === 'WATCHING').length})` },
+          { id: 'IN_POSITION', label: `IN POSITION (${signals.filter(s => s.status === 'IN_POSITION').length})` },
+        ].map((f) => (
+          <button
+            key={f.id}
+            onClick={() => setFilter(f.id)}
+            style={{
+              padding: '6px 12px', borderRadius: 8, fontSize: 10, fontWeight: 800,
+              border: filter === f.id ? '1px solid #00d4ff' : '1px solid rgba(255,255,255,0.08)',
+              background: filter === f.id ? 'rgba(0,212,255,0.15)' : 'rgba(255,255,255,0.03)',
+              color: filter === f.id ? '#00d4ff' : '#7090b0',
+              cursor: 'pointer', transition: 'all 0.2s',
+            }}
+          >
+            {f.label}
+          </button>
+        ))}
       </div>
-      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 2, flexShrink: 0, marginLeft: 10 }}>
-        {ev.reserveUsd != null && ev.reserveUsd > 0 && (
-          <span style={{ fontSize: 8, color: C.green, fontWeight: 700 }}>
-            ${ev.reserveUsd >= 1000 ? (ev.reserveUsd / 1000).toFixed(1) + 'k' : ev.reserveUsd.toFixed(0)} liq
-          </span>
+
+      {/* ── Signals & Assets List ── */}
+      <div style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.06)', borderRadius: 12, overflow: 'hidden' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: '2.5fr 1.5fr 1.5fr 2fr 1.5fr 1.5fr', padding: '12px 16px', background: 'rgba(0,0,0,0.3)', borderBottom: '1px solid rgba(255,255,255,0.06)', fontSize: 10, fontWeight: 800, color: '#3a5070', letterSpacing: '0.06em' }}>
+          <div>ASSET</div>
+          <div>PRICE & 24H</div>
+          <div>AI SCORE</div>
+          <div>MTF TRENDS</div>
+          <div>SIGNAL STATE</div>
+          <div>STATUS & THESIS</div>
+        </div>
+
+        {filteredSignals.length === 0 ? (
+          <div style={{ padding: '36px 20px', textAlign: 'center', color: '#4a6080', fontSize: 12 }}>
+            No altcoin signals match the selected filter.
+          </div>
+        ) : (
+          filteredSignals.map((sig) => {
+            const b = getStatusBadge(sig.status);
+            const isPos24h = sig.priceChange24h >= 0;
+            return (
+              <div
+                key={sig.assetId}
+                onClick={() => setSelectedSignal(sig)}
+                style={{
+                  display: 'grid', gridTemplateColumns: '2.5fr 1.5fr 1.5fr 2fr 1.5fr 1.5fr',
+                  padding: '12px 16px', borderBottom: '1px solid rgba(255,255,255,0.04)',
+                  alignItems: 'center', cursor: 'pointer', transition: 'background 0.2s',
+                }}
+                className="hover-row"
+              >
+                {/* Asset */}
+                <div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <span style={{ fontSize: 13, fontWeight: 900, color: '#ffffff' }}>{sig.symbol}</span>
+                    <span style={{ fontSize: 9, color: CATEGORY_COLORS[sig.category] || '#8099bb', fontWeight: 800, padding: '1px 5px', borderRadius: 4, background: `${CATEGORY_COLORS[sig.category] || '#8099bb'}18` }}>
+                      {sig.category}
+                    </span>
+                  </div>
+                  <div style={{ fontSize: 10, color: '#4a6080', marginTop: 1 }}>{sig.name}</div>
+                </div>
+
+                {/* Price */}
+                <div>
+                  <div style={{ fontSize: 12, fontWeight: 800, color: '#ffffff', fontVariantNumeric: 'tabular-nums' }}>
+                    ${sig.price < 1 ? sig.price.toFixed(4) : sig.price.toFixed(2)}
+                  </div>
+                  <div style={{ fontSize: 10, fontWeight: 800, color: isPos24h ? '#00ff88' : '#ff4466' }}>
+                    {isPos24h ? '+' : ''}{sig.priceChange24h.toFixed(1)}% 24h
+                  </div>
+                </div>
+
+                {/* Score */}
+                <div>
+                  <ScoreBadge score={sig.aiScore} />
+                </div>
+
+                {/* MTF Trends */}
+                <div style={{ display: 'flex', gap: 3, flexWrap: 'wrap' }}>
+                  <TrendPill tf="4H" trend={sig.mtfTrend.tf4h} />
+                  <TrendPill tf="1H" trend={sig.mtfTrend.tf1h} />
+                  <TrendPill tf="15M" trend={sig.mtfTrend.tf15m} />
+                  <TrendPill tf="5M" trend={sig.mtfTrend.tf5m} />
+                </div>
+
+                {/* Signal State */}
+                <div>
+                  <span style={{ fontSize: 9, fontWeight: 800, padding: '3px 8px', borderRadius: 6, background: b.bg, color: b.color, border: `1px solid ${b.border}` }}>
+                    {b.label}
+                  </span>
+                </div>
+
+                {/* Missing Condition / Thesis */}
+                <div>
+                  {sig.missingCondition ? (
+                    <span style={{ fontSize: 10, color: '#ffd700', fontStyle: 'italic' }}>
+                      ⚠️ {sig.missingCondition}
+                    </span>
+                  ) : (
+                    <span style={{ fontSize: 10, color: '#00ff88', fontWeight: 700 }}>
+                      ✅ R:R {sig.tradeThesis.riskRewardRatio.toFixed(1)} Setup
+                    </span>
+                  )}
+                </div>
+              </div>
+            );
+          })
         )}
-        <span style={{ fontSize: 8, color: C.gray }}>{timeAgo(ev.ts)}</span>
-      </div>
-    </div>
-  );
-}
-
-// ── Migration Tracker panel ───────────────────────────────────────────────────
-
-function MigrationFeed() {
-  const { data, loading } = useTrackerData();
-
-  const total              = data?.total ?? 0;
-  const events             = data?.recent ?? [];
-  const pollCount          = data?.pollCount ?? 0;
-  const lastAgoSec         = data?.lastPollAgoSec;
-  const failures           = data?.consecutiveFailures ?? 0;
-  const lastError          = data?.lastError ?? null;
-  const heliusSet          = data?.heliusApiKeySet ?? false;
-  const rpc                = data?.rpcEndpoint ?? 'unknown';
-  const tokensPerHour      = data?.tokensPerHour;
-  const txErrRate          = data?.txFetchErrorRate ?? 0;
-  const walletAddr         = data?.walletAddress ?? '39azUYFWPz3VHgKCf3VChUwbpURdCHRxjWVowf5jUJjg';
-
-  const isLive  = failures === 0 && pollCount > 0;
-  const dotColor = loading ? C.gray : failures > 3 ? C.red : failures > 0 ? C.yellow : isLive ? C.green : C.gray;
-  const statusLabel = loading ? 'INIT' : failures > 3 ? 'ERROR' : failures > 0 ? 'WARN' : isLive ? 'LIVE' : 'STARTING';
-
-  return (
-    <div>
-      {/* ── Section header ── */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
-        <span style={{ fontSize: 10, fontWeight: 800, letterSpacing: '0.12em', color: '#5a4080' }}>
-          🚀 PUMP.FUN MIGRATION TRACKER
-        </span>
-        <span style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 9, color: dotColor, fontWeight: 700 }}>
-          <span style={{ display: 'inline-block', width: 6, height: 6, borderRadius: '50%', background: dotColor, boxShadow: `0 0 6px ${dotColor}` }} />
-          {statusLabel}
-        </span>
-        <span style={{ fontSize: 9, color: C.gray, marginLeft: 'auto' }}>
-          {total} total
-        </span>
       </div>
 
-      {/* ── Tracker info card ── */}
-      <div style={{ background: 'rgba(168,85,247,0.04)', border: '1px solid rgba(168,85,247,0.15)', borderRadius: 10, padding: '10px 14px', marginBottom: 14 }}>
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, alignItems: 'center' }}>
-          <div>
-            <div style={{ fontSize: 8, color: C.gray, marginBottom: 2 }}>MIGRATION WALLET</div>
-            <a
-              href={`https://solscan.io/account/${walletAddr}`}
-              target="_blank"
-              rel="noopener noreferrer"
-              style={{ fontSize: 9, fontFamily: 'monospace', color: C.pump, textDecoration: 'none' }}
+      {/* ── Coin Detail Modal ── */}
+      {selectedSignal && (
+        <div
+          onClick={() => setSelectedSignal(null)}
+          style={{
+            position: 'fixed', inset: 0, zIndex: 100, display: 'flex', alignItems: 'center', justifyContent: 'center',
+            padding: 20, background: 'rgba(0,0,0,0.75)', backdropFilter: 'blur(8px)',
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              background: '#0c1220', border: '1px solid rgba(0,212,255,0.3)', borderRadius: 20,
+              padding: 24, width: '100%', maxWidth: 500, boxShadow: '0 24px 64px rgba(0,0,0,0.8)',
+            }}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 16 }}>
+              <div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <span style={{ fontSize: 20, fontWeight: 900, color: '#ffffff' }}>{selectedSignal.symbol}</span>
+                  <span style={{ fontSize: 10, fontWeight: 800, padding: '2px 8px', borderRadius: 6, background: 'rgba(0,212,255,0.15)', color: '#00d4ff' }}>
+                    {selectedSignal.category}
+                  </span>
+                </div>
+                <div style={{ fontSize: 12, color: '#7090b0', marginTop: 2 }}>{selectedSignal.name}</div>
+              </div>
+              <ScoreBadge score={selectedSignal.aiScore} />
+            </div>
+
+            {/* Score Breakdown */}
+            <div style={{ background: 'rgba(255,255,255,0.03)', borderRadius: 10, padding: 12, marginBottom: 16 }}>
+              <div style={{ fontSize: 10, fontWeight: 800, color: '#9b59ff', letterSpacing: '0.08em', marginBottom: 8 }}>
+                AI MODEL SUB-SCORES BREAKDOWN
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8, textAlign: 'center' }}>
+                <div><div style={{ fontSize: 12, fontWeight: 900, color: '#00d4ff' }}>{selectedSignal.scoreBreakdown.trend}/20</div><div style={{ fontSize: 8, color: '#4a6080' }}>Trend</div></div>
+                <div><div style={{ fontSize: 12, fontWeight: 900, color: '#00ff88' }}>{selectedSignal.scoreBreakdown.momentum}/20</div><div style={{ fontSize: 8, color: '#4a6080' }}>Momentum</div></div>
+                <div><div style={{ fontSize: 12, fontWeight: 900, color: '#ffd700' }}>{selectedSignal.scoreBreakdown.volume}/20</div><div style={{ fontSize: 8, color: '#4a6080' }}>Volume</div></div>
+                <div><div style={{ fontSize: 12, fontWeight: 900, color: '#a855f7' }}>{selectedSignal.scoreBreakdown.structure}/20</div><div style={{ fontSize: 8, color: '#4a6080' }}>Structure</div></div>
+                <div><div style={{ fontSize: 12, fontWeight: 900, color: '#ff8844' }}>{selectedSignal.scoreBreakdown.volatility}/10</div><div style={{ fontSize: 8, color: '#4a6080' }}>Volatility</div></div>
+                <div><div style={{ fontSize: 12, fontWeight: 900, color: '#38bdf8' }}>{selectedSignal.scoreBreakdown.htfAlignment}/10</div><div style={{ fontSize: 8, color: '#4a6080' }}>HTF Align</div></div>
+              </div>
+            </div>
+
+            {/* Trade Thesis */}
+            <div style={{ background: 'rgba(0,255,136,0.04)', border: '1px solid rgba(0,255,136,0.15)', borderRadius: 10, padding: 12, marginBottom: 16 }}>
+              <div style={{ fontSize: 10, fontWeight: 800, color: '#00ff88', letterSpacing: '0.08em', marginBottom: 6 }}>
+                TRADE THESIS ({selectedSignal.tradeThesis.side})
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8, fontSize: 11, marginBottom: 8 }}>
+                <div><span style={{ color: '#4a6080' }}>Entry: </span><b style={{ color: '#ffffff' }}>${selectedSignal.tradeThesis.entryPrice < 1 ? selectedSignal.tradeThesis.entryPrice.toFixed(4) : selectedSignal.tradeThesis.entryPrice.toFixed(2)}</b></div>
+                <div><span style={{ color: '#4a6080' }}>Stop Loss: </span><b style={{ color: '#ff4466' }}>${selectedSignal.tradeThesis.stopLoss < 1 ? selectedSignal.tradeThesis.stopLoss.toFixed(4) : selectedSignal.tradeThesis.stopLoss.toFixed(2)}</b></div>
+                <div><span style={{ color: '#4a6080' }}>Take Profit: </span><b style={{ color: '#00ff88' }}>${selectedSignal.tradeThesis.takeProfit < 1 ? selectedSignal.tradeThesis.takeProfit.toFixed(4) : selectedSignal.tradeThesis.takeProfit.toFixed(2)}</b></div>
+              </div>
+              <div style={{ fontSize: 11, color: '#7090b0', lineHeight: 1.5 }}>
+                • <b>Risk/Reward</b>: {selectedSignal.tradeThesis.riskRewardRatio.toFixed(2)}:1 (Risk {selectedSignal.tradeThesis.riskDistancePct.toFixed(1)}% / Target +{selectedSignal.tradeThesis.rewardDistancePct.toFixed(1)}%)<br/>
+                {selectedSignal.tradeThesis.explanation.map((exp, idx) => (
+                  <span key={idx}>• {exp}<br/></span>
+                ))}
+              </div>
+            </div>
+
+            <button
+              onClick={() => setSelectedSignal(null)}
+              style={{
+                width: '100%', padding: 12, borderRadius: 10, background: 'rgba(255,255,255,0.05)',
+                border: '1px solid rgba(255,255,255,0.1)', color: '#7090b0', cursor: 'pointer', fontWeight: 700,
+              }}
             >
-              {walletAddr.slice(0, 8)}…{walletAddr.slice(-6)}
-            </a>
-          </div>
-          <div style={{ width: 1, background: 'rgba(255,255,255,0.07)', alignSelf: 'stretch' }} />
-          <div>
-            <div style={{ fontSize: 8, color: C.gray, marginBottom: 2 }}>RPC</div>
-            <span style={{ fontSize: 9, color: heliusSet ? C.green : C.yellow, fontWeight: 700 }}>
-              {heliusSet ? '⚡ HELIUS' : '🌐 PUBLIC'}
-            </span>
-          </div>
-          <div style={{ width: 1, background: 'rgba(255,255,255,0.07)', alignSelf: 'stretch' }} />
-          <div>
-            <div style={{ fontSize: 8, color: C.gray, marginBottom: 2 }}>POLLS</div>
-            <span style={{ fontSize: 9, color: '#e0e8ff', fontVariantNumeric: 'tabular-nums' }}>{pollCount}</span>
-          </div>
-          <div style={{ width: 1, background: 'rgba(255,255,255,0.07)', alignSelf: 'stretch' }} />
-          <div>
-            <div style={{ fontSize: 8, color: C.gray, marginBottom: 2 }}>LAST POLL</div>
-            <span style={{ fontSize: 9, color: lastAgoSec == null ? C.gray : lastAgoSec < 5 ? C.green : lastAgoSec < 15 ? C.yellow : C.red, fontVariantNumeric: 'tabular-nums' }}>
-              {lastAgoSec == null ? 'never' : `${lastAgoSec}s ago`}
-            </span>
+              Close
+            </button>
           </div>
         </div>
-
-        {failures > 0 && lastError && (
-          <div style={{ marginTop: 8, fontSize: 9, color: failures > 3 ? C.red : C.yellow, padding: '5px 8px', borderRadius: 6, background: failures > 3 ? 'rgba(255,68,68,0.07)' : 'rgba(255,200,0,0.07)', border: `1px solid ${failures > 3 ? 'rgba(255,68,68,0.2)' : 'rgba(255,200,0,0.2)'}` }}>
-            {failures > 3 ? '⛔' : '⚠'} {lastError} ({failures} consecutive failures)
-          </div>
-        )}
-      </div>
-
-      {/* ── Migration event list ── */}
-      <div style={{ background: 'rgba(168,85,247,0.03)', border: '1px solid rgba(168,85,247,0.12)', borderRadius: 10, padding: '10px 14px' }}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
-          <span style={{ fontSize: 8, fontWeight: 800, letterSpacing: '0.1em', color: C.pump }}>
-            GRADUATED TOKENS ({total})
-          </span>
-          <span style={{ fontSize: 8, color: C.gray }}>polling every 1s</span>
-        </div>
-
-        {events.length === 0 ? (
-          <div style={{ padding: '20px 0', textAlign: 'center', color: C.gray, fontSize: 11 }}>
-            {loading
-              ? 'Initialising tracker…'
-              : pollCount === 0
-              ? 'Waiting for first poll…'
-              : 'No migrations detected yet — watching wallet'}
-          </div>
-        ) : (
-          events.slice(0, 15).map((ev, i) => (
-            <MigrationRow key={ev.mint + i} ev={ev} last={i === Math.min(events.length, 15) - 1} />
-          ))
-        )}
-      </div>
-    </div>
-  );
-}
-
-// ── Main page ─────────────────────────────────────────────────────────────────
-
-export default function DiscoverPage({ sniperStatus: wsProp, wsConnected = false }: Props) {
-  const polled = useSniperStatusFallback(wsConnected);
-  const status = wsConnected ? (wsProp ?? polled) : (polled ?? wsProp);
-
-  const [tick, setTick] = useState(0);
-  useEffect(() => {
-    const id = setInterval(() => setTick(t => t + 1), 1_000);
-    return () => clearInterval(id);
-  }, []);
-
-  const now      = Date.now();
-  const tracked  = (status?.trackedTokens ?? []).filter(t => (t.expiresAt ?? 0) > now || t.entryTriggered || t.sustainStartedAt);
-  const stats    = status?.stats as any ?? {};
-
-  return (
-    <div>
-      {/* ── Strategy Header ── */}
-      <div style={{ ...C.card, marginBottom: 16, background: 'linear-gradient(135deg,rgba(0,191,255,0.06),rgba(123,94,167,0.06))', borderColor: 'rgba(0,191,255,0.2)' }}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 }}>
-          <div>
-            <div style={{ fontSize: 18, fontWeight: 900, color: C.accent, letterSpacing: '0.04em' }}>🚀 20 EMA RETRACE STRATEGY</div>
-            <div style={{ fontSize: 9, color: C.gray, marginTop: 2 }}>Pump.fun Migrations · 20-Min 1m EMA · Min +50% Pump · 20 EMA Retrace Entry</div>
-          </div>
-          <div style={{ textAlign: 'right', fontSize: 9, color: C.gray }}>
-            SOL<br />
-            <span style={{ fontSize: 13, fontWeight: 800, color: '#e0e8ff' }}>${status?.solPriceUsd?.toFixed(0) ?? '—'}</span>
-          </div>
-        </div>
-
-        {/* Primary Strategy Metrics */}
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', padding: '10px 0', borderTop: '1px solid rgba(255,255,255,0.06)', borderBottom: '1px solid rgba(255,255,255,0.06)', gap: 4 }}>
-          <StatPill label="Discovered"  value={stats.discovered ?? stats.pending ?? 0} color={C.accent} />
-          <StatPill label="Tracking"    value={stats.tracking ?? tracked.length} />
-          <StatPill label="Building EMA" value={stats.sustaining ?? 0}                  color={C.yellow} />
-          <StatPill label="Target Hit"  value={stats.tradeEligible ?? 0}               color={C.purple} />
-          <StatPill label="Traded"      value={stats.tradesExecuted ?? 0}              color="#00ff88" />
-        </div>
-
-        <div style={{ marginTop: 12, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-          {[
-            { label: 'Pump.fun Migrations',    color: 'rgba(168,85,247,0.18)' },
-            { label: 'RugCheck Filter',        color: 'rgba(0,255,136,0.15)' },
-            { label: '20-Min 1m EMA Plotting', color: 'rgba(0,191,255,0.18)' },
-            { label: 'Min +50% Pump Target',   color: 'rgba(255,215,0,0.18)' },
-            { label: '20 EMA Retrace Buy',     color: 'rgba(0,255,136,0.18)' },
-            { label: 'Recent 20m Low SL',      color: 'rgba(255,68,102,0.18)' },
-            { label: '120-Min Tracking Cap',   color: 'rgba(255,255,255,0.08)' },
-          ].map(({ label, color }) => (
-            <span key={label} style={{ fontSize: 8, fontWeight: 700, padding: '2px 7px', borderRadius: 4, background: color, color: '#c0c8e0', border: '1px solid rgba(255,255,255,0.08)' }}>{label}</span>
-          ))}
-        </div>
-      </div>
-
-      {/* ── Tracked Tokens ── */}
-      <div style={{ marginBottom: 16 }}>
-        <div style={{ ...C.label, marginBottom: 8 }}>
-          TRACKED TOKENS — 1HR WATCH WINDOW {tracked.length > 0 && `(${tracked.length})`}
-        </div>
-        {tracked.length === 0 ? (
-          <div style={{ ...C.card, color: C.gray, fontSize: 11, textAlign: 'center', padding: '24px 16px' }}>
-            Watching for qualified wallet consensus…<br />
-            <span style={{ fontSize: 9, color: '#2a3a50', marginTop: 6, display: 'block' }}>
-              Each graduated token tracked 1 hour for buyer wallet scoring
-            </span>
-          </div>
-        ) : (
-          tracked
-            .slice()
-            .sort((a, b) => b.buyerActivity.length - a.buyerActivity.length || b.migrationTime - a.migrationTime)
-            .map(tok => <TrackedCard key={tok.mint} tok={tok} tick={tick} />)
-        )}
-      </div>
-
-      {/* ── Migration tracker feed ── */}
-      <MigrationFeed />
+      )}
     </div>
   );
 }

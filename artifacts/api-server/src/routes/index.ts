@@ -3,8 +3,10 @@ import scannerRouter from './scanner.js';
 import settingsRouter from './settings.js';
 import sniperRouter from './sniper.js';
 import diagnosticsRouter from './diagnostics.js';
+import altcoinRouter from './altcoin.js';
 import { getTrenchesDiagnostics } from '../services/trenches.service.js';
 import { isHeliusCoolingDown, heliusCooldownRemainingMs } from '../lib/helius-limiter.js';
+import { resetPaperPortfolio } from '../services/altcoin-paper.service.js';
 
 const router = Router();
 
@@ -46,6 +48,13 @@ router.get('/config', (_req, res) => {
   res.json({ wsUrl });
 });
 
+router.post('/portfolio/reset', async (req, res) => {
+  const { initialBalanceUsd } = req.body as { initialBalanceUsd?: number };
+  const portfolio = await resetPaperPortfolio(initialBalanceUsd);
+  res.json({ success: true, portfolio });
+});
+
+router.use('/altcoin', altcoinRouter);
 router.use('/scanner', scannerRouter);
 router.use('/settings', settingsRouter);
 router.use('/sniper', sniperRouter);

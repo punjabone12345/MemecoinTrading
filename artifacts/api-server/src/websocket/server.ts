@@ -15,18 +15,18 @@ export function initWebSocket(server: Server): void {
     ws.on('close', () => logger.debug('WS client disconnected'));
     ws.on('pong', () => { (ws as WebSocket & { isAlive?: boolean }).isAlive = true; });
 
-    // Push current state immediately so the UI doesn't wait for the next broadcast cycle
     try {
-      const { getSniperStatus } = await import('../services/sniper-engine.service.js');
+      const { processPaperTradingEngine } = await import('../services/altcoin-paper.service.js');
       const { getBalance, getSettings } = await import('../services/settings.service.js');
 
-      const [sniperStatus, balance, settings] = await Promise.all([
-        Promise.resolve(getSniperStatus()),
+      const [status, balance, settings] = await Promise.all([
+        processPaperTradingEngine(),
         getBalance(),
         getSettings(),
       ]);
 
-      safeSend(ws, { type: 'sniper_status' as any, data: sniperStatus });
+      safeSend(ws, { type: 'altcoin_status', data: status });
+      safeSend(ws, { type: 'sniper_status', data: status });
       safeSend(ws, { type: 'balance', data: { balance } });
       safeSend(ws, { type: 'settings', data: settings });
     } catch (err) {
@@ -34,7 +34,18 @@ export function initWebSocket(server: Server): void {
     }
   });
 
-  // Keepalive ping every 30s — prevents Replit proxy from dropping idle connections
+  setInterval(async () => {
+    if (!wss || wss.clients.size === 0) return;
+    try {
+      const { processPaperTradingEngine } = await import('../services/altcoin-paper.service.js');
+      const status = await processPaperTradingEngine();
+      broadcast({ type: 'altcoin_status', data: status });
+      broadcast({ type: 'sniper_status', data: status });
+    } catch (err) {
+      logger.debug({ err }, 'WS periodic broadcast failed');
+    }
+  }, 3_000);
+
   setInterval(() => {
     if (!wss) return;
     for (const ws of wss.clients) {

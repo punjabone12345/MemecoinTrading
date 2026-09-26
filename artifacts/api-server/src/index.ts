@@ -2,8 +2,8 @@ import http from 'http';
 import app from './app.js';
 import { initDB } from './lib/db.js';
 import { initWebSocket } from './websocket/server.js';
+import { startAltcoinScanner } from './services/altcoin-market.service.js';
 import { startTrenchesScanner, setOnGraduation } from './services/trenches.service.js';
-// Discovery is now DexScreener token-profiles based — no on-chain imports needed
 import { startSniperEngine, addGraduatedToken } from './services/sniper-engine.service.js';
 import { startTelegramCommands, stopTelegramCommands } from './lib/telegram-commands.js';
 import { initSessionManager } from './lib/session-manager.js';
@@ -48,7 +48,10 @@ async function main(): Promise<void> {
     logger.error({ err }, 'HTTP server runtime error');
   });
 
-  // Wire GMGN token discovery → sniper engine
+  // Start Altcoin Market Scanner & Paper Trading Engine
+  startAltcoinScanner().catch((err) => logger.error({ err }, 'Failed to start altcoin scanner'));
+
+  // Wire GMGN token discovery → sniper engine (kept for legacy support if needed)
   setOnGraduation(addGraduatedToken);
   startTrenchesScanner();
   await startSniperEngine();

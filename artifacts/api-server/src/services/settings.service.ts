@@ -1,13 +1,10 @@
 import { query } from '../lib/db.js';
 import { Settings } from '../types/index.js';
 
-// In-memory settings cache — avoids a DB round-trip on every 1s check tick.
-// Invalidated immediately on any write (updateSetting/updateSettings).
 let settingsCache: Settings | null = null;
 let settingsCacheAt = 0;
-const SETTINGS_CACHE_TTL = 8_000; // 8 seconds
+const SETTINGS_CACHE_TTL = 8_000;
 
-// Balance cache — refreshed every 5s instead of every 1s tick
 let balanceCache: number | null = null;
 let balanceCacheAt = 0;
 const BALANCE_CACHE_TTL = 5_000;
@@ -31,45 +28,18 @@ export async function getSettings(): Promise<Settings> {
 
   const num = (k: string, def: number) => parseFloat(map[k] ?? String(def));
   const bool = (k: string, def: boolean) => (map[k] ?? String(def)) === 'true';
-  const str = (k: string, def: string) => map[k] ?? def;
 
   const settings: Settings = {
     botEnabled: bool('botEnabled', true),
-    startingBalanceSol: num('startingBalanceSol', 10),
-    currentBalanceSol: num('currentBalanceSol', 10),
-    rpcEndpoint: str('rpcEndpoint', 'https://api.mainnet-beta.solana.com'),
-    slippagePct: num('slippagePct', 1),
-    priorityFeeSol: num('priorityFeeSol', 0.001),
-    walletPublicKey: str('walletPublicKey', ''),
-    sniperSlippagePct: num('sniperSlippagePct', 20),
-    sniperStagnationPct: num('sniperStagnationPct', 5),
-    tradingWindowEnabled: bool('tradingWindowEnabled', false),
-    tradingWindowStart: str('tradingWindowStart', '17:00'),
-    tradingWindowEnd: str('tradingWindowEnd', '00:00'),
-    // 20 EMA Strategy Configs
-    positionSizeSol: num('positionSizeSol', 0.10),
-    emaPeriodMinutes: num('emaPeriodMinutes', 20),
-    pumpTargetPct: num('pumpTargetPct', 50),
-    rugcheckRetryDelayMin: num('rugcheckRetryDelayMin', 5),
-    fakeSetupSpikeCapUsd: num('fakeSetupSpikeCapUsd', 200000),
-    tp1Pct: num('tp1Pct', 100),       tp1ExitPct: num('tp1ExitPct', 30),
-    tp2Pct: num('tp2Pct', 250),       tp2ExitPct: num('tp2ExitPct', 40),       trailingSLPct: num('trailingSLPct', 30),
-    tp3Pct: num('tp3Pct', 400),       tp3ExitPct: num('tp3ExitPct', 30),
-    // Sniper TP tier configs
-    wt1Tp1Pct: num('wt1Tp1Pct', 100),  wt1Tp1Exit: num('wt1Tp1Exit', 30),
-    wt1Tp2Pct: num('wt1Tp2Pct', 250),  wt1Tp2Exit: num('wt1Tp2Exit', 40),  wt1Tp2Trail: num('wt1Tp2Trail', 30),
-    wt1Tp3Pct: num('wt1Tp3Pct', 400),  wt1Tp3Exit: num('wt1Tp3Exit', 30),  wt1Tp3Trail: num('wt1Tp3Trail', 30),
-    wt2Tp1Pct: num('wt2Tp1Pct', 100),  wt2Tp1Exit: num('wt2Tp1Exit', 30),
-    wt2Tp2Pct: num('wt2Tp2Pct', 250),  wt2Tp2Exit: num('wt2Tp2Exit', 40),  wt2Tp2Trail: num('wt2Tp2Trail', 30),
-    wt2Tp3Pct: num('wt2Tp3Pct', 400),  wt2Tp3Exit: num('wt2Tp3Exit', 30),  wt2Tp3Trail: num('wt2Tp3Trail', 30),
-    wt3Tp1Pct: num('wt3Tp1Pct', 100),  wt3Tp1Exit: num('wt3Tp1Exit', 30),
-    wt3Tp2Pct: num('wt3Tp2Pct', 250),  wt3Tp2Exit: num('wt3Tp2Exit', 40),  wt3Tp2Trail: num('wt3Tp2Trail', 30),
-    wt3Tp3Pct: num('wt3Tp3Pct', 400),  wt3Tp3Exit: num('wt3Tp3Exit', 30),  wt3Tp3Trail: num('wt3Tp3Trail', 30),
-    minLiquidity: num('minLiquidity', 15000),
-    minMc: num('minMc', 30000),
-    sustainDurationSec: num('sustainDurationSec', 600),
-    maxTrackingDurationMin: num('maxTrackingDurationMin', 120),
+    startingBalanceUsd: num('startingBalanceUsd', 100),
+    currentBalanceUsd: num('currentBalanceUsd', 100),
+    riskPerTradePct: num('riskPerTradePct', 0.5),
     maxOpenPositions: num('maxOpenPositions', 5),
+    minAiScore: num('minAiScore', 75),
+    minRiskRewardRatio: num('minRiskRewardRatio', 2.0),
+    universeSize: num('universeSize', 100),
+    paperTradingOnly: bool('paperTradingOnly', true),
+    liveTradingEnabled: false,
   };
 
   settingsCache = settings;
@@ -98,58 +68,45 @@ export async function getBalance(): Promise<number> {
   if (balanceCache !== null && now - balanceCacheAt < BALANCE_CACHE_TTL) {
     return balanceCache;
   }
-  const rows = await query<{ value: string }>(`SELECT value FROM settings WHERE key = 'currentBalanceSol'`);
-  const balance = parseFloat(rows[0]?.value ?? '10');
+  const rows = await query<{ value: string }>(`SELECT value FROM settings WHERE key = 'currentBalanceUsd'`);
+  const balance = parseFloat(rows[0]?.value ?? '100');
   balanceCache = balance;
   balanceCacheAt = now;
   return balance;
 }
 
-export async function setBalance(sol: number): Promise<void> {
-  balanceCache = sol;
+export async function setBalance(usd: number): Promise<void> {
+  balanceCache = usd;
   balanceCacheAt = Date.now();
-  await updateSetting('currentBalanceSol', String(sol));
+  await updateSetting('currentBalanceUsd', String(usd));
 }
 
-// Serializes all balance read-modify-write operations so concurrent callers
-// (sniper-engine.service.ts) can never race and silently clobber each other's
-// balance updates.
 let balanceMutex: Promise<unknown> = Promise.resolve();
 
 function withBalanceLock<T>(fn: () => Promise<T>): Promise<T> {
   const run = balanceMutex.then(fn, fn);
-  // Swallow errors here so a failed op doesn't permanently block the queue;
-  // the actual error still propagates to the caller via `run`.
   balanceMutex = run.catch(() => undefined);
   return run;
 }
 
-/**
- * Atomically adjusts the current balance by `deltaSol` (positive or negative),
- * always reading the freshest DB value (bypassing the cache) under a lock so
- * concurrent adjustments never overwrite each other. Returns the new balance.
- * If `floorAtZero` is true (default), the result is clamped to >= 0.
- */
-export async function adjustBalance(deltaSol: number, floorAtZero = true): Promise<number> {
+export async function adjustBalance(deltaUsd: number, floorAtZero = true): Promise<number> {
   return withBalanceLock(async () => {
-    const rows = await query<{ value: string }>(`SELECT value FROM settings WHERE key = 'currentBalanceSol'`);
-    const current = parseFloat(rows[0]?.value ?? '10');
-    let next = current + deltaSol;
+    const rows = await query<{ value: string }>(`SELECT value FROM settings WHERE key = 'currentBalanceUsd'`);
+    const current = parseFloat(rows[0]?.value ?? '100');
+    let next = current + deltaUsd;
     if (floorAtZero) next = Math.max(0, next);
     balanceCache = next;
     balanceCacheAt = Date.now();
-    await updateSetting('currentBalanceSol', String(next));
+    await updateSetting('currentBalanceUsd', String(next));
     return next;
   });
 }
 
 export async function resetAllData(): Promise<void> {
-  await query(`DELETE FROM sniper_positions`);
-  await query(`DELETE FROM traded_mints`).catch(() => {});
-  await query(`DELETE FROM slippage_skipped_mints`).catch(() => {});
-  const rows = await query<{ value: string }>(`SELECT value FROM settings WHERE key = 'startingBalanceSol'`);
-  const start = parseFloat(rows[0]?.value ?? '10');
+  await query(`DELETE FROM paper_positions`).catch(() => {});
+  const rows = await query<{ value: string }>(`SELECT value FROM settings WHERE key = 'startingBalanceUsd'`);
+  const start = parseFloat(rows[0]?.value ?? '100');
   balanceCache = start;
   balanceCacheAt = Date.now();
-  await updateSetting('currentBalanceSol', String(start));
+  await updateSetting('currentBalanceUsd', String(start));
 }

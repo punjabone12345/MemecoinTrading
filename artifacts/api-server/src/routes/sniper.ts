@@ -1,60 +1,52 @@
 import { Router } from 'express';
+import { getAltcoinStatus } from '../services/altcoin-market.service.js';
 import {
-  getSniperStatus,
-  manualCloseSniperPosition,
-  editSniperPositionFields,
-  deleteSniperPositionById,
-  editClosedSniperPositionById,
-  deleteClosedSniperPositionById,
-} from '../services/sniper-engine.service.js';
+  closePaperPosition,
+  getPaperPositions,
+  getClosedPositions,
+  resetPaperPortfolio,
+} from '../services/altcoin-paper.service.js';
 
 const router = Router();
 
 // ── Status ────────────────────────────────────────────────────────────────────
-router.get('/status', (_req, res) => {
-  res.json(getSniperStatus());
+router.get('/status', async (_req, res) => {
+  try {
+    const status = await getAltcoinStatus();
+    res.json(status);
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || 'Failed to fetch status' });
+  }
 });
 
 // ── Open position management ──────────────────────────────────────────────────
 
-/** Close an open sniper position at its last known price */
+/** Close an open paper position at its last known price */
 router.post('/:id/close', async (req, res) => {
   const { reason } = req.body as { reason?: string };
-  const ok = await manualCloseSniperPosition(req.params.id, reason?.trim() || 'Manual close');
-  if (!ok) { res.status(404).json({ error: 'Position not found or already closed' }); return; }
+  const ok = await closePaperPosition(req.params.id, reason?.trim() || 'Manual user close');
+  if (!ok) {
+    res.status(404).json({ error: 'Position not found or already closed' });
+    return;
+  }
   res.json({ success: true });
 });
 
-/** Edit fields of an open sniper position (entryPrice, currentSLPrice, triggerAmountUsd) */
-router.patch('/:id', (req, res) => {
-  const updates = req.body as { entryPrice?: number; currentSLPrice?: number; triggerAmountUsd?: number };
-  const pos = editSniperPositionFields(req.params.id, updates);
-  if (!pos) { res.status(404).json({ error: 'Position not found' }); return; }
-  res.json(pos);
+/** List open paper positions */
+router.get('/positions', (_req, res) => {
+  res.json(getPaperPositions());
 });
 
-/** Delete an open sniper position and refund remaining SOL to balance */
-router.delete('/:id', async (req, res) => {
-  const ok = await deleteSniperPositionById(req.params.id);
-  if (!ok) { res.status(404).json({ error: 'Position not found' }); return; }
-  res.json({ success: true });
+/** List closed paper positions */
+router.get('/positions/closed', (_req, res) => {
+  res.json(getClosedPositions());
 });
 
-// ── Closed position management ────────────────────────────────────────────────
-
-/** Edit a closed sniper position (closeReason, closePnlPct) */
-router.patch('/closed/:id', async (req, res) => {
-  const updates = req.body as { closeReason?: string; closePnlPct?: number };
-  const pos = await editClosedSniperPositionById(req.params.id, updates);
-  if (!pos) { res.status(404).json({ error: 'Closed position not found' }); return; }
-  res.json(pos);
-});
-
-/** Delete a closed sniper position record */
-router.delete('/closed/:id', async (req, res) => {
-  const ok = await deleteClosedSniperPositionById(req.params.id);
-  if (!ok) { res.status(404).json({ error: 'Closed position not found' }); return; }
-  res.json({ success: true });
+/** Reset paper portfolio back to initial state */
+router.post('/reset', async (req, res) => {
+  const { initialBalanceUsd } = req.body as { initialBalanceUsd?: number };
+  const portfolio = await resetPaperPortfolio(initialBalanceUsd);
+  res.json({ success: true, portfolio });
 });
 
 export default router;

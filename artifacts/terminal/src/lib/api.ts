@@ -27,30 +27,28 @@ export const api = {
   resetAll:         () => apiFetch<{ success: boolean; balance: number }>('/settings/reset', { method: 'POST' }),
   getConfig:        () => apiFetch<{ wsUrl: string | null }>('/config'),
 
-  // ── Discovery ──────────────────────────────────────────────────────────────
-  getScannerSources: () => apiFetch<{
-    dexscreener: {
-      total: number;
-      recent: { mint: string; ts: number; description?: string; icon?: string; isMigration: boolean; discoverySource?: string }[];
-    };
-  }>('/scanner/sources'),
+  // ── Altcoin Trading Engine ──────────────────────────────────────────────────
+  getAltcoinStatus: () => apiFetch<AltcoinStatusResponse>('/altcoin/status'),
+  getAltcoinAssets: () => apiFetch<{ assets: AltcoinAsset[] }>('/altcoin/assets'),
+  getAltcoinSignals: () => apiFetch<{ signals: AltcoinSignal[] }>('/altcoin/signals'),
+  getPaperPortfolio: () => apiFetch<PaperPortfolio>('/altcoin/portfolio'),
+  closeAltcoinPosition: (id: string, reason?: string) =>
+    apiFetch<{ success: boolean; portfolio?: PaperPortfolio }>(`/altcoin/close/${id}`, {
+      method: 'POST',
+      body: JSON.stringify({ reason }),
+    }),
+  resetAltcoinPortfolio: (initialBalanceUsd?: number) =>
+    apiFetch<{ success: boolean; portfolio: PaperPortfolio }>('/altcoin/reset', {
+      method: 'POST',
+      body: JSON.stringify({ initialBalanceUsd }),
+    }),
+  getAltcoinLearning: () => apiFetch<LearningMetrics>('/altcoin/learning'),
+  getAltcoinHealth: () => apiFetch<SystemHealth>('/altcoin/health'),
 
-  // ── Sniper engine — read ───────────────────────────────────────────────────
-  getSniperStatus: () => apiFetch<SniperStatus>('/sniper/status'),
-
-  // ── Sniper engine — open position management ───────────────────────────────
+  // ── Legacy Sniper compatibility ──────────────────────────────────────────────
+  getSniperStatus: () => apiFetch<AltcoinStatusResponse>('/sniper/status'),
   closeSniperPosition: (id: string, reason?: string) =>
     apiFetch<{ success: boolean }>(`/sniper/${id}/close`, { method: 'POST', body: JSON.stringify({ reason }) }),
-  editSniperPosition:  (id: string, updates: { entryPrice?: number; currentSLPrice?: number; triggerAmountUsd?: number }) =>
-    apiFetch<SniperPosition>(`/sniper/${id}`, { method: 'PATCH', body: JSON.stringify(updates) }),
-  deleteSniperPosition: (id: string) =>
-    apiFetch<{ success: boolean }>(`/sniper/${id}`, { method: 'DELETE' }),
-
-  // ── Sniper engine — closed position management ─────────────────────────────
-  editClosedSniperPosition:   (id: string, updates: { closeReason?: string; closePnlPct?: number }) =>
-    apiFetch<ClosedSniperPosition>(`/sniper/closed/${id}`, { method: 'PATCH', body: JSON.stringify(updates) }),
-  deleteClosedSniperPosition: (id: string) =>
-    apiFetch<{ success: boolean }>(`/sniper/closed/${id}`, { method: 'DELETE' }),
 
   // ── Diagnostics ────────────────────────────────────────────────────────────
   getDiagTokens: (opts?: { status?: string; limit?: number; offset?: number; since?: number }) => {
