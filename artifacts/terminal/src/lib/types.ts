@@ -9,6 +9,36 @@ export interface Settings {
   universeSize: number;
   paperTradingOnly: boolean;
   liveTradingEnabled: boolean;
+
+  // Optional / legacy fields
+  startingBalanceSol?: number;
+  currentBalanceSol?: number;
+  positionSizeSol?: number;
+  sniperSlippagePct?: number;
+  sniperStagnationPct?: number;
+  tradingWindowEnabled?: boolean;
+  tradingWindowStart?: string;
+  tradingWindowEnd?: string;
+  emaPeriodMinutes?: number;
+  pumpTargetPct?: number;
+  rugcheckRetryDelayMin?: number;
+  fakeSetupSpikeCapUsd?: number;
+  maxTrackingDurationMin?: number;
+  rpcEndpoint?: string;
+  slippagePct?: number;
+  priorityFeeSol?: number;
+  walletPublicKey?: string;
+  tp1Pct?: number;
+  tp1ExitPct?: number;
+  tp2Pct?: number;
+  tp2ExitPct?: number;
+  tp3Pct?: number;
+  tp3ExitPct?: number;
+  trailingSLPct?: number;
+  minLiquidity?: number;
+  minMc?: number;
+  sustainDurationSec?: number;
+  [key: string]: any;
 }
 
 export interface AltcoinAsset {

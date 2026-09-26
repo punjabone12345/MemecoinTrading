@@ -172,7 +172,12 @@ export async function processPaperTradingEngine(inputSignals?: AltcoinSignal[]):
       watching: signals.filter(s => s.status === 'WATCHING').length,
       nearEntry: signals.filter(s => s.status === 'NEAR_ENTRY').length,
       entryReady: signals.filter(s => s.status === 'ENTRY_READY').length,
-      openPositions: openPositions.length
+      openPositions: openPositions.length,
+      tracking: signals.length,
+      positions: openPositions.length,
+      pending: 0,
+      queued: 0,
+      discovered: signals.length
     }
   };
 }
