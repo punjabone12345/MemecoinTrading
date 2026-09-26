@@ -6,7 +6,7 @@ if [ -z "$GITHUB_TOKEN" ]; then
   exit 1
 fi
 
-REMOTE="https://punjabone12345:${GITHUB_TOKEN}@github.com/punjabone12345/MemecoinTrading.git"
+REMOTE="https://punjabone12345:${GITHUB_TOKEN}@github.com/punjabone12345/Memecointradingbot2.git"
 
 echo "🔧  Setting authenticated remote..."
 git remote set-url origin "$REMOTE"
@@ -21,7 +21,7 @@ echo "⬆️   Pushing merged history to GitHub..."
 git push origin main
 
 echo "🔒  Restoring clean remote URL..."
-git remote set-url origin "https://github.com/punjabone12345/MemecoinTrading.git"
+git remote set-url origin "https://github.com/punjabone12345/Memecointradingbot2.git"
 
 echo ""
 echo "✅  Done! Both sets of commits are now on GitHub."
