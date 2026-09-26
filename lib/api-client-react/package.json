@@ -7,8 +7,7 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@tanstack/react-query": "catalog:",
-    "@types/node": "catalog:"
+    "@tanstack/react-query": "catalog:"
   },
   "devDependencies": {
     "@types/node": "catalog:"
