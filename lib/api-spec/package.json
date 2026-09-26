@@ -6,6 +6,7 @@
     "codegen": "orval --config ./orval.config.ts && pnpm -w run typecheck:libs"
   },
   "devDependencies": {
+    "@types/node": "catalog:",
     "orval": "^8.5.2"
   }
 }
