@@ -90,22 +90,22 @@ export default function SettingsPage({ settings: init, onUpdate }: Props) {
             <input
               type="number"
               step="0.1"
-              value={settings.riskPerTradePct ?? 0.5}
-              onChange={(e) => update('riskPerTradePct', parseFloat(e.target.value) || 0.5)}
+              value={settings.riskPerTradePct ?? 1.0}
+              onChange={(e) => update('riskPerTradePct', parseFloat(e.target.value) || 1.0)}
               style={{ width: '100%', padding: '10px 12px', borderRadius: 8, background: '#0a101d', border: '1px solid rgba(255,255,255,0.1)', color: '#ffffff', fontSize: 13, fontWeight: 700 }}
             />
-            <div style={{ fontSize: 10, color: '#4a6080', marginTop: 2 }}>Max capital lost if Stop Loss is hit (Default: 0.5% = $0.50 USD per trade on $100 account).</div>
+            <div style={{ fontSize: 10, color: '#4a6080', marginTop: 2 }}>Max capital lost if Stop Loss is hit (Default: 1.0% = $1.00 USD per trade on $100 account).</div>
           </div>
 
           <div>
             <div style={{ fontSize: 11, color: '#7090b0', fontWeight: 700, marginBottom: 4 }}>MAX OPEN POSITIONS</div>
             <input
               type="number"
-              value={settings.maxOpenPositions ?? 5}
-              onChange={(e) => update('maxOpenPositions', parseInt(e.target.value, 10) || 5)}
+              value={settings.maxOpenPositions ?? 2}
+              onChange={(e) => update('maxOpenPositions', parseInt(e.target.value, 10) || 2)}
               style={{ width: '100%', padding: '10px 12px', borderRadius: 8, background: '#0a101d', border: '1px solid rgba(255,255,255,0.1)', color: '#ffffff', fontSize: 13, fontWeight: 700 }}
             />
-            <div style={{ fontSize: 10, color: '#4a6080', marginTop: 2 }}>Maximum concurrent open positions allowed (Default: 5).</div>
+            <div style={{ fontSize: 10, color: '#4a6080', marginTop: 2 }}>Maximum concurrent open positions allowed for quality over quantity (Default: 2).</div>
           </div>
         </div>
       </div>
@@ -121,11 +121,11 @@ export default function SettingsPage({ settings: init, onUpdate }: Props) {
             <div style={{ fontSize: 11, color: '#7090b0', fontWeight: 700, marginBottom: 4 }}>MINIMUM AI SCORE FOR ENTRY (0 - 100)</div>
             <input
               type="number"
-              value={settings.minAiScore ?? 75}
-              onChange={(e) => update('minAiScore', parseInt(e.target.value, 10) || 75)}
+              value={settings.minAiScore ?? 88}
+              onChange={(e) => update('minAiScore', parseInt(e.target.value, 10) || 88)}
               style={{ width: '100%', padding: '10px 12px', borderRadius: 8, background: '#0a101d', border: '1px solid rgba(255,255,255,0.1)', color: '#ffffff', fontSize: 13, fontWeight: 700 }}
             />
-            <div style={{ fontSize: 10, color: '#4a6080', marginTop: 2 }}>Minimum combined AI score required to trigger ENTRY_READY (Default: 75/100).</div>
+            <div style={{ fontSize: 10, color: '#4a6080', marginTop: 2 }}>Minimum combined AI score required to trigger ENTRY_READY (Default: 88/100).</div>
           </div>
 
           <div>
@@ -133,11 +133,11 @@ export default function SettingsPage({ settings: init, onUpdate }: Props) {
             <input
               type="number"
               step="0.1"
-              value={settings.minRiskRewardRatio ?? 1.5}
-              onChange={(e) => update('minRiskRewardRatio', parseFloat(e.target.value) || 1.5)}
+              value={settings.minRiskRewardRatio ?? 2.0}
+              onChange={(e) => update('minRiskRewardRatio', parseFloat(e.target.value) || 2.0)}
               style={{ width: '100%', padding: '10px 12px', borderRadius: 8, background: '#0a101d', border: '1px solid rgba(255,255,255,0.1)', color: '#ffffff', fontSize: 13, fontWeight: 700 }}
             />
-            <div style={{ fontSize: 10, color: '#4a6080', marginTop: 2 }}>Minimum required reward vs risk ratio (Default: 1.5 : 1).</div>
+            <div style={{ fontSize: 10, color: '#4a6080', marginTop: 2 }}>Minimum required reward vs risk ratio (Default: 2.0 : 1).</div>
           </div>
         </div>
       </div>

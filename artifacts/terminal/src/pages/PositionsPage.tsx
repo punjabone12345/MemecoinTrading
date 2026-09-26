@@ -9,6 +9,7 @@ interface Props {
 
 export default function PositionsPage({ status, onRefresh }: Props) {
   const [closingId, setClosingId] = useState<string | null>(null);
+  const [resetting, setResetting] = useState(false);
 
   const portfolio = status?.portfolio;
   const openPositions = status?.openPositions ?? [];
@@ -26,8 +27,47 @@ export default function PositionsPage({ status, onRefresh }: Props) {
     }
   }
 
+  async function handleReset() {
+    if (!confirm('Reset Paper Portfolio back to $100.00 USD and close all positions?')) return;
+    setResetting(true);
+    try {
+      await api.resetAltcoinPortfolio(100);
+      await onRefresh();
+    } catch {
+      // ignore
+    } finally {
+      setResetting(false);
+    }
+  }
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14, maxWidth: 1200, margin: '0 auto' }}>
+      
+      {/* ── Page Header with Reset Balance Action ── */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
+        <div style={{ fontSize: 13, fontWeight: 900, color: '#00d4ff', letterSpacing: '0.04em' }}>
+          📈 TRADES & PAPER EXECUTION (1% RISK)
+        </div>
+        <button
+          onClick={handleReset}
+          disabled={resetting}
+          style={{
+            padding: '6px 12px',
+            borderRadius: 7,
+            background: 'rgba(255,68,102,0.1)',
+            border: '1px solid rgba(255,68,102,0.3)',
+            color: '#ff4466',
+            fontSize: 10.5,
+            fontWeight: 800,
+            cursor: 'pointer',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 4,
+          }}
+        >
+          {resetting ? 'Resetting...' : '🔄 RESET BALANCE & POSITIONS'}
+        </button>
+      </div>
       
       {/* ── Summary Stats Grid ── */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: 8 }}>

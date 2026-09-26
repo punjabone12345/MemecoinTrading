@@ -682,8 +682,14 @@ export async function initDB(): Promise<void> {
       created_at         BIGINT NOT NULL
     )
   `);
-  await query(`CREATE INDEX IF NOT EXISTS idx_diag_transactions_created_at ON diag_transactions (created_at DESC)`);
-  await query(`CREATE INDEX IF NOT EXISTS idx_diag_transactions_mint ON diag_transactions (mint, created_at DESC)`);
+  // ── Altcoin Paper Balance Reset & 1% Risk Configuration ──
+  await queryQuiet("UPDATE settings SET value = '100' WHERE key = 'currentBalanceUsd'");
+  await queryQuiet("UPDATE settings SET value = '100' WHERE key = 'startingBalanceUsd'");
+  await queryQuiet("UPDATE settings SET value = '1.0' WHERE key = 'riskPerTradePct'");
+  await queryQuiet("UPDATE settings SET value = '2' WHERE key = 'maxOpenPositions'");
+  await queryQuiet("UPDATE settings SET value = '88' WHERE key = 'minAiScore'");
+  await queryQuiet("UPDATE settings SET value = '2.0' WHERE key = 'minRiskRewardRatio'");
+  await queryQuiet("UPDATE positions SET status = 'CLOSED', close_reason = 'RESET_BALANCE' WHERE status = 'OPEN'");
 
-  logger.info('Database initialized');
+  logger.info('Database initialized and paper portfolio reset to clean $100 USD (1% risk)');
 }

@@ -1,4 +1,5 @@
 import { getSettings, getBalance, adjustBalance, setBalance } from './settings.service.js';
+import { query } from '../lib/db.js';
 import {
   Settings,
   PaperPortfolio,
@@ -127,16 +128,17 @@ export async function processPaperTradingEngine(inputSignals: AltcoinSignal[] = 
     }
   }
 
-  // 2. Process New Paper Entries if Bot Enabled
-  if (settings.botEnabled && openPositions.length < settings.maxOpenPositions) {
+  // 2. Process New Paper Entries if Bot Enabled (Strict Quality Limit)
+  const maxOpen = Math.min(settings.maxOpenPositions || 2, 3);
+  if (settings.botEnabled && openPositions.length < maxOpen) {
     const readySignals = signals.filter(s =>
       s.status === 'ENTRY_READY' &&
-      s.aiScore >= settings.minAiScore &&
+      s.aiScore >= (settings.minAiScore || 88) &&
       !openPositions.some(p => p.symbol === s.symbol)
     );
 
     for (const sig of readySignals) {
-      if (openPositions.length >= settings.maxOpenPositions) break;
+      if (openPositions.length >= maxOpen) break;
       await executePaperEntry(sig, settings);
     }
   }
@@ -184,11 +186,11 @@ export async function processPaperTradingEngine(inputSignals: AltcoinSignal[] = 
 
 async function executePaperEntry(sig: AltcoinSignal, settings: Settings): Promise<void> {
   const currentBalance = await getBalance();
-  const riskPct = settings.riskPerTradePct || 0.5;
+  const riskPct = settings.riskPerTradePct || 1.0;
   const riskAmountUsd = (currentBalance * riskPct) / 100;
 
   const riskDistPct = Math.abs((sig.price - sig.tradeThesis.stopLoss) / sig.price);
-  const positionSizeUsd = Math.min(currentBalance * 0.25, riskDistPct > 0 ? riskAmountUsd / riskDistPct : 10);
+  const positionSizeUsd = Math.min(currentBalance * 0.35, riskDistPct > 0 ? riskAmountUsd / riskDistPct : 25);
   const quantity = parseFloat((positionSizeUsd / sig.price).toFixed(4));
 
   if (positionSizeUsd > currentBalance) return;
@@ -219,7 +221,7 @@ async function executePaperEntry(sig: AltcoinSignal, settings: Settings): Promis
   };
 
   openPositions.push(newPos);
-  logger.info({ symbol: newPos.symbol, size: newPos.positionSizeUsd, entry: newPos.entryPrice }, 'Paper Position Opened');
+  logger.info({ symbol: newPos.symbol, size: newPos.positionSizeUsd, entry: newPos.entryPrice, riskPct }, 'Paper Position Opened');
 }
 
 async function closePositionInternal(id: string, closePrice: number, reason: 'TP_HIT' | 'SL_HIT' | 'MANUAL_EXIT' | 'INVALIDATED' | (string & {})): Promise<ClosedPaperPosition | null> {
@@ -265,5 +267,12 @@ export async function resetPaperPortfolio(initialBalanceUsd = 100): Promise<Pape
   openPositions = [];
   closedPositions = [];
   await setBalance(initialBalanceUsd);
+  await query("UPDATE settings SET value = '100' WHERE key = 'currentBalanceUsd'").catch(() => {});
+  await query("UPDATE settings SET value = '100' WHERE key = 'startingBalanceUsd'").catch(() => {});
+  await query("UPDATE settings SET value = '1.0' WHERE key = 'riskPerTradePct'").catch(() => {});
+  await query("UPDATE settings SET value = '2' WHERE key = 'maxOpenPositions'").catch(() => {});
+  await query("UPDATE settings SET value = '88' WHERE key = 'minAiScore'").catch(() => {});
+  await query("UPDATE positions SET status = 'CLOSED', close_reason = 'RESET_BALANCE' WHERE status = 'OPEN'").catch(() => {});
+  logger.info({ initialBalanceUsd }, 'Paper portfolio reset to clean $100 balance, all positions cleared');
   return getPaperPortfolio();
 }

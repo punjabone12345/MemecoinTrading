@@ -98,7 +98,7 @@ export default function DiscoverPage({ status }: Props) {
               ⚡ ALTCOIN MARKET SCANNER & AI RADAR
             </div>
             <div style={{ fontSize: 10, color: '#7090b0', marginTop: 3 }}>
-              Tracking ~100 Liquid Non-Meme Altcoins · Multi-Timeframe Trend & Momentum Scoring · Paper Simulation Mode ($100 USD Account)
+              Institutional Price Action Strategy (20 EMA Retest) · 1.0% Risk Per Trade · Quality Over Quantity Filter ($100 Account)
             </div>
           </div>
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>

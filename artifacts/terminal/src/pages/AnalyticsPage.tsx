@@ -100,16 +100,16 @@ export default function AnalyticsPage({ status }: Props) {
           <div style={{ background: 'rgba(0,0,0,0.2)', padding: 10, borderRadius: 8 }}>
             <div style={{ color: '#9b59ff', fontWeight: 800, marginBottom: 4 }}>Position Sizing Model</div>
             <div style={{ color: '#7090b0', lineHeight: 1.5 }}>
-              Risk-based sizing: <b>0.5% max risk per trade ($0.50 USD)</b>.<br/>
+              Risk-based sizing: <b>1.0% max risk per trade ($1.00 USD)</b>.<br/>
               Position Size = Max Risk / SL Distance %.
             </div>
           </div>
 
           <div style={{ background: 'rgba(0,0,0,0.2)', padding: 10, borderRadius: 8 }}>
-            <div style={{ color: '#00ff88', fontWeight: 800, marginBottom: 4 }}>AI Gate Thresholds</div>
+            <div style={{ color: '#00ff88', fontWeight: 800, marginBottom: 4 }}>Price Action & AI Gates</div>
             <div style={{ color: '#7090b0', lineHeight: 1.5 }}>
-              Minimum AI Score for entry: <b>75 / 100</b>.<br/>
-              Minimum Risk:Reward Ratio: <b>1.5 : 1</b>.
+              Minimum AI Score for entry: <b>88 / 100</b>.<br/>
+              Minimum Risk:Reward Ratio: <b>2.0 : 1</b>.
             </div>
           </div>
 
@@ -117,7 +117,7 @@ export default function AnalyticsPage({ status }: Props) {
             <div style={{ color: '#ffd700', fontWeight: 800, marginBottom: 4 }}>Execution Safety</div>
             <div style={{ color: '#7090b0', lineHeight: 1.5 }}>
               Paper Simulation Mode enabled.<br/>
-              Max open positions capped at <b>5</b>.
+              Max open positions capped at <b>2 (Quality over Quantity)</b>.
             </div>
           </div>
         </div>
