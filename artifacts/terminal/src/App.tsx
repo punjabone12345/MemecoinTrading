@@ -226,11 +226,14 @@ export default function App() {
             background: 'linear-gradient(135deg, rgba(0,212,255,0.2), rgba(155,89,255,0.2))',
             border: '1px solid rgba(0,212,255,0.35)',
             display: 'flex', alignItems: 'center', justifyContent: 'center',
-            fontSize: 18, boxShadow: '0 0 16px rgba(0,212,255,0.15)',
-          }}>⚡</div>
+            boxShadow: '0 0 16px rgba(0,212,255,0.15)',
+            overflow: 'hidden', padding: 4,
+          }}>
+            <img src="/favicon.svg" alt="Logo" style={{ width: '100%', height: '100%' }} />
+          </div>
           <div>
-            <div style={{ fontSize: 16, fontWeight: 900, letterSpacing: '0.06em', background: 'linear-gradient(90deg, #00d4ff, #9b59ff)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>APEX</div>
-            <div style={{ fontSize: 8, color: '#4a6080', letterSpacing: '0.14em', fontWeight: 700, marginTop: -2 }}>MEME TRADER</div>
+            <div style={{ fontSize: 16, fontWeight: 900, letterSpacing: '0.06em', background: 'linear-gradient(90deg, #00d4ff, #9b59ff, #00ff88)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>ALTCOIN</div>
+            <div style={{ fontSize: 8, color: '#4a6080', letterSpacing: '0.14em', fontWeight: 700, marginTop: -2 }}>TRADING BOT</div>
           </div>
           <div style={{
             padding: '3px 9px', borderRadius: 6, fontSize: 9, fontWeight: 800, letterSpacing: '0.07em',

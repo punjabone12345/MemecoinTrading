@@ -612,6 +612,9 @@ importers:
       '@tanstack/react-query':
         specifier: 'catalog:'
         version: 5.90.21(react@19.1.0)
+      '@types/node':
+        specifier: 'catalog:'
+        version: 25.3.5
     devDependencies:
       '@types/node':
         specifier: 'catalog:'
@@ -628,6 +631,9 @@ importers:
 
   lib/api-zod:
     dependencies:
+      '@types/node':
+        specifier: 'catalog:'
+        version: 25.3.5
       zod:
         specifier: 'catalog:'
         version: 3.25.76
@@ -638,6 +644,9 @@ importers:
 
   lib/db:
     dependencies:
+      '@types/node':
+        specifier: 'catalog:'
+        version: 25.3.5
       drizzle-orm:
         specifier: 'catalog:'
         version: 0.45.2(@types/pg@8.18.0)(pg@8.20.0)

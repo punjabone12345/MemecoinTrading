@@ -1,7 +1,7 @@
 {
-  "name": "Memecoin Sniper",
-  "short_name": "Memecoin Sniper",
-  "description": "Pump.fun → Raydium graduation sniper — catch memecoins the moment they hit Raydium.",
+  "name": "Altcoin Trading Bot",
+  "short_name": "Altcoin Bot",
+  "description": "AI-Powered Altcoin Intraday Paper Trading & Market Intelligence Platform.",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#0a0a0f",

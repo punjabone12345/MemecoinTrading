@@ -40,7 +40,7 @@ async function main(): Promise<void> {
   // Bind the port FIRST — if another instance already owns it, throw here
   // so main() rejects and we exit before any services are started.
   await bindServer(server, PORT);
-  logger.info({ port: PORT }, 'Apex Meme Trader API running');
+  logger.info({ port: PORT }, 'Altcoin Trading Bot API running');
 
   // Re-attach a post-startup error handler for unexpected runtime errors
   // (NOT EADDRINUSE — that was handled above).

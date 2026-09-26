@@ -160,7 +160,7 @@ async function processUpdate(update: TelegramUpdate): Promise<void> {
       await handleStatus(chatId);
     } else if (cmd === '/start' || cmd === '/help') {
       await sendReply(chatId,
-        `👋 <b>Apex Meme Trader Bot</b>\n\n` +
+        `👋 <b>Altcoin Trading Bot</b>\n\n` +
         `/command1 — Check your open sniper positions\n` +
         `/command2 — Analyse Sniper Engine\n` +
         `/command3 — Check the bot working or not`

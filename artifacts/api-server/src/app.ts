@@ -14,6 +14,6 @@ app.use('/api', apiRouter);
 
 // Frontend is deployed separately on Vercel — this server only handles
 // /api/* routes and WebSocket connections. No static file serving.
-app.get('/', (_req, res) => res.json({ name: 'Apex Meme Trader API', status: 'running' }));
+app.get('/', (_req, res) => res.json({ name: 'Altcoin Trading Bot API', status: 'running' }));
 
 export default app;
