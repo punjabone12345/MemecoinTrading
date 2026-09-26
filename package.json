@@ -14,10 +14,7 @@
   },
   "private": true,
   "devDependencies": {
-    "@tanstack/react-query": "catalog:",
-    "@types/node": "catalog:",
-    "prettier": "^3.8.1",
     "typescript": "~5.9.2",
-    "zod": "catalog:"
+    "prettier": "^3.8.1"
   }
 }
