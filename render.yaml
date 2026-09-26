@@ -1,11 +1,11 @@
 services:
   - type: web
-    name: apex-meme-trader-api
+    name: altcoin-trading-bot-api
     runtime: node
     region: oregon
     plan: free
-    buildCommand: pnpm install && pnpm --filter @workspace/api-server run build && pnpm --filter @workspace/terminal run build
-    startCommand: pnpm --filter @workspace/api-server run start
+    buildCommand: pnpm run build
+    startCommand: node artifacts/api-server/dist/index.mjs
     envVars:
       - key: NODE_ENV
         value: production
