@@ -25,7 +25,8 @@ const staticDir = candidatePaths.find((p) => fs.existsSync(p));
 if (staticDir) {
   logger.info({ staticDir }, 'Serving terminal frontend UI');
   app.use(express.static(staticDir, { maxAge: '1h', etag: true }));
-  app.get('*', (req, res, next) => {
+  app.use((req, res, next) => {
+    if (req.method !== 'GET') return next();
     if (req.path.startsWith('/api') || req.path.startsWith('/ws')) {
       return next();
     }
