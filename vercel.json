@@ -3,7 +3,7 @@
   "rewrites": [
     {
       "source": "/api/:path*",
-      "destination": "https://memecointradingbot2-dzaa.onrender.com/api/:path*"
+      "destination": "https://memecointradingbot2-534y.onrender.com/api/:path*"
     }
   ]
 }

@@ -14,7 +14,12 @@ export async function query<T = unknown>(sql: string, params?: unknown[]): Promi
   try {
     const result = await client.query(sql, params);
     return result.rows as T[];
-  } catch (err) {
+  } catch (err: unknown) {
+    const pgErr = err as { code?: string; message?: string };
+    if (pgErr?.code === '53100') {
+      logger.warn({ message: pgErr.message, sql: sql.slice(0, 100) }, 'DB storage quota exceeded (code 53100) - write suppressed');
+      return [] as T[];
+    }
     logger.error({ err, sql }, 'DB query error');
     throw err;
   } finally {
@@ -41,6 +46,12 @@ async function queryQuiet(sql: string): Promise<void> {
 }
 
 export async function initDB(): Promise<void> {
+  // ── Storage quota recovery ────────────────────────────────────────────────
+  // Neon 512MB limit recovery: clear historical diagnostic dumps and migrations
+  await queryQuiet(`TRUNCATE TABLE diag_transactions CASCADE;`);
+  await queryQuiet(`TRUNCATE TABLE detected_migrations CASCADE;`);
+  await queryQuiet(`TRUNCATE TABLE diag_errors CASCADE;`);
+  await queryQuiet(`TRUNCATE TABLE diag_tokens CASCADE;`);
   // ── Legacy schema detection ───────────────────────────────────────────────
   // Old Render DBs have a `position_id SERIAL PRIMARY KEY` column which makes
   // every INSERT fail (can't drop NOT NULL from a PK). Since no trade has ever

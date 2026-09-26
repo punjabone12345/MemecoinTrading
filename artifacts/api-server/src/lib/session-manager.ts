@@ -11,10 +11,7 @@
  */
 
 import { getSettings } from '../services/settings.service.js';
-import { startTrenchesScanner, stopTrenchesScanner } from '../services/trenches.service.js';
-import { resumeSniperEngine, stopSniperEngine } from '../services/sniper-engine.service.js';
 import { startTelegramCommands, stopTelegramCommands } from './telegram-commands.js';
-import { stopHeliusWs } from './helius-ws-shared.js';
 import { logger } from './logger.js';
 
 // Current observed state of services. null = not yet initialised.
@@ -52,10 +49,6 @@ function isInsideWindow(start: string, end: string): boolean {
  *  - botEnabled=false  → always stopped (manual override, never auto-resumed)
  *  - tradingWindowEnabled=false → always running (no time restriction)
  *  - tradingWindowEnabled=true  → running only inside the IST window
- *
- * `hard` = true means a full hard-stop (botEnabled=false manual pause).
- * `hard` = false means a soft window-close — only new-entry services stop;
- *          the sniper engine position monitor keeps running for open trades.
  */
 async function shouldServicesRun(): Promise<{ run: boolean; hard: boolean; reason: string }> {
   const s = await getSettings();
@@ -74,33 +67,23 @@ async function shouldServicesRun(): Promise<{ run: boolean; hard: boolean; reaso
 // ── Start / stop helpers ──────────────────────────────────────────────────────
 
 function startServices(): void {
-  startTrenchesScanner();
-  resumeSniperEngine();   // idempotent — no-op if already running
   startTelegramCommands();
 }
 
 /**
  * Soft stop — called when the trading window closes.
- * Stops new-graduation detection and Telegram, but intentionally leaves the
- * sniper engine and Helius WS alive so open positions continue to be tracked
- * for P&L, TP, and SL until they close naturally.
- * The sniper engine's own isInTradingWindow() guards block any new entries.
  */
 function stopNewEntryServices(): void {
-  stopTrenchesScanner();
   stopTelegramCommands();
-  logger.info('Session Manager: soft stop — graduation scanner paused; open positions continue tracking');
+  logger.info('Session Manager: soft stop — trading paused');
 }
 
 /**
  * Hard stop — called only when botEnabled=false (manual PAUSE BOT).
- * Stops everything including the sniper engine and Helius WS.
  */
 function stopAllServices(): void {
-  stopTrenchesScanner();
-  stopSniperEngine();
   stopTelegramCommands();
-  stopHeliusWs();
+  logger.info('Session Manager: hard stop — all services paused');
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────

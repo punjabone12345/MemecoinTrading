@@ -3,8 +3,6 @@ import app from './app.js';
 import { initDB } from './lib/db.js';
 import { initWebSocket } from './websocket/server.js';
 import { startAltcoinScanner } from './services/altcoin-market.service.js';
-import { startTrenchesScanner, setOnGraduation } from './services/trenches.service.js';
-import { startSniperEngine, addGraduatedToken } from './services/sniper-engine.service.js';
 import { startTelegramCommands, stopTelegramCommands } from './lib/telegram-commands.js';
 import { initSessionManager } from './lib/session-manager.js';
 import { logger } from './lib/logger.js';
@@ -51,10 +49,8 @@ async function main(): Promise<void> {
   // Start Altcoin Market Scanner & Paper Trading Engine
   startAltcoinScanner().catch((err) => logger.error({ err }, 'Failed to start altcoin scanner'));
 
-  // Wire GMGN token discovery → sniper engine (kept for legacy support if needed)
-  setOnGraduation(addGraduatedToken);
-  startTrenchesScanner();
-  await startSniperEngine();
+  // Note: Legacy pump.fun / trenches / sniper memecoin services are disabled
+  // to prevent Neon DB storage exhaustion and focus 100% on Altcoin Paper Trading.
   startTelegramCommands();
 
   // Session manager: honours the persisted botEnabled flag — stops all services
