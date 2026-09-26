@@ -1,4 +1,22 @@
-import { Settings, SniperStatus, SniperPosition, ClosedSniperPosition, DiagToken, DiagError, DiagFunnelStats, DiagDailySummary, DiagTransaction } from './types.js';
+import {
+  Settings,
+  AltcoinStatusResponse,
+  AltcoinAsset,
+  AltcoinSignal,
+  PaperPortfolio,
+  PaperPosition,
+  ClosedPaperPosition,
+  LearningMetrics,
+  SystemHealth,
+  SniperStatus,
+  SniperPosition,
+  ClosedSniperPosition,
+  DiagToken,
+  DiagError,
+  DiagFunnelStats,
+  DiagDailySummary,
+  DiagTransaction
+} from './types.js';
 
 // In dev mode always use the Vite proxy (/api → localhost:8080) so local
 // changes are visible immediately, regardless of VITE_API_URL.
