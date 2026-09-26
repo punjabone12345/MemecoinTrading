@@ -1,11 +1,18 @@
 {
-  "buildCommand": "cd ../.. && pnpm install && pnpm --filter @workspace/terminal run build",
+  "buildCommand": "cd ../.. && pnpm install --frozen-lockfile && pnpm --filter @workspace/terminal run build",
   "outputDirectory": "dist/public",
   "framework": null,
   "env": {
-    "VITE_API_URL": "https://memecointrading-thpe.onrender.com"
+    "VITE_API_URL": "https://memecointradingbot2-534y.onrender.com"
   },
   "rewrites": [
-    { "source": "/(.*)", "destination": "/index.html" }
+    {
+      "source": "/api/:path*",
+      "destination": "https://memecointradingbot2-534y.onrender.com/api/:path*"
+    },
+    {
+      "source": "/(.*)",
+      "destination": "/index.html"
+    }
   ]
 }

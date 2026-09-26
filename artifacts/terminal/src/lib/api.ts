@@ -18,16 +18,24 @@ import {
   DiagTransaction
 } from './types.js';
 
-// Render production backend URL fallback
+// Active Render production backend URL
 const DEFAULT_RENDER_URL = 'https://memecointradingbot2-534y.onrender.com';
 
-// In dev mode always use the Vite proxy (/api → localhost:8080) so local
-// changes are visible immediately, regardless of VITE_API_URL.
-// In production builds VITE_API_URL is used or falls back to DEFAULT_RENDER_URL
-// so the static bundle on Vercel/CDN reaches the Render backend directly.
-const BACKEND = import.meta.env.DEV
-  ? ''
-  : ((import.meta.env.VITE_API_URL as string | undefined)?.replace(/\/$/, '') || DEFAULT_RENDER_URL);
+function resolveBackend(): string {
+  if (import.meta.env.DEV) return '';
+  // If hosted directly on Render, use same-origin relative requests
+  if (typeof window !== 'undefined' && window.location.hostname.includes('onrender.com')) {
+    return '';
+  }
+  const envUrl = (import.meta.env.VITE_API_URL as string | undefined)?.replace(/\/$/, '');
+  // Ignore suspended / old render domains
+  if (envUrl && !envUrl.includes('memecointrading-thpe')) {
+    return envUrl;
+  }
+  return DEFAULT_RENDER_URL;
+}
+
+const BACKEND = resolveBackend();
 const API_BASE = BACKEND ? `${BACKEND}/api` : '/api';
 
 async function apiFetch<T>(path: string, opts?: RequestInit): Promise<T> {

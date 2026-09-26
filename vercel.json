@@ -1,9 +1,15 @@
 {
+  "buildCommand": "pnpm install --frozen-lockfile && pnpm --filter @workspace/terminal run build",
   "outputDirectory": "artifacts/terminal/dist/public",
+  "framework": null,
   "rewrites": [
     {
       "source": "/api/:path*",
       "destination": "https://memecointradingbot2-534y.onrender.com/api/:path*"
+    },
+    {
+      "source": "/(.*)",
+      "destination": "/index.html"
     }
   ]
 }
