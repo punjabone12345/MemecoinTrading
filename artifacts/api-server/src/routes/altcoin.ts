@@ -28,13 +28,22 @@ router.get('/assets', (_req, res) => {
 
 /** GET /api/altcoin/signals - Active trading signals */
 router.get('/signals', async (_req, res) => {
-  const status = await getAltcoinStatus();
-  res.json({ signals: status.signals, overview: status.overview });
+  try {
+    const status = await getAltcoinStatus();
+    res.json({ signals: status.signals, stats: status.stats });
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || 'Failed to fetch signals' });
+  }
 });
 
 /** GET /api/altcoin/portfolio - Current paper trading portfolio */
-router.get('/portfolio', (_req, res) => {
-  res.json(getPaperPortfolio());
+router.get('/portfolio', async (_req, res) => {
+  try {
+    const portfolio = await getPaperPortfolio();
+    res.json(portfolio);
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || 'Failed to fetch portfolio' });
+  }
 });
 
 /** GET /api/altcoin/positions - Open positions */
@@ -50,7 +59,8 @@ router.post('/close/:id', async (req, res) => {
     res.status(404).json({ error: 'Position not found or already closed' });
     return;
   }
-  res.json({ success: true, portfolio: getPaperPortfolio() });
+  const portfolio = await getPaperPortfolio();
+  res.json({ success: true, portfolio });
 });
 
 /** POST /api/altcoin/reset - Reset paper account balance */
@@ -67,8 +77,12 @@ router.get('/learning', (_req, res) => {
 
 /** GET /api/altcoin/health - System health diagnostic */
 router.get('/health', async (_req, res) => {
-  const status = await getAltcoinStatus();
-  res.json(status.health);
+  try {
+    const status = await getAltcoinStatus();
+    res.json(status.health);
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || 'Failed to fetch health' });
+  }
 });
 
 export default router;

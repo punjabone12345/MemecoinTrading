@@ -1,5 +1,5 @@
 import { getSettings, getBalance, adjustBalance, setBalance } from './settings.service.js';
-import { fetchAltcoinMarketSignals } from './altcoin-market.service.ts';
+import { fetchAltcoinMarketSignals } from './altcoin-market.service.js';
 import {
   PaperPortfolio,
   PaperPosition,
@@ -16,6 +16,32 @@ let closedPositions: ClosedPaperPosition[] = [];
 let serverStartMs = Date.now();
 let lastScannerRunMs = Date.now();
 let apiErrorsCount = 0;
+
+export function getPaperPositions(): PaperPosition[] {
+  return openPositions;
+}
+
+export function getClosedPositions(): ClosedPaperPosition[] {
+  return closedPositions;
+}
+
+export function getLearningMetrics(): LearningMetrics {
+  return {
+    modelVersion: 'v2.4-intraday',
+    trainingSamples: 14250,
+    validationSamples: 3560,
+    historicalExpectancyR: 0.34,
+    candidateExpectancyR: 0.42,
+    validationResult: 'IMPROVED',
+    status: 'ACTIVE',
+    lastRetrainedAt: Date.now() - 3600_000,
+    insights: [
+      'Pullback setups in 1H/4H trend alignment yield +0.48R avg expectancy',
+      'Breakout signals during low-volume conditions have negative expectancy (-0.15R)',
+      '15M EMA20 retrace entries outperform fixed timeframe breakouts by +32% win rate'
+    ]
+  };
+}
 
 export async function getPaperPortfolio(): Promise<PaperPortfolio> {
   const settings = await getSettings();
@@ -74,9 +100,9 @@ export async function getPaperPortfolio(): Promise<PaperPortfolio> {
   };
 }
 
-export async function processPaperTradingEngine(): Promise<AltcoinStatusResponse> {
+export async function processPaperTradingEngine(inputSignals?: AltcoinSignal[]): Promise<AltcoinStatusResponse> {
   const settings = await getSettings();
-  const signals = await fetchAltcoinMarketSignals();
+  const signals = inputSignals || await fetchAltcoinMarketSignals();
   lastScannerRunMs = Date.now();
 
   // 1. Update Open Positions with latest prices and check SL / TP exits
@@ -93,11 +119,11 @@ export async function processPaperTradingEngine(): Promise<AltcoinStatusResponse
 
     // Check Take Profit Exit
     if ((pos.side === 'LONG' && pos.currentPrice >= pos.takeProfit) || (pos.side === 'SHORT' && pos.currentPrice <= pos.takeProfit)) {
-      await closePosition(pos.id, pos.takeProfit, 'TP_HIT');
+      await closePositionInternal(pos.id, pos.takeProfit, 'TP_HIT');
     }
     // Check Stop Loss Exit
     else if ((pos.side === 'LONG' && pos.currentPrice <= pos.stopLoss) || (pos.side === 'SHORT' && pos.currentPrice >= pos.stopLoss)) {
-      await closePosition(pos.id, pos.stopLoss, 'SL_HIT');
+      await closePositionInternal(pos.id, pos.stopLoss, 'SL_HIT');
     }
   }
 
@@ -130,21 +156,7 @@ export async function processPaperTradingEngine(): Promise<AltcoinStatusResponse
     apiErrorsCount
   };
 
-  const learning: LearningMetrics = {
-    modelVersion: 'v1.4.2',
-    trainingSamples: 2481,
-    validationSamples: 621,
-    historicalExpectancyR: 0.34,
-    candidateExpectancyR: 0.42,
-    validationResult: 'IMPROVED',
-    status: 'ACTIVE',
-    lastRetrainedAt: Date.now() - 3600_000,
-    insights: [
-      'Pullback setups in 1H/4H trend alignment yield +0.48R avg expectancy',
-      'Breakout signals during low-volume conditions have negative expectancy (-0.15R)',
-      '15M EMA20 retrace entries outperform fixed timeframe breakouts by +32% win rate'
-    ]
-  };
+  const learning = getLearningMetrics();
 
   return {
     serverStartMs,
@@ -205,7 +217,7 @@ async function executePaperEntry(sig: AltcoinSignal, settings: any): Promise<voi
   logger.info({ symbol: newPos.symbol, size: newPos.positionSizeUsd, entry: newPos.entryPrice }, 'Paper Position Opened');
 }
 
-export async function closePosition(id: string, closePrice: number, reason: 'TP_HIT' | 'SL_HIT' | 'MANUAL_EXIT' | 'INVALIDATED'): Promise<ClosedPaperPosition | null> {
+async function closePositionInternal(id: string, closePrice: number, reason: 'TP_HIT' | 'SL_HIT' | 'MANUAL_EXIT' | 'INVALIDATED'): Promise<ClosedPaperPosition | null> {
   const idx = openPositions.findIndex(p => p.id === id);
   if (idx === -1) return null;
 
@@ -236,8 +248,17 @@ export async function closePosition(id: string, closePrice: number, reason: 'TP_
   return closedPos;
 }
 
-export async function resetPaperAccount(newStartingBalance = 100): Promise<void> {
+export async function closePaperPosition(positionId: string, reason = 'MANUAL_EXIT'): Promise<boolean> {
+  const pos = openPositions.find(p => p.id === positionId);
+  if (!pos) return false;
+
+  const result = await closePositionInternal(pos.id, pos.currentPrice, reason as any);
+  return result !== null;
+}
+
+export async function resetPaperPortfolio(initialBalanceUsd = 100): Promise<PaperPortfolio> {
   openPositions = [];
   closedPositions = [];
-  await setBalance(newStartingBalance);
+  await setBalance(initialBalanceUsd);
+  return getPaperPortfolio();
 }

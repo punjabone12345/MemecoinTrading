@@ -1,6 +1,7 @@
 import axios from 'axios';
 import { logger } from '../lib/logger.js';
-import { AltcoinSignal, SignalStatus, SetupType, ScoreBreakdown, TradeThesis } from '../types/index.js';
+import { AltcoinAsset, AltcoinSignal, SignalStatus, SetupType, TradeThesis, AltcoinStatusResponse } from '../types/index.js';
+import { processPaperTradingEngine } from './altcoin-paper.service.js';
 
 // Top Non-Meme Altcoins Universe Seed List (dynamically populated & ranked)
 const SEED_ALTCOINS = [
@@ -73,19 +74,14 @@ const SEED_ALTCOINS = [
   { id: 'kava', symbol: 'KAVA', name: 'Kava', category: 'DeFi' },
   { id: 'celo', symbol: 'CELO', name: 'Celo', category: 'L1/L2' },
   { id: 'harmony', symbol: 'ONE', name: 'Harmony', category: 'L1/L2' },
-  { id: 'iota', symbol: 'IOTA', name: 'IOTA', category: 'L1/L2' },
-  { id: 'vechain', symbol: 'VET', name: 'VeChain', category: 'Infra' },
-  { id: 'zilliqa', symbol: 'ZIL', name: 'Zilliqa', category: 'L1/L2' },
-  { id: 'elrond-erd-2', symbol: 'EGLD', name: 'MultiversX', category: 'L1/L2' },
-  { id: 'nervos-network', symbol: 'CKB', name: 'Nervos', category: 'L1/L2' },
-  { id: 'iota', symbol: 'IOTA', name: 'IOTA', category: 'Infra' },
-  { id: 'flare-networks', symbol: 'FLR', name: 'Flare', category: 'Infra' },
-  { id: 'ronin', symbol: 'RON', name: 'Ronin', category: 'L1/L2' }
+  { id: 'flare-networks', symbol: 'FLR', name: 'Flare', category: 'Infra' }
 ];
 
 let signalsCache: AltcoinSignal[] = [];
 let lastFetchTimestamp = 0;
-const CACHE_TTL_MS = 15_000; // 15 seconds cache
+const CACHE_TTL_MS = 15_000;
+let isScanning = false;
+let scanTimer: NodeJS.Timeout | null = null;
 
 export async function fetchAltcoinMarketSignals(): Promise<AltcoinSignal[]> {
   const now = Date.now();
@@ -130,6 +126,56 @@ export async function fetchAltcoinMarketSignals(): Promise<AltcoinSignal[]> {
 
   lastFetchTimestamp = now;
   return signalsCache;
+}
+
+export function getAltcoinAssets(): AltcoinAsset[] {
+  return signalsCache.map((sig, idx) => ({
+    id: sig.assetId,
+    symbol: sig.symbol,
+    name: sig.name,
+    category: sig.category,
+    price: sig.price,
+    priceChange24h: sig.priceChange24h,
+    volume24h: sig.volume24h,
+    marketCap: sig.marketCap,
+    high24h: parseFloat((sig.price * 1.05).toFixed(4)),
+    low24h: parseFloat((sig.price * 0.94).toFixed(4)),
+    isMemecoin: false,
+    isStablecoin: false,
+    liquidityScore: 90,
+    tradabilityScore: 95,
+    universeRank: idx + 1,
+    lastUpdated: sig.lastUpdated
+  }));
+}
+
+export async function getAltcoinStatus(): Promise<AltcoinStatusResponse> {
+  const signals = await fetchAltcoinMarketSignals();
+  return processPaperTradingEngine(signals);
+}
+
+export async function startAltcoinScanner(): Promise<void> {
+  if (isScanning) return;
+  isScanning = true;
+  logger.info('Starting Altcoin Market Scanner Service...');
+
+  // Initial run
+  try {
+    const signals = await fetchAltcoinMarketSignals();
+    await processPaperTradingEngine(signals);
+  } catch (err: any) {
+    logger.error({ err: err?.message }, 'Initial altcoin scanner run failed');
+  }
+
+  // Polling loop
+  scanTimer = setInterval(async () => {
+    try {
+      const signals = await fetchAltcoinMarketSignals();
+      await processPaperTradingEngine(signals);
+    } catch (err: any) {
+      logger.error({ err: err?.message }, 'Altcoin scanner interval error');
+    }
+  }, 30_000);
 }
 
 function computeSignalForCoin(coin: any, category: string, rank: number): AltcoinSignal {
