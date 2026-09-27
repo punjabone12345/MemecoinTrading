@@ -5,7 +5,7 @@
   "rewrites": [
     {
       "source": "/api/:path*",
-      "destination": "https://memecointradingbot2-534y.onrender.com/api/:path*"
+      "destination": "https://memecointradingbot2-pk0b.onrender.com/api/:path*"
     },
     {
       "source": "/(.*)",
