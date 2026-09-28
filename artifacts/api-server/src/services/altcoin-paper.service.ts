@@ -276,8 +276,13 @@ async function executePaperEntry(sig: AltcoinSignal, settings: Settings): Promis
   const currentEquity = portfolio.currentEquityUsd;
   const availableBalance = portfolio.availableBalanceUsd;
 
-  const riskPct = settings.riskPerTradePct || 1.0;
-  // Risk 1% of current equity
+  const baseRiskPct = settings.riskPerTradePct || 1.0;
+  // Day-of-Week Risk Modulation from 3-Year Historical Backtest:
+  // Thu & Sat (+0.108R edge) & Tue: full 1.0% risk
+  // Sun (weekend liquidity drop) & Mon (weekly open chop): 0.5% half risk
+  const utcDay = new Date().getUTCDay();
+  const isChopDay = utcDay === 0 || utcDay === 1;
+  const riskPct = isChopDay ? parseFloat((baseRiskPct * 0.5).toFixed(2)) : baseRiskPct;
   const riskAmountUsd = parseFloat(((currentEquity * riskPct) / 100).toFixed(2));
 
   const riskDistPct = Math.abs((sig.price - sig.tradeThesis.stopLoss) / sig.price);

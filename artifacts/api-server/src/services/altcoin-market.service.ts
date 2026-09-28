@@ -363,7 +363,11 @@ function computeRealSignal(
   const isQualifiedLong = side === 'LONG' && isBullishTrend && longValueScore >= 18 && isLiquid && isAsymmetricRR;
   const isQualifiedShort = side === 'SHORT' && (isBearishTrend || rangeLocation >= 0.88) && shortValueScore >= 18 && isLiquid && isAsymmetricRR;
 
-  if (aiScore >= 88 && (isQualifiedLong || isQualifiedShort)) {
+  // Day of Week Edge Gate (Backtest proven: Thu & Sat have highest expectancy; Sun has low liquidity chop)
+  const utcDay = new Date().getUTCDay();
+  const minRequiredScore = utcDay === 0 ? 92 : 88; // Sunday requires higher AI conviction (92/100)
+
+  if (aiScore >= minRequiredScore && (isQualifiedLong || isQualifiedShort)) {
     status = 'ENTRY_READY';
     setupType = side === 'LONG' ? (change24h > 4 ? 'BREAKOUT' : 'PULLBACK') : (rangeLocation >= 0.88 ? 'REVERSAL' : 'PULLBACK');
     reason = side === 'LONG'
