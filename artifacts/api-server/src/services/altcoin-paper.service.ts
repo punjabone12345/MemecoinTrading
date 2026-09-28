@@ -216,7 +216,7 @@ export async function processPaperTradingEngine(inputSignals: AltcoinSignal[] = 
   }
 
   // 2. Process New Paper Entries if Bot Enabled (Quality over Quantity)
-  const maxOpen = Math.min(settings.maxOpenPositions || 2, 3);
+  const maxOpen = Math.max(1, Math.min(settings.maxOpenPositions || 3, 10));
   if (settings.botEnabled && openPositions.length < maxOpen) {
     const readySignals = signals.filter(s =>
       s.status === 'ENTRY_READY' &&
@@ -540,6 +540,37 @@ export async function editPaperPosition(id: string, updates: Partial<PaperPositi
   }
 
   return null;
+}
+
+/**
+ * Permanently deletes any trade (open or closed) from memory and PostgreSQL.
+ * Automatically restores used margin (if open) or reverses realized P&L impact (if closed)
+ * upon subsequent getPaperPortfolio() calculation.
+ */
+export async function deletePaperPosition(id: string): Promise<boolean> {
+  await ensurePositionsLoadedFromDb();
+
+  const openIdx = openPositions.findIndex(p => p.id === id);
+  if (openIdx !== -1) {
+    const deleted = openPositions.splice(openIdx, 1)[0];
+    await query('DELETE FROM paper_positions WHERE id = $1', [id]).catch(err =>
+      logger.error({ err, id }, 'Failed to delete open paper position from database')
+    );
+    logger.info({ id, symbol: deleted.symbol }, 'Open paper position deleted, margin released');
+    return true;
+  }
+
+  const closedIdx = closedPositions.findIndex(p => p.id === id);
+  if (closedIdx !== -1) {
+    const deleted = closedPositions.splice(closedIdx, 1)[0];
+    await query('DELETE FROM paper_positions WHERE id = $1', [id]).catch(err =>
+      logger.error({ err, id }, 'Failed to delete closed paper position from database')
+    );
+    logger.info({ id, symbol: deleted.symbol, realizedPnlUsd: deleted.realizedPnlUsd }, 'Closed paper position deleted, realized P&L restored');
+    return true;
+  }
+
+  return false;
 }
 
 export async function resetPaperPortfolio(initialBalanceUsd = 100): Promise<PaperPortfolio> {

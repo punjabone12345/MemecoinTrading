@@ -6,6 +6,7 @@ import {
   getClosedPositions,
   closePaperPosition,
   editPaperPosition,
+  deletePaperPosition,
   resetPaperPortfolio,
   getLearningMetrics,
 } from '../services/altcoin-paper.service.js';
@@ -66,6 +67,22 @@ router.patch('/positions/:id', async (req, res) => {
     res.json({ success: true, position: updated, portfolio });
   } catch (err: any) {
     res.status(500).json({ error: err?.message || 'Failed to edit trade' });
+  }
+});
+
+/** DELETE /api/altcoin/positions/:id - Delete any trade (open or closed) and restore balance/equity */
+router.delete('/positions/:id', async (req, res) => {
+  try {
+    const positionId = String(req.params.id || '');
+    const ok = await deletePaperPosition(positionId);
+    if (!ok) {
+      res.status(404).json({ error: 'Trade position not found' });
+      return;
+    }
+    const portfolio = await getPaperPortfolio();
+    res.json({ success: true, portfolio });
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || 'Failed to delete trade' });
   }
 });
 

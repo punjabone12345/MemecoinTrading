@@ -721,15 +721,17 @@ export async function initDB(): Promise<void> {
       created_at         BIGINT NOT NULL
     )
   `);
-  // ── Altcoin Paper Balance Reset & 1% Risk Configuration ──
-  await queryQuiet("UPDATE settings SET value = '100' WHERE key = 'currentBalanceUsd'");
-  await queryQuiet("UPDATE settings SET value = '100' WHERE key = 'startingBalanceUsd'");
-  await queryQuiet("UPDATE settings SET value = '1.0' WHERE key = 'riskPerTradePct'");
-  await queryQuiet("UPDATE settings SET value = '2' WHERE key = 'maxOpenPositions'");
-  await queryQuiet("UPDATE settings SET value = '88' WHERE key = 'minAiScore'");
-  await queryQuiet("UPDATE settings SET value = '2.0' WHERE key = 'minRiskRewardRatio'");
-  await queryQuiet("UPDATE positions SET status = 'CLOSED', close_reason = 'RESET_BALANCE' WHERE status = 'OPEN'");
-  await queryQuiet("TRUNCATE TABLE paper_positions CASCADE;");
+  // Default altcoin paper settings if not already present
+  await queryQuiet(`INSERT INTO settings (key, value) VALUES ('currentBalanceUsd', '100') ON CONFLICT (key) DO NOTHING`);
+  await queryQuiet(`INSERT INTO settings (key, value) VALUES ('startingBalanceUsd', '100') ON CONFLICT (key) DO NOTHING`);
+  await queryQuiet(`INSERT INTO settings (key, value) VALUES ('riskPerTradePct', '1.0') ON CONFLICT (key) DO NOTHING`);
+  await queryQuiet(`INSERT INTO settings (key, value) VALUES ('maxOpenPositions', '3') ON CONFLICT (key) DO NOTHING`);
+  await queryQuiet(`INSERT INTO settings (key, value) VALUES ('minAiScore', '88') ON CONFLICT (key) DO NOTHING`);
+  await queryQuiet(`INSERT INTO settings (key, value) VALUES ('minRiskRewardRatio', '2.0') ON CONFLICT (key) DO NOTHING`);
+  // Safe retention cleanup for free Neon tier (keep last 7 days of audit transactions)
+  const sevenDaysAgo = Date.now() - 7 * 86400 * 1000;
+  await queryQuiet("DELETE FROM diag_transactions WHERE created_at < $1", [sevenDaysAgo]);
+  await queryQuiet("DELETE FROM diag_errors WHERE occurred_at < $1", [sevenDaysAgo]);
 
-  logger.info('Database initialized and paper portfolio reset to clean $100 USD (1% risk)');
+  logger.info('Database initialized successfully with persistent paper positions schema');
 }

@@ -155,13 +155,13 @@ export async function fetchAltcoinMarketSignals(): Promise<AltcoinSignal[]> {
 
     if (computedSignals.length > 0) {
       // ── Quality over Quantity Gate ──
-      // Sort candidates by AI score. Only the top 2 (max 3) highest-scoring
-      // setups meeting all institutional price action criteria are granted ENTRY_READY.
+      // Sort candidates by AI score. Grant ENTRY_READY to all top-tier setups
+      // meeting institutional price action criteria (up to 8 candidates across the universe).
       const readyCandidates = computedSignals
         .filter((s) => s.status === 'ENTRY_READY')
         .sort((a, b) => b.aiScore - a.aiScore);
 
-      const MAX_ENTRY_READY = 3;
+      const MAX_ENTRY_READY = 8;
       const topSymbols = new Set(readyCandidates.slice(0, MAX_ENTRY_READY).map((s) => s.symbol));
 
       for (const sig of computedSignals) {

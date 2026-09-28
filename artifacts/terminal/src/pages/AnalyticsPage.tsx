@@ -87,9 +87,10 @@ interface EditModalProps {
   isClosed: boolean;
   onClose: () => void;
   onSave: (updates: any) => Promise<void>;
+  onDelete?: (id: string) => Promise<void>;
 }
 
-function EditTradeModal({ trade, isClosed, onClose, onSave }: EditModalProps) {
+function EditTradeModal({ trade, isClosed, onClose, onSave, onDelete }: EditModalProps) {
   const [side, setSide] = useState<'LONG' | 'SHORT'>(trade.side);
   const [entryPrice, setEntryPrice] = useState(trade.entryPrice);
   const [closePrice, setClosePrice] = useState((trade as ClosedPaperPosition).closePrice ?? trade.currentPrice);
@@ -297,20 +298,34 @@ function EditTradeModal({ trade, isClosed, onClose, onSave }: EditModalProps) {
         </div>
 
         {/* Modal Actions */}
-        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 6 }}>
-          <button
-            onClick={onClose}
-            style={{ padding: '8px 14px', borderRadius: 6, background: 'rgba(255,255,255,0.08)', border: 'none', color: '#fff', fontSize: 11, fontWeight: 700, cursor: 'pointer' }}
-          >
-            Cancel
-          </button>
-          <button
-            onClick={handleSave}
-            disabled={saving}
-            style={{ padding: '8px 16px', borderRadius: 6, background: 'linear-gradient(135deg, #00d4ff, #9b59ff)', border: 'none', color: '#080d1a', fontSize: 11, fontWeight: 900, cursor: 'pointer' }}
-          >
-            {saving ? 'Saving...' : '💾 Save Changes'}
-          </button>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 6, flexWrap: 'wrap', gap: 8 }}>
+          {onDelete && (
+            <button
+              onClick={async () => {
+                if (!confirm(`Are you sure you want to delete this ${isClosed ? 'closed' : 'open'} trade ($${trade.symbol})? This will permanently remove it and restore your account balance & P&L.`)) return;
+                await onDelete(trade.id);
+                onClose();
+              }}
+              style={{ padding: '8px 14px', borderRadius: 6, background: 'rgba(255,68,102,0.15)', border: '1px solid rgba(255,68,102,0.4)', color: '#ff4466', fontSize: 11, fontWeight: 700, cursor: 'pointer' }}
+            >
+              🗑️ Delete Trade
+            </button>
+          )}
+          <div style={{ display: 'flex', gap: 8, marginLeft: 'auto' }}>
+            <button
+              onClick={onClose}
+              style={{ padding: '8px 14px', borderRadius: 6, background: 'rgba(255,255,255,0.08)', border: 'none', color: '#fff', fontSize: 11, fontWeight: 700, cursor: 'pointer' }}
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handleSave}
+              disabled={saving}
+              style={{ padding: '8px 16px', borderRadius: 6, background: 'linear-gradient(135deg, #00d4ff, #9b59ff)', border: 'none', color: '#080d1a', fontSize: 11, fontWeight: 900, cursor: 'pointer' }}
+            >
+              {saving ? 'Saving...' : '💾 Save Changes'}
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -353,6 +368,16 @@ export default function AnalyticsPage({ status, onRefresh }: Props) {
     if (!editingTrade) return;
     await api.editPaperPosition(editingTrade.trade.id, updates);
     await onRefresh();
+  }
+
+  async function handleDeleteTrade(id: string, symbol: string, isClosed: boolean) {
+    if (!confirm(`Are you sure you want to delete this ${isClosed ? 'closed' : 'open'} trade ($${symbol})? Its margin and P&L impact will be restored to your account.`)) return;
+    try {
+      await api.deletePaperPosition(id);
+      await onRefresh();
+    } catch (err: any) {
+      alert(`Failed to delete trade: ${err?.message || 'Unknown error'}`);
+    }
   }
 
   return (
@@ -454,16 +479,29 @@ export default function AnalyticsPage({ status, onRefresh }: Props) {
                           {rVal >= 0 ? '+' : ''}{rVal.toFixed(2)}R
                         </span>
                       </div>
-                      <button
-                        onClick={() => setEditingTrade({ trade: item, isClosed })}
-                        style={{
-                          padding: '4px 8px', borderRadius: 6, background: 'rgba(0,212,255,0.1)',
-                          border: '1px solid rgba(0,212,255,0.3)', color: '#00d4ff', fontSize: 10,
-                          fontWeight: 800, cursor: 'pointer'
-                        }}
-                      >
-                        ✏️ Edit
-                      </button>
+                      <div style={{ display: 'flex', gap: 6 }}>
+                        <button
+                          onClick={() => setEditingTrade({ trade: item, isClosed })}
+                          style={{
+                            padding: '4px 8px', borderRadius: 6, background: 'rgba(0,212,255,0.1)',
+                            border: '1px solid rgba(0,212,255,0.3)', color: '#00d4ff', fontSize: 10,
+                            fontWeight: 800, cursor: 'pointer'
+                          }}
+                        >
+                          ✏️ Edit
+                        </button>
+                        <button
+                          onClick={() => handleDeleteTrade(item.id, item.symbol, isClosed)}
+                          style={{
+                            padding: '4px 8px', borderRadius: 6, background: 'rgba(255,68,102,0.12)',
+                            border: '1px solid rgba(255,68,102,0.3)', color: '#ff4466', fontSize: 10,
+                            fontWeight: 800, cursor: 'pointer'
+                          }}
+                          title="Delete trade & restore balance"
+                        >
+                          🗑️
+                        </button>
+                      </div>
                     </div>
                   </div>
 
@@ -521,6 +559,7 @@ export default function AnalyticsPage({ status, onRefresh }: Props) {
           isClosed={editingTrade.isClosed}
           onClose={() => setEditingTrade(null)}
           onSave={handleSaveTradeUpdates}
+          onDelete={async (id) => handleDeleteTrade(id, editingTrade.trade.symbol, editingTrade.isClosed)}
         />
       )}
 

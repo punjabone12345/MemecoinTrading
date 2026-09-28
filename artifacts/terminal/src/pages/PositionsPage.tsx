@@ -11,12 +11,14 @@ function EditTradeModal({
   trade,
   isClosed,
   onClose,
-  onSave
+  onSave,
+  onDelete
 }: {
   trade: PaperPosition | ClosedPaperPosition;
   isClosed: boolean;
   onClose: () => void;
   onSave: (updates: any) => Promise<void>;
+  onDelete?: (id: string) => Promise<void>;
 }) {
   const [side, setSide] = useState<'LONG' | 'SHORT'>(trade.side);
   const [entryPrice, setEntryPrice] = useState(trade.entryPrice);
@@ -221,20 +223,34 @@ function EditTradeModal({
           />
         </div>
 
-        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 6 }}>
-          <button
-            onClick={onClose}
-            style={{ padding: '8px 14px', borderRadius: 6, background: 'rgba(255,255,255,0.08)', border: 'none', color: '#fff', fontSize: 11, fontWeight: 700, cursor: 'pointer' }}
-          >
-            Cancel
-          </button>
-          <button
-            onClick={handleSave}
-            disabled={saving}
-            style={{ padding: '8px 16px', borderRadius: 6, background: 'linear-gradient(135deg, #00d4ff, #9b59ff)', border: 'none', color: '#080d1a', fontSize: 11, fontWeight: 900, cursor: 'pointer' }}
-          >
-            {saving ? 'Saving...' : '💾 Save Changes'}
-          </button>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 6, flexWrap: 'wrap', gap: 8 }}>
+          {onDelete && (
+            <button
+              onClick={async () => {
+                if (!confirm(`Are you sure you want to delete this ${isClosed ? 'closed' : 'open'} trade ($${trade.symbol})? This will permanently remove it and restore your account balance & P&L.`)) return;
+                await onDelete(trade.id);
+                onClose();
+              }}
+              style={{ padding: '8px 14px', borderRadius: 6, background: 'rgba(255,68,102,0.15)', border: '1px solid rgba(255,68,102,0.4)', color: '#ff4466', fontSize: 11, fontWeight: 700, cursor: 'pointer' }}
+            >
+              🗑️ Delete Trade
+            </button>
+          )}
+          <div style={{ display: 'flex', gap: 8, marginLeft: 'auto' }}>
+            <button
+              onClick={onClose}
+              style={{ padding: '8px 14px', borderRadius: 6, background: 'rgba(255,255,255,0.08)', border: 'none', color: '#fff', fontSize: 11, fontWeight: 700, cursor: 'pointer' }}
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handleSave}
+              disabled={saving}
+              style={{ padding: '8px 16px', borderRadius: 6, background: 'linear-gradient(135deg, #00d4ff, #9b59ff)', border: 'none', color: '#080d1a', fontSize: 11, fontWeight: 900, cursor: 'pointer' }}
+            >
+              {saving ? 'Saving...' : '💾 Save Changes'}
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -259,6 +275,16 @@ export default function PositionsPage({ status, onRefresh }: Props) {
       // ignore
     } finally {
       setClosingId(null);
+    }
+  }
+
+  async function handleDeletePosition(id: string, symbol: string, isClosed: boolean) {
+    if (!confirm(`Are you sure you want to delete this ${isClosed ? 'closed' : 'open'} position ($${symbol})? Its margin and P&L impact will be restored to your account.`)) return;
+    try {
+      await api.deletePaperPosition(id);
+      await onRefresh();
+    } catch (err: any) {
+      alert(`Failed to delete position: ${err?.message || 'Unknown error'}`);
     }
   }
 
@@ -444,6 +470,17 @@ export default function PositionsPage({ status, onRefresh }: Props) {
                       >
                         {closingId === pos.id ? 'CLOSING...' : 'CLOSE'}
                       </button>
+                      <button
+                        onClick={() => handleDeletePosition(pos.id, pos.symbol, false)}
+                        style={{
+                          padding: '6px 10px', borderRadius: 7, background: 'rgba(255,68,102,0.12)',
+                          border: '1px solid rgba(255,68,102,0.3)', color: '#ff4466',
+                          fontSize: 10, fontWeight: 800, cursor: 'pointer', minHeight: 32, touchAction: 'manipulation',
+                        }}
+                        title="Delete position & restore margin"
+                      >
+                        🗑️
+                      </button>
                     </div>
                   </div>
                 </div>
@@ -507,7 +544,7 @@ export default function PositionsPage({ status, onRefresh }: Props) {
                         {pos.closeReason}
                       </span>
                     </div>
-                    <div>
+                    <div style={{ display: 'flex', gap: 4 }}>
                       <button
                         onClick={() => setEditingTrade({ trade: pos, isClosed: true })}
                         style={{
@@ -517,6 +554,17 @@ export default function PositionsPage({ status, onRefresh }: Props) {
                         }}
                       >
                         ✏️ Edit
+                      </button>
+                      <button
+                        onClick={() => handleDeletePosition(pos.id, pos.symbol, true)}
+                        style={{
+                          padding: '3px 6px', borderRadius: 5, background: 'rgba(255,68,102,0.12)',
+                          border: '1px solid rgba(255,68,102,0.3)', color: '#ff4466',
+                          fontSize: 9.5, fontWeight: 800, cursor: 'pointer'
+                        }}
+                        title="Delete trade & restore balance"
+                      >
+                        🗑️
                       </button>
                     </div>
                   </div>
@@ -550,16 +598,29 @@ export default function PositionsPage({ status, onRefresh }: Props) {
                       <span style={{ fontSize: 8.5, fontWeight: 800, padding: '2px 6px', borderRadius: 4, background: isWin ? 'rgba(0,255,136,0.1)' : 'rgba(255,68,102,0.1)', color: isWin ? '#00ff88' : '#ff4466' }}>
                         {pos.closeReason}
                       </span>
-                      <button
-                        onClick={() => setEditingTrade({ trade: pos, isClosed: true })}
-                        style={{
-                          padding: '3px 8px', borderRadius: 5, background: 'rgba(0,212,255,0.12)',
-                          border: '1px solid rgba(0,212,255,0.3)', color: '#00d4ff',
-                          fontSize: 9.5, fontWeight: 800, cursor: 'pointer'
-                        }}
-                      >
-                        ✏️ Edit
-                      </button>
+                      <div style={{ display: 'flex', gap: 4 }}>
+                        <button
+                          onClick={() => setEditingTrade({ trade: pos, isClosed: true })}
+                          style={{
+                            padding: '3px 8px', borderRadius: 5, background: 'rgba(0,212,255,0.12)',
+                            border: '1px solid rgba(0,212,255,0.3)', color: '#00d4ff',
+                            fontSize: 9.5, fontWeight: 800, cursor: 'pointer'
+                          }}
+                        >
+                          ✏️ Edit
+                        </button>
+                        <button
+                          onClick={() => handleDeletePosition(pos.id, pos.symbol, true)}
+                          style={{
+                            padding: '3px 6px', borderRadius: 5, background: 'rgba(255,68,102,0.12)',
+                            border: '1px solid rgba(255,68,102,0.3)', color: '#ff4466',
+                            fontSize: 9.5, fontWeight: 800, cursor: 'pointer'
+                          }}
+                          title="Delete trade & restore balance"
+                        >
+                          🗑️
+                        </button>
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -579,6 +640,7 @@ export default function PositionsPage({ status, onRefresh }: Props) {
             await api.editPaperPosition(editingTrade.trade.id, updates);
             await onRefresh();
           }}
+          onDelete={async (id) => handleDeletePosition(id, editingTrade.trade.symbol, editingTrade.isClosed)}
         />
       )}
     </div>

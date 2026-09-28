@@ -19,7 +19,7 @@ import {
 } from './types.js';
 
 // Active Render production backend URL
-const DEFAULT_RENDER_URL = 'https://memecointradingbot2-534y.onrender.com';
+const DEFAULT_RENDER_URL = 'https://memecointradingbot2-pk0b.onrender.com';
 
 function resolveBackend(): string {
   if (import.meta.env.DEV) return '';
@@ -77,6 +77,10 @@ export const api = {
     apiFetch<{ success: boolean; position: PaperPosition | ClosedPaperPosition; portfolio?: PaperPortfolio }>(`/altcoin/positions/${id}`, {
       method: 'PATCH',
       body: JSON.stringify(updates),
+    }),
+  deletePaperPosition: (id: string) =>
+    apiFetch<{ success: boolean; portfolio: PaperPortfolio }>(`/altcoin/positions/${id}`, {
+      method: 'DELETE',
     }),
   testTelegram: () =>
     apiFetch<{ success: boolean; error?: string }>('/altcoin/telegram/test', {
