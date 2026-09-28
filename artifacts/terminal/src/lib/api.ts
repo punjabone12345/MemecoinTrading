@@ -73,6 +73,15 @@ export const api = {
     }),
   getAltcoinLearning: () => apiFetch<LearningMetrics>('/altcoin/learning'),
   getAltcoinHealth: () => apiFetch<SystemHealth>('/altcoin/health'),
+  editPaperPosition: (id: string, updates: Partial<PaperPosition & ClosedPaperPosition>) =>
+    apiFetch<{ success: boolean; position: PaperPosition | ClosedPaperPosition; portfolio?: PaperPortfolio }>(`/altcoin/positions/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(updates),
+    }),
+  testTelegram: () =>
+    apiFetch<{ success: boolean; error?: string }>('/altcoin/telegram/test', {
+      method: 'POST',
+    }),
 
   // ── Legacy Sniper compatibility ──────────────────────────────────────────────
   getSniperStatus: () => apiFetch<AltcoinStatusResponse>('/sniper/status'),

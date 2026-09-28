@@ -158,6 +158,45 @@ export async function initDB(): Promise<void> {
   `);
   // Migration: add entry_mcap column for existing DBs
   await query(`ALTER TABLE sniper_positions ADD COLUMN IF NOT EXISTS entry_mcap NUMERIC NOT NULL DEFAULT 0`).catch(() => {});
+
+  // ── Altcoin Intraday Paper Positions Table ────────────────────────────────
+  // Durable record of both OPEN and CLOSED trades. Supports editable trade history,
+  // exact execution metrics, risk-adjusted returns, and crash-resilient portfolio tracking.
+  await query(`
+    CREATE TABLE IF NOT EXISTS paper_positions (
+      id TEXT PRIMARY KEY,
+      asset_id TEXT NOT NULL,
+      symbol TEXT NOT NULL,
+      name TEXT NOT NULL,
+      side TEXT NOT NULL DEFAULT 'LONG',
+      entry_price NUMERIC NOT NULL,
+      current_price NUMERIC NOT NULL,
+      exit_price NUMERIC,
+      stop_loss NUMERIC NOT NULL,
+      take_profit NUMERIC NOT NULL,
+      position_size_usd NUMERIC NOT NULL,
+      quantity NUMERIC NOT NULL,
+      risk_amount_usd NUMERIC NOT NULL,
+      risk_pct NUMERIC NOT NULL DEFAULT 1.0,
+      realized_pnl_usd NUMERIC DEFAULT 0,
+      realized_pnl_pct NUMERIC DEFAULT 0,
+      unrealized_pnl_usd NUMERIC DEFAULT 0,
+      unrealized_pnl_pct NUMERIC DEFAULT 0,
+      r_multiple NUMERIC DEFAULT 0,
+      final_r NUMERIC DEFAULT 0,
+      ai_score_at_entry INTEGER NOT NULL,
+      setup_type TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'OPEN',
+      close_reason TEXT,
+      entry_time BIGINT NOT NULL,
+      close_time BIGINT,
+      trade_thesis JSONB DEFAULT '[]'::jsonb,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      updated_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+  await query(`CREATE INDEX IF NOT EXISTS idx_paper_positions_status ON paper_positions (status)`);
+  await query(`CREATE INDEX IF NOT EXISTS idx_paper_positions_entry_time ON paper_positions (entry_time DESC)`);
   // Migration: add timing columns (buy-detection timestamp + how long after detection we entered)
   await query(`ALTER TABLE sniper_positions ADD COLUMN IF NOT EXISTS buy_detected_timestamp BIGINT`).catch(() => {});
   await query(`ALTER TABLE sniper_positions ADD COLUMN IF NOT EXISTS entry_delay_ms BIGINT`).catch(() => {});
@@ -690,6 +729,7 @@ export async function initDB(): Promise<void> {
   await queryQuiet("UPDATE settings SET value = '88' WHERE key = 'minAiScore'");
   await queryQuiet("UPDATE settings SET value = '2.0' WHERE key = 'minRiskRewardRatio'");
   await queryQuiet("UPDATE positions SET status = 'CLOSED', close_reason = 'RESET_BALANCE' WHERE status = 'OPEN'");
+  await queryQuiet("TRUNCATE TABLE paper_positions CASCADE;");
 
   logger.info('Database initialized and paper portfolio reset to clean $100 USD (1% risk)');
 }

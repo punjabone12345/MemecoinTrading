@@ -300,3 +300,125 @@ export async function notifySniperSkip(params: {
   );
 }
 
+// ── Altcoin Trading Bot Notifications ─────────────────────────────────────────
+
+export async function notifyAltcoinTradeEntered(params: {
+  symbol: string;
+  name: string;
+  side: 'LONG' | 'SHORT';
+  entryPrice: number;
+  stopLoss: number;
+  takeProfit: number;
+  positionSizeUsd: number;
+  riskAmountUsd: number;
+  aiScore: number;
+  setupType: string;
+  rrRatio: number;
+  thesis: string[];
+}): Promise<void> {
+  const { symbol, name, side, entryPrice, stopLoss, takeProfit, positionSizeUsd, riskAmountUsd, aiScore, setupType, rrRatio, thesis } = params;
+  const sideEmoji = side === 'LONG' ? '🟢 <b>LONG BUY</b>' : '🔴 <b>SHORT SELL</b>';
+  const riskPct = ((Math.abs(entryPrice - stopLoss) / entryPrice) * 100).toFixed(1);
+  const rewardPct = ((Math.abs(takeProfit - entryPrice) / entryPrice) * 100).toFixed(1);
+
+  const thesisText = thesis.length > 0 ? `\n\n<b>Trade Thesis:</b>\n• ${thesis.slice(0, 3).join('\n• ')}` : '';
+
+  await sendMessage(
+    `${sideEmoji} — <b>$${symbol}</b> (${name})\n` +
+    `<b>Setup:</b> ${setupType} | <b>AI Score:</b> ${aiScore}/100\n` +
+    `<b>Entry:</b> $${formatPrice(entryPrice)}\n` +
+    `<b>Stop Loss:</b> $${formatPrice(stopLoss)} (${riskPct}% risk)\n` +
+    `<b>Take Profit:</b> $${formatPrice(takeProfit)} (+${rewardPct}% target)\n` +
+    `<b>Risk:Reward:</b> 1:${rrRatio.toFixed(2)}\n` +
+    `<b>Position Size:</b> $${positionSizeUsd.toFixed(2)} USD (1.0% Risk: $${riskAmountUsd.toFixed(2)})\n` +
+    `<b>Time:</b> ${toIST(new Date())}${thesisText}`
+  );
+}
+
+export async function notifyAltcoinTPHit(params: {
+  symbol: string;
+  name: string;
+  side: 'LONG' | 'SHORT';
+  entryPrice: number;
+  closePrice: number;
+  realizedPnlUsd: number;
+  realizedPnlPct: number;
+  finalR: number;
+  currentEquityUsd: number;
+}): Promise<void> {
+  const { symbol, name, side, entryPrice, closePrice, realizedPnlUsd, realizedPnlPct, finalR, currentEquityUsd } = params;
+  await sendMessage(
+    `🎯 <b>TAKE PROFIT HIT — $${symbol}</b> (${name})\n` +
+    `<b>Side:</b> ${side}\n` +
+    `<b>Entry:</b> $${formatPrice(entryPrice)} → <b>Exit:</b> $${formatPrice(closePrice)}\n` +
+    `<b>Profit:</b> +$${realizedPnlUsd.toFixed(2)} USD (+${realizedPnlPct.toFixed(1)}% | +${finalR.toFixed(2)}R)\n` +
+    `<b>Total Equity:</b> $${currentEquityUsd.toFixed(2)} USD\n` +
+    `<b>Time:</b> ${toIST(new Date())}`
+  );
+}
+
+export async function notifyAltcoinSLHit(params: {
+  symbol: string;
+  name: string;
+  side: 'LONG' | 'SHORT';
+  entryPrice: number;
+  closePrice: number;
+  realizedPnlUsd: number;
+  realizedPnlPct: number;
+  currentEquityUsd: number;
+}): Promise<void> {
+  const { symbol, name, side, entryPrice, closePrice, realizedPnlUsd, realizedPnlPct, currentEquityUsd } = params;
+  await sendMessage(
+    `🛑 <b>STOP LOSS HIT — $${symbol}</b> (${name})\n` +
+    `<b>Side:</b> ${side}\n` +
+    `<b>Entry:</b> $${formatPrice(entryPrice)} → <b>Stopped:</b> $${formatPrice(closePrice)}\n` +
+    `<b>Loss:</b> -$${Math.abs(realizedPnlUsd).toFixed(2)} USD (${realizedPnlPct.toFixed(1)}% | 1.0% Risk Protected)\n` +
+    `<b>Total Equity:</b> $${currentEquityUsd.toFixed(2)} USD\n` +
+    `<b>Time:</b> ${toIST(new Date())}`
+  );
+}
+
+export async function notifyAltcoinTradeClosed(params: {
+  symbol: string;
+  name: string;
+  side: 'LONG' | 'SHORT';
+  entryPrice: number;
+  closePrice: number;
+  realizedPnlUsd: number;
+  realizedPnlPct: number;
+  reason: string;
+  currentEquityUsd: number;
+}): Promise<void> {
+  const { symbol, name, side, entryPrice, closePrice, realizedPnlUsd, realizedPnlPct, reason, currentEquityUsd } = params;
+  const emoji = realizedPnlUsd >= 0 ? '🟢' : '🔴';
+  await sendMessage(
+    `${emoji} <b>TRADE CLOSED — $${symbol}</b> (${name})\n` +
+    `<b>Side:</b> ${side} | <b>Reason:</b> ${reason}\n` +
+    `<b>Entry:</b> $${formatPrice(entryPrice)} → <b>Exit:</b> $${formatPrice(closePrice)}\n` +
+    `<b>P&L:</b> ${realizedPnlUsd >= 0 ? '+' : ''}$${realizedPnlUsd.toFixed(2)} USD (${realizedPnlPct >= 0 ? '+' : ''}${realizedPnlPct.toFixed(1)}%)\n` +
+    `<b>Total Equity:</b> $${currentEquityUsd.toFixed(2)} USD\n` +
+    `<b>Time:</b> ${toIST(new Date())}`
+  );
+}
+
+export async function testTelegramNotification(): Promise<{ success: boolean; error?: string }> {
+  const creds = await getTelegramCredentials();
+  if (!creds?.token || !creds?.chatId) {
+    return { success: false, error: 'Telegram bot token or chat ID is missing. Set them in settings or environment variables.' };
+  }
+  try {
+    const text = `🤖 <b>Altcoin Trading Bot: Telegram Alerts Activated!</b>\n` +
+      `Platform: AI-Assisted Intraday Paper Trading & Scanner\n` +
+      `Time: ${toIST(new Date())}\n` +
+      `Real-time trade entries, take profits, stop losses, and exits will be broadcast here.`;
+    await axios.post(`https://api.telegram.org/bot${creds.token}/sendMessage`, {
+      chat_id: creds.chatId,
+      text,
+      parse_mode: 'HTML',
+    });
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: err?.response?.data?.description || err?.message || 'Telegram API request failed' };
+  }
+}
+

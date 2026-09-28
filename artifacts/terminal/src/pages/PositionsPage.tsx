@@ -7,9 +7,244 @@ interface Props {
   onRefresh: () => Promise<void>;
 }
 
+function EditTradeModal({
+  trade,
+  isClosed,
+  onClose,
+  onSave
+}: {
+  trade: PaperPosition | ClosedPaperPosition;
+  isClosed: boolean;
+  onClose: () => void;
+  onSave: (updates: any) => Promise<void>;
+}) {
+  const [side, setSide] = useState<'LONG' | 'SHORT'>(trade.side);
+  const [entryPrice, setEntryPrice] = useState(trade.entryPrice);
+  const [closePrice, setClosePrice] = useState((trade as ClosedPaperPosition).closePrice ?? trade.currentPrice);
+  const [stopLoss, setStopLoss] = useState(trade.stopLoss);
+  const [takeProfit, setTakeProfit] = useState(trade.takeProfit);
+  const [positionSizeUsd, setPositionSizeUsd] = useState(trade.positionSizeUsd);
+  const [quantity, setQuantity] = useState(trade.quantity);
+  const [aiScoreAtEntry, setAiScoreAtEntry] = useState(trade.aiScoreAtEntry);
+  const [setupType, setSetupType] = useState(trade.setupType);
+  const [closeReason, setCloseReason] = useState((trade as ClosedPaperPosition).closeReason ?? 'MANUAL_EXIT');
+  const [thesisText, setThesisText] = useState(trade.tradeThesis?.join('\n') || '');
+  const [saving, setSaving] = useState(false);
+
+  async function handleSave() {
+    setSaving(true);
+    try {
+      const updates: any = {
+        side,
+        entryPrice: Number(entryPrice),
+        currentPrice: Number(closePrice),
+        stopLoss: Number(stopLoss),
+        takeProfit: Number(takeProfit),
+        positionSizeUsd: Number(positionSizeUsd),
+        quantity: Number(quantity),
+        aiScoreAtEntry: Number(aiScoreAtEntry),
+        setupType,
+        tradeThesis: thesisText.split('\n').filter(Boolean),
+      };
+      if (isClosed) {
+        updates.closePrice = Number(closePrice);
+        updates.closeReason = closeReason;
+      }
+      await onSave(updates);
+      onClose();
+    } catch {
+      // ignore
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div style={{
+      position: 'fixed', inset: 0, zIndex: 9999, background: 'rgba(0,0,0,0.8)',
+      display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 14,
+      backdropFilter: 'blur(8px)',
+    }}>
+      <div style={{
+        background: '#0d1527', border: '1px solid rgba(0,212,255,0.3)', borderRadius: 14,
+        width: '100%', maxWidth: 540, maxHeight: '90vh', overflowY: 'auto', padding: 20,
+        boxShadow: '0 10px 40px rgba(0,0,0,0.8)', display: 'flex', flexDirection: 'column', gap: 14,
+      }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div>
+            <div style={{ fontSize: 15, fontWeight: 900, color: '#00d4ff' }}>
+              ✏️ EDIT TRADE — ${trade.symbol} ({trade.name})
+            </div>
+            <div style={{ fontSize: 10, color: '#7090b0', marginTop: 2 }}>
+              ID: {trade.id} · Status: <b style={{ color: isClosed ? '#9b59ff' : '#00ff88' }}>{isClosed ? 'CLOSED' : 'OPEN'}</b>
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            style={{ background: 'transparent', border: 'none', color: '#7090b0', fontSize: 18, cursor: 'pointer', padding: 4 }}
+          >
+            ✕
+          </button>
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 10 }}>
+          <div>
+            <label style={{ fontSize: 10, fontWeight: 800, color: '#7090b0' }}>SIDE</label>
+            <select
+              value={side}
+              onChange={(e) => setSide(e.target.value as any)}
+              style={{ width: '100%', padding: '8px 10px', background: '#070b14', border: '1px solid rgba(255,255,255,0.1)', color: '#fff', borderRadius: 6, fontSize: 12, marginTop: 4 }}
+            >
+              <option value="LONG">🟢 LONG</option>
+              <option value="SHORT">🔴 SHORT</option>
+            </select>
+          </div>
+
+          <div>
+            <label style={{ fontSize: 10, fontWeight: 800, color: '#7090b0' }}>SETUP TYPE</label>
+            <select
+              value={setupType}
+              onChange={(e) => setSetupType(e.target.value as any)}
+              style={{ width: '100%', padding: '8px 10px', background: '#070b14', border: '1px solid rgba(255,255,255,0.1)', color: '#fff', borderRadius: 6, fontSize: 12, marginTop: 4 }}
+            >
+              <option value="PULLBACK">PULLBACK</option>
+              <option value="BREAKOUT">BREAKOUT</option>
+              <option value="REVERSAL">REVERSAL</option>
+              <option value="TREND_CONTINUATION">TREND_CONTINUATION</option>
+            </select>
+          </div>
+
+          <div>
+            <label style={{ fontSize: 10, fontWeight: 800, color: '#7090b0' }}>ENTRY PRICE ($)</label>
+            <input
+              type="number"
+              step="any"
+              value={entryPrice}
+              onChange={(e) => {
+                const val = parseFloat(e.target.value) || 0;
+                setEntryPrice(val);
+                if (val > 0) setQuantity(parseFloat((positionSizeUsd / val).toFixed(val < 1 ? 2 : 4)));
+              }}
+              style={{ width: '100%', padding: '8px 10px', background: '#070b14', border: '1px solid rgba(255,255,255,0.1)', color: '#fff', borderRadius: 6, fontSize: 12, marginTop: 4 }}
+            />
+          </div>
+
+          <div>
+            <label style={{ fontSize: 10, fontWeight: 800, color: '#7090b0' }}>{isClosed ? 'EXIT PRICE ($)' : 'CURRENT PRICE ($)'}</label>
+            <input
+              type="number"
+              step="any"
+              value={closePrice}
+              onChange={(e) => setClosePrice(parseFloat(e.target.value) || 0)}
+              style={{ width: '100%', padding: '8px 10px', background: '#070b14', border: '1px solid rgba(255,255,255,0.1)', color: '#fff', borderRadius: 6, fontSize: 12, marginTop: 4 }}
+            />
+          </div>
+
+          <div>
+            <label style={{ fontSize: 10, fontWeight: 800, color: '#7090b0' }}>STOP LOSS ($)</label>
+            <input
+              type="number"
+              step="any"
+              value={stopLoss}
+              onChange={(e) => setStopLoss(parseFloat(e.target.value) || 0)}
+              style={{ width: '100%', padding: '8px 10px', background: '#070b14', border: '1px solid rgba(255,255,255,0.1)', color: '#fff', borderRadius: 6, fontSize: 12, marginTop: 4 }}
+            />
+          </div>
+
+          <div>
+            <label style={{ fontSize: 10, fontWeight: 800, color: '#7090b0' }}>TAKE PROFIT ($)</label>
+            <input
+              type="number"
+              step="any"
+              value={takeProfit}
+              onChange={(e) => setTakeProfit(parseFloat(e.target.value) || 0)}
+              style={{ width: '100%', padding: '8px 10px', background: '#070b14', border: '1px solid rgba(255,255,255,0.1)', color: '#fff', borderRadius: 6, fontSize: 12, marginTop: 4 }}
+            />
+          </div>
+
+          <div>
+            <label style={{ fontSize: 10, fontWeight: 800, color: '#7090b0' }}>POSITION SIZE (USD)</label>
+            <input
+              type="number"
+              step="any"
+              value={positionSizeUsd}
+              onChange={(e) => {
+                const val = parseFloat(e.target.value) || 0;
+                setPositionSizeUsd(val);
+                if (entryPrice > 0) setQuantity(parseFloat((val / entryPrice).toFixed(entryPrice < 1 ? 2 : 4)));
+              }}
+              style={{ width: '100%', padding: '8px 10px', background: '#070b14', border: '1px solid rgba(255,255,255,0.1)', color: '#fff', borderRadius: 6, fontSize: 12, marginTop: 4 }}
+            />
+          </div>
+
+          <div>
+            <label style={{ fontSize: 10, fontWeight: 800, color: '#7090b0' }}>QUANTITY</label>
+            <input
+              type="number"
+              step="any"
+              value={quantity}
+              onChange={(e) => setQuantity(parseFloat(e.target.value) || 0)}
+              style={{ width: '100%', padding: '8px 10px', background: '#070b14', border: '1px solid rgba(255,255,255,0.1)', color: '#fff', borderRadius: 6, fontSize: 12, marginTop: 4 }}
+            />
+          </div>
+
+          <div>
+            <label style={{ fontSize: 10, fontWeight: 800, color: '#7090b0' }}>AI SCORE AT ENTRY (0-100)</label>
+            <input
+              type="number"
+              value={aiScoreAtEntry}
+              onChange={(e) => setAiScoreAtEntry(parseInt(e.target.value, 10) || 0)}
+              style={{ width: '100%', padding: '8px 10px', background: '#070b14', border: '1px solid rgba(255,255,255,0.1)', color: '#fff', borderRadius: 6, fontSize: 12, marginTop: 4 }}
+            />
+          </div>
+
+          {isClosed && (
+            <div>
+              <label style={{ fontSize: 10, fontWeight: 800, color: '#7090b0' }}>CLOSE REASON</label>
+              <input
+                type="text"
+                value={closeReason}
+                onChange={(e) => setCloseReason(e.target.value)}
+                style={{ width: '100%', padding: '8px 10px', background: '#070b14', border: '1px solid rgba(255,255,255,0.1)', color: '#fff', borderRadius: 6, fontSize: 12, marginTop: 4 }}
+              />
+            </div>
+          )}
+        </div>
+
+        <div>
+          <label style={{ fontSize: 10, fontWeight: 800, color: '#7090b0' }}>REASON / THESIS</label>
+          <textarea
+            rows={3}
+            value={thesisText}
+            onChange={(e) => setThesisText(e.target.value)}
+            style={{ width: '100%', padding: '8px 10px', background: '#070b14', border: '1px solid rgba(255,255,255,0.1)', color: '#fff', borderRadius: 6, fontSize: 11, marginTop: 4, fontFamily: 'monospace' }}
+          />
+        </div>
+
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 6 }}>
+          <button
+            onClick={onClose}
+            style={{ padding: '8px 14px', borderRadius: 6, background: 'rgba(255,255,255,0.08)', border: 'none', color: '#fff', fontSize: 11, fontWeight: 700, cursor: 'pointer' }}
+          >
+            Cancel
+          </button>
+          <button
+            onClick={handleSave}
+            disabled={saving}
+            style={{ padding: '8px 16px', borderRadius: 6, background: 'linear-gradient(135deg, #00d4ff, #9b59ff)', border: 'none', color: '#080d1a', fontSize: 11, fontWeight: 900, cursor: 'pointer' }}
+          >
+            {saving ? 'Saving...' : '💾 Save Changes'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function PositionsPage({ status, onRefresh }: Props) {
   const [closingId, setClosingId] = useState<string | null>(null);
   const [resetting, setResetting] = useState(false);
+  const [editingTrade, setEditingTrade] = useState<{ trade: PaperPosition | ClosedPaperPosition; isClosed: boolean } | null>(null);
 
   const portfolio = status?.portfolio;
   const openPositions = status?.openPositions ?? [];
@@ -187,17 +422,29 @@ export default function PositionsPage({ status, onRefresh }: Props) {
                     <div style={{ fontSize: 9.5, color: '#7090b0' }}>
                       Size: <b style={{ color: '#ffffff' }}>${pos.positionSizeUsd.toFixed(2)}</b> (Risk: <b style={{ color: '#ff8844' }}>${pos.riskAmountUsd.toFixed(2)}</b> / {pos.riskPct}%)
                     </div>
-                    <button
-                      onClick={() => handleClose(pos.id)}
-                      disabled={closingId === pos.id}
-                      style={{
-                        padding: '6px 12px', borderRadius: 7, background: 'rgba(255,68,102,0.18)',
-                        border: '1px solid rgba(255,68,102,0.4)', color: '#ff4466',
-                        fontSize: 10, fontWeight: 800, cursor: 'pointer', minHeight: 32, touchAction: 'manipulation',
-                      }}
-                    >
-                      {closingId === pos.id ? 'CLOSING...' : 'CLOSE'}
-                    </button>
+                    <div style={{ display: 'flex', gap: 6 }}>
+                      <button
+                        onClick={() => setEditingTrade({ trade: pos, isClosed: false })}
+                        style={{
+                          padding: '6px 12px', borderRadius: 7, background: 'rgba(0,212,255,0.15)',
+                          border: '1px solid rgba(0,212,255,0.3)', color: '#00d4ff',
+                          fontSize: 10, fontWeight: 800, cursor: 'pointer', minHeight: 32, touchAction: 'manipulation',
+                        }}
+                      >
+                        ✏️ EDIT
+                      </button>
+                      <button
+                        onClick={() => handleClose(pos.id)}
+                        disabled={closingId === pos.id}
+                        style={{
+                          padding: '6px 12px', borderRadius: 7, background: 'rgba(255,68,102,0.18)',
+                          border: '1px solid rgba(255,68,102,0.4)', color: '#ff4466',
+                          fontSize: 10, fontWeight: 800, cursor: 'pointer', minHeight: 32, touchAction: 'manipulation',
+                        }}
+                      >
+                        {closingId === pos.id ? 'CLOSING...' : 'CLOSE'}
+                      </button>
+                    </div>
                   </div>
                 </div>
               );
@@ -220,13 +467,14 @@ export default function PositionsPage({ status, onRefresh }: Props) {
           <div style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid rgba(255,255,255,0.06)', borderRadius: 12, overflow: 'hidden' }}>
             
             {/* Desktop Table Header */}
-            <div className="desktop-table-header" style={{ display: 'grid', gridTemplateColumns: '1.8fr 1.2fr 1.2fr 1.5fr 1.2fr 1.6fr', padding: '10px 14px', background: 'rgba(0,0,0,0.3)', fontSize: 9, fontWeight: 800, color: '#3a5070', letterSpacing: '0.06em' }}>
+            <div className="desktop-table-header" style={{ display: 'grid', gridTemplateColumns: '1.8fr 1.1fr 1.1fr 1.4fr 1.1fr 1.4fr 0.8fr', padding: '10px 14px', background: 'rgba(0,0,0,0.3)', fontSize: 9, fontWeight: 800, color: '#3a5070', letterSpacing: '0.06em' }}>
               <div>ASSET</div>
               <div>ENTRY</div>
               <div>EXIT</div>
               <div>REALIZED P&L</div>
               <div>R MULTIPLE</div>
               <div>CLOSE REASON</div>
+              <div>ACTION</div>
             </div>
 
             {closedPositions.map((pos: ClosedPaperPosition) => {
@@ -236,7 +484,7 @@ export default function PositionsPage({ status, onRefresh }: Props) {
                   {/* Desktop Row */}
                   <div
                     style={{
-                      display: 'grid', gridTemplateColumns: '1.8fr 1.2fr 1.2fr 1.5fr 1.2fr 1.6fr',
+                      display: 'grid', gridTemplateColumns: '1.8fr 1.1fr 1.1fr 1.4fr 1.1fr 1.4fr 0.8fr',
                       padding: '10px 14px', borderBottom: '1px solid rgba(255,255,255,0.04)',
                       alignItems: 'center', fontSize: 11,
                     }}
@@ -258,6 +506,18 @@ export default function PositionsPage({ status, onRefresh }: Props) {
                       <span style={{ fontSize: 9, fontWeight: 800, padding: '2px 6px', borderRadius: 4, background: isWin ? 'rgba(0,255,136,0.1)' : 'rgba(255,68,102,0.1)', color: isWin ? '#00ff88' : '#ff4466' }}>
                         {pos.closeReason}
                       </span>
+                    </div>
+                    <div>
+                      <button
+                        onClick={() => setEditingTrade({ trade: pos, isClosed: true })}
+                        style={{
+                          padding: '3px 8px', borderRadius: 5, background: 'rgba(0,212,255,0.12)',
+                          border: '1px solid rgba(0,212,255,0.3)', color: '#00d4ff',
+                          fontSize: 9.5, fontWeight: 800, cursor: 'pointer'
+                        }}
+                      >
+                        ✏️ Edit
+                      </button>
                     </div>
                   </div>
 
@@ -286,10 +546,20 @@ export default function PositionsPage({ status, onRefresh }: Props) {
                       <span>${pos.entryPrice < 1 ? pos.entryPrice.toFixed(4) : pos.entryPrice.toFixed(2)} → ${pos.closePrice < 1 ? pos.closePrice.toFixed(4) : pos.closePrice.toFixed(2)}</span>
                       <span style={{ fontWeight: 800, color: isWin ? '#00ff88' : '#ff4466' }}>{pos.finalR.toFixed(2)}R</span>
                     </div>
-                    <div style={{ display: 'flex', justifyContent: 'flex-start' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                       <span style={{ fontSize: 8.5, fontWeight: 800, padding: '2px 6px', borderRadius: 4, background: isWin ? 'rgba(0,255,136,0.1)' : 'rgba(255,68,102,0.1)', color: isWin ? '#00ff88' : '#ff4466' }}>
                         {pos.closeReason}
                       </span>
+                      <button
+                        onClick={() => setEditingTrade({ trade: pos, isClosed: true })}
+                        style={{
+                          padding: '3px 8px', borderRadius: 5, background: 'rgba(0,212,255,0.12)',
+                          border: '1px solid rgba(0,212,255,0.3)', color: '#00d4ff',
+                          fontSize: 9.5, fontWeight: 800, cursor: 'pointer'
+                        }}
+                      >
+                        ✏️ Edit
+                      </button>
                     </div>
                   </div>
                 </div>
@@ -298,6 +568,19 @@ export default function PositionsPage({ status, onRefresh }: Props) {
           </div>
         )}
       </div>
+
+      {/* Edit Modal Popup */}
+      {editingTrade && (
+        <EditTradeModal
+          trade={editingTrade.trade}
+          isClosed={editingTrade.isClosed}
+          onClose={() => setEditingTrade(null)}
+          onSave={async (updates) => {
+            await api.editPaperPosition(editingTrade.trade.id, updates);
+            await onRefresh();
+          }}
+        />
+      )}
     </div>
   );
 }

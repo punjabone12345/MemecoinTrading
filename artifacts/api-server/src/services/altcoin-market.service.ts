@@ -251,42 +251,43 @@ function computeRealSignal(
   const rangeSpan = high24h - low24h;
   const rangeLocation = rangeSpan > 0 ? (price - low24h) / rangeSpan : 0.5;
 
-  // ── 6 Institutional Price Action Pillars (0 - 100) ──
+  // ── 6 Institutional Price Action Pillars (Evaluated for both LONG and SHORT) ──
 
-  // 1. Trend Quality & Exhaustion Guard (0 - 20)
-  // Optimal: healthy sustained trend (+2.5% to +18%).
-  // Overextended (>24%) incurs exhaustion penalty.
-  let trendScore = 10;
-  if (change24h >= 2.5 && change24h <= 18.0) {
-    trendScore = Math.min(20, Math.round(15 + (change24h / 18.0) * 5));
-  } else if (change24h > 18.0 && change24h <= 25.0) {
-    trendScore = 14;
-  } else if (change24h > 25.0) {
-    trendScore = 9; // High risk of mean-reversion rejection
-  } else if (change24h > 0) {
-    trendScore = 12;
-  } else if (change24h >= -2.0) {
-    trendScore = 7;
+  // 1. Trend Quality & Extension Analysis
+  const isBullishTrend = change24h >= 2.0 && change24h <= 24.0;
+  const isBearishTrend = change24h <= -2.0 && change24h >= -24.0;
+  const isBlowoffExhaustion = change24h > 24.0; // Overextended, candidate for mean-reversion short
+  const isCapitulationOversold = change24h < -24.0; // Extreme oversold, candidate for mean-reversion long
+
+  let longTrendScore = isBullishTrend ? Math.min(20, Math.round(15 + (change24h / 20.0) * 5)) : isCapitulationOversold ? 14 : change24h > 0 ? 11 : 4;
+  let shortTrendScore = isBearishTrend ? Math.min(20, Math.round(15 + (Math.abs(change24h) / 20.0) * 5)) : isBlowoffExhaustion ? 18 : change24h < 0 ? 11 : 4;
+
+  // 2. Price Action Value Retest / 20 EMA & VWAP Zone (0 - 20)
+  // LONG value zone: 0.58 <= rangeLocation <= 0.82 (Dynamic 20 EMA support retest held above VWAP)
+  let longValueScore = 8;
+  if (rangeLocation >= 0.58 && rangeLocation <= 0.82) {
+    longValueScore = 20; // Textbook 20 EMA pullback test held
+  } else if (rangeLocation >= 0.50 && rangeLocation < 0.58) {
+    longValueScore = 15; // Holding VWAP midpoint
+  } else if (rangeLocation > 0.82 && rangeLocation <= 0.88) {
+    longValueScore = 12; // Approaching breakout
   } else {
-    trendScore = 4;
+    longValueScore = 5;
   }
 
-  // 2. Price Action Value Retest / 20 EMA Zone (0 - 20)
-  // Sweet spot: 0.58 <= rangeLocation <= 0.82 (Pullback holding dynamic support above VWAP).
-  let valueRetestScore = 10;
-  if (rangeLocation >= 0.60 && rangeLocation <= 0.80) {
-    valueRetestScore = 20; // Textbook 20 EMA pullback test held
-  } else if (rangeLocation >= 0.52 && rangeLocation < 0.60) {
-    valueRetestScore = 16; // Deep retest holding key support
-  } else if (rangeLocation > 0.80 && rangeLocation <= 0.85) {
-    valueRetestScore = 14; // Approaching high
-  } else if (rangeLocation > 0.85) {
-    valueRetestScore = 8;  // Chasing resistance ceiling
+  // SHORT value zone: 0.18 <= rangeLocation <= 0.45 (Retesting 20 EMA from below) OR >= 0.88 (Liquidity sweep & rejection)
+  let shortValueScore = 8;
+  if (rangeLocation >= 0.18 && rangeLocation <= 0.45) {
+    shortValueScore = 20; // Textbook 20 EMA dynamic resistance rejection
+  } else if (rangeLocation >= 0.88) {
+    shortValueScore = 19; // 24h High liquidity sweep followed by rejection
+  } else if (rangeLocation > 0.45 && rangeLocation <= 0.52) {
+    shortValueScore = 14; // Rejection at VWAP midpoint
   } else {
-    valueRetestScore = 5;  // Broken below equilibrium / weak structure
+    shortValueScore = 5;
   }
 
-  // 3. Institutional Volume Confirmation (0 - 20)
+  // 3. Institutional Volume Depth (0 - 20)
   let volumeScore = 8;
   if (volume24h >= 60_000_000) {
     volumeScore = 20;
@@ -300,15 +301,15 @@ function computeRealSignal(
     volumeScore = 5;
   }
 
-  // 4. Market Structure & Compression (0 - 20)
+  // 4. Market Structure Compression & Volatility (0 - 20)
   const volPct = price > 0 ? (rangeSpan / price) * 100 : 5;
   let structureScore = 12;
-  if (volPct >= 4.0 && volPct <= 14.0 && rangeLocation >= 0.55) {
-    structureScore = 19; // Clean structural compression with higher low
-  } else if (volPct > 14.0 && volPct <= 22.0) {
+  if (volPct >= 4.0 && volPct <= 15.0) {
+    structureScore = 19; // Ideal intraday compression
+  } else if (volPct > 15.0 && volPct <= 24.0) {
     structureScore = 14;
-  } else if (volPct > 22.0) {
-    structureScore = 9;  // Erratic / high wick risk
+  } else if (volPct > 24.0) {
+    structureScore = 9; // High chop
   } else {
     structureScore = 10;
   }
@@ -316,27 +317,39 @@ function computeRealSignal(
   // 5. Volatility Balance (0 - 10)
   const volatilityScore = Math.min(10, Math.max(3, Math.round(Math.min(volPct, 12) * 0.7 + 2)));
 
-  // 6. Multi-Timeframe Confluence (0 - 10)
-  let htfScore = 5;
-  if (change24h >= 2.0 && rangeLocation >= 0.55 && volume24h >= 15_000_000) {
-    htfScore = 10;
-  } else if (change24h >= 0 && rangeLocation >= 0.50) {
-    htfScore = 7;
-  } else {
-    htfScore = 3;
-  }
+  // 6. Multi-Timeframe Alignment (0 - 10)
+  let longHtfScore = change24h >= 2.0 && rangeLocation >= 0.55 && volume24h >= 15_000_000 ? 10 : change24h >= 0 ? 6 : 3;
+  let shortHtfScore = (change24h <= -2.0 || rangeLocation >= 0.88) && volume24h >= 15_000_000 ? 10 : change24h < 0 ? 6 : 3;
 
-  const aiScore = Math.min(98, Math.max(30, trendScore + valueRetestScore + volumeScore + structureScore + volatilityScore + htfScore));
+  const longAiScore = Math.min(98, Math.max(30, longTrendScore + longValueScore + volumeScore + structureScore + volatilityScore + longHtfScore));
+  const shortAiScore = Math.min(98, Math.max(30, shortTrendScore + shortValueScore + volumeScore + structureScore + volatilityScore + shortHtfScore));
 
-  // Dynamic Stop Loss placed tightly at invalidation (2.5% to 4.5% distance)
+  // Determine which side has the true statistical edge
+  const isShort = shortAiScore > longAiScore && (change24h < -1.5 || rangeLocation >= 0.88);
+  const aiScore = isShort ? shortAiScore : longAiScore;
+  const side: 'LONG' | 'SHORT' = isShort ? 'SHORT' : 'LONG';
+
+  // Dynamic Stop Loss and Take Profit
   const stopLossDistancePct = Math.max(2.5, Math.min(4.5, (price - low24h) > 0 ? ((price - low24h) / price) * 100 * 0.65 : 3.0));
-  const stopLoss = parseFloat((price * (1 - stopLossDistancePct / 100)).toFixed(price < 1 ? 4 : 2));
+  const targetMultiplier = 2.3; // Minimum 1:2.3 asymmetric payoff
 
-  // Target asymmetric reward (at least 2.25x risk)
-  const targetMultiplier = 2.25;
-  const takeProfit = parseFloat((price * (1 + (stopLossDistancePct * targetMultiplier) / 100)).toFixed(price < 1 ? 4 : 2));
-  const riskDist = parseFloat((((price - stopLoss) / price) * 100).toFixed(2));
-  const rewardDist = parseFloat((((takeProfit - price) / price) * 100).toFixed(2));
+  let stopLoss: number;
+  let takeProfit: number;
+  let riskDist: number;
+  let rewardDist: number;
+
+  if (side === 'LONG') {
+    stopLoss = parseFloat((price * (1 - stopLossDistancePct / 100)).toFixed(price < 1 ? 4 : 2));
+    takeProfit = parseFloat((price * (1 + (stopLossDistancePct * targetMultiplier) / 100)).toFixed(price < 1 ? 4 : 2));
+    riskDist = parseFloat((((price - stopLoss) / price) * 100).toFixed(2));
+    rewardDist = parseFloat((((takeProfit - price) / price) * 100).toFixed(2));
+  } else {
+    // SHORT: Stop Loss ABOVE entry, Take Profit BELOW entry
+    stopLoss = parseFloat((price * (1 + stopLossDistancePct / 100)).toFixed(price < 1 ? 4 : 2));
+    takeProfit = parseFloat((price * (1 - (stopLossDistancePct * targetMultiplier) / 100)).toFixed(price < 1 ? 4 : 2));
+    riskDist = parseFloat((((stopLoss - price) / price) * 100).toFixed(2));
+    rewardDist = parseFloat((((price - takeProfit) / price) * 100).toFixed(2));
+  }
   const rrRatio = parseFloat((rewardDist / (riskDist || 1)).toFixed(2));
 
   let setupType: SetupType = 'NONE';
@@ -344,46 +357,46 @@ function computeRealSignal(
   let reason = '';
   let missingCondition: string | null = null;
 
-  // Strict Institutional Price Action Filters:
-  const isHealthyTrend = change24h >= 2.5 && change24h <= 24.0;
-  const isInValueZone = rangeLocation >= 0.58 && rangeLocation <= 0.84;
+  // Strict Institutional Price Action Filter (Supports both LONG and SHORT)
   const isLiquid = volume24h >= 20_000_000;
   const isAsymmetricRR = rrRatio >= 2.1;
+  const isQualifiedLong = side === 'LONG' && isBullishTrend && longValueScore >= 18 && isLiquid && isAsymmetricRR;
+  const isQualifiedShort = side === 'SHORT' && (isBearishTrend || rangeLocation >= 0.88) && shortValueScore >= 18 && isLiquid && isAsymmetricRR;
 
-  if (aiScore >= 88 && isHealthyTrend && isInValueZone && isLiquid && isAsymmetricRR) {
+  if (aiScore >= 88 && (isQualifiedLong || isQualifiedShort)) {
     status = 'ENTRY_READY';
-    setupType = 'PULLBACK';
-    reason = `High-conviction 20 EMA pullback confirmed: 4H/1H HTF trend bullish (+${change24h.toFixed(1)}%), volume held dynamic support ($${(volume24h / 1_000_000).toFixed(1)}M). Asymmetric 1:${rrRatio} R:R setup.`;
+    setupType = side === 'LONG' ? (change24h > 4 ? 'BREAKOUT' : 'PULLBACK') : (rangeLocation >= 0.88 ? 'REVERSAL' : 'PULLBACK');
+    reason = side === 'LONG'
+      ? `High-conviction LONG 20 EMA pullback: 4H/1H trend bullish (+${change24h.toFixed(1)}%), volume held dynamic support ($${(volume24h / 1_000_000).toFixed(1)}M). Asymmetric 1:${rrRatio} R:R.`
+      : `High-conviction SHORT rejection: 4H/1H trend distributive (${change24h.toFixed(1)}%), 20 EMA resistance held ($${(volume24h / 1_000_000).toFixed(1)}M volume). Asymmetric 1:${rrRatio} R:R.`;
     missingCondition = null;
   } else if (aiScore >= 76) {
     status = 'NEAR_ENTRY';
-    setupType = 'PULLBACK';
-    reason = `Multi-timeframe structure bullish (${change24h >= 0 ? '+' : ''}${change24h.toFixed(1)}%). Price action testing key structural level.`;
-    if (!isInValueZone && rangeLocation > 0.84) {
-      missingCondition = `Overextended near 24h high resistance ($${high24h.toFixed(price < 1 ? 4 : 2)}). Awaiting 15M pullback to 20 EMA support zone ($${(price * 0.985).toFixed(price < 1 ? 4 : 2)}).`;
-    } else if (!isInValueZone && rangeLocation < 0.58) {
-      missingCondition = `Price below 20 EMA value equilibrium. Waiting for structure reclaim above $${((low24h + high24h) * 0.5).toFixed(price < 1 ? 4 : 2)}.`;
-    } else if (!isLiquid) {
-      missingCondition = `24h volume ($${(volume24h / 1_000_000).toFixed(1)}M) below $20M liquidity threshold. Waiting for institutional volume.`;
-    } else if (!isHealthyTrend && change24h > 24.0) {
-      missingCondition = `Overextended rally (+${change24h.toFixed(1)}% 24h). High exhaustion risk; awaiting 1H consolidation base.`;
+    setupType = side === 'LONG' ? 'PULLBACK' : 'REVERSAL';
+    reason = `${side} setup forming: structure aligned (${change24h >= 0 ? '+' : ''}${change24h.toFixed(1)}%). Price action testing key decision level.`;
+    if (!isLiquid) {
+      missingCondition = `24h volume ($${(volume24h / 1_000_000).toFixed(1)}M) below $20M liquidity requirement.`;
+    } else if (side === 'LONG' && rangeLocation > 0.84) {
+      missingCondition = `Overextended into 24h high resistance ($${high24h.toFixed(price < 1 ? 4 : 2)}). Wait for 15M pullback to 20 EMA support.`;
+    } else if (side === 'SHORT' && rangeLocation < 0.18) {
+      missingCondition = `Oversold near 24h low support ($${low24h.toFixed(price < 1 ? 4 : 2)}). Wait for 15M relief bounce into 20 EMA resistance.`;
     } else {
       missingCondition = `Awaiting 15M reversal confirmation candle and volume spike above 20 EMA.`;
     }
   } else if (aiScore >= 55) {
     status = 'WATCHING';
     setupType = 'TREND_CONTINUATION';
-    reason = `Consolidating in 24h range ($${low24h.toFixed(price < 1 ? 4 : 2)} – $${high24h.toFixed(price < 1 ? 4 : 2)}). Trend neutral-to-bullish.`;
-    missingCondition = `Waiting for 1H momentum expansion and volume breakout above 20-period MA.`;
+    reason = `Consolidating in 24h range ($${low24h.toFixed(price < 1 ? 4 : 2)} – $${high24h.toFixed(price < 1 ? 4 : 2)}). Trend neutral.`;
+    missingCondition = `Waiting for directional momentum breakout and volume expansion.`;
   } else {
     status = 'NO_SETUP';
     setupType = 'NONE';
-    reason = `Below institutional momentum threshold. Structure is rangebound or counter-trend.`;
-    missingCondition = `Requires 4H trend structure shift before qualification.`;
+    reason = `Below institutional momentum threshold. Structure is choppy or rangebound.`;
+    missingCondition = `Requires clear trend structure formation before qualification.`;
   }
 
   const tradeThesis: TradeThesis = {
-    side: 'LONG',
+    side,
     entryPrice: price,
     stopLoss,
     takeProfit,
@@ -394,7 +407,7 @@ function computeRealSignal(
     targetLevel: takeProfit,
     explanation: [
       `Real-time market price $${price} (${change24h >= 0 ? '+' : ''}${change24h.toFixed(2)}% 24h).`,
-      `Price action: 20 EMA dynamic support held with $${(volume24h / 1_000_000).toFixed(1)}M USD 24h volume.`,
+      `Price action: ${side === 'LONG' ? '20 EMA dynamic support held' : '20 EMA resistance rejection'} with $${(volume24h / 1_000_000).toFixed(1)}M USD 24h volume.`,
       `Stop Loss at $${stopLoss} (${riskDist}% risk, managed by 1.0% portfolio sizing / $1.00 risk cap).`,
       `Take Profit target at $${takeProfit} for a 1:${rrRatio} Risk/Reward ratio.`
     ]
@@ -411,20 +424,20 @@ function computeRealSignal(
     marketCap,
     aiScore,
     scoreBreakdown: {
-      trend: trendScore,
-      momentum: valueRetestScore,
+      trend: isShort ? shortTrendScore : longTrendScore,
+      momentum: isShort ? shortValueScore : longValueScore,
       volume: volumeScore,
       structure: structureScore,
       volatility: volatilityScore,
-      htfAlignment: htfScore
+      htfAlignment: isShort ? shortHtfScore : longHtfScore
     },
     status,
     setupType,
     mtfTrend: {
       tf4h: change24h >= 0 ? 'BULLISH' : 'BEARISH',
       tf1h: rangeLocation >= 0.5 ? 'BULLISH' : 'BEARISH',
-      tf15m: rangeLocation >= 0.4 ? 'BULLISH' : 'SIDEWAYS',
-      tf5m: 'BULLISH'
+      tf15m: isShort ? 'BEARISH' : 'BULLISH',
+      tf5m: isShort ? 'BEARISH' : 'BULLISH'
     },
     reason,
     missingCondition,

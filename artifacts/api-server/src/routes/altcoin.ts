@@ -5,9 +5,11 @@ import {
   getPaperPositions,
   getClosedPositions,
   closePaperPosition,
+  editPaperPosition,
   resetPaperPortfolio,
   getLearningMetrics,
 } from '../services/altcoin-paper.service.js';
+import { testTelegramNotification } from '../lib/telegram.js';
 
 const router = Router();
 
@@ -51,6 +53,22 @@ router.get('/positions', (_req, res) => {
   res.json({ open: getPaperPositions(), closed: getClosedPositions() });
 });
 
+/** PATCH /api/altcoin/positions/:id - Edit any trade entry (even after closed) */
+router.patch('/positions/:id', async (req, res) => {
+  try {
+    const positionId = String(req.params.id || '');
+    const updated = await editPaperPosition(positionId, req.body);
+    if (!updated) {
+      res.status(404).json({ error: 'Trade position not found' });
+      return;
+    }
+    const portfolio = await getPaperPortfolio();
+    res.json({ success: true, position: updated, portfolio });
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || 'Failed to edit trade' });
+  }
+});
+
 /** POST /api/altcoin/close/:id - Close open position */
 router.post('/close/:id', async (req, res) => {
   const { reason } = req.body as { reason?: string };
@@ -62,6 +80,16 @@ router.post('/close/:id', async (req, res) => {
   }
   const portfolio = await getPaperPortfolio();
   res.json({ success: true, portfolio });
+});
+
+/** POST /api/altcoin/telegram/test - Test Telegram bot alert */
+router.post('/telegram/test', async (_req, res) => {
+  try {
+    const result = await testTelegramNotification();
+    res.json(result);
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err?.message || 'Failed to send test message' });
+  }
 });
 
 /** POST /api/altcoin/reset - Reset paper account balance */

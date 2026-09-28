@@ -142,6 +142,62 @@ export default function SettingsPage({ settings: init, onUpdate }: Props) {
         </div>
       </div>
 
+      {/* Telegram Alerts Section */}
+      <div style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(0,212,255,0.2)', borderRadius: 12, padding: '16px' }}>
+        <div style={{ fontSize: 12, fontWeight: 800, color: '#00d4ff', letterSpacing: '0.08em', marginBottom: 12, textTransform: 'uppercase' }}>
+          📱 TELEGRAM ALERTS & NOTIFICATIONS
+        </div>
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <div>
+            <div style={{ fontSize: 11, color: '#7090b0', fontWeight: 700, marginBottom: 4 }}>TELEGRAM BOT TOKEN</div>
+            <input
+              type="password"
+              placeholder="e.g. 123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ"
+              value={settings.telegramBotToken ?? ''}
+              onChange={(e) => update('telegramBotToken' as any, e.target.value)}
+              style={{ width: '100%', padding: '10px 12px', borderRadius: 8, background: '#0a101d', border: '1px solid rgba(255,255,255,0.1)', color: '#ffffff', fontSize: 13, fontWeight: 700 }}
+            />
+            <div style={{ fontSize: 10, color: '#4a6080', marginTop: 2 }}>From @BotFather on Telegram (also reads TELEGRAM_BOT_TOKEN env var).</div>
+          </div>
+
+          <div>
+            <div style={{ fontSize: 11, color: '#7090b0', fontWeight: 700, marginBottom: 4 }}>TELEGRAM CHAT ID / CHANNEL ID</div>
+            <input
+              type="text"
+              placeholder="e.g. 123456789 or -1001234567890"
+              value={settings.telegramChatId ?? ''}
+              onChange={(e) => update('telegramChatId' as any, e.target.value)}
+              style={{ width: '100%', padding: '10px 12px', borderRadius: 8, background: '#0a101d', border: '1px solid rgba(255,255,255,0.1)', color: '#ffffff', fontSize: 13, fontWeight: 700 }}
+            />
+            <div style={{ fontSize: 10, color: '#4a6080', marginTop: 2 }}>Your user ID or channel ID where entry, exit, TP, and SL alerts will be sent.</div>
+          </div>
+
+          <div style={{ marginTop: 4 }}>
+            <button
+              onClick={async () => {
+                try {
+                  const res = await api.testTelegram();
+                  if (res.success) {
+                    alert('✅ Test alert sent successfully to Telegram!');
+                  } else {
+                    alert(`❌ Failed to send Telegram alert: ${res.error || 'Unknown error'}`);
+                  }
+                } catch (e: any) {
+                  alert(`❌ Error sending Telegram test: ${e.message}`);
+                }
+              }}
+              style={{
+                padding: '8px 14px', borderRadius: 7, background: 'rgba(0,212,255,0.15)',
+                border: '1px solid rgba(0,212,255,0.3)', color: '#00d4ff', fontSize: 11, fontWeight: 800, cursor: 'pointer'
+              }}
+            >
+              🚀 Send Test Telegram Alert
+            </button>
+          </div>
+        </div>
+      </div>
+
       {/* Save Button */}
       <button
         onClick={handleSave}
