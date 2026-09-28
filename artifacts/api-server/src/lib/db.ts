@@ -34,10 +34,10 @@ export async function query<T = unknown>(sql: string, params?: unknown[]): Promi
  * `query()` emits — that log made every normal boot look like a crash and
  * risked masking real errors (e.g. GMGN API failures) in the same log stream.
  */
-async function queryQuiet(sql: string): Promise<void> {
+async function queryQuiet(sql: string, params?: any[]): Promise<void> {
   const client = await pool.connect();
   try {
-    await client.query(sql);
+    await client.query(sql, params);
   } catch {
     // Expected: legacy table/column may not exist. No-op.
   } finally {
