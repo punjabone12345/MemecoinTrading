@@ -301,33 +301,138 @@ export default function PositionsPage({ status, onRefresh }: Props) {
     }
   }
 
+  function exportTradesToCsv() {
+    const allTrades = [
+      ...openPositions.map(p => ({ item: p, isClosed: false })),
+      ...closedPositions.map(p => ({ item: p, isClosed: true }))
+    ].sort((a, b) => b.item.entryTime - a.item.entryTime);
+
+    if (allTrades.length === 0) {
+      alert('No trades available to export.');
+      return;
+    }
+    const headers = [
+      'Trade ID',
+      'Symbol',
+      'Side',
+      'Status',
+      'Setup Type',
+      'AI Score',
+      'Entry Time (UTC)',
+      'Exit Time (UTC)',
+      'Duration (Minutes)',
+      'Entry Price ($)',
+      'Exit/Current Price ($)',
+      'Stop Loss ($)',
+      'Take Profit ($)',
+      'Position Size ($)',
+      'Quantity',
+      'Risk Amount ($)',
+      'Risk Pct (%)',
+      'Realized PnL ($)',
+      'Realized PnL (%)',
+      'R-Multiple',
+      'Close Reason',
+      'Trade Thesis'
+    ];
+
+    const rows = allTrades.map(({ item, isClosed }) => {
+      const cp = isClosed ? (item as ClosedPaperPosition) : null;
+      const exitPrice = isClosed ? cp!.closePrice : item.currentPrice;
+      const exitTime = isClosed && cp!.closeTime ? new Date(cp!.closeTime).toISOString() : '';
+      const entryTime = item.entryTime ? new Date(item.entryTime).toISOString() : '';
+      const durationMin = isClosed && cp!.closeTime && item.entryTime ? Math.round((cp!.closeTime - item.entryTime) / 60000) : '';
+      const realizedPnlUsd = isClosed ? cp!.realizedPnlUsd : '';
+      const realizedPnlPct = isClosed ? cp!.realizedPnlPct : '';
+      const rMultiple = isClosed ? cp!.finalR : item.rMultiple;
+      const closeReason = isClosed ? cp!.closeReason : 'RUNNING';
+      const thesis = Array.isArray(item.tradeThesis) ? item.tradeThesis.join(' | ') : (item.tradeThesis || '');
+
+      return [
+        `"${item.id}"`,
+        `"${item.symbol}"`,
+        `"${item.side}"`,
+        `"${isClosed ? 'CLOSED' : 'OPEN'}"`,
+        `"${item.setupType || 'PULLBACK'}"`,
+        item.aiScoreAtEntry ?? '',
+        `"${entryTime}"`,
+        `"${exitTime}"`,
+        durationMin,
+        item.entryPrice,
+        exitPrice,
+        item.stopLoss,
+        item.takeProfit,
+        item.positionSizeUsd,
+        item.quantity,
+        item.riskAmountUsd,
+        item.riskPct,
+        realizedPnlUsd,
+        realizedPnlPct,
+        rMultiple,
+        `"${closeReason}"`,
+        `"${thesis.replace(/"/g, '""')}"`
+      ].join(',');
+    });
+
+    const csvContent = [headers.join(','), ...rows].join('\n');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.setAttribute('href', url);
+    link.setAttribute('download', `trade-history-${new Date().toISOString().slice(0, 10)}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  }
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14, maxWidth: 1200, margin: '0 auto' }}>
       
-      {/* ── Page Header with Reset Balance Action ── */}
+      {/* ── Page Header with Actions ── */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
         <div style={{ fontSize: 13, fontWeight: 900, color: '#00d4ff', letterSpacing: '0.04em' }}>
           📈 TRADES & PAPER EXECUTION (1% RISK)
         </div>
-        <button
-          onClick={handleReset}
-          disabled={resetting}
-          style={{
-            padding: '6px 12px',
-            borderRadius: 7,
-            background: 'rgba(255,68,102,0.1)',
-            border: '1px solid rgba(255,68,102,0.3)',
-            color: '#ff4466',
-            fontSize: 10.5,
-            fontWeight: 800,
-            cursor: 'pointer',
-            display: 'flex',
-            alignItems: 'center',
-            gap: 4,
-          }}
-        >
-          {resetting ? 'Resetting...' : '🔄 RESET BALANCE & POSITIONS'}
-        </button>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <button
+            onClick={exportTradesToCsv}
+            style={{
+              padding: '6px 12px',
+              borderRadius: 7,
+              background: 'rgba(0, 212, 255, 0.12)',
+              border: '1px solid rgba(0, 212, 255, 0.35)',
+              color: '#00d4ff',
+              fontSize: 10.5,
+              fontWeight: 800,
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 4,
+            }}
+            title="Download full trade history as CSV"
+          >
+            📥 EXPORT CSV ({openPositions.length + closedPositions.length})
+          </button>
+          <button
+            onClick={handleReset}
+            disabled={resetting}
+            style={{
+              padding: '6px 12px',
+              borderRadius: 7,
+              background: 'rgba(255,68,102,0.1)',
+              border: '1px solid rgba(255,68,102,0.3)',
+              color: '#ff4466',
+              fontSize: 10.5,
+              fontWeight: 800,
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 4,
+            }}
+          >
+            {resetting ? 'Resetting...' : '🔄 RESET BALANCE & POSITIONS'}
+          </button>
+        </div>
       </div>
       
       {/* ── Summary Stats Grid ── */}
@@ -492,8 +597,22 @@ export default function PositionsPage({ status, onRefresh }: Props) {
 
       {/* ── Closed Positions Section ── */}
       <div>
-        <div style={{ fontSize: 11, fontWeight: 800, color: '#9b59ff', letterSpacing: '0.08em', marginBottom: 10, textTransform: 'uppercase' }}>
-          📜 CLOSED PAPER POSITIONS ({closedPositions.length})
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10, flexWrap: 'wrap', gap: 6 }}>
+          <div style={{ fontSize: 11, fontWeight: 800, color: '#9b59ff', letterSpacing: '0.08em', textTransform: 'uppercase' }}>
+            📜 CLOSED PAPER POSITIONS ({closedPositions.length})
+          </div>
+          {closedPositions.length > 0 && (
+            <button
+              onClick={exportTradesToCsv}
+              style={{
+                padding: '3px 8px', borderRadius: 5, fontSize: 9.5, fontWeight: 800,
+                background: 'rgba(155, 89, 255, 0.12)', border: '1px solid rgba(155, 89, 255, 0.3)',
+                color: '#9b59ff', cursor: 'pointer'
+              }}
+            >
+              📥 Export CSV
+            </button>
+          )}
         </div>
 
         {closedPositions.length === 0 ? (

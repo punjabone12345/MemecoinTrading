@@ -12,74 +12,16 @@ interface BinanceTicker {
   lowPrice: string;
 }
 
-// Top Non-Meme Altcoins Universe Seed List (dynamically mapped to live Binance pairs)
+// Top Proven Altcoins Universe Seed List (Focused High-Liquidity Basket for Max Edge & Minimal Churn)
 const SEED_ALTCOINS = [
+  { id: 'bitcoin', symbol: 'BTC', binanceSymbol: 'BTCUSDT', name: 'Bitcoin', category: 'Store of Value' },
+  { id: 'ethereum', symbol: 'ETH', binanceSymbol: 'ETHUSDT', name: 'Ethereum', category: 'Layer 1' },
   { id: 'solana', symbol: 'SOL', binanceSymbol: 'SOLUSDT', name: 'Solana', category: 'Layer 1' },
+  { id: 'binancecoin', symbol: 'BNB', binanceSymbol: 'BNBUSDT', name: 'BNB Chain', category: 'Layer 1' },
+  { id: 'dogecoin', symbol: 'DOGE', binanceSymbol: 'DOGEUSDT', name: 'Dogecoin', category: 'High Beta / Top 10' },
   { id: 'chainlink', symbol: 'LINK', binanceSymbol: 'LINKUSDT', name: 'Chainlink', category: 'Oracle' },
   { id: 'avalanche-2', symbol: 'AVAX', binanceSymbol: 'AVAXUSDT', name: 'Avalanche', category: 'Layer 1' },
-  { id: 'sui', symbol: 'SUI', binanceSymbol: 'SUIUSDT', name: 'Sui', category: 'Layer 1' },
-  { id: 'aave', symbol: 'AAVE', binanceSymbol: 'AAVEUSDT', name: 'Aave', category: 'DeFi' },
-  { id: 'near', symbol: 'NEAR', binanceSymbol: 'NEARUSDT', name: 'NEAR Protocol', category: 'Layer 1' },
-  { id: 'arbitrum', symbol: 'ARB', binanceSymbol: 'ARBUSDT', name: 'Arbitrum', category: 'Layer 2' },
-  { id: 'optimism', symbol: 'OP', binanceSymbol: 'OPUSDT', name: 'Optimism', category: 'Layer 2' },
-  { id: 'injective-protocol', symbol: 'INJ', binanceSymbol: 'INJUSDT', name: 'Injective', category: 'DeFi' },
-  { id: 'sei-network', symbol: 'SEI', binanceSymbol: 'SEIUSDT', name: 'Sei', category: 'Layer 1' },
-  { id: 'celestia', symbol: 'TIA', binanceSymbol: 'TIAUSDT', name: 'Celestia', category: 'Infrastructure' },
-  { id: 'uniswap', symbol: 'UNI', binanceSymbol: 'UNIUSDT', name: 'Uniswap', category: 'DeFi' },
-  { id: 'polygon-ecosystem-token', symbol: 'POL', binanceSymbol: 'POLUSDT', name: 'Polygon', category: 'Layer 2' },
-  { id: 'polkadot', symbol: 'DOT', binanceSymbol: 'DOTUSDT', name: 'Polkadot', category: 'Layer 1' },
-  { id: 'cardano', symbol: 'ADA', binanceSymbol: 'ADAUSDT', name: 'Cardano', category: 'Layer 1' },
-  { id: 'fetch-ai', symbol: 'FET', binanceSymbol: 'FETUSDT', name: 'Artificial Superintelligence', category: 'AI' },
-  { id: 'render-token', symbol: 'RENDER', binanceSymbol: 'RENDERUSDT', name: 'Render', category: 'AI' },
-  { id: 'cosmos', symbol: 'ATOM', binanceSymbol: 'ATOMUSDT', name: 'Cosmos', category: 'Layer 1' },
-  { id: 'fantom', symbol: 'FTM', binanceSymbol: 'FTMUSDT', name: 'Fantom', category: 'Layer 1' },
-  { id: 'algorand', symbol: 'ALGO', binanceSymbol: 'ALGOUSDT', name: 'Algorand', category: 'Layer 1' },
-  { id: 'lido-dao', symbol: 'LDO', binanceSymbol: 'LDOUSDT', name: 'Lido DAO', category: 'DeFi' },
-  { id: 'aptos', symbol: 'APT', binanceSymbol: 'APTUSDT', name: 'Aptos', category: 'Layer 1' },
-  { id: 'quant-network', symbol: 'QNT', binanceSymbol: 'QNTUSDT', name: 'Quant', category: 'Infrastructure' },
-  { id: 'filecoin', symbol: 'FIL', binanceSymbol: 'FILUSDT', name: 'Filecoin', category: 'Infrastructure' },
-  { id: 'blockstack', symbol: 'STX', binanceSymbol: 'STXUSDT', name: 'Stacks', category: 'Layer 2' },
-  { id: 'arweave', symbol: 'AR', binanceSymbol: 'ARUSDT', name: 'Arweave', category: 'Infrastructure' },
-  { id: 'the-graph', symbol: 'GRT', binanceSymbol: 'GRTUSDT', name: 'The Graph', category: 'Infrastructure' },
-  { id: 'maker', symbol: 'MKR', binanceSymbol: 'MKRUSDT', name: 'MakerDAO', category: 'DeFi' },
-  { id: 'thorchain', symbol: 'RUNE', binanceSymbol: 'RUNEUSDT', name: 'THORChain', category: 'DeFi' },
-  { id: 'kaspa', symbol: 'KAS', binanceSymbol: 'KASUSDT', name: 'Kaspa', category: 'Layer 1' },
-  { id: 'bittensor', symbol: 'TAO', binanceSymbol: 'TAOUSDT', name: 'Bittensor', category: 'AI' },
-  { id: 'worldcoin-wld', symbol: 'WLD', binanceSymbol: 'WLDUSDT', name: 'Worldcoin', category: 'AI' },
-  { id: 'immutable-x', symbol: 'IMX', binanceSymbol: 'IMXUSDT', name: 'Immutable', category: 'Layer 2' },
-  { id: 'pyth-network', symbol: 'PYTH', binanceSymbol: 'PYTHUSDT', name: 'Pyth Network', category: 'Oracle' },
-  { id: 'ondo-finance', symbol: 'ONDO', binanceSymbol: 'ONDOUSDT', name: 'Ondo', category: 'RWA' },
-  { id: 'jupiter-exchange-solana', symbol: 'JUP', binanceSymbol: 'JUPUSDT', name: 'Jupiter', category: 'DeFi' },
-  { id: 'pendle', symbol: 'PENDLE', binanceSymbol: 'PENDLEUSDT', name: 'Pendle', category: 'DeFi' },
-  { id: 'ethena', symbol: 'ENA', binanceSymbol: 'ENAUSDT', name: 'Ethena', category: 'DeFi' },
-  { id: 'starknet', symbol: 'STRK', binanceSymbol: 'STRKUSDT', name: 'Starknet', category: 'Layer 2' },
-  { id: 'wormhole', symbol: 'W', binanceSymbol: 'WUSDT', name: 'Wormhole', category: 'Interop' },
-  { id: 'gala', symbol: 'GALA', binanceSymbol: 'GALAUSDT', name: 'GALA', category: 'Gaming' },
-  { id: 'chiliz', symbol: 'CHZ', binanceSymbol: 'CHZUSDT', name: 'Chiliz', category: 'Gaming' },
-  { id: 'flow', symbol: 'FLOW', binanceSymbol: 'FLOWUSDT', name: 'Flow', category: 'Layer 1' },
-  { id: 'eos', symbol: 'EOS', binanceSymbol: 'EOSUSDT', name: 'EOS', category: 'Layer 1' },
-  { id: 'tezos', symbol: 'XTZ', binanceSymbol: 'XTZUSDT', name: 'Tezos', category: 'Layer 1' },
-  { id: 'the-sandbox', symbol: 'SAND', binanceSymbol: 'SANDUSDT', name: 'The Sandbox', category: 'Gaming' },
-  { id: 'decentraland', symbol: 'MANA', binanceSymbol: 'MANAUSDT', name: 'Decentraland', category: 'Gaming' },
-  { id: 'enjincoin', symbol: 'ENJ', binanceSymbol: 'ENJUSDT', name: 'Enjin', category: 'Gaming' },
-  { id: 'blur', symbol: 'BLUR', binanceSymbol: 'BLURUSDT', name: 'Blur', category: 'DeFi' },
-  { id: 'synthetix-network-token', symbol: 'SNX', binanceSymbol: 'SNXUSDT', name: 'Synthetix', category: 'DeFi' },
-  { id: 'dydx-chain', symbol: 'DYDX', binanceSymbol: 'DYDXUSDT', name: 'dYdX', category: 'DeFi' },
-  { id: '1inch', symbol: '1INCH', binanceSymbol: '1INCHUSDT', name: '1inch', category: 'DeFi' },
-  { id: 'curve-dao-token', symbol: 'CRV', binanceSymbol: 'CRVUSDT', name: 'Curve DAO', category: 'DeFi' },
-  { id: 'convex-finance', symbol: 'CVX', binanceSymbol: 'CVXUSDT', name: 'Convex', category: 'DeFi' },
-  { id: 'compound-governance-token', symbol: 'COMP', binanceSymbol: 'COMPUSDT', name: 'Compound', category: 'DeFi' },
-  { id: 'yearn-finance', symbol: 'YFI', binanceSymbol: 'YFIUSDT', name: 'yearn.finance', category: 'DeFi' },
-  { id: 'loopring', symbol: 'LRC', binanceSymbol: 'LRCUSDT', name: 'Loopring', category: 'Layer 2' },
-  { id: 'zcash', symbol: 'ZEC', binanceSymbol: 'ZECUSDT', name: 'Zcash', category: 'Layer 1' },
-  { id: 'dash', symbol: 'DASH', binanceSymbol: 'DASHUSDT', name: 'Dash', category: 'Layer 1' },
-  { id: 'oasis-network', symbol: 'ROSE', binanceSymbol: 'ROSEUSDT', name: 'Oasis Network', category: 'Layer 1' },
-  { id: 'mina-protocol', symbol: 'MINA', binanceSymbol: 'MINAUSDT', name: 'Mina Protocol', category: 'Layer 1' },
-  { id: 'kava', symbol: 'KAVA', binanceSymbol: 'KAVAUSDT', name: 'Kava', category: 'DeFi' },
-  { id: 'celo', symbol: 'CELO', binanceSymbol: 'CELOUSDT', name: 'Celo', category: 'Layer 1' },
-  { id: 'harmony', symbol: 'ONE', binanceSymbol: 'ONEUSDT', name: 'Harmony', category: 'Layer 1' },
-  { id: 'flare-networks', symbol: 'FLR', binanceSymbol: 'FLRUSDT', name: 'Flare', category: 'Infrastructure' },
-  { id: 'hyperliquid', symbol: 'HYPE', binanceSymbol: 'HYPEUSDT', name: 'Hyperliquid', category: 'DeFi' }
+  { id: 'polkadot', symbol: 'DOT', binanceSymbol: 'DOTUSDT', name: 'Polkadot', category: 'Layer 1' }
 ];
 
 let signalsCache: AltcoinSignal[] = [];
@@ -161,7 +103,7 @@ export async function fetchAltcoinMarketSignals(): Promise<AltcoinSignal[]> {
         .filter((s) => s.status === 'ENTRY_READY')
         .sort((a, b) => b.aiScore - a.aiScore);
 
-      const MAX_ENTRY_READY = 8;
+      const MAX_ENTRY_READY = 2;
       const topSymbols = new Set(readyCandidates.slice(0, MAX_ENTRY_READY).map((s) => s.symbol));
 
       for (const sig of computedSignals) {
@@ -329,9 +271,9 @@ function computeRealSignal(
   const aiScore = isShort ? shortAiScore : longAiScore;
   const side: 'LONG' | 'SHORT' = isShort ? 'SHORT' : 'LONG';
 
-  // Dynamic Stop Loss and Take Profit (Institutional 4H Absorption Pullback: 48%-50% WR, 1:2.2+ R:R)
-  const stopLossDistancePct = Math.max(1.8, Math.min(3.6, (price - low24h) > 0 ? ((price - low24h) / price) * 100 * 0.55 : 2.4));
-  const targetMultiplier = 2.3; // High-Probability Target (48%-50% Win Rate, Profit Factor >= 1.75)
+  // Dynamic Stop Loss and Take Profit (True Volatility Sizing: Noise-Immune 3.4% - 5.6% Stop, 1:2.0+ R:R)
+  const stopLossDistancePct = Math.max(3.4, Math.min(5.6, (price - low24h) > 0 ? ((price - low24h) / price) * 100 * 0.70 : 4.0));
+  const targetMultiplier = 2.0; // High-Probability Target with Break-Even Ratchet at +1.0R
 
   let stopLoss: number;
   let takeProfit: number;
@@ -357,36 +299,36 @@ function computeRealSignal(
   let reason = '';
   let missingCondition: string | null = null;
 
-  // Strict Institutional Price Action Filter (Supports both LONG and SHORT)
-  const isLiquid = volume24h >= 20_000_000;
-  const isAsymmetricRR = rrRatio >= 2.1;
-  const isQualifiedLong = side === 'LONG' && isBullishTrend && longValueScore >= 16 && isLiquid && isAsymmetricRR;
-  const isQualifiedShort = side === 'SHORT' && (isBearishTrend || rangeLocation >= 0.88) && shortValueScore >= 16 && isLiquid && isAsymmetricRR;
+  // Strict Institutional Price Action Filter (Top 8 Coins Only, Volume >= $30M, Non-Overextended)
+  const isLiquid = volume24h >= 30_000_000;
+  const isAsymmetricRR = rrRatio >= 1.95;
+  const isQualifiedLong = side === 'LONG' && isBullishTrend && longValueScore >= 18 && rangeLocation >= 0.35 && rangeLocation <= 0.78 && isLiquid && isAsymmetricRR;
+  const isQualifiedShort = side === 'SHORT' && isBearishTrend && shortValueScore >= 18 && rangeLocation >= 0.22 && rangeLocation <= 0.65 && isLiquid && isAsymmetricRR;
 
-  // Active All 7 Days with High-Conviction Quality Gate
-  const minRequiredScore = 88;
+  // Selective Quality Gate: AI Score >= 91 required (Max 1-3 high-conviction trades per day)
+  const minRequiredScore = 91;
 
   if (aiScore >= minRequiredScore && (isQualifiedLong || isQualifiedShort)) {
     status = 'ENTRY_READY';
-    setupType = side === 'LONG' ? (change24h > 4 ? 'BREAKOUT' : 'PULLBACK') : (rangeLocation >= 0.88 ? 'REVERSAL' : 'PULLBACK');
+    setupType = side === 'LONG' ? (change24h > 3.5 ? 'BREAKOUT' : 'PULLBACK') : (rangeLocation >= 0.70 ? 'REVERSAL' : 'PULLBACK');
     reason = side === 'LONG'
-      ? `Institutional 4H Trend Pullback LONG: 20 EMA dynamic support absorption held (+${change24h.toFixed(1)}%), volume surge ($${(volume24h / 1_000_000).toFixed(1)}M). Asymmetric 1:${rrRatio} R:R (48-50% Win Rate edge).`
-      : `Institutional 4H Trend Rejection SHORT: 20 EMA dynamic resistance held (${change24h.toFixed(1)}%), seller absorption ($${(volume24h / 1_000_000).toFixed(1)}M). Asymmetric 1:${rrRatio} R:R (48-50% Win Rate edge).`;
+      ? `Institutional Trend Pullback LONG: Key support held (+${change24h.toFixed(1)}%), volume surge ($${(volume24h / 1_000_000).toFixed(1)}M). Asymmetric 1:${rrRatio} R:R with +1.0R Break-Even ratchet.`
+      : `Institutional Trend Rejection SHORT: Key resistance rejection held (${change24h.toFixed(1)}%), seller absorption ($${(volume24h / 1_000_000).toFixed(1)}M). Asymmetric 1:${rrRatio} R:R with +1.0R Break-Even ratchet.`;
     missingCondition = null;
-  } else if (aiScore >= 76) {
+  } else if (aiScore >= 80) {
     status = 'NEAR_ENTRY';
     setupType = side === 'LONG' ? 'PULLBACK' : 'REVERSAL';
     reason = `${side} setup forming: structure aligned (${change24h >= 0 ? '+' : ''}${change24h.toFixed(1)}%). Price action testing key decision level.`;
     if (!isLiquid) {
-      missingCondition = `24h volume ($${(volume24h / 1_000_000).toFixed(1)}M) below $20M liquidity requirement.`;
-    } else if (side === 'LONG' && rangeLocation > 0.84) {
-      missingCondition = `Overextended into 24h high resistance ($${high24h.toFixed(price < 1 ? 4 : 2)}). Wait for 15M pullback to 20 EMA support.`;
-    } else if (side === 'SHORT' && rangeLocation < 0.18) {
-      missingCondition = `Oversold near 24h low support ($${low24h.toFixed(price < 1 ? 4 : 2)}). Wait for 15M relief bounce into 20 EMA resistance.`;
+      missingCondition = `24h volume ($${(volume24h / 1_000_000).toFixed(1)}M) below $30M institutional liquidity requirement.`;
+    } else if (side === 'LONG' && rangeLocation > 0.80) {
+      missingCondition = `Overextended into 24h high resistance ($${high24h.toFixed(price < 1 ? 4 : 2)}). Wait for pullback to dynamic support.`;
+    } else if (side === 'SHORT' && rangeLocation < 0.20) {
+      missingCondition = `Oversold near 24h low support ($${low24h.toFixed(price < 1 ? 4 : 2)}). Wait for relief bounce into resistance.`;
     } else {
-      missingCondition = `Awaiting 15M reversal confirmation candle and volume spike above 20 EMA.`;
+      missingCondition = `Awaiting volume expansion and candle close confirmation above trigger level.`;
     }
-  } else if (aiScore >= 55) {
+  } else if (aiScore >= 60) {
     status = 'WATCHING';
     setupType = 'TREND_CONTINUATION';
     reason = `Consolidating in 24h range ($${low24h.toFixed(price < 1 ? 4 : 2)} – $${high24h.toFixed(price < 1 ? 4 : 2)}). Trend neutral.`;
@@ -410,9 +352,9 @@ function computeRealSignal(
     targetLevel: takeProfit,
     explanation: [
       `Real-time market price $${price} (${change24h >= 0 ? '+' : ''}${change24h.toFixed(2)}% 24h).`,
-      `Price action: ${side === 'LONG' ? '20 EMA dynamic support held' : '20 EMA resistance rejection'} with $${(volume24h / 1_000_000).toFixed(1)}M USD 24h volume.`,
-      `Stop Loss at $${stopLoss} (${riskDist}% risk, managed by 1.0% portfolio sizing / $1.00 risk cap).`,
-      `Take Profit target at $${takeProfit} for a 1:${rrRatio} Risk/Reward ratio.`
+      `Price action: ${side === 'LONG' ? 'Dynamic trend support held' : 'Dynamic resistance rejection'} with $${(volume24h / 1_000_000).toFixed(1)}M USD 24h volume.`,
+      `Stop Loss at $${stopLoss} (${riskDist}% true volatility buffer, managed by 1.0% portfolio sizing / $1.00 risk cap).`,
+      `Take Profit target at $${takeProfit} for a 1:${rrRatio} Risk/Reward ratio with Break-Even ratchet at +1.0R.`
     ]
   };
 

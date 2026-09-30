@@ -380,9 +380,130 @@ export default function AnalyticsPage({ status, onRefresh }: Props) {
     }
   }
 
+  function exportTradesToCsv() {
+    if (allTrades.length === 0) {
+      alert('No trades available to export.');
+      return;
+    }
+    const headers = [
+      'Trade ID',
+      'Symbol',
+      'Side',
+      'Status',
+      'Setup Type',
+      'AI Score',
+      'Entry Time (UTC)',
+      'Exit Time (UTC)',
+      'Duration (Minutes)',
+      'Entry Price ($)',
+      'Exit/Current Price ($)',
+      'Stop Loss ($)',
+      'Take Profit ($)',
+      'Position Size ($)',
+      'Quantity',
+      'Risk Amount ($)',
+      'Risk Pct (%)',
+      'Realized PnL ($)',
+      'Realized PnL (%)',
+      'R-Multiple',
+      'Close Reason',
+      'Trade Thesis'
+    ];
+
+    const rows = allTrades.map(({ item, isClosed }) => {
+      const cp = isClosed ? (item as ClosedPaperPosition) : null;
+      const exitPrice = isClosed ? cp!.closePrice : item.currentPrice;
+      const exitTime = isClosed && cp!.closeTime ? new Date(cp!.closeTime).toISOString() : '';
+      const entryTime = item.entryTime ? new Date(item.entryTime).toISOString() : '';
+      const durationMin = isClosed && cp!.closeTime && item.entryTime ? Math.round((cp!.closeTime - item.entryTime) / 60000) : '';
+      const realizedPnlUsd = isClosed ? cp!.realizedPnlUsd : '';
+      const realizedPnlPct = isClosed ? cp!.realizedPnlPct : '';
+      const rMultiple = isClosed ? cp!.finalR : item.rMultiple;
+      const closeReason = isClosed ? cp!.closeReason : 'RUNNING';
+      const thesis = Array.isArray(item.tradeThesis) ? item.tradeThesis.join(' | ') : (item.tradeThesis || '');
+
+      return [
+        `"${item.id}"`,
+        `"${item.symbol}"`,
+        `"${item.side}"`,
+        `"${isClosed ? 'CLOSED' : 'OPEN'}"`,
+        `"${item.setupType || 'PULLBACK'}"`,
+        item.aiScoreAtEntry ?? '',
+        `"${entryTime}"`,
+        `"${exitTime}"`,
+        durationMin,
+        item.entryPrice,
+        exitPrice,
+        item.stopLoss,
+        item.takeProfit,
+        item.positionSizeUsd,
+        item.quantity,
+        item.riskAmountUsd,
+        item.riskPct,
+        realizedPnlUsd,
+        realizedPnlPct,
+        rMultiple,
+        `"${closeReason}"`,
+        `"${thesis.replace(/"/g, '""')}"`
+      ].join(',');
+    });
+
+    const csvContent = [headers.join(','), ...rows].join('\n');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.setAttribute('href', url);
+    link.setAttribute('download', `trade-history-${new Date().toISOString().slice(0, 10)}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  }
+
+  async function handleResetAccount() {
+    if (!confirm('Are you sure you want to reset your portfolio? This will clear all trade history and restore a fresh $100.00 starting balance.')) return;
+    try {
+      await api.resetAltcoinPortfolio(100);
+      await onRefresh();
+      alert('Portfolio successfully reset to $100.00 with all trade history cleared.');
+    } catch (err: any) {
+      alert(`Reset failed: ${err?.message || 'Unknown error'}`);
+    }
+  }
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14, maxWidth: 1200, margin: '0 auto' }}>
       
+      {/* Top Header Toolbar */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
+        <div style={{ fontSize: 13, fontWeight: 900, color: '#00d4ff', letterSpacing: '0.04em' }}>
+          📊 PORTFOLIO & PERFORMANCE METRICS
+        </div>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <button
+            onClick={exportTradesToCsv}
+            style={{
+              padding: '6px 12px', borderRadius: 6, fontSize: 11, fontWeight: 800,
+              background: 'rgba(0, 212, 255, 0.12)', border: '1px solid rgba(0, 212, 255, 0.35)',
+              color: '#00d4ff', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 5
+            }}
+            title="Download full trade history as CSV spreadsheet"
+          >
+            📥 Export CSV ({allTrades.length})
+          </button>
+          <button
+            onClick={handleResetAccount}
+            style={{
+              padding: '6px 12px', borderRadius: 6, fontSize: 11, fontWeight: 800,
+              background: 'rgba(255, 68, 102, 0.12)', border: '1px solid rgba(255, 68, 102, 0.35)',
+              color: '#ff4466', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 5
+            }}
+            title="Reset to clean $100 starting balance and clear history"
+          >
+            🔄 Reset to $100.00
+          </button>
+        </div>
+      </div>
+
       {/* Analytics Stats Grid */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: 8 }}>
         <StatCard label="Account Equity" value={`$${equity.toFixed(2)}`} color="#00d4ff" sub="Starting Balance: $100.00" />
@@ -410,22 +531,36 @@ export default function AnalyticsPage({ status, onRefresh }: Props) {
             </div>
           </div>
 
-          {/* Filter Pills */}
-          <div style={{ display: 'flex', gap: 6 }}>
-            {(['ALL', 'OPEN', 'CLOSED'] as const).map(tab => (
-              <button
-                key={tab}
-                onClick={() => setFilter(tab)}
-                style={{
-                  padding: '4px 10px', borderRadius: 6, fontSize: 10, fontWeight: 800,
-                  background: filter === tab ? 'rgba(0,212,255,0.2)' : 'rgba(255,255,255,0.05)',
-                  border: filter === tab ? '1px solid rgba(0,212,255,0.4)' : '1px solid rgba(255,255,255,0.08)',
-                  color: filter === tab ? '#00d4ff' : '#7090b0', cursor: 'pointer'
-                }}
-              >
-                {tab === 'ALL' ? `ALL (${allTrades.length})` : tab === 'OPEN' ? `RUNNING (${openPositions.length})` : `CLOSED (${closedPositions.length})`}
-              </button>
-            ))}
+          {/* Action Toolbar */}
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+            <button
+              onClick={exportTradesToCsv}
+              style={{
+                padding: '4px 10px', borderRadius: 6, fontSize: 10, fontWeight: 800,
+                background: 'rgba(0,212,255,0.15)', border: '1px solid rgba(0,212,255,0.3)',
+                color: '#00d4ff', cursor: 'pointer'
+              }}
+            >
+              📥 Export CSV
+            </button>
+
+            {/* Filter Pills */}
+            <div style={{ display: 'flex', gap: 6 }}>
+              {(['ALL', 'OPEN', 'CLOSED'] as const).map(tab => (
+                <button
+                  key={tab}
+                  onClick={() => setFilter(tab)}
+                  style={{
+                    padding: '4px 10px', borderRadius: 6, fontSize: 10, fontWeight: 800,
+                    background: filter === tab ? 'rgba(0,212,255,0.2)' : 'rgba(255,255,255,0.05)',
+                    border: filter === tab ? '1px solid rgba(0,212,255,0.4)' : '1px solid rgba(255,255,255,0.08)',
+                    color: filter === tab ? '#00d4ff' : '#7090b0', cursor: 'pointer'
+                  }}
+                >
+                  {tab === 'ALL' ? `ALL (${allTrades.length})` : tab === 'OPEN' ? `RUNNING (${openPositions.length})` : `CLOSED (${closedPositions.length})`}
+                </button>
+              ))}
+            </div>
           </div>
         </div>
 
