@@ -721,17 +721,17 @@ export async function initDB(): Promise<void> {
       created_at         BIGINT NOT NULL
     )
   `);
-  // One-time fresh restart requested: wipe previous churned trades & reset balance to clean $100.00
+  // One-time fresh restart: wipe previous AVAX trade & reset balance to clean $100.00 for 65-coin tiered SL/TP model
   try {
-    const resetCheck = await query<{ value: string }>("SELECT value FROM settings WHERE key = 'v3_fresh_reset_done'").catch(() => []);
+    const resetCheck = await query<{ value: string }>("SELECT value FROM settings WHERE key = 'v4_65coins_clean_reset'").catch(() => []);
     if (resetCheck.length === 0) {
       await queryQuiet("TRUNCATE TABLE paper_positions CASCADE;");
       await queryQuiet("UPDATE settings SET value = '100.00' WHERE key = 'startingBalanceUsd'");
       await queryQuiet("UPDATE settings SET value = '100.00' WHERE key = 'currentBalanceUsd'");
       await queryQuiet("UPDATE settings SET value = '91' WHERE key = 'minAiScore'");
-      await queryQuiet("UPDATE settings SET value = '2' WHERE key = 'maxOpenPositions'");
-      await queryQuiet("INSERT INTO settings (key, value) VALUES ('v3_fresh_reset_done', 'true') ON CONFLICT (key) DO UPDATE SET value = 'true'");
-      logger.info('V3 Clean Fresh Restart: paper_positions cleared and balance reset to $100.00');
+      await queryQuiet("UPDATE settings SET value = '3' WHERE key = 'maxOpenPositions'");
+      await queryQuiet("INSERT INTO settings (key, value) VALUES ('v4_65coins_clean_reset', 'true') ON CONFLICT (key) DO UPDATE SET value = 'true'");
+      logger.info('V4 Clean Fresh Restart: paper_positions cleared, old AVAX trade removed, and balance reset to $100.00');
     }
   } catch (err) {
     logger.warn({ err }, 'Failed to check/apply fresh reset (non-fatal)');
