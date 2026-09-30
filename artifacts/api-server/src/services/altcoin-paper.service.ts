@@ -229,19 +229,19 @@ export async function processPaperTradingEngine(inputSignals: AltcoinSignal[] = 
   }
 
   // 2. Process New Paper Entries if Bot Enabled (Quality over Quantity)
-  const maxOpen = Math.max(1, Math.min(settings.maxOpenPositions || 2, 5));
+  const maxOpen = Math.max(1, Math.min(settings.maxOpenPositions || 4, 8));
 
-  // Daily Trade Budget (Strict Max 5 Trades per 24-Hour Rolling Window)
+  // Daily Trade Budget (Scales with user max open positions, minimum 6, preventing over-trading while allowing normal rotation)
   const now = Date.now();
   const oneDayAgo = now - 24 * 60 * 60 * 1000;
   const recentTradesCount = [...openPositions, ...closedPositions].filter(p => p.entryTime >= oneDayAgo).length;
-  const MAX_DAILY_TRADES = 5;
+  const maxDailyTrades = Math.max(6, maxOpen * 2);
 
-  // Inter-Trade Spacing (Minimum 45 minutes between new positions across the portfolio)
+  // Inter-Trade Spacing (Minimum 30 minutes between new positions across the portfolio to prevent flash-spike clustering)
   const lastEntryTime = openPositions.length > 0 ? Math.max(...openPositions.map(p => p.entryTime)) : (closedPositions[0]?.entryTime || 0);
-  const isCooldownActive = (now - lastEntryTime) < 45 * 60 * 1000 && openPositions.length > 0;
+  const isCooldownActive = (now - lastEntryTime) < 30 * 60 * 1000 && openPositions.length > 0;
 
-  if (settings.botEnabled && openPositions.length < maxOpen && recentTradesCount < MAX_DAILY_TRADES && !isCooldownActive) {
+  if (settings.botEnabled && openPositions.length < maxOpen && recentTradesCount < maxDailyTrades && !isCooldownActive) {
     const readySignals = signals.filter(s =>
       s.status === 'ENTRY_READY' &&
       s.aiScore >= (settings.minAiScore || 91) &&

@@ -136,6 +136,24 @@ export default function DiscoverPage({ status }: Props) {
         </div>
       </div>
 
+      {/* ── Active Portfolio Execution Capacity Banner ── */}
+      {status?.openPositions && status.openPositions.length >= 3 && (
+        <div style={{
+          background: 'rgba(255,215,0,0.08)',
+          border: '1px solid rgba(255,215,0,0.3)',
+          borderRadius: 10, padding: '10px 14px',
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8,
+          fontSize: 11, color: '#ffd700'
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={{ fontSize: 14 }}>🛡️</span>
+            <span>
+              <strong>Portfolio Safeguard Active:</strong> {status.openPositions.length} active positions running ({status.openPositions.map(p => p.symbol).join(', ')}). High-scoring ENTRY READY setups are queued and will execute automatically as active positions hit Take Profit/Stop Loss or daily trade window advances.
+            </span>
+          </div>
+        </div>
+      )}
+
       {/* ── Top Opportunities Highlights ── */}
       {topOps.length > 0 && (
         <div>
